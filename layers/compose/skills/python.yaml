@@ -1,0 +1,6 @@
+name: python
+description: layers/skills/common/python/description.md
+inputs:
+  - layers/skills/common/python/practices.md
+  - layers/skills/this_repo/python.md
+output: examples/.claude/skills/python/SKILL.md

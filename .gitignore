@@ -1,0 +1,25 @@
+# Generated compose outputs — the example recipes write demo files under examples/.
+# (In your own project, point each recipe `output:` path at a real location and commit those.)
+/examples/
+
+# Vetting — local-only proprietary-content denylist + checker.
+# NEVER pushed: this is a PUBLIC repo. See CLAUDE.md "Pre-push vetting".
+/.vetting/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

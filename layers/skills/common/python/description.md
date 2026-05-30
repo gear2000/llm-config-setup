@@ -1,0 +1,1 @@
+Python conventions and project-specific patterns. Use when writing, reviewing, or scaffolding Python code — covers syntax rules, package structure, testing via Docker, error handling, and the project-specific monorepo conventions.

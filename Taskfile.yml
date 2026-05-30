@@ -1,0 +1,35 @@
+version: '3'
+
+# llm-config-setup — compose targets only.
+# Run `task compose:all` after editing layers to regenerate output files.
+
+tasks:
+
+  # ---------------------------------------------------------------------------
+  # compose:* — assemble skills/agents/CLAUDE.md/AGENTS.md from layer files
+  # ---------------------------------------------------------------------------
+
+  compose:all:
+    desc: "Assemble all CLAUDE.md, AGENTS.md, and skill files from layer files"
+    cmds:
+      - python3 tools/compose-layers.py
+
+  compose:skill:
+    desc: "Assemble one skill (e.g. task compose:skill -- python)"
+    cmds:
+      - python3 tools/compose-layers.py layers/compose/skills/{{.CLI_ARGS}}.yaml
+
+  compose:claude-md:
+    desc: "Assemble one CLAUDE.md (e.g. task compose:claude-md -- root)"
+    cmds:
+      - python3 tools/compose-layers.py layers/compose/claude-md/{{.CLI_ARGS}}.yaml
+
+  compose:agents-md:
+    desc: "Assemble one AGENTS.md (e.g. task compose:agents-md -- root)"
+    cmds:
+      - python3 tools/compose-layers.py layers/compose/agents-md/{{.CLI_ARGS}}.yaml
+
+  compose:dry-run:
+    desc: "Preview what compose:all would generate without writing files"
+    cmds:
+      - python3 tools/compose-layers.py --dry-run
