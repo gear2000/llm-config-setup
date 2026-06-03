@@ -6,6 +6,9 @@
 # NEVER pushed: this is a PUBLIC repo. See CLAUDE.md "Pre-push vetting".
 /.vetting/
 
+# npm — safety net so an accidental install under the repo is never tracked
+node_modules/
+
 # Python
 __pycache__/
 *.pyc

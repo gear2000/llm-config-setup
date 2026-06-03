@@ -33,3 +33,17 @@ tasks:
     desc: "Preview what compose:all would generate without writing files"
     cmds:
       - python3 tools/compose-layers.py --dry-run
+
+  # ---------------------------------------------------------------------------
+  # setup:* — wire Pi harness runtime config into ~/.pi/
+  # ---------------------------------------------------------------------------
+
+  setup:pi:
+    desc: "Symlink this kit's Pi extensions + codex-reviewer agent into ~/.pi and install their npm deps"
+    cmds:
+      - bash tools/setup-pi.sh
+
+  setup:pi:unlink:
+    desc: "Remove the ~/.pi symlinks created by setup:pi (leaves settings.json + node_modules)"
+    cmds:
+      - bash tools/setup-pi.sh --unlink

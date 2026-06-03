@@ -114,3 +114,19 @@ Then run `task compose:all` (or `python3 tools/compose-layers.py`) to generate y
 27. **Review outputs** — open `CLAUDE.md`, `AGENTS.md`, and `.claude/skills/python/SKILL.md`. Read them as an LLM would. Adjust layer prose until the generated content reads naturally and accurately describes your project.
 
 28. **Commit generated files** — unlike this kit (which gitignores its own example outputs), your consumer repo should commit the generated `CLAUDE.md`, `AGENTS.md`, and skill files. They are the deliverables. Remove the relevant lines from `.gitignore` before committing.
+
+---
+
+## I — Pi harness (optional)
+
+If you use the [Pi coding agent](https://github.com/badlogic/pi), this kit ships ready-to-use Pi runtime config under `layers/llm/pi/common/`.
+
+29. **Wire it up** — run once per machine after cloning:
+    ```bash
+    task setup:pi
+    ```
+    This symlinks the bundled extensions and codex-reviewer agent into `~/.pi/`, scaffolds `~/.pi/agent/settings.json` from the template (if absent), and installs npm dependencies via `npm ci` (if `node_modules` is missing).
+
+30. **Customize settings** — open `layers/llm/pi/common/settings.template.json` and adjust `defaultProvider`, `defaultModel`, `defaultThinkingLevel`, and `packages` to match your environment. The template is applied only when `~/.pi/agent/settings.json` does not exist; edit your live settings file directly after first run.
+
+31. **Extensions and agent** — `context-workflow.ts`, `codex-reviewer-hub.ts`, and `codex-reviewer.md` are reusable as-is. They contain no project-specific references; you can adopt them without modification.
