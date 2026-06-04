@@ -119,7 +119,7 @@ Then run `task compose:all` (or `python3 tools/compose-layers.py`) to generate y
 
 ## I — Pi harness (optional)
 
-If you use the [Pi coding agent](https://github.com/badlogic/pi), this kit ships ready-to-use Pi runtime config under `layers/llm/pi/common/`.
+If you use the [Pi coding agent](https://github.com/earendil-works/pi-mono), this kit ships ready-to-use Pi runtime config under `layers/llm/pi/common/`.
 
 29. **Wire it up** — run once per machine after cloning:
     ```bash

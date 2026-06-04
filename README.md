@@ -87,7 +87,7 @@ See `ONBOARDING.md` for the ordered fill-in checklist.
 
 ## Pi harness runtime config (optional)
 
-`layers/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/badlogic/pi). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, `tools/setup-pi.sh` symlinks them directly into `~/.pi/` so Pi can discover and load them at runtime.
+`layers/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, `tools/setup-pi.sh` symlinks them directly into `~/.pi/` so Pi can discover and load them at runtime.
 
 **What it contains:**
 
@@ -111,7 +111,7 @@ If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.
 
 `node_modules` is never committed. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 
-**Prerequisites:** a Pi install (`npm install -g @mariozechner/pi`), and `node` / `npm` on your `PATH`.
+**Prerequisites:** a Pi install (`npm install -g @earendil-works/pi-coding-agent`), and `node` / `npm` on your `PATH`.
 
 ## Output-style caveat
 
