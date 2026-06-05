@@ -92,8 +92,10 @@ See `ONBOARDING.md` for the ordered fill-in checklist.
 **What it contains:**
 
 - `extensions/context-workflow.ts` — A Pi extension that wraps a structured write→test→review→fix→verify loop. Symlinked into `~/.pi/agent/extensions/` (auto-loaded by the Pi agent on startup).
-- `extensions/codex-reviewer-hub.ts` — A Pi extension that listens on a Unix socket and dispatches review requests to a second LLM for adversarial code review. Symlinked into `~/.pi/extensions/` (loaded when Pi is launched with `-e`).
+- `extensions/iac-guard.ts` — A Pi extension that **gates destructive infrastructure commands**. It hooks `tool_call` (before a command runs) and inspects `terraform` / `tofu` / `aws` / `kubectl`: read/create operations run freely; destroys (`destroy` / `delete` / `terminate`) **always require human approval** via the native confirm dialog; gray-zone updates/replaces are judged by the `iac-verifier` agent. Fail-closed — any ambiguity, missing UI, or unavailable verifier falls back to human approval. Symlinked into `~/.pi/agent/extensions/` (auto-loaded). See the policy tables at the top of the file to tune which verbs are allow/ask/gray.
+- `extensions/codex-reviewer-hub.ts` — A Pi extension that listens on a Unix socket and dispatches sub-agent requests — adversarial code review (default), and the `iac-verifier` gray-zone verdicts for the gate above. Symlinked into `~/.pi/extensions/` (loaded when Pi is launched with `-e`).
 - `agents/codex-reviewer.md` — The system prompt for the adversarial reviewer agent invoked by the hub extension. Symlinked into `~/.pi/agents/`.
+- `agents/iac-verifier.md` — The system prompt for the gray-zone verifier the `iac-guard` gate consults (judges an update/apply's blast radius → ALLOW or ASK). Symlinked into `~/.pi/agents/`.
 - `npm/package.json` + `npm/package-lock.json` — The npm manifest for Pi's extension dependencies. `setup-pi.sh` runs `npm ci` into `~/.pi/agent/npm/` if `node_modules` is absent.
 - `settings.template.json` — A starter Pi settings file (provider, model, thinking level, packages). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten.
 
@@ -107,11 +109,22 @@ task setup:pi
 task setup:pi:unlink
 ```
 
+**Launching (requires `tmux`):**
+
+```bash
+task up        # symlinks + socket hub (in tmux) + builder Pi — one command
+task hub       # just the hub (serves codex reviews + iac-verifier verdicts)
+task status    # show hub + socket state
+task clean     # stop the hub, remove stale sockets
+```
+
+The `iac-guard` gate auto-loads in every Pi session. The hub only needs to be running for the gray-zone verifier path — if it is down, the gate fails closed to human approval. These launch tasks are named unprefixed so a higher-level Taskfile can import them (`includes: { pi: { taskfile: ./Taskfile.yml, dir: . } }` → `task pi:up`), or run them directly with `task -d <this-dir> up`.
+
 If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.md` already exists as a real file and is byte-identical to this kit's copy, `setup-pi.sh` migrates it to a repo-managed symlink automatically. If the files differ, the existing file is left untouched and a warning is printed.
 
 `node_modules` is never committed. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 
-**Prerequisites:** a Pi install (`npm install -g @earendil-works/pi-coding-agent`), and `node` / `npm` on your `PATH`.
+**Prerequisites:** a Pi install (`npm install -g @earendil-works/pi-coding-agent`), `node` / `npm` on your `PATH`, and `tmux` (for the `task up` / `task hub` launch group).
 
 ## Output-style caveat
 

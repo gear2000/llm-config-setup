@@ -4,8 +4,10 @@
 #
 # Sources live under layers/llm/pi/common/ (runtime config, NOT compose inputs):
 #   extensions/context-workflow.ts        -> ~/.pi/agent/extensions/   (symlink)
+#   extensions/iac-guard.ts               -> ~/.pi/agent/extensions/   (symlink, IaC safety gate, auto-loaded)
 #   extensions/codex-reviewer-hub.ts      -> ~/.pi/extensions/         (symlink)
 #   agents/codex-reviewer.md              -> ~/.pi/agents/             (symlink)
+#   agents/iac-verifier.md                -> ~/.pi/agents/             (symlink)
 #   settings.template.json                -> ~/.pi/agent/settings.json (scaffold if absent)
 #   npm/{package.json,package-lock.json}  -> npm ci into ~/.pi/agent/npm/ (if node_modules missing)
 #
@@ -35,8 +37,12 @@ PI_SETTINGS="$PI_AGENT_DIR/settings.json"
 # extension name : destination dir (two distinct home locations by design)
 PI_EXT_MAP=(
   "context-workflow.ts:$PI_AGENT_DIR/extensions"   # agent-scoped, auto-loaded
+  "iac-guard.ts:$PI_AGENT_DIR/extensions"          # agent-scoped, auto-loaded (IaC safety gate)
   "codex-reviewer-hub.ts:$HOME_PI/extensions"      # top-level, `pi -e` loaded
 )
+
+# agent personas symlinked into ~/.pi/agents/
+PI_AGENT_FILES=(codex-reviewer.md iac-verifier.md)
 
 # A symlink is "ours" iff it resolves into this clone's layers/llm/pi/common tree.
 is_ours() {  # link_target resolved_target
@@ -53,11 +59,13 @@ if [[ "${1:-}" == "--unlink" ]]; then
       if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
     fi
   done
-  target="$PI_AGENTS_DIR/codex-reviewer.md"
-  if [[ -L "$target" ]]; then
-    lt="$(readlink "$target")"; rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-    if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
-  fi
+  for amd in "${PI_AGENT_FILES[@]}"; do
+    target="$PI_AGENTS_DIR/$amd"
+    if [[ -L "$target" ]]; then
+      lt="$(readlink "$target")"; rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
+      if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
+    fi
+  done
   # Never removed: $PI_SETTINGS (live/runtime-mutated) and $PI_NPM_DIR/node_modules (regenerable).
   exit 0
 fi
@@ -81,23 +89,25 @@ for pair in "${PI_EXT_MAP[@]}"; do
   ln -s "$src" "$target"; linked_ext=$((linked_ext + 1))
 done
 
-# --- codex-reviewer.md agent: symlink (migrate an existing identical real file) ---
-ca="$AGENTS_SRC/codex-reviewer.md"; linked_agent=0
-if [[ -f "$ca" ]]; then
-  mkdir -p "$PI_AGENTS_DIR"; target="$PI_AGENTS_DIR/codex-reviewer.md"
+# --- agent personas: symlink (migrate an existing identical real file) ---
+linked_agent=0
+for amd in "${PI_AGENT_FILES[@]}"; do
+  ca="$AGENTS_SRC/$amd"
+  [[ -f "$ca" ]] || continue
+  mkdir -p "$PI_AGENTS_DIR"; target="$PI_AGENTS_DIR/$amd"
   if [[ -L "$target" ]]; then
     lt="$(readlink "$target")"
-    if [[ "$lt" != "$ca" ]]; then
-      rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-      if is_ours "$lt" "$rt"; then rm "$target"; ln -s "$ca" "$target"; linked_agent=1; fi
-    fi
+    [[ "$lt" == "$ca" ]] && continue
+    rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
+    if is_ours "$lt" "$rt"; then rm "$target"; ln -s "$ca" "$target"; linked_agent=$((linked_agent + 1))
+    else echo "skipping agent $amd — $target exists (not our symlink)" >&2; fi
   elif [[ -e "$target" ]]; then
-    if cmp -s "$target" "$ca"; then rm "$target"; ln -s "$ca" "$target"; linked_agent=1; echo "migrated codex-reviewer.md -> repo-managed symlink"
-    else echo "skipping codex-reviewer.md — $target differs from repo copy; back it up and re-run" >&2; fi
+    if cmp -s "$target" "$ca"; then rm "$target"; ln -s "$ca" "$target"; linked_agent=$((linked_agent + 1)); echo "migrated $amd -> repo-managed symlink"
+    else echo "skipping $amd — $target differs from repo copy; back it up and re-run" >&2; fi
   else
-    ln -s "$ca" "$target"; linked_agent=1
+    ln -s "$ca" "$target"; linked_agent=$((linked_agent + 1))
   fi
-fi
+done
 
 # --- settings: scaffold from template only when absent (never clobber live copy) ---
 if [[ -f "$SETTINGS_TEMPLATE" ]]; then
@@ -117,5 +127,5 @@ if [[ -f "$NPM_SRC/package.json" ]]; then
   fi
 fi
 
-echo "pi setup: $linked_ext extensions linked ($skipped_ext skipped), codex-reviewer agent ($linked_agent linked)"
+echo "pi setup: $linked_ext extensions linked ($skipped_ext skipped), $linked_agent agent persona(s) linked"
 echo "verify: launch pi — /workflow should be available"

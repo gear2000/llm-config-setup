@@ -47,3 +47,46 @@ tasks:
     desc: "Remove the ~/.pi symlinks created by setup:pi (leaves settings.json + node_modules)"
     cmds:
       - bash tools/setup-pi.sh --unlink
+
+  test:
+    desc: "Run the iac-guard classifier unit test (zero deps; Node 22.6+ native type-stripping)"
+    cmds:
+      - node --experimental-strip-types layers/llm/pi/common/extensions/iac-guard.test.ts
+
+  # ---------------------------------------------------------------------------
+  # Pi launch group — start & manage the Pi agents (hub + builder). Requires tmux.
+  # Named unprefixed so a parent Taskfile imports them cleanly:
+  #   includes: { pi: { taskfile: ./Taskfile.yml, dir: . } }   ->   task pi:up
+  # Or run directly, no parent edit:   task -d <this-dir> up
+  # ---------------------------------------------------------------------------
+
+  up:
+    desc: "Bring up the Pi setup: ensure ~/.pi symlinks + the socket hub, then launch the builder"
+    deps: [setup:pi]
+    cmds:
+      - task: hub
+      - pi
+
+  hub:
+    desc: "Start the codex/iac-verifier socket hub detached in tmux (idempotent)"
+    cmds:
+      - tmux has-session -t pi-hub 2>/dev/null || tmux new-session -d -s pi-hub 'pi -e ~/.pi/extensions/codex-reviewer-hub.ts'
+      - 'echo "pi-hub up — tmux attach -t pi-hub to watch"'
+
+  builder:
+    desc: "Launch a builder Pi (iac-guard auto-loads); the hub must be up for gray-zone verdicts"
+    cmds:
+      - pi
+
+  status:
+    desc: "Show hub + socket state"
+    cmds:
+      - 'tmux has-session -t pi-hub 2>/dev/null && echo "hub: up" || echo "hub: down"'
+      - 'test -S ~/.pi/codex-reviewer.sock && echo "socket: present" || echo "socket: absent"'
+
+  clean:
+    desc: "Stop the hub and remove stale sockets"
+    cmds:
+      - tmux kill-session -t pi-hub 2>/dev/null || true
+      - rm -f ~/.pi/codex-reviewer.sock
+      - 'echo "clean: hub stopped, sockets removed"'

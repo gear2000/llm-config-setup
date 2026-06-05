@@ -1,9 +1,11 @@
 /**
  * codex-reviewer-hub — Unix socket dispatch for adversarial code review
  *
- * Listens on a Unix socket. Receives JSON dispatch requests from Claude Code.
- * Spawns codex-reviewer sub-agents via pi-subagents. Writes error content to
- * the output path if the sub-agent fails or times out.
+ * Listens on a Unix socket. Receives JSON dispatch requests from Claude Code
+ * (or any local caller, e.g. the iac-guard gate). Spawns the requested sub-agent
+ * via pi-subagents — defaults to codex-reviewer; pass "agent" to run another
+ * (e.g. iac-verifier). Writes error content to the output path if the sub-agent
+ * fails or times out.
  *
  * Usage: pi -e ~/.pi/extensions/codex-reviewer-hub.ts
  *   or:  pi -e ~/.pi/extensions/codex-reviewer-hub.ts --socket /custom/path.sock
@@ -24,6 +26,7 @@ interface DispatchRequest {
   handoff: string;
   output: string;
   timeout_ms?: number;
+  agent?: string; // which sub-agent to run (default: codex-reviewer). Lets one socket serve iac-verifier etc.
 }
 
 interface DispatchResponse {
@@ -129,19 +132,27 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const task = [
-        `Read the handoff at ${req.handoff}.`,
-        `Perform an adversarial review of the artifacts it references.`,
-        `Write your review to ${req.output}.`,
-      ].join(" ");
+      const agent = req.agent ?? "codex-reviewer";
+      const task =
+        agent === "codex-reviewer"
+          ? [
+              `Read the handoff at ${req.handoff}.`,
+              `Perform an adversarial review of the artifacts it references.`,
+              `Write your review to ${req.output}.`,
+            ].join(" ")
+          : [
+              `Read the handoff at ${req.handoff}.`,
+              `Follow its instructions and your agent system prompt.`,
+              `Write your output to ${req.output}.`,
+            ].join(" ");
 
       pi.sendMessage(
         {
           customType: "codex-dispatch",
           content: [
             `[dispatch request_id=${requestId}]`,
-            `Use the subagent tool to run the codex-reviewer agent:`,
-            `subagent({ agent: "codex-reviewer", task: "${task.replace(/"/g, '\\"')}", async: true })`,
+            `Use the subagent tool to run the ${agent} agent:`,
+            `subagent({ agent: "${agent}", task: "${task.replace(/"/g, '\\"')}", async: true })`,
           ].join("\n"),
           display: true,
         },

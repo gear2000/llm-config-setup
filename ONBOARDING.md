@@ -125,8 +125,10 @@ If you use the [Pi coding agent](https://github.com/earendil-works/pi-mono), thi
     ```bash
     task setup:pi
     ```
-    This symlinks the bundled extensions and codex-reviewer agent into `~/.pi/`, scaffolds `~/.pi/agent/settings.json` from the template (if absent), and installs npm dependencies via `npm ci` (if `node_modules` is missing).
+    This symlinks the bundled extensions and agent personas into `~/.pi/`, scaffolds `~/.pi/agent/settings.json` from the template (if absent), and installs npm dependencies via `npm ci` (if `node_modules` is missing).
 
 30. **Customize settings** — open `layers/llm/pi/common/settings.template.json` and adjust `defaultProvider`, `defaultModel`, `defaultThinkingLevel`, and `packages` to match your environment. The template is applied only when `~/.pi/agent/settings.json` does not exist; edit your live settings file directly after first run.
 
-31. **Extensions and agent** — `context-workflow.ts`, `codex-reviewer-hub.ts`, and `codex-reviewer.md` are reusable as-is. They contain no project-specific references; you can adopt them without modification.
+31. **Extensions and agents** — `context-workflow.ts`, `iac-guard.ts`, `codex-reviewer-hub.ts`, `codex-reviewer.md`, and `iac-verifier.md` are reusable as-is. They contain no project-specific references; you can adopt them without modification.
+
+32. **IaC safety gate** — `iac-guard.ts` auto-loads in every Pi session and forces human approval before any destructive `terraform` / `tofu` / `aws` / `kubectl` command runs (gray-zone updates are judged by the `iac-verifier` agent over the hub socket; fail-closed if the hub is down). Tune the allow/ask/gray verb tables at the top of `iac-guard.ts`. Launch with `task up` (needs `tmux`); `task status` / `task clean` manage the hub.
