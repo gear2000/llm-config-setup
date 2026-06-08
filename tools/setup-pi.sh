@@ -5,9 +5,14 @@
 # Sources live under layers/llm/pi/common/ (runtime config, NOT compose inputs):
 #   extensions/context-workflow.ts        -> ~/.pi/agent/extensions/   (symlink)
 #   extensions/iac-guard.ts               -> ~/.pi/agent/extensions/   (symlink, IaC safety gate, auto-loaded)
-#   extensions/codex-reviewer-hub.ts      -> ~/.pi/extensions/         (symlink)
+#   extensions/codex-reviewer-hub.ts      -> ~/.pi/extensions/         (symlink, iac-guard approval hub)
+#   extensions/doc-review-hub.ts          -> ~/.pi/extensions/         (symlink, document-review hub)
+#   extensions/pr-review-hub.ts           -> ~/.pi/extensions/         (symlink, PR-review hub)
+#   extensions/hub-common.ts              -> ~/.pi/extensions/         (symlink, shared hub plumbing)
 #   agents/codex-reviewer.md              -> ~/.pi/agents/             (symlink)
 #   agents/iac-verifier.md                -> ~/.pi/agents/             (symlink)
+#   agents/doc-reviewer.md                -> ~/.pi/agents/             (symlink)
+#   agents/pr-reviewer.md                 -> ~/.pi/agents/             (symlink)
 #   settings.template.json                -> ~/.pi/agent/settings.json (scaffold if absent)
 #   npm/{package.json,package-lock.json}  -> npm ci into ~/.pi/agent/npm/ (if node_modules missing)
 #
@@ -38,11 +43,14 @@ PI_SETTINGS="$PI_AGENT_DIR/settings.json"
 PI_EXT_MAP=(
   "context-workflow.ts:$PI_AGENT_DIR/extensions"   # agent-scoped, auto-loaded
   "iac-guard.ts:$PI_AGENT_DIR/extensions"          # agent-scoped, auto-loaded (IaC safety gate)
-  "codex-reviewer-hub.ts:$HOME_PI/extensions"      # top-level, `pi -e` loaded
+  "codex-reviewer-hub.ts:$HOME_PI/extensions"      # top-level, `pi -e` loaded (iac-guard approval hub)
+  "doc-review-hub.ts:$HOME_PI/extensions"          # top-level, `pi -e` loaded (document-review hub)
+  "pr-review-hub.ts:$HOME_PI/extensions"           # top-level, `pi -e` loaded (PR-review hub)
+  "hub-common.ts:$HOME_PI/extensions"              # shared plumbing imported by the two review hubs
 )
 
 # agent personas symlinked into ~/.pi/agents/
-PI_AGENT_FILES=(codex-reviewer.md iac-verifier.md)
+PI_AGENT_FILES=(codex-reviewer.md iac-verifier.md doc-reviewer.md pr-reviewer.md)
 
 # A symlink is "ours" iff it resolves into this clone's layers/llm/pi/common tree.
 is_ours() {  # link_target resolved_target
