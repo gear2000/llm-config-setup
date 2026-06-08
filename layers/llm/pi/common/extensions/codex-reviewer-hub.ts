@@ -3,7 +3,7 @@
  *
  * Listens on a Unix socket. Receives JSON dispatch requests from Claude Code
  * (or any local caller, e.g. the iac-guard gate). Spawns the requested sub-agent
- * via pi-subagents — defaults to codex-reviewer; pass "agent" to run another
+ * via pi-subagents — defaults to the builtin reviewer; pass "agent" to run another
  * (e.g. iac-verifier). Writes error content to the output path if the sub-agent
  * fails or times out.
  *
@@ -26,7 +26,7 @@ interface DispatchRequest {
   handoff: string;
   output: string;
   timeout_ms?: number;
-  agent?: string; // which sub-agent to run (default: codex-reviewer). Lets one socket serve iac-verifier etc.
+  agent?: string; // which sub-agent to run (default: reviewer). Lets one socket serve iac-verifier etc.
 }
 
 interface DispatchResponse {
@@ -132,13 +132,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const agent = req.agent ?? "codex-reviewer";
+      const agent = req.agent ?? "reviewer";
       const task =
-        agent === "codex-reviewer"
+        agent === "reviewer"
           ? [
               `Read the handoff at ${req.handoff}.`,
               `Perform an adversarial review of the artifacts it references.`,
-              `Write your review to ${req.output}.`,
+              `Do not modify any code or files — only write your review findings to ${req.output}.`,
             ].join(" ")
           : [
               `Read the handoff at ${req.handoff}.`,
