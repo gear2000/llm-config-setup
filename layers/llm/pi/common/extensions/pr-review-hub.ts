@@ -19,6 +19,7 @@
  *     "handoff_path": "/abs/path/to/handoff.md",
  *     "output_path": "/abs/path/to/review.md",
  *     "timeout_seconds": 1200,
+ *     "model": "optional Pi model, e.g. anthropic/claude-sonnet-4:high, google/gemini-3-pro, ollama/qwen2.5-coder:7b:off",
  *     "previous_run_id": "optional"
  *   }
  *
@@ -41,7 +42,8 @@ import {
 
 const DEFAULT_SOCKET = path.join(os.homedir(), ".pi", "pr-reviewer.sock");
 const DEFAULT_TIMEOUT_SECONDS = 1200;
-const AGENT = "pr-reviewer";
+const DEFAULT_MODEL = process.env.PR_REVIEW_MODEL || "openai-codex/gpt-5.5:xhigh";
+const AGENT = "reviewer";
 const LOG = "pr-review-hub-log";
 const COMPLETION_POLL_MS = 15_000;
 const MODES = ["new", "status", "replace", "cancel"];
@@ -84,7 +86,15 @@ export default function (pi: ExtensionAPI) {
     try { socket.end(); } catch { /* ignore */ }
   }
 
-  function dispatch(req: any, reviewKey: string, requestId: string, note?: string): void {
+  function getReviewModel(req: any): string {
+    return (typeof req.model === "string" && req.model.trim()) ? req.model.trim() : DEFAULT_MODEL;
+  }
+
+  function buildSubagentCall(task: string, model: string): string {
+    return `subagent(${JSON.stringify({ agent: AGENT, task, model, async: true })})`;
+  }
+
+  function dispatch(req: any, reviewKey: string, requestId: string, model: string, note?: string): void {
     const timeoutSeconds = Number(req.timeout_seconds) || DEFAULT_TIMEOUT_SECONDS;
 
     const task = [
@@ -99,7 +109,7 @@ export default function (pi: ExtensionAPI) {
     if (note) content.push(note);
     content.push(
       `Use the subagent tool to run the ${AGENT} agent:`,
-      `subagent({ agent: "${AGENT}", task: "${task.replace(/"/g, '\\"')}", async: true })`,
+      buildSubagentCall(task, model),
     );
 
     pi.sendMessage(
@@ -239,6 +249,8 @@ export default function (pi: ExtensionAPI) {
           note = `This REPLACES an in-progress review (request_id=${existing.request_id}); interrupt/supersede that previous run if possible.`;
         }
 
+        const model = getReviewModel(parsed);
+
         active.set(reviewKey, {
           request_id: requestId,
           output_path: parsed.output_path,
@@ -247,7 +259,7 @@ export default function (pi: ExtensionAPI) {
           dispatched_at: new Date().toISOString(),
         });
 
-        reply(socket, { status: "dispatched", request_id: requestId, review_key: reviewKey });
+        reply(socket, { status: "dispatched", request_id: requestId, review_key: reviewKey, model });
 
         try {
           pi.appendEntry(LOG, {
@@ -257,10 +269,11 @@ export default function (pi: ExtensionAPI) {
             review_key: reviewKey,
             head_sha: parsed.head_sha,
             output: parsed.output_path,
+            model,
           });
         } catch { /* best-effort */ }
 
-        dispatch(parsed, reviewKey, requestId, note);
+        dispatch(parsed, reviewKey, requestId, model, note);
       })
       .catch(() => {
         try { socket.destroy(); } catch { /* ignore */ }
