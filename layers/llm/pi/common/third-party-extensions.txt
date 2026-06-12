@@ -1,0 +1,47 @@
+# Third-party Pi extensions — pinned install manifest.
+#
+# One `pi install` source per non-comment line. Lines starting with `#` and
+# blank lines are ignored. tools/install-pi-extensions.sh reads this file and
+# runs `pi install <source>` for each line (skipping any already present in
+# `pi list`), so any machine reproduces the exact set with one command.
+#
+# These are INSTALLED FROM SOURCE via `pi install` — never copied or vendored
+# into this repo. (Our OWN authored extensions live in extensions/*.ts and are
+# symlinked by setup-pi.sh; they are NOT listed here. See THIRD-PARTY-EXTENSIONS.md.)
+#
+# Pins: a fresh machine gets the pinned version written into settings.json's
+# `packages` array. `pi install` matches by PACKAGE NAME, so on a machine that
+# already has an entry (pinned or bare) it is a no-op and the existing entry is
+# kept as-is — re-running never duplicates or downgrades. Bump a pin here, then
+# `pi remove npm:<name>` + re-run the script to move a populated machine onto it.
+
+# pi-lens — inline diagnostics / linting lens over the working tree.
+npm:pi-lens@3.8.45
+
+# pi-subagents — spawn and manage Pi subagents.
+npm:pi-subagents@0.25.0
+
+# pi-web-access — fetch and search the web from inside a Pi session.
+npm:pi-web-access@0.10.7
+
+# pi-powerline-footer — powerline-style status footer in the TUI.
+npm:pi-powerline-footer@0.5.4
+
+# @juicesharp/rpiv-btw — "review-plan-implement-verify, by the way" workflow helper.
+npm:@juicesharp/rpiv-btw@1.12.0
+
+# pi-markdown-preview — rendered markdown / Mermaid / LaTeX preview (/preview, /preview-pdf).
+#   Runtime deps (NOT installed by this kit): Pandoc (+ a LaTeX engine for PDF),
+#   and a Chromium-based browser for terminal/PNG preview. Missing Pandoc only
+#   disables PDF/preview rendering; the extension still loads.
+npm:pi-markdown-preview@0.10.0
+
+# @plannotator/pi-extension — browser-based plan / diff / PR review UI (plannotator_submit_plan).
+#   Requires Pi >= 0.74.0. Opens reviews in your default browser.
+npm:@plannotator/pi-extension@0.20.1
+
+# --- Opt-in: not enabled in this release (this project doesn't use Cursor) ---
+# pi-cursor-sdk — use Cursor's models inside Pi.
+#   To enable in a project that uses Cursor: uncomment the line below and run
+#   tools/install-pi-extensions.sh. Needs Pi >= 0.79.1 and Node >= 22.19.
+# npm:pi-cursor-sdk@0.1.42

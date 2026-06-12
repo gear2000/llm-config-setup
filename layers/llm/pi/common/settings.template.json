@@ -2,11 +2,6 @@
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.4-mini",
   "defaultThinkingLevel": "medium",
-  "packages": [
-    "npm:pi-subagents",
-    "npm:pi-web-access",
-    "npm:pi-lens",
-    "npm:pi-powerline-footer",
-    "npm:@juicesharp/rpiv-btw"
-  ]
+  "_packages_note": "Third-party extensions are NOT listed here. setup-pi.sh runs tools/install-pi-extensions.sh, which `pi install`s the pinned set from third-party-extensions.txt and fills this array. Single source of truth is the manifest.",
+  "packages": []
 }

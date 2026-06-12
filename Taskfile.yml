@@ -44,14 +44,24 @@ tasks:
       - bash tools/setup-pi.sh
 
   setup:pi:unlink:
-    desc: "Remove the ~/.pi symlinks created by setup:pi (leaves settings.json + node_modules)"
+    desc: "Remove the ~/.pi symlinks created by setup:pi (leaves settings.json + installed extensions)"
     cmds:
       - bash tools/setup-pi.sh --unlink
+
+  setup:pi:extensions:
+    desc: "Install the pinned third-party Pi extensions from the manifest (idempotent; pass -- --dry-run to preview)"
+    cmds:
+      - bash tools/install-pi-extensions.sh {{.CLI_ARGS}}
 
   test:
     desc: "Run the iac-guard classifier unit test (zero deps; Node 22.6+ native type-stripping)"
     cmds:
       - node --experimental-strip-types layers/llm/pi/common/extensions/iac-guard.test.ts
+
+  test:memsearch:
+    desc: "Run the memsearch collection-derivation unit test (zero deps; Node 22.6+ native type-stripping)"
+    cmds:
+      - node --experimental-strip-types layers/llm/pi/common/extensions/memsearch.test.ts
 
   # ---------------------------------------------------------------------------
   # Pi launch group — start & manage the Pi agents (hub + builder). Requires tmux.

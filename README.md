@@ -93,11 +93,25 @@ See `ONBOARDING.md` for the ordered fill-in checklist.
 
 - `extensions/context-workflow.ts` — A Pi extension that wraps a structured write→test→review→fix→verify loop. Symlinked into `~/.pi/agent/extensions/` (auto-loaded by the Pi agent on startup).
 - `extensions/iac-guard.ts` — A Pi extension that **gates destructive infrastructure commands**. It hooks `tool_call` (before a command runs) and inspects `terraform` / `tofu` / `aws` / `kubectl`: read/create operations run freely; destroys (`destroy` / `delete` / `terminate`) **always require human approval** via the native confirm dialog; gray-zone updates/replaces are judged by the `iac-verifier` agent. Fail-closed — any ambiguity, missing UI, or unavailable verifier falls back to human approval. Symlinked into `~/.pi/agent/extensions/` (auto-loaded). See the policy tables at the top of the file to tune which verbs are allow/ask/gray.
+- `extensions/memsearch/` — A directory Pi extension (`index.ts` + `collection.ts`) that gives Pi memory over the **same shared store** Claude Code builds: per-project daily markdown logs under `<git-root>/.memsearch/memory/<YYYY-MM-DD>.md`, indexed into a per-project Milvus collection. The collection name is derived to **exactly match** memsearch's `derive-collection.sh`, so Pi and Claude converge on the same collection per repo.
+  - **Recall — full parity.** Same shared store, same `memsearch` CLI Claude uses: a model-callable `memory_search` tool + `/recall <query>` return ranked hits from past sessions, `memory_expand` + `/recall-expand <hash>` open the full section, and on `session_start` it injects a one-line "memory available" hint.
+  - **Capture — deliberately NOT full parity.** On `agent_end` it writes **deterministic** third-person notes (what the user asked, which tools the agent used, a clipped agent reply) — **lighter than Claude's and the memsearch codex reference plugin's default**, which run an LLM to summarize the turn. The deterministic path is chosen so capture never makes a blocking nested LLM call. It appends the notes (with a `<!-- session: turn: transcript: -->` anchor) to today's daily log synchronously (the markdown is the source of truth), then runs `memsearch index` in a detached child. If the Milvus Lite single-writer lock is contended (Claude indexing the same store at the same time), the child retries that condition only; on exhaustion it **fails loud** — writes to `~/.pi/agent/memsearch-index.log` and drops an `<!-- index-deferred: <ISO> reason=lock -->` breadcrumb in the daily md — and the next `session_start` re-index catches it up. Non-lock errors fail loud immediately. Nothing is lost because the markdown is already written.
+  - Symlinked as a directory into `~/.pi/agent/extensions/` (auto-loaded; Pi loads `index.ts`, with `collection.ts` riding along as an imported helper). `collection.ts` holds just the derivation (Node built-ins only) so it can be unit-tested (`memsearch.test.ts`, golden value `ms_my_project_a26ceb5d` for the example path `/home/user/code/my-project`). Needs the `memsearch` CLI on `PATH` or `uvx` (ONNX embeddings, no API key); if neither is present it no-ops silently.
 - `extensions/codex-reviewer-hub.ts` — A Pi extension that listens on a Unix socket and dispatches sub-agent requests — adversarial code review (default), and the `iac-verifier` gray-zone verdicts for the gate above. Symlinked into `~/.pi/extensions/` (loaded when Pi is launched with `-e`).
 - `agents/codex-reviewer.md` — The system prompt for the adversarial reviewer agent invoked by the hub extension. Symlinked into `~/.pi/agents/`.
 - `agents/iac-verifier.md` — The system prompt for the gray-zone verifier the `iac-guard` gate consults (judges an update/apply's blast radius → ALLOW or ASK). Symlinked into `~/.pi/agents/`.
-- `npm/package.json` + `npm/package-lock.json` — The npm manifest for Pi's extension dependencies. `setup-pi.sh` runs `npm ci` into `~/.pi/agent/npm/` if `node_modules` is absent.
-- `settings.template.json` — A starter Pi settings file (provider, model, thinking level, packages). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten.
+- `third-party-extensions.txt` — Pinned manifest of **third-party** Pi extensions, one `pi install` source per line. `tools/install-pi-extensions.sh` reads it and installs each via `pi install` (skipping any already present), so the set reproduces on any machine with one command. `setup-pi.sh` calls that installer.
+- `THIRD-PARTY-EXTENSIONS.md` — The per-extension reference: what each one does, its runtime deps, and the own-vs-third-party rule below.
+- `settings.template.json` — A starter Pi settings file (provider, model, thinking level). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten. Its `packages` array starts empty — the installer fills it.
+
+### Own vs third-party extensions — keep them separate
+
+Two kinds of Pi extension, two install paths. **Do not mix them.**
+
+- **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by `setup-pi.sh` — copied/layered, never installed from a registry.
+- **THIRD-PARTY** are **installed from source** via `pi install`, declared as pinned sources in `third-party-extensions.txt` — never copied or vendored into this repo (no committed `node_modules`).
+
+There is one install path for third-party extensions: `pi install` + the manifest. The previous `npm ci` route is gone. See `layers/llm/pi/common/THIRD-PARTY-EXTENSIONS.md` for the full set and per-extension runtime deps.
 
 **Setup:**
 
@@ -105,7 +119,7 @@ See `ONBOARDING.md` for the ordered fill-in checklist.
 # Wire everything up (idempotent — safe to re-run)
 task setup:pi
 
-# Undo: remove the symlinks (leaves settings.json and node_modules)
+# Undo: remove the symlinks (leaves settings.json and installed third-party extensions)
 task setup:pi:unlink
 ```
 
@@ -122,7 +136,7 @@ The `iac-guard` gate auto-loads in every Pi session. The hub only needs to be ru
 
 If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.md` already exists as a real file and is byte-identical to this kit's copy, `setup-pi.sh` migrates it to a repo-managed symlink automatically. If the files differ, the existing file is left untouched and a warning is printed.
 
-`node_modules` is never committed. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
+Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/node_modules/`), never committed here. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 
 **Prerequisites:** a Pi install (`npm install -g @earendil-works/pi-coding-agent`), `node` / `npm` on your `PATH`, and `tmux` (for the `task up` / `task hub` launch group).
 
