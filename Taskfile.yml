@@ -53,6 +53,22 @@ tasks:
     cmds:
       - bash tools/install-pi-extensions.sh {{.CLI_ARGS}}
 
+  # ---------------------------------------------------------------------------
+  # setup:global — compose the GENERAL convention skills and install them into the
+  # user's HOME skill dirs (~/.claude, ~/.codex, ~/.pi), global/all-projects.
+  # Separate from the per-repo compose; does not touch ~/.claude/CLAUDE.md.
+  # ---------------------------------------------------------------------------
+
+  setup:global:
+    desc: "Compose the general skills and install them into ~/.claude, ~/.codex, ~/.pi (global, all-projects)"
+    cmds:
+      - bash tools/install-global.sh
+
+  setup:global:uninstall:
+    desc: "Remove only the global skills installed by setup:global (leaves foreign/divergent files)"
+    cmds:
+      - bash tools/install-global.sh --uninstall
+
   test:
     desc: "Run the iac-guard classifier unit test (zero deps; Node 22.6+ native type-stripping)"
     cmds:

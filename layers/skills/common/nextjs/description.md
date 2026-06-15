@@ -1,0 +1,1 @@
+General Next.js App Router conventions. Use when writing or reviewing Next.js code — covers project structure, client vs server components, thin API routes, data fetching, keeping the frontend a thin UI/routing layer, naming, and testing.
