@@ -1,6 +1,6 @@
 # llm-config-setup
 
-A portable starter kit for composing AI-assistant instruction files (`CLAUDE.md`, `AGENTS.md`, skill files) from reusable markdown layers. See `README.md` for what it does and `ONBOARDING.md` for how to adopt it.
+A portable starter kit for composing AI-assistant instruction files (`CLAUDE.md`, `AGENTS.md`, skill files, and agent personas) from reusable markdown layers. Two install commands — `task install local` (home pieces: general skills, the 18 generic agents, the Pi runtime, the `llm-compose` wrapper) and `task install repo -- <dir>` (set up a target repo) — plus a `task compose:*` build step. See `README.md` for the full layout and install model, and `ONBOARDING.md` for how to adopt it.
 
 ---
 
@@ -31,6 +31,8 @@ A local, gitignored checklist lives under `.vetting/` (never committed — it wo
 
 # Working on this kit
 
-- Edit the source **layers** under `.shared-llm/layers/`; never hand-edit generated outputs.
+- **Edit the source under `.shared-llm/` — never hand-edit a generated output.** The source is the layer prose in `.shared-llm/layers/` (the `llm/`, `skills/`, and `agents/` trees) and the recipes in `.shared-llm/compose/`. The generated outputs (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`, agent `.md` files) are build artifacts.
 - `python3 tools/compose-layers.py` (or `task compose:all`) regenerates outputs. In this repo, demo outputs land in `examples/` (gitignored) and never overwrite this governance file.
-- When adding a layer, follow the placeholder convention (`{{TOKEN}}` + `<!-- TODO(project): … -->`); see `ONBOARDING.md`.
+- The Pi runtime under `.shared-llm/llm/pi/common/` is **not** a compose input — its files are symlinked into `~/.pi/` by `tools/setup-pi.sh`, never concatenated into any output. Edit those `.ts` / `.md` files directly.
+- The install machinery lives in `tools/` (`install-local.sh`, `install-repo.sh`, `install-global.sh`, `setup-pi.sh`, `install-pi-extensions.sh`) with copy-time templates in `tools/templates/` (the `llm-compose` wrapper and the thin per-repo `llm.Taskfile.yml`). Keep behavior and docs in sync when you change them.
+- When adding a `this_repo` layer, follow the placeholder convention (`{{TOKEN}}` + `<!-- TODO(project): … -->`) and ship it as a `TEMPLATE.*` stub; see `ONBOARDING.md`.
