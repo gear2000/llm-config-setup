@@ -4,7 +4,7 @@ Pi extensions in this kit come in **two kinds**, installed by **two different pa
 
 | Kind | Lives in | Wired by | Mechanism |
 |------|----------|----------|-----------|
-| **OWN** (authored here) | `layers/llm/pi/common/extensions/*.ts` | `tools/setup-pi.sh` | **Symlinked** into `~/.pi/` — copied/layered, never installed from a registry |
+| **OWN** (authored here) | `.shared-llm/llm/pi/common/extensions/*.ts` | `tools/setup-pi.sh` | **Symlinked** into `~/.pi/` — copied/layered, never installed from a registry |
 | **THIRD-PARTY** | a registry (npm/git) | `tools/install-pi-extensions.sh` | **Installed from source** via `pi install` — never copied/vendored into this repo |
 
 This page is about the **third-party** set. For the own extensions, see `setup-pi.sh` and the README's "Pi harness runtime config" section.

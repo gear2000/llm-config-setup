@@ -2,7 +2,7 @@
 # Wire this kit's Pi harness runtime config into ~/.pi/ so Pi can discover it.
 # Run once per machine after cloning. Idempotent — safe to re-run.
 #
-# Sources live under layers/llm/pi/common/ (runtime config, NOT compose inputs):
+# Sources live under .shared-llm/llm/pi/common/ (runtime config, NOT compose inputs):
 #   extensions/context-workflow.ts        -> ~/.pi/agent/extensions/   (symlink)
 #   extensions/iac-guard.ts               -> ~/.pi/agent/extensions/   (symlink, IaC safety gate, auto-loaded)
 #   extensions/memsearch/                 -> ~/.pi/agent/extensions/   (symlinked DIR; index.ts auto-loaded, memory recall+capture)
@@ -18,8 +18,8 @@
 #
 # Third-party extensions are NOT handled here as a copy — they are installed from
 # source via `pi install` driven by tools/install-pi-extensions.sh (pinned list in
-# layers/llm/pi/common/third-party-extensions.txt). This script calls that installer
-# at the end. See layers/llm/pi/common/THIRD-PARTY-EXTENSIONS.md.
+# .shared-llm/llm/pi/common/third-party-extensions.txt). This script calls that installer
+# at the end. See .shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md.
 #
 # Usage:
 #   tools/setup-pi.sh             # wire everything up
@@ -32,7 +32,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PI_SRC="$REPO_ROOT/layers/llm/pi/common"
+PI_SRC="$REPO_ROOT/.shared-llm/llm/pi/common"
 EXT_SRC="$PI_SRC/extensions"
 AGENTS_SRC="$PI_SRC/agents"
 SETTINGS_TEMPLATE="$PI_SRC/settings.template.json"
@@ -64,7 +64,7 @@ PI_EXT_DIRS=(
 # agent personas symlinked into ~/.pi/agents/
 PI_AGENT_FILES=(codex-reviewer.md iac-verifier.md doc-reviewer.md pr-reviewer.md)
 
-# A symlink is "ours" iff it resolves into this clone's layers/llm/pi/common tree.
+# A symlink is "ours" iff it resolves into this clone's .shared-llm/llm/pi/common tree.
 is_ours() {  # link_target resolved_target
   case "$1" in "$PI_SRC"/*) return 0 ;; esac
   case "$2" in "$PI_SRC"/*) return 0 ;; esac

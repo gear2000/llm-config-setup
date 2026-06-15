@@ -1,6 +1,6 @@
 # Global (all-projects) Next.js skill recipe.
 #
-# Same compose mechanism as the per-repo recipes under layers/compose/skills/ —
+# Same compose mechanism as the per-repo recipes under .shared-llm/compose/skills/ —
 # the ONLY difference is intent: this assembles the GENERAL Next.js convention layer
 # (no project stub) for installation into the user's HOME skill dirs, where all three
 # harnesses (Claude Code, Codex, Pi) read skills globally.
@@ -14,7 +14,7 @@
 # Output staging path lives under examples/ (gitignored) because it is a generated
 # artifact, not source — the installer copies it into home.
 name: nextjs
-description: layers/skills/common/nextjs/description.md
+description: .shared-llm/layers/skills/common/nextjs/description.md
 inputs:
-  - layers/skills/common/nextjs/practices.md
+  - .shared-llm/layers/skills/common/nextjs/practices.md
 output: examples/global-staging/skills/nextjs/SKILL.md

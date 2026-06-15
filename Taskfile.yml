@@ -17,22 +17,17 @@ tasks:
   compose:skill:
     desc: "Assemble one skill (e.g. task compose:skill -- python)"
     cmds:
-      - python3 tools/compose-layers.py layers/compose/skills/{{.CLI_ARGS}}.yaml
+      - python3 tools/compose-layers.py .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
 
   compose:claude-md:
     desc: "Assemble one CLAUDE.md (e.g. task compose:claude-md -- root)"
     cmds:
-      - python3 tools/compose-layers.py layers/compose/claude-md/{{.CLI_ARGS}}.yaml
+      - python3 tools/compose-layers.py .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
 
   compose:agents-md:
     desc: "Assemble one AGENTS.md (e.g. task compose:agents-md -- root)"
     cmds:
-      - python3 tools/compose-layers.py layers/compose/agents-md/{{.CLI_ARGS}}.yaml
-
-  compose:dry-run:
-    desc: "Preview what compose:all would generate without writing files"
-    cmds:
-      - python3 tools/compose-layers.py --dry-run
+      - python3 tools/compose-layers.py .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
 
   # ---------------------------------------------------------------------------
   # setup:* — wire Pi harness runtime config into ~/.pi/
@@ -49,7 +44,7 @@ tasks:
       - bash tools/setup-pi.sh --unlink
 
   setup:pi:extensions:
-    desc: "Install the pinned third-party Pi extensions from the manifest (idempotent; pass -- --dry-run to preview)"
+    desc: "Install the pinned third-party Pi extensions from the manifest (idempotent)"
     cmds:
       - bash tools/install-pi-extensions.sh {{.CLI_ARGS}}
 
@@ -72,12 +67,12 @@ tasks:
   test:
     desc: "Run the iac-guard classifier unit test (zero deps; Node 22.6+ native type-stripping)"
     cmds:
-      - node --experimental-strip-types layers/llm/pi/common/extensions/iac-guard.test.ts
+      - node --experimental-strip-types .shared-llm/llm/pi/common/extensions/iac-guard.test.ts
 
   test:memsearch:
     desc: "Run the memsearch collection-derivation unit test (zero deps; Node 22.6+ native type-stripping)"
     cmds:
-      - node --experimental-strip-types layers/llm/pi/common/extensions/memsearch.test.ts
+      - node --experimental-strip-types .shared-llm/llm/pi/common/extensions/memsearch.test.ts
 
   # ---------------------------------------------------------------------------
   # Pi launch group — start & manage the Pi agents (hub + builder). Requires tmux.

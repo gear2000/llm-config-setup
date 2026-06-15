@@ -31,6 +31,6 @@ A local, gitignored checklist lives under `.vetting/` (never committed — it wo
 
 # Working on this kit
 
-- Edit the source **layers** under `layers/`; never hand-edit generated outputs.
+- Edit the source **layers** under `.shared-llm/layers/`; never hand-edit generated outputs.
 - `python3 tools/compose-layers.py` (or `task compose:all`) regenerates outputs. In this repo, demo outputs land in `examples/` (gitignored) and never overwrite this governance file.
 - When adding a layer, follow the placeholder convention (`{{TOKEN}}` + `<!-- TODO(project): … -->`); see `ONBOARDING.md`.

@@ -1,6 +1,6 @@
 # Global (all-projects) Python skill recipe.
 #
-# Same compose mechanism as the per-repo recipes under layers/compose/skills/ —
+# Same compose mechanism as the per-repo recipes under .shared-llm/compose/skills/ —
 # the ONLY difference is intent: this assembles the GENERAL Python convention layer
 # (no project/this_repo stub) for installation into the user's HOME skill dirs,
 # where all three harnesses (Claude Code, Codex, Pi) read skills globally.
@@ -9,14 +9,14 @@
 # ~/.claude/skills/python/, ~/.codex/skills/python/, and ~/.pi/skills/python/.
 #
 # Inputs: ONLY the general layer — practices.md + description.md. Deliberately does
-# NOT include layers/skills/this_repo/python.md (the per-project stub), so the global
+# NOT include .shared-llm/layers/skills/this_repo/python.md (the per-project stub), so the global
 # skill carries general conventions only.
 #
 # Output staging path lives under examples/ (gitignored) because it is a generated
 # artifact, not source — the installer copies it into home (a real file, no dangling
 # symlink to a generated/ignored path).
 name: python
-description: layers/skills/common/python/description.md
+description: .shared-llm/layers/skills/common/python/description.md
 inputs:
-  - layers/skills/common/python/practices.md
+  - .shared-llm/layers/skills/common/python/practices.md
 output: examples/global-staging/skills/python/SKILL.md

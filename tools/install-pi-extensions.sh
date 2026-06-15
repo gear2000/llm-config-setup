@@ -3,7 +3,7 @@
 # native `pi install` path (appends to the `packages` array in
 # ~/.pi/agent/settings.json and fetches the source).
 #
-# Source of truth: layers/llm/pi/common/third-party-extensions.txt
+# Source of truth: .shared-llm/llm/pi/common/third-party-extensions.txt
 #   - one `pi install` source per non-comment line (e.g. `npm:pi-lens@3.8.45`)
 #   - blank lines and `#` comments are ignored
 #
@@ -15,19 +15,15 @@
 #
 # Usage:
 #   tools/install-pi-extensions.sh            # install everything in the manifest
-#   tools/install-pi-extensions.sh --dry-run  # print what would run, change nothing
 #
 # This installs THIRD-PARTY extensions only. Our OWN authored extensions
 # (extensions/*.ts) are symlinked by setup-pi.sh — never installed. Keep the two
-# paths separate (see layers/llm/pi/common/THIRD-PARTY-EXTENSIONS.md).
+# paths separate (see .shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md).
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MANIFEST="$REPO_ROOT/layers/llm/pi/common/third-party-extensions.txt"
-
-DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+MANIFEST="$REPO_ROOT/.shared-llm/llm/pi/common/third-party-extensions.txt"
 
 command -v pi >/dev/null 2>&1 || {
   echo "ERROR: 'pi' not on PATH. Install it: npm install -g @earendil-works/pi-coding-agent" >&2
@@ -72,11 +68,6 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
     continue
   fi
 
-  if [[ "$DRY_RUN" == 1 ]]; then
-    echo "  WOULD  pi install $line"
-    continue
-  fi
-
   echo "  install $line"
   if ! pi install "$line"; then               # fail loud — no masking
     echo "ERROR: 'pi install $line' failed (peer-dep / Pi-version gap, or network)." >&2
@@ -86,9 +77,5 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
   installed_count=$((installed_count + 1))
 done < "$MANIFEST"
 
-if [[ "$DRY_RUN" == 1 ]]; then
-  echo "dry-run: $planned_count manifest entr(ies), $skipped_count already present"
-  exit 0
-fi
 echo "done: $installed_count installed, $skipped_count already present ($planned_count in manifest)"
 echo "verify: pi list"

@@ -1,5 +1,0 @@
-type: claude-md
-inputs:
-  - layers/llm/this_repo/src/packages.md
-  - layers/llm/this_repo/packages/example_package.md
-output: examples/src/packages/example_package/CLAUDE.md

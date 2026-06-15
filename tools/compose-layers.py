@@ -1,44 +1,85 @@
 #!/usr/bin/env python3
 """Assemble layer .md files into skill, agent, CLAUDE.md, and AGENTS.md definitions.
 
-Reads compose YAML files from layers/compose/ that specify which layer
+Reads compose YAML files from <shared-llm>/compose/ that specify which layer
 markdown files to concatenate, and produces output .md files with proper
 formatting for the target type.
+
+Two roots are decoupled:
+    SOURCE  — the .shared-llm/ dir (layers + compose recipes). Inputs, catalog,
+              description, and recipe discovery resolve against it. Selected via
+              --shared-llm, then $SHARED_LLM_DIR, then a walk-up for `.shared-llm/`.
+    TARGET  — the output base (where `output:` paths land). Selected via --target;
+              defaults to the current working directory.
 
 Compose YAML types:
     type: skill      — YAML frontmatter with name + description (default if no type)
     type: agent      — YAML frontmatter with name + description + model
     type: claude-md  — plain concatenated markdown, no frontmatter (CLAUDE.md)
     type: agents-md  — plain concatenated markdown, no frontmatter (AGENTS.md)
+    type: prompt     — plain concatenated markdown, no frontmatter; a whole
+                       feature prompt assembled from an explicit manifest of
+                       layer fragments (credentials/CI pointer, the per-feature
+                       context, the chosen agent role) for a systemPrompt harness
+
+Optional keys:
+    catalog: <path>  — shared partial injected FIRST before 'inputs' (single-source for
+                       content repeated across many outputs, e.g. the service catalog).
+                       Exactly one source file; the tool reads it once and prepends it.
 
 Usage:
-    python tools/compose-layers.py                              # compose all
-    python tools/compose-layers.py layers/compose/skills/x.yaml # compose one
-    python tools/compose-layers.py --dry-run                    # preview only
+    python tools/compose-layers.py                                       # compose all
+    python tools/compose-layers.py .shared-llm/compose/skills/x.yaml     # compose one
+    python tools/compose-layers.py --shared-llm /path/.shared-llm --target /path/out
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
+import os
 from pathlib import Path
+import sys
 from typing import Any
 
 import yaml
 
 
-def find_repo_root() -> Path:
-    """Walk up from script location looking for layers/ directory."""
-    candidate = Path(__file__).resolve().parent
-    for _ in range(10):
-        if (candidate / "layers").is_dir():
-            return candidate
-        candidate = candidate.parent
-    # Fall back to cwd
-    cwd = Path.cwd()
-    if (cwd / "layers").is_dir():
-        return cwd
-    print("error: cannot find repo root (no layers/ directory found)", file=sys.stderr)
+def find_shared_llm(arg: str | None) -> Path:
+    """Resolve the .shared-llm source root.
+
+    Resolution order:
+      1. explicit --shared-llm argument
+      2. $SHARED_LLM_DIR environment variable
+      3. walk up from the script location (then cwd) for a `.shared-llm/` dir
+    Fails loud if none resolve to a directory.
+    """
+    # 1. explicit argument
+    if arg:
+        candidate = Path(arg).expanduser().resolve()
+        if not candidate.is_dir():
+            print(f"error: --shared-llm path is not a directory: {candidate}", file=sys.stderr)
+            sys.exit(1)
+        return candidate
+
+    # 2. environment variable
+    env = os.environ.get("SHARED_LLM_DIR")
+    if env:
+        candidate = Path(env).expanduser().resolve()
+        if not candidate.is_dir():
+            print(f"error: $SHARED_LLM_DIR is not a directory: {candidate}", file=sys.stderr)
+            sys.exit(1)
+        return candidate
+
+    # 3. walk up from the script location, then cwd, for a `.shared-llm/` dir
+    for start in (Path(__file__).resolve().parent, Path.cwd()):
+        candidate = start
+        for _ in range(10):
+            shared = candidate / ".shared-llm"
+            if shared.is_dir():
+                return shared
+            candidate = candidate.parent
+
+    print("error: cannot find .shared-llm root", file=sys.stderr)
     sys.exit(1)
 
 
@@ -50,7 +91,11 @@ def read_file(path: Path) -> str:
     return path.read_text()
 
 
-VALID_TYPES = {"skill", "agent", "claude-md", "agents-md"}
+VALID_TYPES = {"skill", "agent", "claude-md", "agents-md", "prompt"}
+
+# Types that produce plain concatenated markdown with no name/description
+# frontmatter (CLAUDE.md / AGENTS.md / whole feature prompts).
+PLAIN_TYPES = ("claude-md", "agents-md", "prompt")
 
 
 def load_compose_yaml(path: Path) -> dict[str, Any]:
@@ -76,7 +121,7 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
             print(f"error: {path} missing required field: {field}", file=sys.stderr)
             sys.exit(1)
 
-    if compose_type not in ("claude-md", "agents-md"):
+    if compose_type not in PLAIN_TYPES:
         for field in ("name", "description"):
             if field not in data:
                 print(f"error: {path} missing required field: {field}", file=sys.stderr)
@@ -106,36 +151,32 @@ class ClaudeSkill:
         fm: dict[str, Any] = {"name": name, "description": description}
         return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
-    def write(self, data: dict[str, Any], body: str, output_path: Path, *, dry_run: bool) -> None:
+    def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
         frontmatter = self.build_frontmatter(data["name"], description)
         content = f"---\n{frontmatter}---\n\n{body}"
-
-        if dry_run:
-            print(f"  [dry-run] would write skill -> {output_path}")
-            return
-
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(content)
 
 
 class ClaudeAgent:
-    """Produces an agent .md file with name + description + model frontmatter."""
+    """Produces an agent .md file with name + description + model frontmatter.
 
-    def build_frontmatter(self, name: str, description: str, model: str) -> str:
+    An optional `color:` field is emitted only when the recipe declares one.
+    """
+
+    def build_frontmatter(self, name: str, description: str, model: str, color: str | None) -> str:
         fm: dict[str, Any] = {"name": name, "description": description, "model": model}
+        if color is not None:
+            fm["color"] = color
         return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
-    def write(self, data: dict[str, Any], body: str, output_path: Path, *, dry_run: bool) -> None:
+    def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
         model = data["model"]
-        frontmatter = self.build_frontmatter(data["name"], description, model)
+        color = data.get("color")
+        frontmatter = self.build_frontmatter(data["name"], description, model, color)
         content = f"---\n{frontmatter}---\n\n{body}"
-
-        if dry_run:
-            print(f"  [dry-run] would write agent -> {output_path}")
-            return
-
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(content)
 
@@ -143,11 +184,7 @@ class ClaudeAgent:
 class ClaudeMd:
     """Produces a plain markdown file with no frontmatter."""
 
-    def write(self, data: dict[str, Any], body: str, output_path: Path, *, dry_run: bool) -> None:
-        if dry_run:
-            print(f"  [dry-run] would write claude-md -> {output_path}")
-            return
-
+    def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(body)
 
@@ -155,11 +192,21 @@ class ClaudeMd:
 class AgentsMd:
     """Produces a plain markdown file for AGENTS.md (cross-harness instruction files)."""
 
-    def write(self, data: dict[str, Any], body: str, output_path: Path, *, dry_run: bool) -> None:
-        if dry_run:
-            print(f"  [dry-run] would write agents-md -> {output_path}")
-            return
+    def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(body)
 
+
+class Prompt:
+    """Produces a whole feature prompt — plain concatenated markdown, no frontmatter.
+
+    A feature prompt is a complete system prompt: it bundles the selected layer
+    fragments (credentials pointer, CI/CD-via-Taskfile, the per-feature context,
+    the chosen agent role) into one piece so a systemPrompt-controlling harness
+    gets everything without traversing the layer tree.
+    """
+
+    def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(body)
 
@@ -171,20 +218,36 @@ class AgentsMd:
 class Composer:
     """Discovers compose YAMLs and dispatches to the right output handler."""
 
-    def __init__(self, repo_root: Path) -> None:
-        self.root = repo_root
+    def __init__(self, source_root: Path, target_root: Path) -> None:
+        self.source = source_root
+        self.target = target_root
         self.skill_handler = ClaudeSkill()
         self.agent_handler = ClaudeAgent()
         self.claude_md_handler = ClaudeMd()
         self.agents_md_handler = AgentsMd()
+        self.prompt_handler = Prompt()
 
-    def resolve(self, relative: str) -> Path:
-        """Resolve a path relative to repo root."""
-        return self.root / relative
+    def resolve_input(self, relative: str) -> Path:
+        """Resolve an input/catalog/description path against the SOURCE root.
+
+        A literal that already names the source root (`.shared-llm/...`) is kept
+        repo-relative by stripping that prefix, so recipes can carry the full
+        `.shared-llm/layers/...` path the repo commits while still resolving
+        against an arbitrary --shared-llm base.
+        """
+        rel = relative
+        base = self.source.name  # ".shared-llm"
+        if rel.startswith(base + "/"):
+            rel = rel[len(base) + 1 :]
+        return self.source / rel
+
+    def resolve_output(self, relative: str) -> Path:
+        """Resolve an output path against the TARGET root."""
+        return self.target / relative
 
     def discover(self) -> list[Path]:
-        """Find all YAML files under layers/compose/."""
-        compose_dir = self.root / "layers" / "compose"
+        """Find all YAML files under <source>/compose/."""
+        compose_dir = self.source / "compose"
         if not compose_dir.is_dir():
             print(f"error: compose directory not found: {compose_dir}", file=sys.stderr)
             sys.exit(1)
@@ -202,42 +265,49 @@ class Composer:
             return "agent"
         return "skill"
 
-    def compose_one(self, yaml_path: Path, *, dry_run: bool) -> None:
+    def compose_one(self, yaml_path: Path) -> None:
         """Process a single compose YAML."""
         data = load_compose_yaml(yaml_path)
         compose_type = self._resolve_type(data)
 
-        if compose_type not in ("claude-md", "agents-md"):
-            desc_path = self.resolve(data["description"])
+        if compose_type not in PLAIN_TYPES:
+            desc_path = self.resolve_input(data["description"])
             data["_description_content"] = read_file(desc_path).strip()
 
         parts: list[str] = []
+        # Inject shared catalog partial FIRST when declared (single-source pattern).
+        catalog_rel = data.get("catalog")
+        if catalog_rel:
+            catalog_path = self.resolve_input(catalog_rel)
+            parts.append(read_file(catalog_path).rstrip())
         for input_rel in data["inputs"]:
-            input_path = self.resolve(input_rel)
+            input_path = self.resolve_input(input_rel)
             parts.append(read_file(input_path).rstrip())
 
-        separator = "\n\n---\n\n" if compose_type in ("claude-md", "agents-md") else "\n"
+        separator = "\n\n---\n\n" if compose_type in PLAIN_TYPES else "\n"
         body = separator.join(parts) + "\n"
-        output_path = self.resolve(data["output"])
+        output_path = self.resolve_output(data["output"])
         label = data.get("name", output_path.name)
 
         print(f"  {compose_type}: {label} -> {output_path}")
 
         match compose_type:
             case "claude-md":
-                self.claude_md_handler.write(data, body, output_path, dry_run=dry_run)
+                self.claude_md_handler.write(data, body, output_path)
             case "agents-md":
-                self.agents_md_handler.write(data, body, output_path, dry_run=dry_run)
+                self.agents_md_handler.write(data, body, output_path)
             case "agent":
-                self.agent_handler.write(data, body, output_path, dry_run=dry_run)
+                self.agent_handler.write(data, body, output_path)
+            case "prompt":
+                self.prompt_handler.write(data, body, output_path)
             case _:
-                self.skill_handler.write(data, body, output_path, dry_run=dry_run)
+                self.skill_handler.write(data, body, output_path)
 
-    def compose_all(self, *, dry_run: bool) -> None:
+    def compose_all(self) -> None:
         """Discover and compose all targets."""
         yamls = self.discover()
         for yp in yamls:
-            self.compose_one(yp, dry_run=dry_run)
+            self.compose_one(yp)
 
 
 # ---------------------------------------------------------------------------
@@ -249,29 +319,41 @@ def main() -> None:
         description="Assemble layer files into skill, agent, CLAUDE.md, and AGENTS.md definitions."
     )
     parser.add_argument(
-        "target",
+        "recipe",
         nargs="?",
-        help="Specific compose YAML to process (default: all under layers/compose/)",
+        help="Specific compose YAML to process (default: all under <shared-llm>/compose/)",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be generated without writing files",
+        "--shared-llm",
+        help="Path to the .shared-llm source root (default: $SHARED_LLM_DIR, then walk up for .shared-llm/)",
+    )
+    parser.add_argument(
+        "--target",
+        help="Output base directory where 'output:' paths land (default: current working directory)",
     )
     args = parser.parse_args()
 
-    repo_root = find_repo_root()
-    composer = Composer(repo_root)
+    source_root = find_shared_llm(args.shared_llm)
+    target_root = Path(args.target).expanduser().resolve() if args.target else Path.cwd()
+    composer = Composer(source_root, target_root)
 
-    print(f"repo root: {repo_root}")
+    print(f"shared-llm source: {source_root}")
+    print(f"target output: {target_root}")
 
-    if args.target:
-        target = Path(args.target)
-        if not target.is_absolute():
-            target = repo_root / target
-        composer.compose_one(target, dry_run=args.dry_run)
+    if args.recipe:
+        recipe = Path(args.recipe)
+        if not recipe.is_absolute():
+            # A recipe path may be given repo-relative (`.shared-llm/compose/...`)
+            # or source-relative (`compose/...`). Resolve against the source root,
+            # stripping the source dir name if the caller included it.
+            rel = args.recipe
+            base = source_root.name
+            if rel.startswith(base + "/"):
+                rel = rel[len(base) + 1 :]
+            recipe = source_root / rel
+        composer.compose_one(recipe)
     else:
-        composer.compose_all(dry_run=args.dry_run)
+        composer.compose_all()
 
     print("done.")
 

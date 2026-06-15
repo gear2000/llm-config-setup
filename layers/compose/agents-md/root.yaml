@@ -1,6 +1,0 @@
-type: agents-md
-inputs:
-  - layers/llm/this_repo/general.md
-  - layers/llm/this_repo/agents.md
-  - layers/llm/common/response.md
-output: examples/AGENTS.md

@@ -1,0 +1,5 @@
+type: claude-md
+inputs:
+  - .shared-llm/layers/llm/this_repo/common/src/services.md
+  - .shared-llm/layers/llm/this_repo/common/services/example_service.md
+output: examples/src/services/example_service/CLAUDE.md

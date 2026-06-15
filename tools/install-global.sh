@@ -42,9 +42,9 @@ STAGING="$REPO_ROOT/examples/global-staging/skills"
 # Global skills to install: "<skill-name>:<recipe path relative to repo root>".
 # Add a line here to ship another general skill globally.
 GLOBAL_SKILLS=(
-  "python:layers/compose/global/python.yaml"
-  "nextjs:layers/compose/global/nextjs.yaml"
-  "backend:layers/compose/global/backend.yaml"
+  "python:.shared-llm/compose/global/python.yaml"
+  "nextjs:.shared-llm/compose/global/nextjs.yaml"
+  "backend:.shared-llm/compose/global/backend.yaml"
 )
 
 # Home skill dirs each harness reads globally.
@@ -88,7 +88,9 @@ command -v python3 >/dev/null 2>&1 || { echo "error: python3 not on PATH" >&2; e
 for pair in "${GLOBAL_SKILLS[@]}"; do
   recipe="${pair##*:}"
   echo "compose: $recipe"
-  python3 "$COMPOSE" "$recipe"   # fail loud — set -e aborts on non-zero
+  # --target pins output (examples/...) under REPO_ROOT regardless of cwd; the engine
+  # finds the .shared-llm source by walking up from its own location. fail loud — set -e.
+  python3 "$COMPOSE" "$recipe" --target "$REPO_ROOT"
 done
 
 # --- install: copy each staged skill into the three home dirs ---
