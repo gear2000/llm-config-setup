@@ -144,7 +144,7 @@ if [[ "$SKIP_PI_EXTENSIONS" -eq 1 ]]; then
   restore_x=0
   if [[ -x "$EXT_INSTALLER" ]]; then chmod -x "$EXT_INSTALLER"; restore_x=1; fi
   set +e
-  "$SETUP_PI"
+  PI_SKIP_EXTENSIONS=1 "$SETUP_PI"
   pi_rc=$?
   set -e
   [[ "$restore_x" -eq 1 ]] && chmod +x "$EXT_INSTALLER"

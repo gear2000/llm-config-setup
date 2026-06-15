@@ -6,6 +6,14 @@ This walks you from a clean machine to generated `CLAUDE.md` / `AGENTS.md` / ski
 
 ## 0 — Install
 
+**Prerequisites.** Install these first:
+
+- `task` (go-task) — the single entrypoint for every command below.
+- `python3` — runs the compose engine.
+- PyYAML — the engine's one Python dependency: `pip install pyyaml`.
+
+The Pi runtime extras (`pi` binary, `tmux`) are optional — needed only for the Pi flow.
+
 Two install surfaces. Run both for a fresh setup.
 
 1. **Home pieces (all projects):**

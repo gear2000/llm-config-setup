@@ -166,6 +166,8 @@ fi
 if [[ -x "$EXT_INSTALLER" ]]; then
   echo "third-party: installing from manifest via pi install"
   "$EXT_INSTALLER"
+elif [[ "${PI_SKIP_EXTENSIONS:-0}" -eq 1 ]]; then
+  echo "third-party Pi extensions: skipped (--skip-pi-extensions)"
 else
   echo "third-party: skipped — $EXT_INSTALLER not found/executable" >&2
 fi

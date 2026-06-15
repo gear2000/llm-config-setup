@@ -41,7 +41,10 @@ from pathlib import Path
 import sys
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.exit("error: PyYAML is required. Install it with: pip install pyyaml")
 
 
 def find_shared_llm(arg: str | None) -> Path:
