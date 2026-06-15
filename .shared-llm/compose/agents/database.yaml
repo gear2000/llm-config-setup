@@ -1,0 +1,8 @@
+type: agent
+name: database
+model: sonnet
+color: cyan
+description: .shared-llm/layers/agents/common/database.description.md
+inputs:
+  - .shared-llm/layers/agents/common/database.md
+output: examples/.claude/agents/database.md

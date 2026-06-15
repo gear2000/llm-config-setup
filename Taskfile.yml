@@ -29,6 +29,20 @@ tasks:
     cmds:
       - python3 tools/compose-layers.py .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
 
+  compose:agent:
+    desc: "Assemble one agent (e.g. task compose:agent -- architecture)"
+    cmds:
+      - python3 tools/compose-layers.py .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
+
+  compose:agents:
+    desc: "Assemble every agent recipe under .shared-llm/compose/agents/"
+    cmds:
+      - for: { var: AGENTS }
+        cmd: python3 tools/compose-layers.py .shared-llm/compose/agents/{{.ITEM}}
+    vars:
+      AGENTS:
+        sh: ls -1 .shared-llm/compose/agents/
+
   # ---------------------------------------------------------------------------
   # setup:* — wire Pi harness runtime config into ~/.pi/
   # ---------------------------------------------------------------------------

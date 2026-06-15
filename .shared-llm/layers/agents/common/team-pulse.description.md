@@ -1,0 +1,1 @@
+Tiny single-purpose heartbeat agent for teams. On a fixed interval, pings the team leader with a status-check message so the leader is forced to take a turn and check on the rest of the team. Prevents the whole team from idling when workers go quiet. Spawn only for team-based flows; subagent-only flows do not need it.

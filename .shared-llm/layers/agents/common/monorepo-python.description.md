@@ -1,0 +1,1 @@
+Project-specific Python agent for a monorepo. Use when working on Python packages or deployable services. Knows the package structure, service structure, package-registry conventions, and Docker test setup for the monorepo.

@@ -1,0 +1,1 @@
+Use when designing or modifying database schemas, writing schema definitions, creating migrations, or working with a data-access layer. Writes the schema, applies it, validates it works, and iterates until clean.

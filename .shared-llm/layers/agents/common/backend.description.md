@@ -1,0 +1,1 @@
+Use when writing or modifying backend services — serverless functions, API routes, or worker handlers. Writes code, writes tests, runs them, and iterates until everything works. Also audits git diffs for problematic try/except usage.

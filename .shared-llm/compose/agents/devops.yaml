@@ -1,0 +1,8 @@
+type: agent
+name: devops
+model: sonnet
+color: gray
+description: .shared-llm/layers/agents/common/devops.description.md
+inputs:
+  - .shared-llm/layers/agents/common/devops.md
+output: examples/.claude/agents/devops.md

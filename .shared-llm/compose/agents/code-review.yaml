@@ -1,0 +1,8 @@
+type: agent
+name: code-review
+model: sonnet
+color: blue
+description: .shared-llm/layers/agents/common/code-review.description.md
+inputs:
+  - .shared-llm/layers/agents/common/code-review.md
+output: examples/.claude/agents/code-review.md

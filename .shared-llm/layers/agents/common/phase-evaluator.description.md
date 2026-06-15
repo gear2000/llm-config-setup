@@ -1,0 +1,1 @@
+Optional second-opinion judge for per-phase verdicts. Spawn only when the team leader wants an independent verdict — ambiguous verification output, borderline deploy evidence, or a high-stakes phase. Reviews git diff, captured verification output, and deployer evidence, then emits a structured PASSED/FAILED/BLOCKED verdict.

@@ -1,0 +1,8 @@
+type: agent
+name: team-pulse
+model: haiku
+color: yellow
+description: .shared-llm/layers/agents/common/team-pulse.description.md
+inputs:
+  - .shared-llm/layers/agents/common/team-pulse.md
+output: examples/.claude/agents/team-pulse.md

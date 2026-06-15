@@ -1,0 +1,8 @@
+type: agent
+name: architecture
+model: opus
+color: blue
+description: .shared-llm/layers/agents/common/architecture.description.md
+inputs:
+  - .shared-llm/layers/agents/common/architecture.md
+output: examples/.claude/agents/architecture.md

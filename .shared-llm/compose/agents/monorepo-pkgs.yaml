@@ -1,0 +1,8 @@
+type: agent
+name: monorepo-pkgs
+model: sonnet
+color: green
+description: .shared-llm/layers/agents/common/monorepo-pkgs.description.md
+inputs:
+  - .shared-llm/layers/agents/common/monorepo-pkgs.md
+output: examples/.claude/agents/monorepo-pkgs.md
