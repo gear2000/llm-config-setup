@@ -44,6 +44,35 @@ tasks:
         sh: ls -1 .shared-llm/compose/agents/
 
   # ---------------------------------------------------------------------------
+  # install — the headline consumer feature. Two surfaces:
+  #   task install local            general/home pieces (all-projects)
+  #   task install repo -- <dir=.>  set up a target repo (per-repo pieces)
+  #
+  # go-task runs `install local` / `install repo` as the `install` guard target
+  # followed by the `local` / `repo` worker target, so the invocations read as
+  # natural two-word commands.
+  # ---------------------------------------------------------------------------
+
+  install:
+    desc: "Install entrypoint — run `task install local` or `task install repo -- <dir>`"
+    silent: true
+    cmds:
+      # Runs as the first of two targets in `install local` / `install repo`, and
+      # alone for a bare `task install`. The usage hint is harmless before a worker
+      # and useful on its own. Workers (local/repo) carry all the real output.
+      - 'echo "install: local -> general/home pieces | repo -- <dir> -> set up a target repo"'
+
+  local:
+    desc: "Install the general/home pieces: skills, generic agents, pi runtime, ~/.local/bin/llm-compose"
+    cmds:
+      - bash tools/install-local.sh {{.CLI_ARGS}}
+
+  repo:
+    desc: "Set up a target repo (e.g. task install repo -- /path/to/repo); INSTALL_REPO_YES=1 to skip the fill pause"
+    cmds:
+      - bash tools/install-repo.sh {{.CLI_ARGS}}
+
+  # ---------------------------------------------------------------------------
   # setup:* — wire Pi harness runtime config into ~/.pi/
   # ---------------------------------------------------------------------------
 
