@@ -15,8 +15,14 @@
 #      Bypass for automation: set INSTALL_REPO_YES=1 (or pipe a non-tty stdin) to
 #      proceed without waiting.
 #   3. Compose against <dir> (engine --target <dir>) to generate CLAUDE.md/AGENTS.md
-#      etc. If TEMPLATE.* stubs are still unfilled, compose is SKIPPED (you cannot
-#      compose against unfilled stubs) and the remaining stubs are reported.
+#      at the REPO ROOT, plus the skills and the 18 agents at their proper paths
+#      (.claude/skills/<name>/SKILL.md, .claude/agents/<name>.md). Only the
+#      CONSUMER-relevant recipe groups are composed — NOT the home-only `global/`
+#      skills (those install via `task install local`) and NOT the
+#      `example-package` / `example-service` DEMO recipes (illustrative samples,
+#      kept out of the consumer's real tree). If TEMPLATE.* stubs are still
+#      unfilled, compose is SKIPPED (you cannot compose against unfilled stubs)
+#      and the remaining stubs are reported.
 #   4. Print a SUMMARY: what was generated + what is NOT installed (home pieces come
 #      from `task install local`).
 #
@@ -124,8 +130,19 @@ if [[ "${#REMAINING[@]}" -gt 0 ]]; then
   for s in "${REMAINING[@]}"; do echo "  - ${s#"$TARGET"/}" >&2; done
   echo "Fill + rename them, then run:  task -d $TARGET compose:all  (or: cd $TARGET && llm-compose)" >&2
 else
-  echo "All stubs filled — composing all recipes into $TARGET ..."
-  python3 "$TARGET/tools/compose-layers.py" --shared-llm "$TARGET/.shared-llm" --target "$TARGET"
+  echo "All stubs filled — composing consumer recipes into $TARGET (outputs land at the repo root) ..."
+  # Compose ONLY the consumer-relevant recipe groups so the outputs land at the
+  # consumer's root (CLAUDE.md, AGENTS.md, .claude/skills/*, .claude/agents/*).
+  # Deliberately excluded:
+  #   - compose/global/*       home-only skills (install via `task install local`)
+  #   - the example-package / example-service DEMO recipes under compose/claude-md/
+  #     (illustrative samples — not consumer deliverables; never written into the
+  #     consumer's real src/ tree).
+  ENGINE="$TARGET/tools/compose-layers.py"
+  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/claude-md/root.yaml"
+  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents-md/root.yaml"
+  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/skills"
+  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents"
   composed=1
 fi
 

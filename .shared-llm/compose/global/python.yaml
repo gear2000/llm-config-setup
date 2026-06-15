@@ -19,4 +19,4 @@ name: python
 description: .shared-llm/layers/skills/common/python/description.md
 inputs:
   - .shared-llm/layers/skills/common/python/practices.md
-output: examples/global-staging/skills/python/SKILL.md
+output: global-staging/skills/python/SKILL.md

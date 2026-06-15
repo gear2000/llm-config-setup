@@ -17,4 +17,4 @@ name: backend
 description: .shared-llm/layers/skills/common/backend/description.md
 inputs:
   - .shared-llm/layers/skills/common/backend/practices.md
-output: examples/global-staging/skills/backend/SKILL.md
+output: global-staging/skills/backend/SKILL.md

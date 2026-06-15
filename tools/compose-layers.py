@@ -245,9 +245,16 @@ class Composer:
         """Resolve an output path against the TARGET root."""
         return self.target / relative
 
-    def discover(self) -> list[Path]:
-        """Find all YAML files under <source>/compose/."""
-        compose_dir = self.source / "compose"
+    def discover(self, root: Path | None = None) -> list[Path]:
+        """Find all recipe YAML files under a directory (default <source>/compose/).
+
+        Pass an explicit `root` (e.g. <source>/compose/agents) to compose only a
+        SUBSET of recipes — this is how a consumer install composes the
+        consumer-relevant recipes (root CLAUDE.md/AGENTS.md, skills, agents) while
+        leaving the home-only `global/` skills and the `example-*` demo samples out
+        of the consumer's tree.
+        """
+        compose_dir = root if root is not None else self.source / "compose"
         if not compose_dir.is_dir():
             print(f"error: compose directory not found: {compose_dir}", file=sys.stderr)
             sys.exit(1)
@@ -309,6 +316,12 @@ class Composer:
         for yp in yamls:
             self.compose_one(yp)
 
+    def compose_dir(self, recipe_dir: Path) -> None:
+        """Compose every recipe under a single recipe directory (a subset)."""
+        yamls = self.discover(recipe_dir)
+        for yp in yamls:
+            self.compose_one(yp)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -321,7 +334,11 @@ def main() -> None:
     parser.add_argument(
         "recipe",
         nargs="?",
-        help="Specific compose YAML to process (default: all under <shared-llm>/compose/)",
+        help=(
+            "A specific compose YAML to process, OR a directory of recipes to compose "
+            "as a subset (e.g. .shared-llm/compose/agents). Default: all recipes under "
+            "<shared-llm>/compose/."
+        ),
     )
     parser.add_argument(
         "--shared-llm",
@@ -351,7 +368,11 @@ def main() -> None:
             if rel.startswith(base + "/"):
                 rel = rel[len(base) + 1 :]
             recipe = source_root / rel
-        composer.compose_one(recipe)
+        # A directory composes the subset of recipes under it; a file composes one.
+        if recipe.is_dir():
+            composer.compose_dir(recipe)
+        else:
+            composer.compose_one(recipe)
     else:
         composer.compose_all()
 

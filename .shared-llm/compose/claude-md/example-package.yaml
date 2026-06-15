@@ -2,4 +2,4 @@ type: claude-md
 inputs:
   - .shared-llm/layers/llm/this_repo/common/src/packages.md
   - .shared-llm/layers/llm/this_repo/common/packages/example_package.md
-output: examples/src/packages/example_package/CLAUDE.md
+output: samples/src/packages/example_package/CLAUDE.md

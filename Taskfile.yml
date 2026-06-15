@@ -2,46 +2,67 @@ version: '3'
 
 # llm-config-setup — compose targets only.
 # Run `task compose:all` after editing layers to regenerate output files.
+#
+# Recipe `output:` paths are now ROOT-RELATIVE (CLAUDE.md, AGENTS.md,
+# .claude/agents/<name>.md, .claude/skills/<name>/SKILL.md) so a CONSUMER repo
+# gets real files at its root. To keep THIS kit's own hand-maintained CLAUDE.md /
+# README / etc. from being clobbered when the kit composes ITSELF, every target
+# below pins `--target examples/` — a gitignored STAGING dir. After a kit
+# self-compose the working tree stays clean (examples/ is ignored).
 
 tasks:
 
   # ---------------------------------------------------------------------------
-  # compose:* — assemble skills/agents/CLAUDE.md/AGENTS.md from layer files
+  # compose:* — assemble skills/agents/CLAUDE.md/AGENTS.md from layer files.
+  # All targets stage into the gitignored examples/ dir (--target examples) so a
+  # kit self-compose never overwrites the kit's own root files.
   # ---------------------------------------------------------------------------
 
   compose:all:
-    desc: "Assemble all CLAUDE.md, AGENTS.md, and skill files from layer files"
+    desc: "Self-compose the kit's stub-free recipes (agents + global skills) into the gitignored examples/ staging dir"
+    # The kit ships its `this_repo` layers as TEMPLATE.* stubs on purpose, so the
+    # claude-md / agents-md / per-repo skill recipes (which depend on a filled
+    # general.md etc.) cannot compose against the kit itself — only against a
+    # consumer repo whose stubs are filled. The kit's OWN self-compose therefore
+    # exercises just the stub-free recipe groups: the 18 generic agents and the
+    # global skills. Both stage into the gitignored examples/ dir, so the kit's own
+    # root files are never touched and the working tree stays clean.
     cmds:
-      - python3 tools/compose-layers.py
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/global
+
+  compose:consumer-all:
+    desc: "Compose EVERY consumer recipe (claude-md/agents-md/skills/agents) into examples/ — requires filled this_repo stubs"
+    cmds:
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/claude-md/root.yaml
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents-md/root.yaml
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/skills
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents
 
   compose:skill:
-    desc: "Assemble one skill (e.g. task compose:skill -- python)"
+    desc: "Assemble one skill into examples/ staging (e.g. task compose:skill -- python)"
     cmds:
-      - python3 tools/compose-layers.py .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
 
   compose:claude-md:
-    desc: "Assemble one CLAUDE.md (e.g. task compose:claude-md -- root)"
+    desc: "Assemble one CLAUDE.md into examples/ staging (e.g. task compose:claude-md -- root)"
     cmds:
-      - python3 tools/compose-layers.py .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
 
   compose:agents-md:
-    desc: "Assemble one AGENTS.md (e.g. task compose:agents-md -- root)"
+    desc: "Assemble one AGENTS.md into examples/ staging (e.g. task compose:agents-md -- root)"
     cmds:
-      - python3 tools/compose-layers.py .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
 
   compose:agent:
-    desc: "Assemble one agent (e.g. task compose:agent -- architecture)"
+    desc: "Assemble one agent into examples/ staging (e.g. task compose:agent -- architecture)"
     cmds:
-      - python3 tools/compose-layers.py .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
 
   compose:agents:
-    desc: "Assemble every agent recipe under .shared-llm/compose/agents/"
+    desc: "Assemble every agent recipe into examples/ staging"
     cmds:
-      - for: { var: AGENTS }
-        cmd: python3 tools/compose-layers.py .shared-llm/compose/agents/{{.ITEM}}
-    vars:
-      AGENTS:
-        sh: ls -1 .shared-llm/compose/agents/
+      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents
 
   # ---------------------------------------------------------------------------
   # install — the headline consumer feature. Two surfaces:

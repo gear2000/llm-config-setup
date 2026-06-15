@@ -5,4 +5,4 @@ color: cyan
 description: .shared-llm/layers/agents/common/docs-writer.description.md
 inputs:
   - .shared-llm/layers/agents/common/docs-writer.md
-output: examples/.claude/agents/docs-writer.md
+output: .claude/agents/docs-writer.md

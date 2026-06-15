@@ -5,4 +5,4 @@ color: brown
 description: .shared-llm/layers/agents/common/ci-pipeline.description.md
 inputs:
   - .shared-llm/layers/agents/common/ci-pipeline.md
-output: examples/.claude/agents/ci-pipeline.md
+output: .claude/agents/ci-pipeline.md

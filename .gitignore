@@ -1,6 +1,13 @@
-# Generated compose outputs — the example recipes write demo files under examples/.
-# (In your own project, point each recipe `output:` path at a real location and commit those.)
+# Kit self-compose staging — the kit composes ITSELF into examples/ (a gitignored
+# staging dir) via `--target examples` so a self-compose never clobbers the kit's
+# own hand-maintained root files (CLAUDE.md, README, etc.). install-local.sh /
+# install-global.sh also stage agents + global skills here before copying to $HOME.
 /examples/
+
+# DEMO samples — the example-package / example-service recipes are illustrative
+# only; composing them writes here, kept out of the kit's real src/ tree. A
+# consumer install does NOT compose these into the consumer repo.
+/samples/
 
 # Vetting — local-only proprietary-content denylist + checker.
 # NEVER pushed: this is a PUBLIC repo. See CLAUDE.md "Pre-push vetting".

@@ -37,7 +37,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE="$REPO_ROOT/tools/compose-layers.py"
-STAGING="$REPO_ROOT/examples/global-staging/skills"
+# Global recipes carry staging-relative outputs (global-staging/skills/<name>/SKILL.md).
+# Stage them under the gitignored examples/ dir by composing with --target examples,
+# so the kit's own tree is never polluted, then copy each skill into the home dirs.
+STAGING_BASE="$REPO_ROOT/examples"
+STAGING="$STAGING_BASE/global-staging/skills"
 
 # Global skills to install: "<skill-name>:<recipe path relative to repo root>".
 # Add a line here to ship another general skill globally.
@@ -88,9 +92,10 @@ command -v python3 >/dev/null 2>&1 || { echo "error: python3 not on PATH" >&2; e
 for pair in "${GLOBAL_SKILLS[@]}"; do
   recipe="${pair##*:}"
   echo "compose: $recipe"
-  # --target pins output (examples/...) under REPO_ROOT regardless of cwd; the engine
-  # finds the .shared-llm source by walking up from its own location. fail loud — set -e.
-  python3 "$COMPOSE" "$recipe" --target "$REPO_ROOT"
+  # --target pins output under REPO_ROOT/examples/ (gitignored staging) regardless of
+  # cwd; the engine finds the .shared-llm source by walking up from its own location.
+  # fail loud — set -e.
+  python3 "$COMPOSE" "$recipe" --target "$STAGING_BASE"
 done
 
 # --- install: copy each staged skill into the three home dirs ---

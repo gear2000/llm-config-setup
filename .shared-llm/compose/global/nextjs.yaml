@@ -17,4 +17,4 @@ name: nextjs
 description: .shared-llm/layers/skills/common/nextjs/description.md
 inputs:
   - .shared-llm/layers/skills/common/nextjs/practices.md
-output: examples/global-staging/skills/nextjs/SKILL.md
+output: global-staging/skills/nextjs/SKILL.md

@@ -5,4 +5,4 @@ color: purple
 description: .shared-llm/layers/agents/common/backend.description.md
 inputs:
   - .shared-llm/layers/agents/common/backend.md
-output: examples/.claude/agents/backend.md
+output: .claude/agents/backend.md

@@ -5,4 +5,4 @@ color: orange
 description: .shared-llm/layers/agents/common/ci-trigger.description.md
 inputs:
   - .shared-llm/layers/agents/common/ci-trigger.md
-output: examples/.claude/agents/ci-trigger.md
+output: .claude/agents/ci-trigger.md

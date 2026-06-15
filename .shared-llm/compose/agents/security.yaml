@@ -5,4 +5,4 @@ color: red
 description: .shared-llm/layers/agents/common/security.description.md
 inputs:
   - .shared-llm/layers/agents/common/security.md
-output: examples/.claude/agents/security.md
+output: .claude/agents/security.md

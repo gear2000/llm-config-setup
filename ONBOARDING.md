@@ -132,20 +132,25 @@ Then run `task compose:all` (or `llm-compose`) to generate your output files.
     ```bash
     task compose:all
     # or, with the wrapper installed by `install local`:
-    llm-compose
+    llm-compose --target . .shared-llm/compose/claude-md/root.yaml
     ```
 
-27. **Where the outputs land — read this so you are not surprised.** The recipes ship with their `output:` paths pointing under `examples/` (e.g. `examples/CLAUDE.md`, `examples/.claude/skills/python/SKILL.md`). That `examples/` directory is **gitignored** — it is a staging area, not a deliverable. There are two ways to get the generated files where you actually want them:
+27. **Where the outputs land — at your repo root, no manual move.** Recipe `output:` paths are **root-relative**, and `install repo` (and the thin Taskfile's `task compose:all`) compose with `--target .`. So the generated files land exactly where each harness reads them:
 
-    - **Target the whole compose run at the repo root** (the simplest, and what `install repo` does for you): pass `--target .` so every recipe's `output:` is written relative to the repo root rather than under `examples/`. The thin Taskfile copied in by `install repo` already does this — `task compose:all` runs `compose-layers.py --shared-llm .shared-llm --target .`. With it, a recipe whose `output:` is `examples/CLAUDE.md` still lands under `examples/`; to put `CLAUDE.md` at the repo root, edit each recipe's `output:` to drop the `examples/` prefix (see the next bullet).
+    - `CLAUDE.md` and `AGENTS.md` at the repo **root**
+    - the per-repo Python skill at `.claude/skills/python/SKILL.md`
+    - the 18 generic agent personas at `.claude/agents/<name>.md`
 
-    - **Edit each recipe's `output:` path** in `.shared-llm/compose/` to the real location you want (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`). This is the explicit, per-output way to point compose at the files you intend to commit. Do this for every recipe whose output you keep.
+    `task compose:all` (the thin Taskfile copied in by `install repo`) composes only the **consumer-relevant** recipe groups — root `CLAUDE.md`/`AGENTS.md`, the skills, and the agents. It deliberately does **not** compose:
 
-    The behavior is unchanged from the kit — `examples/` is the default staging path on purpose so composing never clobbers a real file by accident. You opt outputs into real, committed locations by editing the `output:` paths (or composing into a target where you have removed the `examples/` prefix).
+    - the home-only `global/` skills (`python`/`nextjs`/`backend`) — those install into `~/` via `task install local`, not into your repo;
+    - the `example-package` / `example-service` **demo** recipes — illustrative samples only. If you want to see them, compose by hand into a throwaway area (`llm-compose --target /tmp/samples .shared-llm/compose/claude-md/example-package.yaml`); they are not deliverables and never land in your real `src/` tree.
 
-28. **Review outputs** — open the generated `CLAUDE.md`, `AGENTS.md`, and skill files. Read them as an LLM would. Adjust the layer prose until the generated content reads naturally and accurately describes your project, then recompose.
+    To produce a `CLAUDE.md` for one of your **real** packages/services, copy a leaf layer + its recipe (group F above) and point the new recipe's `output:` at the real path (e.g. `src/packages/<name>/CLAUDE.md`).
 
-29. **Commit the generated files** — unlike this kit (which gitignores its own `examples/` staging), your consumer repo should commit the generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files once they point at real locations. They are the deliverables. If you kept any output under a path that your repo's `.gitignore` excludes, remove that line before committing.
+28. **Review outputs** — open the generated `CLAUDE.md`, `AGENTS.md`, and skill files at the repo root. Read them as an LLM would. Adjust the layer prose until the generated content reads naturally and accurately describes your project, then recompose.
+
+29. **Commit the generated files** — your consumer repo should commit the generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files. They are the deliverables and they sit at the locations each harness reads. (This kit, by contrast, gitignores its own `examples/` staging because it composes itself only to test the engine — it keeps a hand-maintained `CLAUDE.md` of its own.)
 
 ---
 

@@ -56,9 +56,13 @@ INSTALL_GLOBAL="$REPO_ROOT/tools/install-global.sh"
 SETUP_PI="$REPO_ROOT/tools/setup-pi.sh"
 WRAPPER_SRC="$REPO_ROOT/tools/templates/llm-compose"
 
-# Agent recipes compose to examples/.claude/agents/<name>.md (output: in each recipe).
+# Agent recipes now carry ROOT-RELATIVE outputs (.claude/agents/<name>.md). We
+# stage them under the gitignored examples/ dir by composing with
+# `--target $REPO_ROOT/examples`, so the kit's own tree is never polluted, then
+# copy each persona into the home agent dir(s).
 AGENT_RECIPE_DIR="$REPO_ROOT/.shared-llm/compose/agents"
-AGENT_STAGING="$REPO_ROOT/examples/.claude/agents"
+AGENT_STAGING_BASE="$REPO_ROOT/examples"
+AGENT_STAGING="$AGENT_STAGING_BASE/.claude/agents"
 
 # Home agent dirs by harness. Claude Code + Pi read user agents; Codex does NOT
 # (it has ~/.codex/skills but no ~/.codex/agents) — so Codex is intentionally absent.
@@ -94,11 +98,12 @@ echo
 echo ">>> [2/4] Generic agents -> ${HOME_AGENT_DIRS[*]}"
 [[ -d "$AGENT_RECIPE_DIR" ]] || { echo "error: agent recipe dir missing: $AGENT_RECIPE_DIR" >&2; exit 1; }
 
-# Compose every agent recipe; --target pins staging under REPO_ROOT/examples/.
+# Compose every agent recipe; --target pins staging under REPO_ROOT/examples/ so the
+# root-relative .claude/agents/<name>.md outputs land at examples/.claude/agents/.
 agent_recipes=("$AGENT_RECIPE_DIR"/*.yaml)
 [[ -e "${agent_recipes[0]}" ]] || { echo "error: no agent recipes in $AGENT_RECIPE_DIR" >&2; exit 1; }
 for recipe in "${agent_recipes[@]}"; do
-  python3 "$COMPOSE" "$recipe" --target "$REPO_ROOT" >/dev/null
+  python3 "$COMPOSE" "$recipe" --target "$AGENT_STAGING_BASE" >/dev/null
 done
 
 agents_installed=0; agents_uptodate=0; agents_skipped=0

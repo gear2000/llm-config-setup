@@ -3,4 +3,4 @@ description: .shared-llm/layers/skills/common/python/description.md
 inputs:
   - .shared-llm/layers/skills/common/python/practices.md
   - .shared-llm/layers/skills/this_repo/python.md
-output: examples/.claude/skills/python/SKILL.md
+output: .claude/skills/python/SKILL.md

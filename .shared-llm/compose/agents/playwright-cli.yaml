@@ -5,4 +5,4 @@ color: magenta
 description: .shared-llm/layers/agents/common/playwright-cli.description.md
 inputs:
   - .shared-llm/layers/agents/common/playwright-cli.md
-output: examples/.claude/agents/playwright-cli.md
+output: .claude/agents/playwright-cli.md

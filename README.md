@@ -102,7 +102,7 @@ Makes a target repo **self-contained**:
 
 1. Copies the portable `.shared-llm/` layer tree, the compose engine (`tools/compose-layers.py`), and a thin compose Taskfile into `<dir>`. The `this_repo` layers arrive as fillable `TEMPLATE.*` stubs. (If `<dir>` already has a `Taskfile.yml`, the thin one is dropped alongside as `tools/llm.Taskfile.yml` to include, rather than overwriting yours.)
 2. Prints the list of `TEMPLATE.*` stubs you must fill, then pauses. Set `INSTALL_REPO_YES=1` (or pipe non-TTY stdin) to skip the pause for automation.
-3. Composes against the target — but only if every stub is filled and renamed. While stubs remain, compose is skipped and the remaining stubs are reported (you cannot compose against an unfilled stub).
+3. Composes the consumer-relevant recipes against the target (`--target <dir>`) — but only if every stub is filled and renamed. The generated `CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, and the 18 `.claude/agents/<name>.md` land **at the repo root**, ready to commit — no manual move. The home-only `global/` skills and the `example-*` demo recipes are deliberately not composed into the consumer tree. While stubs remain, compose is skipped and the remaining stubs are reported (you cannot compose against an unfilled stub).
 4. Prints a summary of what was generated and what is not installed here (the home pieces come from `task install local`).
 
 ```bash
@@ -171,16 +171,26 @@ Recipe types: `skill` (frontmatter name + description), `agent` (name + descript
 ```bash
 python3 tools/compose-layers.py                                     # compose all
 python3 tools/compose-layers.py .shared-llm/compose/claude-md/root.yaml  # compose one
-# or via Task:
+python3 tools/compose-layers.py .shared-llm/compose/agents            # compose a SUBSET (a recipe dir)
+python3 tools/compose-layers.py --target . .shared-llm/compose/claude-md/root.yaml  # land at the repo root
+# or via Task (kit self-compose — stages into the gitignored examples/ dir):
 task compose:all
 task compose:claude-md -- root
 task compose:skill -- python
 task compose:agent -- deployer
 ```
 
-## Where compose outputs land in this repo
+The `recipe` argument also accepts a **directory** of recipes — `compose-layers.py .shared-llm/compose/agents` composes just that group. This is how a consumer install composes the consumer-relevant recipes (root `CLAUDE.md`/`AGENTS.md`, the skills, the agents) while leaving the home-only `global/` skills and the `example-*` demo samples out of the consumer's tree.
 
-In this repo the example recipes write demo outputs under `examples/` (gitignored), so composing here never touches this repo's own `CLAUDE.md`. That staging path is just a default. When you set up a real project with `task install repo`, the engine composes with `--target <dir>` so each recipe's `output:` lands inside that repo (e.g. `CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`). See `ONBOARDING.md` for how a consumer points outputs where they want them and commits the generated files.
+## Where compose outputs land
+
+**Recipe `output:` paths are root-relative.** A real recipe writes to the location it actually belongs: `CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`. So when you set up a real project with `task install repo`, the engine composes with `--target <dir>` (or the thin Taskfile's `--target .`) and the generated files land **at that repo's root** — no manual move, no `examples/` prefix to strip.
+
+**The kit never clobbers its own files when it composes itself.** This repo ships its `this_repo` layers as `TEMPLATE.*` stubs and keeps a hand-maintained `CLAUDE.md` / `README` of its own. Its `task compose:*` targets all pass `--target examples` — a **gitignored staging dir** — so a kit self-compose writes into `examples/` and leaves the kit's real root files untouched. After `task compose:all`, `git status` stays clean. (`install-local.sh` and `install-global.sh` likewise stage the agents and global skills under `examples/` before copying them into `$HOME`.)
+
+**The `example-package` / `example-service` recipes are demos, not deliverables.** They compose under a gitignored `samples/` area and are deliberately excluded from the consumer install — a consumer repo never gets a stray `src/packages/example_package/CLAUDE.md`. To make per-package / per-service `CLAUDE.md` files for your real components, copy a leaf layer + its recipe (see `ONBOARDING.md` group F) and point its `output:` at the real path.
+
+See `ONBOARDING.md` for the consumer compose flow and committing the generated files.
 
 ## Quickstart
 
