@@ -1,0 +1,1 @@
+General Go conventions. Use when writing, reviewing, or scaffolding Go code — covers core idioms, deep-module design, package layering, fail-loud error handling, concurrency safety, and testing.
