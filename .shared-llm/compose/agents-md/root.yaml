@@ -3,4 +3,5 @@ inputs:
   - .shared-llm/layers/llm/this_repo/common/general.md
   - .shared-llm/layers/llm/this_repo/codex/agents.md
   - .shared-llm/layers/llm/common/common/response.md
+  - .shared-llm/layers/llm/common/common/plain-english.md
 output: AGENTS.md
