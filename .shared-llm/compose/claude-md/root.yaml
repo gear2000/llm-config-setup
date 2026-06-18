@@ -2,6 +2,7 @@ type: claude-md
 inputs:
   - .shared-llm/layers/llm/this_repo/common/general.md
   - .shared-llm/layers/llm/this_repo/claude/claude.md
+  - .shared-llm/layers/llm/common/common/architecture.md
   - .shared-llm/layers/llm/common/common/response.md
   - .shared-llm/layers/llm/common/common/plain-english.md
 output: CLAUDE.md

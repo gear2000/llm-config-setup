@@ -62,3 +62,53 @@ user = get_user(uid)
 ## Linting
 
 Run `ruff check` before delivering code. Fix all issues — don't suppress warnings without a clear reason.
+
+## Hierarchical package architecture
+
+Python packages layer the same way Go packages do: lower-layer packages are independent
+libraries; services sit on top of them. Imports point one direction — a package must not reach
+upward into a service or sideways into a sibling it should not know about.
+
+```
+Layer 0 — primitives:   shared types, constants, utilities with no external deps
+Layer 1 — adapters:     one module per external system (queue, DB, HTTP client, cache)
+Layer 2 — domain:       domain logic with no I/O (models, rules, computation)
+Layer 3 — application:  orchestrate layers 0-2 (handlers, use cases, roles)
+Layer 4 — entry points: service handler / FastAPI app — wire everything, minimal public surface
+```
+
+Rules:
+- A layer may only import from lower layers.
+- `__init__.py` is the contract. Libraries: explicit `__all__`. Services: `__all__ = []`.
+- Internal modules use `_` prefix or live in `_internal/`. Never re-export internals through `__init__.py`.
+
+## Interface thickness
+
+A package's public interface should hide complexity, not expose it.
+
+Ask: would a caller need to understand the internals to use this correctly? If yes, push
+complexity inward — the interface is too shallow.
+
+Supporting smell: ~10+ exported names in `__all__` is a prompt to review whether the interface
+is too wide, not an automatic reject.
+
+## Placement decisions — LLM guidance
+
+**DECISION POINT: business_logic_placement**
+
+Trigger: you are about to place domain or business logic in a package.
+
+- Default: lowest cohesive layer. Do not ask.
+- Ask only when two or more services would share the same logic.
+- Question: "Services A and B both need this — should I create a shared package, or duplicate it?"
+
+Repo-level files override this default. Check `layers/skills/this_repo/python.md` if present.
+
+---
+
+**DECISION POINT: service_contextual_package**
+
+Trigger: a Python service is growing large and helper logic is piling up in handler files.
+
+Ask: "This service is getting large. Should I create a local `_internal/` module to organise
+helpers, or keep it flat?"
