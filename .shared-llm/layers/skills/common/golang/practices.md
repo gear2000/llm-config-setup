@@ -70,3 +70,55 @@ internal/handlers/           — application layer, calls domain + adapters
 - Prefer channels for communication between goroutines; prefer mutexes for protecting shared state.
 - Always pass `context.Context` as the first argument of any function that can block or be cancelled.
 - A goroutine that can panic must recover and surface the error — a bare `go func()` that panics will crash the whole process.
+
+## Hierarchical package architecture
+
+Packages and services follow a strict layered hierarchy. Imports point downward only — a lower
+package must never import from a package or service above it.
+
+```
+Layer 0 — primitives:   shared types, constants, small utilities with no external deps
+Layer 1 — adapters:     one sub-package per external system (queue, DB, HTTP client, cache)
+Layer 2 — domain:       domain logic with no I/O (models, rules, computation)
+Layer 3 — application:  orchestrate layers 0-2 (roles, handlers, use cases)
+Layer 4 — entry points: cmd/ or lambda root — wire everything, minimal public surface
+```
+
+Three package classifications:
+
+- **Universal** (layers 0-1): stateless technical primitives. Cannot import from a higher layer.
+- **High-context** (layers 2-3): opinionated about the technical environment; may contain domain
+  logic but must not know about user-facing product workflows.
+- **Service-contextual**: shapes generic packages into service-specific concepts. In Go, this is
+  `internal/` — compiler-enforced and never importable from outside the module.
+
+## Interface thickness
+
+A package's public interface should hide complexity, not expose it.
+
+Ask: would a caller need to understand the internals to use this correctly? If yes, push
+complexity inward — the interface is too shallow.
+
+Supporting smell: ~10+ exported symbols (types + functions + methods combined) is a prompt to
+review whether the interface is too wide, not an automatic reject.
+
+## Placement decisions — LLM guidance
+
+**DECISION POINT: business_logic_placement**
+
+Trigger: you are about to place domain or business logic in a package.
+
+- Default: lowest cohesive layer. Do not ask.
+- Ask only when two or more services would share the same logic.
+- Question to ask: "Services A and B both need this — should I create a shared package, or duplicate it?"
+
+Repo-level files override this default. Read `layers/skills/this_repo/golang.md` if present.
+
+---
+
+**DECISION POINT: service_contextual_package_python**
+
+Trigger: a Python service is growing large and helper logic is piling up in handler files.
+
+Ask the user: "This service is getting large. Should I create a local `_internal/` module to
+organise helpers, or keep it flat? Go `internal/` handles this automatically."
