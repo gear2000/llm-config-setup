@@ -1,0 +1,6 @@
+type: skill
+name: grill-me
+description: .shared-llm/layers/slash-commands/common/common/grill-me/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/grill-me/command.md
+output: .claude/skills/grill-me/SKILL.md

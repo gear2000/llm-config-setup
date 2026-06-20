@@ -1,0 +1,6 @@
+type: skill
+name: prd-to-plan
+description: .shared-llm/layers/slash-commands/common/common/prd-to-plan/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/prd-to-plan/command.md
+output: .claude/skills/prd-to-plan/SKILL.md

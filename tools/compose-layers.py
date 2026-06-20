@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -132,6 +133,12 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
         if not isinstance(data["description"], str):
             print(f"error: {path} 'description' must be a string", file=sys.stderr)
             sys.exit(1)
+        if "frontmatter" in data and not isinstance(data["frontmatter"], dict):
+            print(f"error: {path} 'frontmatter' must be a mapping", file=sys.stderr)
+            sys.exit(1)
+        if "resources" in data and not isinstance(data["resources"], str):
+            print(f"error: {path} 'resources' must be a string (a source directory path)", file=sys.stderr)
+            sys.exit(1)
 
     if not isinstance(data["inputs"], list):
         print(f"error: {path} 'inputs' must be a list", file=sys.stderr)
@@ -148,15 +155,23 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class ClaudeSkill:
-    """Produces a skill .md file with name + description frontmatter."""
+    """Produces a skill .md file with name + description frontmatter.
 
-    def build_frontmatter(self, name: str, description: str) -> str:
+    A recipe may declare an optional `frontmatter:` mapping of extra fields
+    (e.g. `argument-hint`, `allowed-tools`). They are emitted in order AFTER
+    name + description, so a slash-command source can carry the same frontmatter
+    its hand-authored SKILL.md had without the composer dropping it.
+    """
+
+    def build_frontmatter(self, name: str, description: str, extra: dict[str, Any]) -> str:
         fm: dict[str, Any] = {"name": name, "description": description}
-        return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        fm.update(extra)
+        return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True, width=2**31)
 
     def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
-        frontmatter = self.build_frontmatter(data["name"], description)
+        extra = data.get("frontmatter") or {}
+        frontmatter = self.build_frontmatter(data["name"], description, extra)
         content = f"---\n{frontmatter}---\n\n{body}"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(content)
@@ -172,7 +187,7 @@ class ClaudeAgent:
         fm: dict[str, Any] = {"name": name, "description": description, "model": model}
         if color is not None:
             fm["color"] = color
-        return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True, width=2**31)
 
     def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
@@ -312,6 +327,22 @@ class Composer:
                 self.prompt_handler.write(data, body, output_path)
             case _:
                 self.skill_handler.write(data, body, output_path)
+
+        # Copy bundled resources (a source dir of static reference files) into the
+        # output dir alongside the composed file — for skills that ship a
+        # references/ tree the SKILL.md points at. Stale copies are cleared first.
+        resources_rel = data.get("resources")
+        if resources_rel:
+            src_dir = self.resolve_input(resources_rel)
+            if not src_dir.is_dir():
+                print(f"error: resources path is not a directory: {src_dir}", file=sys.stderr)
+                sys.exit(1)
+            for item in src_dir.rglob("*"):
+                if item.is_dir():
+                    continue
+                dest = output_path.parent / item.relative_to(src_dir)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(item, dest)
 
     def compose_all(self) -> None:
         """Discover and compose all targets."""

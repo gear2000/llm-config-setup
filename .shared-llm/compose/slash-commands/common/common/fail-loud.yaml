@@ -1,0 +1,6 @@
+type: skill
+name: fail-loud
+description: .shared-llm/layers/slash-commands/common/common/fail-loud/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/fail-loud/command.md
+output: .claude/skills/fail-loud/SKILL.md

@@ -1,0 +1,6 @@
+type: skill
+name: codex:delegate
+description: .shared-llm/layers/slash-commands/common/claude/codex:delegate/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/claude/codex:delegate/command.md
+output: .claude/skills/codex:delegate/SKILL.md
