@@ -1,0 +1,6 @@
+type: skill
+name: security
+description: .shared-llm/layers/slash-commands/common/common/security/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/security/command.md
+output: .claude/skills/security/SKILL.md
