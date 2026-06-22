@@ -1,0 +1,8 @@
+type: skill
+name: hub-connect
+description: .shared-llm/layers/slash-commands/common/claude/hub-connect/description.md
+frontmatter:
+  argument-hint: "[hub-json-path] [name] — discovery JSON path (default $HOME/.meta-orch/hub.json); optional 2nd token = this worker's name/address"
+inputs:
+- .shared-llm/layers/slash-commands/common/claude/hub-connect/command.md
+output: .claude/skills/hub-connect/SKILL.md

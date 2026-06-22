@@ -1,0 +1,8 @@
+type: skill
+name: run-phase
+description: .shared-llm/layers/slash-commands/common/claude/run-phase/description.md
+frontmatter:
+  argument-hint: "plan=<path> phase=<N> agents=<agent-a,agent-b,...> — all three required"
+inputs:
+- .shared-llm/layers/slash-commands/common/claude/run-phase/command.md
+output: .claude/skills/run-phase/SKILL.md
