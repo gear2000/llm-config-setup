@@ -5,4 +5,5 @@ inputs:
   - .shared-llm/layers/llm/common/common/architecture.md
   - .shared-llm/layers/llm/common/common/response.md
   - .shared-llm/layers/llm/common/common/plain-english.md
+  - .shared-llm/layers/llm/common/common/found-issues.md
 output: CLAUDE.md
