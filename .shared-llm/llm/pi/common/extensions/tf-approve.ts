@@ -164,6 +164,15 @@ export default function (pi: ExtensionAPI) {
       throw err; // unexpected error — propagate loud
     }
 
+    // Build the full confirmation message: directory + command + plan table
+    const cwd: string = ctx?.cwd ?? process.cwd();
+    const confirmMessage = [
+      `Directory: ${cwd}`,
+      `Command:   ${command.trim()}`,
+      "",
+      tableString,
+    ].join("\n");
+
     // Show the table to the human
     const confirm = ctx?.ui?.confirm;
     if (typeof confirm !== "function") {
@@ -172,7 +181,7 @@ export default function (pi: ExtensionAPI) {
 
     let approved: boolean;
     try {
-      approved = await ctx.ui.confirm("Terraform approval required", tableString, {
+      approved = await ctx.ui.confirm("Terraform approval required", confirmMessage, {
         timeout: CONFIRM_TIMEOUT_MS,
       });
     } catch {
