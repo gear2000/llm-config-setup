@@ -1,12 +1,14 @@
 ---
 name: design-doc
-description: Create and iterate versioned interactive HTML design docs. Writes vN.html to a configured docs directory (served by MkDocs or any static web server). Includes a sticky-note annotation layer so the user can mark up the doc in the browser, copy feedback back to Claude, and keep iterating. Finalize button signals the design is locked. This is the canonical skill for creating design docs — use it instead of ad-hoc lavish or manual HTML creation.
-argument-hint: <topic> [brief context or constraints]
+description: Create and iterate versioned interactive HTML design docs that capture how a feature or area of the repository works. Writes vN.html to a configured docs directory (served by MkDocs or any static web server). The visual HTML lets you make architectural decisions at a big-picture level; the finalized doc becomes the basis for contracts, skills, and agent context. Includes a sticky-note annotation layer — mark up the doc in the browser, copy feedback back to Claude, iterate. Finalize button locks the design.
+argument-hint: <feature or area name> [brief context or constraints]
 ---
 
 # Design Doc Skill
 
-Creates versioned HTML design docs following the project's dark v3 style. Each invocation writes a new `vN.html` — never overwrites. The HTML includes a built-in annotation layer: the user can place sticky notes anywhere in the browser, export feedback as markdown (one paste → Claude creates vN+1), and click Finalize when done.
+Creates versioned HTML design docs that visually represent how a feature or area of the repository works — onboarding, input-vars, scan, whatever the focus is. The finalized doc is the source of truth that contracts, skills, and agent knowledge are built from.
+
+Each invocation writes a new `vN.html` — never overwrites an existing version. The HTML includes a built-in annotation layer: place sticky notes in the browser, click "Copy Feedback" to get the notes as markdown, paste here → Claude creates vN+1. "Finalize" locks the doc and copies a summary.
 
 ## Invocation
 
