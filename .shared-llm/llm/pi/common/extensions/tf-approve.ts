@@ -167,10 +167,10 @@ export default function (pi: ExtensionAPI) {
     // Build the full confirmation message: directory + command + plan table
     const cwd: string = ctx?.cwd ?? process.cwd();
     const confirmMessage = [
-      `Directory: ${cwd}`,
-      `Command:   ${command.trim()}`,
-      "",
       tableString,
+      "",
+      `cd ${cwd}`,
+      command.trim(),
     ].join("\n");
 
     // Show the table to the human
