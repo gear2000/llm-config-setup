@@ -11,8 +11,8 @@
  * to apply).
  *
  * FIFOs:
- *   ~/.pi/tf-plan-request.fifo   — extension writes raw plan → agent reads
- *   ~/.pi/tf-plan-response.fifo  — agent writes JSON table → extension reads
+ *   ~/.pi/tf-review-request.fifo   — extension writes raw plan → agent reads
+ *   ~/.pi/tf-review-response.fifo  — agent writes pre-formatted message → extension reads
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -93,29 +93,9 @@ function readFifo(fifoPath: string): Promise<string> {
   });
 }
 
-// ─── Table renderer ───────────────────────────────────────────────────────────
-interface PlanRow {
-  action: string;
-  resource: string;
-  note: string;
-}
-
+// ─── Response type ────────────────────────────────────────────────────────────
 interface PlanResponse {
-  rows: PlanRow[];
-  summary: string;
-}
-
-function renderTable(resp: PlanResponse): string {
-  const W_ACTION = 8;
-  const W_RESOURCE = 26;
-  const divider = "─".repeat(W_ACTION + 2 + W_RESOURCE + 2 + 40);
-  const pad = (s: string, len: number) => s.slice(0, len).padEnd(len);
-  const header = `${pad("Action", W_ACTION)}  ${pad("Resource", W_RESOURCE)}  Note`;
-  const rows = resp.rows.map(
-    (r) =>
-      `${pad(r.action, W_ACTION)}  ${pad(r.resource, W_RESOURCE)}  ${r.note ?? ""}`
-  );
-  return [header, divider, ...rows, divider, resp.summary].join("\n");
+  message: string;
 }
 
 // ─── Extension entry ─────────────────────────────────────────────────────────
@@ -154,7 +134,7 @@ export default function (pi: ExtensionAPI) {
       const responseText = await withTimeout(readFifo(RESPONSE_FIFO), REVIEWER_TIMEOUT_MS);
       if (!responseText) throw new Error("reviewer returned empty response");
       const resp: PlanResponse = JSON.parse(responseText);
-      tableString = renderTable(resp);
+      tableString = resp.message;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isAbsent =
