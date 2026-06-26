@@ -1,6 +1,6 @@
 ---
 name: design-doc
-description: Create and iterate versioned interactive HTML design docs. Writes vN.html to the diagrams directory (MkDocs-served at dev101:8088). Includes a sticky-note annotation layer so the user can mark up the doc in the browser, copy feedback back to Claude, and keep iterating. Finalize button signals the design is locked.
+description: Create and iterate versioned interactive HTML design docs. Writes vN.html to a configured docs directory (served by MkDocs or any static web server). Includes a sticky-note annotation layer so the user can mark up the doc in the browser, copy feedback back to Claude, and keep iterating. Finalize button signals the design is locked. This is the canonical skill for creating design docs — use it instead of ad-hoc lavish or manual HTML creation.
 argument-hint: <topic> [brief context or constraints]
 ---
 
@@ -19,16 +19,36 @@ Creates versioned HTML design docs following the project's dark v3 style. Each i
 
 ## Workflow
 
+### Step 0 — Read project config
+
+Look for config in this order. Stop at the first match.
+
+1. `.shared-llm/llm/claude/common/config/design-doc.json`
+2. `.claude/design-doc.json`
+
+Config shape:
+```json
+{
+  "base_url": "http://dev101:8088",
+  "docs_dir": "ops/mkdocs/docs"
+}
+```
+
+- `base_url` — the web server root reachable in a browser (any host/port/scheme). No trailing slash.
+- `docs_dir` — the local path that the web server serves, relative to the repo root.
+
+If no config file is found, auto-detect `docs_dir` (see Step 1) and set `base_url` to `null` (report file path only, no URL).
+
 ### Step 1 — Determine output directory
 
-Check in this order:
-1. `ops/mkdocs/docs/diagrams/` exists → use `ops/mkdocs/docs/diagrams/{slug}/`
-2. `docs/diagrams/` exists → use `docs/diagrams/{slug}/`
+Use `{docs_dir}` from config if set. Otherwise check in this order:
+1. `ops/mkdocs/docs/` exists → `ops/mkdocs/docs/diagrams/{slug}/`
+2. `docs/diagrams/` exists → `docs/diagrams/{slug}/`
 3. Otherwise → `diagrams/{slug}/` relative to cwd
 
 `{slug}` = topic lowercased, spaces → hyphens, special chars stripped.
 
-Create the directory if it does not exist.
+Create the directory if it does not exist. Full target path: `{docs_dir}/diagrams/{slug}/`.
 
 ### Step 2 — Version number
 
@@ -38,9 +58,9 @@ List `{dir}/v*.html`. If none exist → v1. Otherwise → find highest N, write 
 ls {dir}/v*.html 2>/dev/null | sort -V | tail -1
 ```
 
-### Step 3 — Read the project style (jiffy)
+### Step 3 — Read the project style
 
-If `ops/mkdocs/docs/diagrams/architecture/v3.html` exists, read its `<style>` block and use it verbatim as the CSS foundation for the new doc. Otherwise use the default style block in Step 4.
+If `{docs_dir}/diagrams/architecture/v3.html` exists, read its `<style>` block and use it verbatim as the CSS foundation for the new doc. Otherwise use the default style block in Step 4.
 
 ### Step 4 — Write the HTML doc
 
@@ -167,12 +187,18 @@ After writing the file, report:
 
 ```
 Created: {full path to vN.html}
-URL:     http://dev101:8088/diagrams/{slug}/v{N}/  (if ops/mkdocs path)
-         or: open {path} in your browser
+URL:     {base_url}/diagrams/{slug}/vN.html      ← if base_url is configured
+         open {full path} in your browser         ← if no base_url
 
 Use the sticky-note toolbar at the bottom to annotate.
 When done, click "Copy Feedback" and paste it here to iterate → v{N+1}.
 Click "Finalize" when the design is locked.
+```
+
+If `base_url` is not configured, add a one-liner suggestion:
+```
+Tip: create .shared-llm/llm/claude/common/config/design-doc.json with
+{"base_url":"http://<host>:<port>","docs_dir":"<path>"} to get a clickable URL.
 ```
 
 ---
