@@ -2,32 +2,30 @@
 # Wire this kit's Pi harness runtime config into ~/.pi/ so Pi can discover it.
 # Run once per machine after cloning. Idempotent — safe to re-run.
 #
-# Sources live under .shared-llm/llm/pi/common/ (runtime config, NOT compose inputs):
-#   extensions/context-workflow.ts        -> ~/.pi/agent/extensions/   (symlink)
-#   extensions/iac-guard.ts               -> ~/.pi/agent/extensions/   (symlink, IaC safety gate, auto-loaded)
-#   extensions/memsearch/                 -> ~/.pi/agent/extensions/   (symlinked DIR; index.ts auto-loaded, memory recall+capture)
-#   extensions/codex-reviewer-hub.ts      -> ~/.pi/extensions/         (symlink, iac-guard approval hub)
-#   extensions/doc-review-hub.ts          -> ~/.pi/extensions/         (symlink, document-review hub)
-#   extensions/pr-review-hub.ts           -> ~/.pi/extensions/         (symlink, PR-review hub)
-#   extensions/hub-common.ts              -> ~/.pi/extensions/         (symlink, shared hub plumbing)
-#   agents/codex-reviewer.md              -> ~/.pi/agents/             (symlink)
-#   agents/iac-verifier.md                -> ~/.pi/agents/             (symlink)
-#   agents/doc-reviewer.md                -> ~/.pi/agents/             (symlink)
-#   agents/pr-reviewer.md                 -> ~/.pi/agents/             (symlink)
-#   settings.template.json                -> ~/.pi/agent/settings.json (scaffold if absent)
+# All entries under .shared-llm/llm/pi/common/extensions/ are auto-discovered:
+#   *.test.ts files                  — excluded (test files, not runtime)
+#   *-hub.ts / hub-*.ts flat files   — ~/.pi/extensions/        (hub / `pi -e` scope)
+#   all other flat .ts files         — ~/.pi/agent/extensions/   (agent-scoped, auto-loaded)
+#   all directories                  — ~/.pi/agent/extensions/   (Pi loads <dir>/index.ts)
 #
-# Third-party extensions are NOT handled here as a copy — they are installed from
-# source via `pi install` driven by tools/install-pi-extensions.sh (pinned list in
+# Adding a new extension to .shared-llm/llm/pi/common/extensions/ is enough —
+# re-running this script picks it up. No PI_EXT_MAP or PI_EXT_DIRS list to update.
+#
+# agents/*.md         -> ~/.pi/agents/             (symlink)
+# settings.template.json -> ~/.pi/agent/settings.json (scaffolded once, never clobbered)
+#
+# Third-party extensions are NOT handled here — they are installed from source
+# via `pi install` driven by tools/install-pi-extensions.sh (pinned list in
 # .shared-llm/llm/pi/common/third-party-extensions.txt). This script calls that installer
 # at the end. See .shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md.
 #
 # Usage:
 #   tools/setup-pi.sh             # wire everything up
 #   tools/setup-pi.sh --unlink    # remove the symlinks created earlier
+#   tools/setup-pi.sh --force     # re-create all managed symlinks (use after git pull)
 #
-# An existing real file in ~/.pi is migrated to a symlink only when byte-identical
-# to this kit's copy; a divergent file is left untouched. --unlink never removes the
-# live settings.json or the regenerable node_modules.
+# --force never clobbers foreign (non-managed) symlinks or real files.
+# --unlink never removes the live settings.json or installed third-party extensions.
 
 set -euo pipefail
 
@@ -42,27 +40,19 @@ HOME_PI="$HOME/.pi"
 PI_AGENT_DIR="$HOME_PI/agent"
 PI_AGENTS_DIR="$HOME_PI/agents"
 PI_SETTINGS="$PI_AGENT_DIR/settings.json"
+PI_AGENT_EXT_DIR="$PI_AGENT_DIR/extensions"   # agent-scoped (auto-loaded)
+PI_HUB_EXT_DIR="$HOME_PI/extensions"           # top-level (hub / `pi -e`)
 
-# extension name : destination dir (two distinct home locations by design)
-PI_EXT_MAP=(
-  "context-workflow.ts:$PI_AGENT_DIR/extensions"   # agent-scoped, auto-loaded
-  "iac-guard.ts:$PI_AGENT_DIR/extensions"          # agent-scoped, auto-loaded (IaC safety gate)
-  "codex-reviewer-hub.ts:$HOME_PI/extensions"      # top-level, `pi -e` loaded (iac-guard approval hub)
-  "doc-review-hub.ts:$HOME_PI/extensions"          # top-level, `pi -e` loaded (document-review hub)
-  "pr-review-hub.ts:$HOME_PI/extensions"           # top-level, `pi -e` loaded (PR-review hub)
-  "hub-common.ts:$HOME_PI/extensions"              # shared plumbing imported by the two review hubs
-)
-
-# DIRECTORY extensions: symlink the whole dir so Pi auto-loads its index.ts and the
-# sibling helpers ride along un-discovered (a bare *.ts helper at the top level would
-# fail Pi's "must export a factory" check — that is why memsearch is a directory).
-# name : destination dir
-PI_EXT_DIRS=(
-  "memsearch:$PI_AGENT_DIR/extensions"             # agent-scoped, auto-loaded (memory recall+capture)
-)
-
-# agent personas symlinked into ~/.pi/agents/
-PI_AGENT_FILES=(codex-reviewer.md iac-verifier.md doc-reviewer.md pr-reviewer.md)
+FORCE=false
+UNLINK=false
+for _arg in "$@"; do
+  case "$_arg" in
+    --force)  FORCE=true ;;
+    --unlink) UNLINK=true ;;
+    *) echo "unknown argument: $_arg" >&2; exit 1 ;;
+  esac
+done
+unset _arg
 
 # A symlink is "ours" iff it resolves into this clone's .shared-llm/llm/pi/common tree.
 is_ours() {  # link_target resolved_target
@@ -71,88 +61,109 @@ is_ours() {  # link_target resolved_target
   return 1
 }
 
-if [[ "${1:-}" == "--unlink" ]]; then
-  for pair in "${PI_EXT_MAP[@]}"; do
-    name="${pair%%:*}"; dest_dir="${pair##*:}"; target="$dest_dir/$name"
-    if [[ -L "$target" ]]; then
-      lt="$(readlink "$target")"; rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-      if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
-    fi
+# Destination dir for a flat .ts extension: hub scope or agent scope.
+ext_dest_dir() {
+  case "$1" in
+    *-hub.ts|hub-*.ts) echo "$PI_HUB_EXT_DIR" ;;
+    *) echo "$PI_AGENT_EXT_DIR" ;;
+  esac
+}
+
+# Remove a managed symlink (skip if foreign or not a symlink).
+_try_unlink() {
+  local target="$1"
+  if [[ -L "$target" ]]; then
+    local lt rt
+    lt="$(readlink "$target")"; rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
+    if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
+  fi
+}
+
+if [[ "$UNLINK" == "true" ]]; then
+  for _e in "$EXT_SRC"/*.ts; do
+    [[ -f "$_e" ]] || continue; _n="$(basename "$_e")"
+    [[ "$_n" == *.test.ts ]] && continue
+    _try_unlink "$(ext_dest_dir "$_n")/$_n"
   done
-  for pair in "${PI_EXT_DIRS[@]}"; do
-    name="${pair%%:*}"; dest_dir="${pair##*:}"; target="$dest_dir/$name"
-    if [[ -L "$target" ]]; then
-      lt="$(readlink "$target")"; rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-      if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
-    fi
+  for _e in "$EXT_SRC"/*/; do
+    [[ -d "$_e" ]] || continue
+    _try_unlink "$PI_AGENT_EXT_DIR/$(basename "$_e")"
   done
-  for amd in "${PI_AGENT_FILES[@]}"; do
-    target="$PI_AGENTS_DIR/$amd"
-    if [[ -L "$target" ]]; then
-      lt="$(readlink "$target")"; rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-      if is_ours "$lt" "$rt"; then rm "$target"; echo "unlinked $target"; fi
-    fi
+  for _a in "$AGENTS_SRC"/*.md; do
+    [[ -f "$_a" ]] || continue
+    _try_unlink "$PI_AGENTS_DIR/$(basename "$_a")"
   done
-  # Never removed: $PI_SETTINGS (live/runtime-mutated) and installed third-party
-  # extensions (managed via `pi install`/`pi remove`, not by this script).
+  unset _e _n _a
+  # Never remove: $PI_SETTINGS (live/runtime-mutated) and third-party extensions.
   exit 0
 fi
 
-# --- extensions: symlink into their two home locations ---
+# --- extensions: flat .ts files (auto-discovered) ---
 linked_ext=0; skipped_ext=0
-for pair in "${PI_EXT_MAP[@]}"; do
-  name="${pair%%:*}"; dest_dir="${pair##*:}"; src="$EXT_SRC/$name"
-  [[ -f "$src" ]] || continue
-  mkdir -p "$dest_dir"; target="$dest_dir/$name"
-  if [[ -L "$target" ]]; then
-    lt="$(readlink "$target")"
-    [[ "$lt" == "$src" ]] && continue
-    rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-    if is_ours "$lt" "$rt"; then rm "$target"
-    else echo "skipping ext $name — $target exists (not our symlink)" >&2; skipped_ext=$((skipped_ext + 1)); continue; fi
-  elif [[ -e "$target" ]]; then
-    if cmp -s "$target" "$src"; then rm "$target"; echo "migrated ext $name -> repo-managed symlink"
-    else echo "skipping ext $name — $target differs from repo copy; back it up and re-run" >&2; skipped_ext=$((skipped_ext + 1)); continue; fi
+for _e in "$EXT_SRC"/*.ts; do
+  [[ -f "$_e" ]] || continue
+  _n="$(basename "$_e")"
+  [[ "$_n" == *.test.ts ]] && continue
+  _dest="$(ext_dest_dir "$_n")"; _target="$_dest/$_n"
+  mkdir -p "$_dest"
+  if [[ -L "$_target" ]]; then
+    _lt="$(readlink "$_target")"; _rt="$(readlink -f "$_target" 2>/dev/null || realpath -m "$_target")"
+    if [[ "$_lt" == "$_e" ]]; then
+      if [[ "$FORCE" == "true" ]]; then rm "$_target"; ln -s "$_e" "$_target"; linked_ext=$((linked_ext + 1)); fi
+      continue
+    fi
+    if is_ours "$_lt" "$_rt"; then rm "$_target"
+    else echo "skipping $_n — $_target exists (not our symlink)" >&2; skipped_ext=$((skipped_ext + 1)); continue; fi
+  elif [[ -e "$_target" ]]; then
+    if cmp -s "$_target" "$_e"; then rm "$_target"; echo "migrated $_n -> repo-managed symlink"
+    else echo "skipping $_n — $_target differs from repo copy; back it up and re-run" >&2; skipped_ext=$((skipped_ext + 1)); continue; fi
   fi
-  ln -s "$src" "$target"; linked_ext=$((linked_ext + 1))
+  ln -s "$_e" "$_target"; linked_ext=$((linked_ext + 1))
 done
 
-# --- directory extensions: symlink the whole dir (Pi loads its index.ts) ---
-for pair in "${PI_EXT_DIRS[@]}"; do
-  name="${pair%%:*}"; dest_dir="${pair##*:}"; src="$EXT_SRC/$name"
-  [[ -d "$src" ]] || continue
-  mkdir -p "$dest_dir"; target="$dest_dir/$name"
-  if [[ -L "$target" ]]; then
-    lt="$(readlink "$target")"
-    [[ "$lt" == "$src" ]] && continue
-    rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-    if is_ours "$lt" "$rt"; then rm "$target"
-    else echo "skipping ext dir $name — $target exists (not our symlink)" >&2; skipped_ext=$((skipped_ext + 1)); continue; fi
-  elif [[ -e "$target" ]]; then
-    echo "skipping ext dir $name — $target exists (not our symlink); back it up and re-run" >&2; skipped_ext=$((skipped_ext + 1)); continue
+# --- extensions: directories (Pi loads <dir>/index.ts) ---
+for _e in "$EXT_SRC"/*/; do
+  [[ -d "$_e" ]] || continue
+  _n="$(basename "$_e")"; _target="$PI_AGENT_EXT_DIR/$_n"
+  mkdir -p "$PI_AGENT_EXT_DIR"
+  if [[ -L "$_target" ]]; then
+    _lt="$(readlink "$_target")"; _rt="$(readlink -f "$_target" 2>/dev/null || realpath -m "$_target")"
+    if [[ "$_lt" == "${_e%/}" ]]; then
+      if [[ "$FORCE" == "true" ]]; then rm "$_target"; ln -s "${_e%/}" "$_target"; linked_ext=$((linked_ext + 1)); fi
+      continue
+    fi
+    if is_ours "$_lt" "$_rt"; then rm "$_target"
+    else echo "skipping ext dir $_n — $_target exists (not our symlink)" >&2; skipped_ext=$((skipped_ext + 1)); continue; fi
+  elif [[ -e "$_target" ]]; then
+    echo "skipping ext dir $_n — $_target exists (not our symlink); back it up and re-run" >&2; skipped_ext=$((skipped_ext + 1)); continue
   fi
-  ln -s "$src" "$target"; linked_ext=$((linked_ext + 1))
+  ln -s "${_e%/}" "$_target"; linked_ext=$((linked_ext + 1))
 done
+unset _e _n _dest _target _lt _rt
 
-# --- agent personas: symlink (migrate an existing identical real file) ---
+# --- agent personas: auto-discovered from AGENTS_SRC ---
 linked_agent=0
-for amd in "${PI_AGENT_FILES[@]}"; do
-  ca="$AGENTS_SRC/$amd"
-  [[ -f "$ca" ]] || continue
-  mkdir -p "$PI_AGENTS_DIR"; target="$PI_AGENTS_DIR/$amd"
-  if [[ -L "$target" ]]; then
-    lt="$(readlink "$target")"
-    [[ "$lt" == "$ca" ]] && continue
-    rt="$(readlink -f "$target" 2>/dev/null || realpath -m "$target")"
-    if is_ours "$lt" "$rt"; then rm "$target"; ln -s "$ca" "$target"; linked_agent=$((linked_agent + 1))
-    else echo "skipping agent $amd — $target exists (not our symlink)" >&2; fi
-  elif [[ -e "$target" ]]; then
-    if cmp -s "$target" "$ca"; then rm "$target"; ln -s "$ca" "$target"; linked_agent=$((linked_agent + 1)); echo "migrated $amd -> repo-managed symlink"
-    else echo "skipping $amd — $target differs from repo copy; back it up and re-run" >&2; fi
+mkdir -p "$PI_AGENTS_DIR"
+for _a in "$AGENTS_SRC"/*.md; do
+  [[ -f "$_a" ]] || continue
+  _n="$(basename "$_a")"; _target="$PI_AGENTS_DIR/$_n"
+  if [[ -L "$_target" ]]; then
+    _lt="$(readlink "$_target")"
+    if [[ "$_lt" == "$_a" ]]; then
+      if [[ "$FORCE" == "true" ]]; then rm "$_target"; ln -s "$_a" "$_target"; linked_agent=$((linked_agent + 1)); fi
+      continue
+    fi
+    _rt="$(readlink -f "$_target" 2>/dev/null || realpath -m "$_target")"
+    if is_ours "$_lt" "$_rt"; then rm "$_target"; ln -s "$_a" "$_target"; linked_agent=$((linked_agent + 1))
+    else echo "skipping agent $_n — $_target exists (not our symlink)" >&2; fi
+  elif [[ -e "$_target" ]]; then
+    if cmp -s "$_target" "$_a"; then rm "$_target"; ln -s "$_a" "$_target"; linked_agent=$((linked_agent + 1)); echo "migrated $_n -> repo-managed symlink"
+    else echo "skipping $_n — $_target differs from repo copy; back it up and re-run" >&2; fi
   else
-    ln -s "$ca" "$target"; linked_agent=$((linked_agent + 1))
+    ln -s "$_a" "$_target"; linked_agent=$((linked_agent + 1))
   fi
 done
+unset _a _n _target _lt _rt
 
 # --- settings: scaffold from template only when absent (never clobber live copy) ---
 if [[ -f "$SETTINGS_TEMPLATE" ]]; then
