@@ -99,7 +99,40 @@ export default function (pi: ExtensionAPI) {
   let planContent = "";
   let pendingIssues: string[] = [];
 
-  // ── session_start: set up FIFOs and load the plan ──────────────────────────
+  // ── /tf:write <plan-path> — register slash command ────────────────────────
+  (pi as any).registerCommand("tf:write", {
+    description: "Load a Terraform plan and start the write loop: /tf:write <plan-path>",
+    handler: async (args: string, ctx: any) => {
+      const planPath = args.trim();
+      if (!planPath) {
+        ctx.ui.notify("Usage: /tf:write <path-to-plan-file>", "error");
+        return;
+      }
+      fs.mkdirSync(PI_DIR, { recursive: true });
+      try {
+        ensureFifo(REQUEST_FIFO);
+        ensureFifo(RESPONSE_FIFO);
+      } catch (err) {
+        ctx.ui.notify(
+          `tf:write: failed to create FIFOs — ${err instanceof Error ? err.message : String(err)}`,
+          "error"
+        );
+        return;
+      }
+      try {
+        planContent = fs.readFileSync(planPath, "utf-8");
+        pendingIssues = [];
+        ctx.ui.notify(`tf:write: plan loaded from ${planPath} — ask Pi to write .tf files`, "info");
+      } catch (err) {
+        ctx.ui.notify(
+          `tf:write: failed to read plan at ${planPath} — ${err instanceof Error ? err.message : String(err)}`,
+          "error"
+        );
+      }
+    },
+  });
+
+  // ── session_start: also load plan from TF_PLAN_PATH env var (CLI path) ────
 
   pi.on("session_start", async (_event, ctx) => {
     // Create FIFOs if they don't exist.
@@ -115,15 +148,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Load the plan.
+    // Load the plan from env var (used when launched via `just tf-write`).
     const planPath = process.env.TF_PLAN_PATH;
-    if (!planPath) {
-      ctx.ui.notify(
-        "tf-write: TF_PLAN_PATH is not set — no plan loaded; set the env var and restart.",
-        "warning"
-      );
-      return;
-    }
+    if (!planPath) return; // no env var — user will use /tf:write command instead
 
     try {
       planContent = fs.readFileSync(planPath, "utf-8");
