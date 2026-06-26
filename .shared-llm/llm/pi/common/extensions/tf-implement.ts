@@ -1,21 +1,27 @@
 /**
- * tf-write — Autonomous Terraform file authoring loop for Pi
+ * tf-implement — Terraform implementation loop for Pi
  *
- * Loads a Terraform plan from TF_PLAN_PATH, injects it into Pi's system
- * prompt, then intercepts the "echo TF_REVIEW_READY" signal Pi emits when
- * it considers itself done. At that point the extension bundles all .tf files
- * in cwd and routes them to an external reviewer via named pipes (FIFOs).
+ * Implements Terraform code in two modes:
  *
- * Reviewer protocol:
- *   Extension → tf-review-request.fifo  — JSON: { type: "code_review", files: Record<filename, content> }
+ * 1. Standalone  /tf:implement <plan-path>
+ *    Load a plan from a file, inject it into Pi's system prompt, guide Pi through
+ *    writing .tf files. When Pi signals ready (echo TF_REVIEW_READY), bundle the
+ *    files and route them to an external reviewer via FIFOs.
+ *
+ * 2. Plannotator  /tf:auto [description]
+ *    Use the Plannotator extension as the planning step first. Pi writes PLAN.md,
+ *    submits it via plannotator_submit_plan, the user approves in the browser, then
+ *    Pi implements the .tf files. The approved PLAN.md is read from cwd and passed
+ *    to the reviewer as context.
+ *
+ * Reviewer protocol (shared by both modes):
+ *   Extension → tf-review-request.fifo  — JSON: { type: "code_review", files: Record<filename, content>, plan: string }
  *   Reviewer  → tf-review-response.fifo — JSON: { status: "approved" }
- *                                       |        { status: "issues", escalate: boolean, items: string[] }
+ *                                        |        { status: "issues", escalate: boolean, items: string[] }
  *
  * FIFOs:
  *   ~/.pi/tf-review-request.fifo   — extension writes, reviewer reads
  *   ~/.pi/tf-review-response.fifo  — reviewer writes, extension reads
- *
- * Usage: TF_PLAN_PATH=/path/to/plan.txt pi -e extensions/tf-write.ts
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -96,83 +102,121 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 
 export default function (pi: ExtensionAPI) {
   // State persists across turns (closure-level, not event-level).
-  let planContent = "";
+  let planContent = "";           // set in standalone mode
   let pendingIssues: string[] = [];
+  let plannotatorMode = false;    // set by /tf:auto; clears on completion
 
-  // ── /tf:write <plan-path> — register slash command ────────────────────────
-  (pi as any).registerCommand("tf:write", {
-    description: "Load a Terraform plan and start the write loop: /tf:write <plan-path>",
+  function setupFifos(ctx: any): boolean {
+    fs.mkdirSync(PI_DIR, { recursive: true });
+    try {
+      ensureFifo(REQUEST_FIFO);
+      ensureFifo(RESPONSE_FIFO);
+      return true;
+    } catch (err) {
+      ctx.ui.notify(
+        `tf: failed to create FIFOs — ${err instanceof Error ? err.message : String(err)}`,
+        "error"
+      );
+      return false;
+    }
+  }
+
+  // ── /tf:implement <plan-path> — standalone mode ───────────────────────────
+  (pi as any).registerCommand("tf:implement", {
+    description: "Load a Terraform plan and start the implement loop: /tf:implement <plan-path>",
     handler: async (args: string, ctx: any) => {
       const planPath = args.trim();
       if (!planPath) {
-        ctx.ui.notify("Usage: /tf:write <path-to-plan-file>", "error");
+        ctx.ui.notify("Usage: /tf:implement <path-to-plan-file>", "error");
         return;
       }
-      fs.mkdirSync(PI_DIR, { recursive: true });
-      try {
-        ensureFifo(REQUEST_FIFO);
-        ensureFifo(RESPONSE_FIFO);
-      } catch (err) {
-        ctx.ui.notify(
-          `tf:write: failed to create FIFOs — ${err instanceof Error ? err.message : String(err)}`,
-          "error"
-        );
-        return;
-      }
+      if (!setupFifos(ctx)) return;
       try {
         planContent = fs.readFileSync(planPath, "utf-8");
         pendingIssues = [];
-        ctx.ui.notify(`tf:write: plan loaded from ${planPath} — ask Pi to write .tf files`, "info");
+        plannotatorMode = false;
+        ctx.ui.notify(`tf:implement: plan loaded from ${planPath} — ask Pi to write .tf files`, "info");
       } catch (err) {
         ctx.ui.notify(
-          `tf:write: failed to read plan at ${planPath} — ${err instanceof Error ? err.message : String(err)}`,
+          `tf:implement: failed to read plan at ${planPath} — ${err instanceof Error ? err.message : String(err)}`,
           "error"
         );
       }
     },
   });
 
-  // ── session_start: also load plan from TF_PLAN_PATH env var (CLI path) ────
+  // ── /tf:auto [description] — Plannotator-first workflow ──────────────────
+  (pi as any).registerCommand("tf:auto", {
+    description: "Plan with Plannotator first, then implement: /tf:auto [optional description]",
+    handler: async (args: string, ctx: any) => {
+      if (!setupFifos(ctx)) return;
+      planContent = "";
+      pendingIssues = [];
+      plannotatorMode = true;
+      const hint = args.trim();
+      const msg = hint
+        ? `tf:auto: Plannotator planning mode active — Pi will plan "${hint}", submit for your review, then implement the .tf files after approval.`
+        : "tf:auto: Plannotator planning mode active — tell Pi what Terraform infrastructure to build. It will create a plan for your review, then implement after approval.";
+      ctx.ui.notify(msg, "info");
+    },
+  });
+
+  // ── session_start: load plan from TF_PLAN_PATH env var (CLI / just tf-implement) ─
 
   pi.on("session_start", async (_event, ctx) => {
-    // Create FIFOs if they don't exist.
     fs.mkdirSync(PI_DIR, { recursive: true });
     try {
       ensureFifo(REQUEST_FIFO);
       ensureFifo(RESPONSE_FIFO);
     } catch (err) {
       ctx.ui.notify(
-        `tf-write: failed to create FIFOs — ${err instanceof Error ? err.message : String(err)}`,
+        `tf-implement: failed to create FIFOs — ${err instanceof Error ? err.message : String(err)}`,
         "error"
       );
       return;
     }
-
-    // Load the plan from env var (used when launched via `just tf-write`).
     const planPath = process.env.TF_PLAN_PATH;
-    if (!planPath) return; // no env var — user will use /tf:write command instead
-
+    if (!planPath) return;
     try {
       planContent = fs.readFileSync(planPath, "utf-8");
-      ctx.ui.notify(`tf-write: plan loaded from ${planPath}`, "info");
+      plannotatorMode = false;
+      ctx.ui.notify(`tf-implement: plan loaded from ${planPath}`, "info");
     } catch (err) {
       ctx.ui.notify(
-        `tf-write: failed to read plan at ${planPath} — ${err instanceof Error ? err.message : String(err)}`,
+        `tf-implement: failed to read plan at ${planPath} — ${err instanceof Error ? err.message : String(err)}`,
         "error"
       );
     }
   });
 
-  // ── before_agent_start: inject plan (and any pending issues) into the prompt ─
+  // ── before_agent_start: inject instructions for the active mode ───────────
 
   pi.on("before_agent_start", async (event) => {
-    if (!planContent) return;
-
     const issuesBlock =
       pendingIssues.length > 0
         ? `The reviewer found these issues with your previous iteration. Fix them before signalling ready:\n\n${pendingIssues.join("\n")}\n\n`
         : "";
 
+    if (plannotatorMode) {
+      // Plannotator mode: cover both the planning phase (create PLAN.md, submit)
+      // and the execution phase (write .tf files, signal ready) in a single prompt.
+      // Plannotator injects its own approved-plan context on transition, so we keep
+      // our addition minimal and non-conflicting.
+      return {
+        systemPrompt:
+          event.systemPrompt +
+          `\n\n${issuesBlock}You are a Terraform infrastructure engineer.\n\n` +
+          (pendingIssues.length > 0
+            ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
+            : "STEP 1 — PLAN: Write a Terraform implementation plan to PLAN.md. Include: what resources to create, the file/module structure, and key variables. Then submit it for user review by calling the plannotator_submit_plan tool.\n\n" +
+              "STEP 2 — IMPLEMENT: Once the plan is approved, write all .tf files to implement it exactly. Follow the approved plan.\n\n" +
+              "STEP 3 — SIGNAL: When all .tf files are written and ready for review, run:\n  echo TF_REVIEW_READY\n\nDo NOT run terraform init, plan, apply, or destroy — only write .tf files."),
+      };
+    }
+
+    if (!planContent) return;
+
+    // Standalone mode: inject plan content and optional issues.
     return {
       systemPrompt:
         event.systemPrompt +
@@ -187,7 +231,6 @@ export default function (pi: ExtensionAPI) {
     const command: string = event?.input?.command ?? "";
     if (!command.trim()) return;
 
-    // Only intercept the review-ready signal.
     const trimmed = command.trim();
     if (
       trimmed !== "echo TF_REVIEW_READY" &&
@@ -195,6 +238,8 @@ export default function (pi: ExtensionAPI) {
     ) {
       return;
     }
+
+    if (!planContent && !plannotatorMode) return; // no active session
 
     // Collect all .tf files in cwd.
     const cwd: string = ctx?.cwd ?? process.cwd();
@@ -208,14 +253,25 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       return {
         block: true,
-        reason: `tf-write: failed to read .tf files from ${cwd} — ${err instanceof Error ? err.message : String(err)}`,
+        reason: `tf-implement: failed to read .tf files from ${cwd} — ${err instanceof Error ? err.message : String(err)}`,
       };
+    }
+
+    // In plannotator mode, read the approved plan from PLAN.md in cwd.
+    let planForReview = planContent;
+    if (plannotatorMode && !planForReview) {
+      try {
+        const planFilePath = path.join(cwd, "PLAN.md");
+        if (fs.existsSync(planFilePath)) {
+          planForReview = fs.readFileSync(planFilePath, "utf-8");
+        }
+      } catch { /* ignore — reviewer gets empty plan context */ }
     }
 
     // Send files to reviewer and wait for response.
     let response: ReviewResponse;
     try {
-      const payload = JSON.stringify({ type: "code_review", files: tfFiles, plan: planContent });
+      const payload = JSON.stringify({ type: "code_review", files: tfFiles, plan: planForReview });
       await withTimeout(writeFifo(REQUEST_FIFO, payload), REVIEWER_TIMEOUT_MS);
       const raw = await withTimeout(readFifo(RESPONSE_FIFO), REVIEWER_TIMEOUT_MS);
       if (!raw) throw new Error("reviewer returned empty response");
@@ -223,37 +279,33 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       return {
         block: true,
-        reason: `tf-write: FIFO error during review — ${err instanceof Error ? err.message : String(err)}`,
+        reason: `tf-implement: FIFO error during review — ${err instanceof Error ? err.message : String(err)}`,
       };
     }
 
     // Branch on reviewer verdict.
     if (response.status === "approved") {
       pendingIssues = [];
+      plannotatorMode = false;
       return {
         block: true,
-        reason: "Code approved by reviewer. tf:write complete.",
+        reason: "Code approved by reviewer. tf:implement complete.",
       };
     }
 
     if (response.status === "issues") {
       if (!response.escalate) {
-        // Reviewer says fix it — block the echo and tell Pi what to fix.
         pendingIssues = response.items;
-        const issueList = response.items
-          .map((i) => `  - ${i}`)
-          .join("\n");
+        const issueList = response.items.map((i) => `  - ${i}`).join("\n");
         return {
           block: true,
           reason: `Reviewer found ${response.items.length} issue(s). Fix them and run echo TF_REVIEW_READY again:\n\n${issueList}`,
         };
       }
 
-      // Reviewer flagged issues for human escalation.
       const issueList = response.items.map((i) => `  - ${i}`).join("\n");
       const confirmUI = ctx?.ui?.confirm;
       if (typeof confirmUI !== "function") {
-        // No UI — treat as rejected; tell Pi to fix the issues.
         pendingIssues = response.items;
         return {
           block: true,
@@ -274,13 +326,10 @@ export default function (pi: ExtensionAPI) {
 
       if (humanApproved) {
         pendingIssues = [];
-        return {
-          block: true,
-          reason: "Approved by human override.",
-        };
+        plannotatorMode = false;
+        return { block: true, reason: "Approved by human override." };
       }
 
-      // Human rejected — send Pi back to fix the issues.
       pendingIssues = response.items;
       return {
         block: true,
@@ -288,10 +337,9 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
-    // Unknown response shape — fail loud.
     return {
       block: true,
-      reason: `tf-write: unexpected reviewer response: ${JSON.stringify(response)}`,
+      reason: `tf-implement: unexpected reviewer response: ${JSON.stringify(response)}`,
     };
   });
 }

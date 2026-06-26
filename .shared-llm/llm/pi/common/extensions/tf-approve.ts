@@ -111,25 +111,6 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── /tf:auto <plan-path> — load plan AND confirm approval gate ───────────
-  (pi as any).registerCommand("tf:auto", {
-    description: "Load a Terraform plan and enable the approval gate: /tf:auto <plan-path>",
-    handler: async (args: string, ctx: any) => {
-      const planPath = args.trim();
-      if (!planPath) {
-        ctx.ui.notify(
-          "Usage: /tf:auto <path-to-plan-file>\n\nThis enables both the write loop (via tf:write) and the apply/destroy gate (tf:approve). Load /tf:write first, or use: just tf-auto <plan-path>",
-          "info"
-        );
-        return;
-      }
-      ctx.ui.notify(
-        `tf:auto: use 'just tf-auto ${planPath}' to chain the full write+approve workflow, or run /tf:write ${planPath} in a session started with: pi -e tf-write.ts -e tf-approve.ts`,
-        "info"
-      );
-    },
-  });
-
 
   // Capture the output of every terraform plan so we can show a structured
   // summary when the agent moves on to apply or destroy.
