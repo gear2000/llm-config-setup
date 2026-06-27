@@ -1,4 +1,4 @@
-"""Tests for tools/compose-layers.py — the layer composer.
+"""Tests for tools/harness.py compose — the layer composer.
 
 Run: python3 -m pytest tools/test_compose_layers.py -q
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-COMPOSER = Path(__file__).resolve().parent / "compose-layers.py"
+COMPOSER = Path(__file__).resolve().parent / "harness.py"
 
 
 def _write(path: Path, text: str) -> None:
@@ -25,7 +25,7 @@ def _write(path: Path, text: str) -> None:
 
 def _compose(shared_llm: Path, target: Path, recipe_rel: str) -> None:
     result = subprocess.run(
-        [sys.executable, str(COMPOSER), recipe_rel,
+        [sys.executable, str(COMPOSER), "compose", recipe_rel,
          "--shared-llm", str(shared_llm), "--target", str(target)],
         capture_output=True, text=True,
     )

@@ -27,15 +27,25 @@ Optional keys:
                        content repeated across many outputs, e.g. the service catalog).
                        Exactly one source file; the tool reads it once and prepends it.
 
+This file also reconciles the per-harness symlinks (pi / codex) that wire the
+composed outputs into the dirs the tools read at startup — see the reconciler
+section near the bottom. One file, three subcommands, driven by the justfile
+(setup) and the Taskfile (compose).
+
 Usage:
-    python tools/compose-layers.py                                       # compose all
-    python tools/compose-layers.py .shared-llm/compose/skills/x.yaml     # compose one
-    python tools/compose-layers.py --shared-llm /path/.shared-llm --target /path/out
+    python tools/harness.py compose                                      # compose all
+    python tools/harness.py compose .shared-llm/compose/skills/x.yaml    # compose one
+    python tools/harness.py compose --shared-llm /path/.shared-llm --target /path/out
+    python tools/harness.py sync                                         # create + prune all harness links
+    python tools/harness.py sync --plan                                  # preview, touch nothing
+    python tools/harness.py unlink                                       # remove managed links
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
@@ -344,11 +354,33 @@ class Composer:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(item, dest)
 
+    def copy_standalone_skills(self) -> None:
+        """Copy whole standalone skills verbatim into .claude/skills/.
+
+        Skills under <source>/skills/ are complete, multi-file skills (SKILL.md +
+        README + agents/ + references/) — nothing to stitch. Unlike the recipe-driven
+        skills, they are copied in their entirety: whole dir in, whole dir out. The
+        repo's .codex-plugin points Codex at the same .claude/skills/ dir, so both
+        harnesses pick them up from one copy. Stale dest dirs are cleared first.
+        """
+        skills_src = self.source / "skills"
+        if not skills_src.is_dir():
+            return
+        for skill_dir in sorted(skills_src.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            dest = self.target / ".claude" / "skills" / skill_dir.name
+            print(f"  standalone-skill: {skill_dir.name} -> {dest}")
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(skill_dir, dest)
+
     def compose_all(self) -> None:
         """Discover and compose all targets."""
         yamls = self.discover()
         for yp in yamls:
             self.compose_one(yp)
+        self.copy_standalone_skills()
 
     def compose_dir(self, recipe_dir: Path) -> None:
         """Compose every recipe under a single recipe directory (a subset)."""
@@ -357,33 +389,216 @@ class Composer:
             self.compose_one(yp)
 
 
+# ===========================================================================
+# Symlink reconciler — sync / unlink
+# ===========================================================================
+#
+# compose (above) turns layer files into outputs under .claude/. The reconciler
+# wires those outputs and the Pi extensions into the per-harness discovery dirs
+# the tools read at startup, by symlink:
+#
+#   pi     skills   .claude/skills/<name>     -> ~/.pi/skills/<name>    (portable skills only)
+#          agents   .claude/agents/<name>.md  -> ~/.pi/agents/<name>.md
+#          ext      .shared-llm/llm/pi/common/extensions/<x>
+#                                             -> ~/.pi/agent/extensions/<x>  (or ~/.pi/extensions for *-hub.ts)
+#   codex  skills   .claude/skills/<name>     -> ~/.codex/skills/<name> (portable + codex skills)
+#
+# Unlike the old add-only bash, this RECONCILES desired-vs-actual: it creates
+# missing links, re-points drifted ones, and PRUNES links whose source was
+# renamed or deleted (the gap that left dangling links). It only ever touches a
+# link that resolves into THIS repo family — never a foreign link or a real file.
+
+HOME = Path.home()
+
+# Authored extensions present in the tree but intentionally NOT linked on this
+# clone. Empty in the portable kit — nothing to skip.
+EXT_SKIP = set()  # no private overrides in the portable kit
+
+# Managed sub-path markers. A link counts as "ours" only if its target contains
+# the repo-family token AND one of these — the guard that stops us ever removing
+# a foreign link or a real file.
+MANAGED_MARKERS = (
+    "/.claude/skills/",
+    "/.claude/agents/",
+    "/.ai/shared/skills/",
+    "/.ai/shared/agents/",
+    "/.shared-llm/llm/pi/common/extensions/",
+    # legacy pre-migration paths — kept so the reconciler recognises and prunes
+    # links left dangling by the layers/ -> .shared-llm/ move.
+    "/layers/llm/pi/common/extensions/",
+    "/layers/llm/pi/common/agents/",
+)
+
+
+def project_root() -> Path:
+    """The repo root (tools/ lives directly under it)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def repo_family(root: Path) -> str:
+    """Token identifying our own links even from a sibling worktree clone.
+    Worktrees live in <repo>-trees/<wt>, so the family is the parent dir name
+    minus the -trees suffix; otherwise the repo dir name itself."""
+    if root.parent.name.endswith("-trees"):
+        return root.parent.name[: -len("-trees")]
+    return root.name
+
+
+@dataclass
+class LinkPlan:
+    desired: dict[Path, Path]   # dest link path -> source path it should point at
+    dest_dirs: list[Path]       # dirs scanned for orphaned / dangling managed links
+
+
+def harness_of(root: Path, name: str) -> str:
+    """Harness a skill belongs to, derived from where its recipe lives:
+      compose/slash-commands/<scope>/<harness>/<name>.yaml -> <harness>
+      compose/skills/<name>.yaml (convention skill)        -> common
+    else 'unknown'. Mirrors the bash harness_of."""
+    slash = root / ".shared-llm/compose/slash-commands"
+    if slash.is_dir():
+        hits = list(slash.rglob(f"{name}.yaml"))
+        if hits:
+            return hits[0].parent.name
+    if (root / ".shared-llm/compose/skills" / f"{name}.yaml").exists():
+        return "common"
+    return "unknown"
+
+
+def link_is_ours(dest: Path, family: str) -> bool:
+    """True iff dest is a symlink whose literal OR resolved target points into
+    our repo family's managed dirs. Works on a dangling link (the literal target
+    string still carries the marker). Never returns True for a real file."""
+    if not dest.is_symlink():
+        return False
+    literal = os.readlink(dest)
+    resolved = os.path.realpath(dest)  # a path string even when it doesn't exist
+    for t in (literal, resolved):
+        if family in t and any(m in t for m in MANAGED_MARKERS):
+            return True
+    # Also ours if it resolves inside the current clone.
+    try:
+        Path(resolved).relative_to(project_root())
+        return True
+    except ValueError:
+        return False
+
+
+def _skill_dirs(root: Path) -> list[Path]:
+    skills = root / ".claude/skills"
+    if not skills.is_dir():
+        return []
+    return [d for d in sorted(skills.iterdir()) if d.is_dir() and d.name != "_archived"]
+
+
+def plan_pi(root: Path) -> LinkPlan:
+    desired: dict[Path, Path] = {}
+    pi_skills = HOME / ".pi/skills"
+    pi_agents = HOME / ".pi/agents"
+    agent_ext = HOME / ".pi/agent/extensions"
+    hub_ext = HOME / ".pi/extensions"
+
+    # skills — Pi gets a skill only when it is portable to every harness (common)
+    for d in _skill_dirs(root):
+        if harness_of(root, d.name) == "common":
+            desired[pi_skills / d.name] = d
+
+    # agents — composed personas under .claude/agents/ AND the hand-authored Pi
+    # agent personas kept in the runtime tree (.shared-llm/llm/pi/common/agents/,
+    # e.g. the hub reviewers + tf-reviewer). Both feed ~/.pi/agents/.
+    for agents_src in (root / ".claude/agents", root / ".shared-llm/llm/pi/common/agents"):
+        if agents_src.is_dir():
+            for f in sorted(agents_src.glob("*.md")):
+                desired[pi_agents / f.name] = f
+
+    # extensions — dirs + flat .ts (minus *.test.ts and the skip-list); hub routing
+    ext_src = root / ".shared-llm/llm/pi/common/extensions"
+    if ext_src.is_dir():
+        for entry in sorted(ext_src.iterdir()):
+            name = entry.name
+            if name in EXT_SKIP:
+                continue
+            if entry.is_dir():
+                desired[agent_ext / name] = entry
+            elif name.endswith(".ts") and not name.endswith(".test.ts"):
+                is_hub = name.endswith("-hub.ts") or name.startswith("hub-")
+                desired[(hub_ext if is_hub else agent_ext) / name] = entry
+
+    return LinkPlan(desired, [pi_skills, pi_agents, agent_ext, hub_ext])
+
+
+def plan_codex(root: Path) -> LinkPlan:
+    desired: dict[Path, Path] = {}
+    codex_home = Path(os.environ.get("CODEX_HOME", str(HOME / ".codex")))
+    codex_skills = codex_home / "skills"
+    # Codex gets portable (common) and codex-specific skills; not claude-only.
+    for d in _skill_dirs(root):
+        if harness_of(root, d.name) in ("common", "codex"):
+            desired[codex_skills / d.name] = d
+    return LinkPlan(desired, [codex_skills])
+
+
+PLAN_BUILDERS = {"pi": plan_pi, "codex": plan_codex}
+
+
+def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool) -> collections.Counter:
+    counts: collections.Counter = collections.Counter()
+    tag = "plan" if plan_only else "done"
+
+    def emit(kind: str, dest: Path, src: Path | None) -> None:
+        counts[kind] += 1
+        arrow = f" -> {src}" if src is not None else ""
+        print(f"  [{tag}] {kind}: {dest}{arrow}")
+
+    if not plan_only:
+        for d in plan.dest_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+
+    # create / re-point
+    for dest, src in sorted(plan.desired.items()):
+        if dest.is_symlink():
+            if os.readlink(dest) == str(src):
+                if force and not plan_only:
+                    dest.unlink()
+                    dest.symlink_to(src)
+                continue  # already correct
+            if link_is_ours(dest, family):
+                emit("repoint", dest, src)
+                if not plan_only:
+                    dest.unlink()
+                    dest.symlink_to(src)
+            else:
+                emit("skip-foreign", dest, None)
+        elif dest.exists():
+            emit("skip-foreign", dest, None)
+        else:
+            emit("create", dest, src)
+            if not plan_only:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.symlink_to(src)
+
+    # prune orphaned / dangling managed links (source renamed or deleted)
+    desired_by_dir: dict[Path, set] = collections.defaultdict(set)
+    for dest in plan.desired:
+        desired_by_dir[dest.parent].add(dest.name)
+    for d in plan.dest_dirs:
+        if not d.is_dir():
+            continue
+        for entry in sorted(d.iterdir()):
+            if entry.name in desired_by_dir[d]:
+                continue  # wanted — handled above
+            if link_is_ours(entry, family):
+                emit("prune", entry, None)
+                if not plan_only:
+                    entry.unlink()
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Assemble layer files into skill, agent, CLAUDE.md, and AGENTS.md definitions."
-    )
-    parser.add_argument(
-        "recipe",
-        nargs="?",
-        help=(
-            "A specific compose YAML to process, OR a directory of recipes to compose "
-            "as a subset (e.g. .shared-llm/compose/agents). Default: all recipes under "
-            "<shared-llm>/compose/."
-        ),
-    )
-    parser.add_argument(
-        "--shared-llm",
-        help="Path to the .shared-llm source root (default: $SHARED_LLM_DIR, then walk up for .shared-llm/)",
-    )
-    parser.add_argument(
-        "--target",
-        help="Output base directory where 'output:' paths land (default: current working directory)",
-    )
-    args = parser.parse_args()
-
+def cmd_compose(args: argparse.Namespace) -> None:
     source_root = find_shared_llm(args.shared_llm)
     target_root = Path(args.target).expanduser().resolve() if args.target else Path.cwd()
     composer = Composer(source_root, target_root)
@@ -411,6 +626,72 @@ def main() -> None:
         composer.compose_all()
 
     print("done.")
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    root = project_root()
+    family = repo_family(root)
+    harnesses = list(PLAN_BUILDERS) if args.harness == "all" else [args.harness]
+    print(f"repo: {root}  family: {family}  mode: {'plan' if args.plan else 'apply'}")
+    total: collections.Counter = collections.Counter()
+    for h in harnesses:
+        print(f"--- {h} ---")
+        total += reconcile(PLAN_BUILDERS[h](root), family, plan_only=args.plan, force=args.force)
+    print(
+        f"done. created {total['create']}, repointed {total['repoint']}, "
+        f"pruned {total['prune']}, skipped-foreign {total['skip-foreign']}."
+    )
+
+
+def cmd_unlink(args: argparse.Namespace) -> None:
+    root = project_root()
+    family = repo_family(root)
+    harnesses = list(PLAN_BUILDERS) if args.harness == "all" else [args.harness]
+    removed = 0
+    for h in harnesses:
+        for d in PLAN_BUILDERS[h](root).dest_dirs:
+            if not d.is_dir():
+                continue
+            for entry in sorted(d.iterdir()):
+                if link_is_ours(entry, family):
+                    print(f"  unlink: {entry}")
+                    entry.unlink()
+                    removed += 1
+    print(f"done. unlinked {removed}.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="harness.py",
+        description="Compose layer files and reconcile per-harness symlinks (pi / codex).",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    pc = sub.add_parser("compose", help="Assemble skills/agents/CLAUDE.md from layer recipes.")
+    pc.add_argument(
+        "recipe",
+        nargs="?",
+        help=(
+            "A specific compose YAML to process, OR a directory of recipes to compose "
+            "as a subset (e.g. .shared-llm/compose/agents). Default: all recipes."
+        ),
+    )
+    pc.add_argument("--shared-llm", help="Path to the .shared-llm source root.")
+    pc.add_argument("--target", help="Output base dir where 'output:' paths land (default: cwd).")
+    pc.set_defaults(func=cmd_compose)
+
+    ps = sub.add_parser("sync", help="Reconcile per-harness symlinks: create, re-point, prune.")
+    ps.add_argument("--harness", choices=["pi", "codex", "all"], default="all")
+    ps.add_argument("--plan", action="store_true", help="Preview the changes; touch nothing.")
+    ps.add_argument("--force", action="store_true", help="Re-create even a correct link.")
+    ps.set_defaults(func=cmd_sync)
+
+    pu = sub.add_parser("unlink", help="Remove every managed symlink for a harness.")
+    pu.add_argument("--harness", choices=["pi", "codex", "all"], default="all")
+    pu.set_defaults(func=cmd_unlink)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":

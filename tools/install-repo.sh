@@ -3,13 +3,13 @@
 # `task install repo -- <dir=.>`.
 #
 # Makes the target SELF-CONTAINED: it copies the portable .shared-llm/ layer tree,
-# the compose engine (tools/compose-layers.py), and a thin Taskfile into <dir> so
+# the compose engine (tools/harness.py), and a thin Taskfile into <dir> so
 # the repo can recompose on its own — no dependency on a central engine or on the
 # ~/.local/bin/llm-compose wrapper being installed. (The wrapper still works against
 # it; it is a convenience, not a requirement.)
 #
 # Steps:
-#   1. Copy .shared-llm/ + tools/compose-layers.py + a thin tools/llm.Taskfile.yml
+#   1. Copy .shared-llm/ + tools/harness.py + a thin tools/llm.Taskfile.yml
 #      into <dir>. The this_repo layer files arrive as fillable TEMPLATE.* stubs.
 #   2. INTERACTIVE PAUSE: print the TEMPLATE stub list the user must fill, then wait.
 #      Bypass for automation: set INSTALL_REPO_YES=1 (or pipe a non-tty stdin) to
@@ -43,7 +43,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_SHARED="$REPO_ROOT/.shared-llm"
-SRC_ENGINE="$REPO_ROOT/tools/compose-layers.py"
+SRC_ENGINE="$REPO_ROOT/tools/harness.py"
 SRC_TASKFILE="$REPO_ROOT/tools/templates/llm.Taskfile.yml"
 
 TARGET="${1:-.}"
@@ -73,11 +73,11 @@ else
 fi
 
 mkdir -p "$TARGET/tools"
-if [[ -e "$TARGET/tools/compose-layers.py" ]] && ! cmp -s "$TARGET/tools/compose-layers.py" "$SRC_ENGINE"; then
-  echo "skip engine -> $TARGET/tools/compose-layers.py exists and differs (leaving it)" >&2
+if [[ -e "$TARGET/tools/harness.py" ]] && ! cmp -s "$TARGET/tools/harness.py" "$SRC_ENGINE"; then
+  echo "skip engine -> $TARGET/tools/harness.py exists and differs (leaving it)" >&2
 else
-  cp "$SRC_ENGINE" "$TARGET/tools/compose-layers.py"; chmod +x "$TARGET/tools/compose-layers.py"
-  echo "copied engine -> $TARGET/tools/compose-layers.py"
+  cp "$SRC_ENGINE" "$TARGET/tools/harness.py"; chmod +x "$TARGET/tools/harness.py"
+  echo "copied engine -> $TARGET/tools/harness.py"
 fi
 
 if [[ -e "$TARGET/Taskfile.yml" ]]; then
@@ -138,11 +138,11 @@ else
   #   - the example-package / example-service DEMO recipes under compose/claude-md/
   #     (illustrative samples — not consumer deliverables; never written into the
   #     consumer's real src/ tree).
-  ENGINE="$TARGET/tools/compose-layers.py"
-  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/claude-md/root.yaml"
-  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents-md/root.yaml"
-  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/skills"
-  python3 "$ENGINE" --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents"
+  ENGINE="$TARGET/tools/harness.py"
+  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/claude-md/root.yaml"
+  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents-md/root.yaml"
+  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/skills"
+  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents"
   composed=1
 fi
 
@@ -157,7 +157,7 @@ echo "Target: $TARGET"
 echo
 echo "INSTALLED into the target repo (self-contained):"
 echo "  - .shared-llm/        the portable layer tree (this_repo = TEMPLATE.* stubs)"
-echo "  - tools/compose-layers.py   the compose engine (recompose standalone)"
+echo "  - tools/harness.py   the compose engine (recompose standalone)"
 echo "  - Taskfile / tools/llm.Taskfile.yml   thin compose targets"
 if [[ "$composed" -eq 1 ]]; then
   echo

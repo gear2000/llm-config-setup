@@ -17,7 +17,7 @@
 #   tools/install-pi-extensions.sh            # install everything in the manifest
 #
 # This installs THIRD-PARTY extensions only. Our OWN authored extensions
-# (extensions/*.ts) are symlinked by setup-pi.sh — never installed. Keep the two
+# (extensions/*.ts) are symlinked by harness.py sync — never installed. Keep the two
 # paths separate (see .shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md).
 
 set -euo pipefail

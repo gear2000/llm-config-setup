@@ -12,9 +12,11 @@
 #                             ~/.pi/agents/. Codex has NO user-agent directory
 #                             concept (it has ~/.codex/skills but not /agents), so
 #                             Codex is skipped — we never invent a dir.
-#   3. Pi runtime           — delegates to setup-pi.sh (symlinks the bundled Pi
-#                             extensions + agent personas, scaffolds settings) and
-#                             install-pi-extensions.sh (the pinned third-party set).
+#   3. Pi runtime           — wires the bundled Pi extensions + agent personas into
+#                             ~/.pi via `harness.py sync` (create / re-point / prune),
+#                             scaffolds ~/.pi/agent/settings.json from the template
+#                             when absent, and installs the pinned third-party set via
+#                             install-pi-extensions.sh.
 #   4. The llm-compose wrapper — copies tools/templates/llm-compose to
 #                             ~/.local/bin/llm-compose (executable).
 #
@@ -22,7 +24,7 @@
 # CLAUDE.md/AGENTS.md). Those come from `task install repo`. The summary at the end
 # states this explicitly.
 #
-# Safe-migration discipline (mirrors install-global.sh / setup-pi.sh):
+# Safe-migration discipline (mirrors install-global.sh / harness.py sync):
 #   - Idempotent: re-running installs nothing new when home already matches.
 #   - Never clobber a divergent/foreign file: an existing real file that does NOT
 #     match our staged copy, or an existing symlink we did not create, is left
@@ -33,8 +35,8 @@
 # Flags:
 #   --skip-pi-extensions   skip install-pi-extensions.sh (the `pi install` network
 #                          step). The sandbox gate uses this so the throwaway HOME
-#                          never hits the network. setup-pi.sh's own symlink wiring
-#                          still runs (offline, $HOME-relative).
+#                          never hits the network. The `harness.py sync` symlink
+#                          wiring still runs (offline, $HOME-relative).
 #
 # Usage:
 #   tools/install-local.sh
@@ -51,9 +53,8 @@ for arg in "$@"; do
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE="$REPO_ROOT/tools/compose-layers.py"
+COMPOSE="$REPO_ROOT/tools/harness.py"
 INSTALL_GLOBAL="$REPO_ROOT/tools/install-global.sh"
-SETUP_PI="$REPO_ROOT/tools/setup-pi.sh"
 WRAPPER_SRC="$REPO_ROOT/tools/templates/llm-compose"
 
 # Agent recipes now carry ROOT-RELATIVE outputs (.claude/agents/<name>.md). We
@@ -77,7 +78,6 @@ WRAPPER_DST="$BIN_DIR/llm-compose"
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 not on PATH" >&2; exit 1; }
 [[ -f "$COMPOSE" ]] || { echo "error: compose engine not found: $COMPOSE" >&2; exit 1; }
 [[ -x "$INSTALL_GLOBAL" ]] || { echo "error: install-global.sh not found/executable: $INSTALL_GLOBAL" >&2; exit 1; }
-[[ -x "$SETUP_PI" ]] || { echo "error: setup-pi.sh not found/executable: $SETUP_PI" >&2; exit 1; }
 [[ -f "$WRAPPER_SRC" ]] || { echo "error: wrapper template not found: $WRAPPER_SRC" >&2; exit 1; }
 
 echo "=============================================================="
@@ -103,7 +103,7 @@ echo ">>> [2/4] Generic agents -> ${HOME_AGENT_DIRS[*]}"
 agent_recipes=("$AGENT_RECIPE_DIR"/*.yaml)
 [[ -e "${agent_recipes[0]}" ]] || { echo "error: no agent recipes in $AGENT_RECIPE_DIR" >&2; exit 1; }
 for recipe in "${agent_recipes[@]}"; do
-  python3 "$COMPOSE" "$recipe" --target "$AGENT_STAGING_BASE" >/dev/null
+  python3 "$COMPOSE" compose "$recipe" --target "$AGENT_STAGING_BASE" >/dev/null
 done
 
 agents_installed=0; agents_uptodate=0; agents_skipped=0
@@ -131,26 +131,34 @@ done
 echo "agents: $agents_installed copied, $agents_uptodate already current, $agents_skipped skipped (foreign/divergent)"
 
 # ---------------------------------------------------------------------------
-# 3. Pi runtime (delegate to setup-pi.sh; it calls install-pi-extensions.sh)
+# 3. Pi runtime — symlink wiring + settings scaffold + third-party extensions.
+#    Done directly here (no separate helper script): harness.py sync reconciles
+#    the Pi/Codex symlinks (extensions + agent personas), then we scaffold
+#    settings.json when absent and install the pinned third-party set.
 # ---------------------------------------------------------------------------
 echo
-echo ">>> [3/4] Pi runtime (setup-pi.sh)"
+echo ">>> [3/4] Pi runtime (harness.py sync + settings + third-party extensions)"
+
+# (a) symlink wiring: create missing links, re-point drifted ones, prune orphans.
+python3 "$COMPOSE" sync
+
+# (b) settings: scaffold from the template only when absent (never clobber the live copy).
+SETTINGS_TEMPLATE="$REPO_ROOT/.shared-llm/llm/pi/common/settings.template.json"
+PI_SETTINGS="$HOME/.pi/agent/settings.json"
+if [[ -f "$SETTINGS_TEMPLATE" ]]; then
+  mkdir -p "$HOME/.pi/agent"
+  if [[ -f "$PI_SETTINGS" ]]; then echo "settings: preserved existing $PI_SETTINGS"
+  else cp "$SETTINGS_TEMPLATE" "$PI_SETTINGS"; echo "settings: scaffolded from template"; fi
+fi
+
+# (c) third-party extensions: install from the pinned manifest (unless --skip-pi-extensions).
+EXT_INSTALLER="$REPO_ROOT/tools/install-pi-extensions.sh"
 if [[ "$SKIP_PI_EXTENSIONS" -eq 1 ]]; then
-  echo "    (--skip-pi-extensions: running setup-pi.sh symlink wiring only, no 'pi install')"
-  # setup-pi.sh runs install-pi-extensions.sh only if it is executable. Temporarily
-  # make the third-party installer non-executable so the network step is skipped,
-  # while the offline symlink wiring still runs. Restore the bit afterward.
-  EXT_INSTALLER="$REPO_ROOT/tools/install-pi-extensions.sh"
-  restore_x=0
-  if [[ -x "$EXT_INSTALLER" ]]; then chmod -x "$EXT_INSTALLER"; restore_x=1; fi
-  set +e
-  PI_SKIP_EXTENSIONS=1 "$SETUP_PI"
-  pi_rc=$?
-  set -e
-  [[ "$restore_x" -eq 1 ]] && chmod +x "$EXT_INSTALLER"
-  [[ "$pi_rc" -eq 0 ]] || { echo "error: setup-pi.sh failed (rc=$pi_rc)" >&2; exit "$pi_rc"; }
+  echo "    (--skip-pi-extensions: skipping the third-party 'pi install' step)"
+elif [[ -x "$EXT_INSTALLER" ]]; then
+  "$EXT_INSTALLER"
 else
-  "$SETUP_PI"
+  echo "third-party: skipped — $EXT_INSTALLER not found/executable" >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -192,7 +200,7 @@ INSTALLED (general / home, all-projects):
 
 NOT installed here (these come from \`task install repo -- <dir>\`):
   - the per-repo .shared-llm/ layer tree
-  - the per-repo compose engine (tools/compose-layers.py) + thin Taskfile
+  - the per-repo compose engine (tools/harness.py) + thin Taskfile
   - generated CLAUDE.md / AGENTS.md / per-repo skill files
 
 NOT applicable:

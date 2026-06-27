@@ -28,41 +28,41 @@ tasks:
     # global skills. Both stage into the gitignored examples/ dir, so the kit's own
     # root files are never touched and the working tree stays clean.
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/global
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/global
 
   compose:consumer-all:
     desc: "Compose EVERY consumer recipe (claude-md/agents-md/skills/agents) into examples/ — requires filled this_repo stubs"
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/claude-md/root.yaml
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents-md/root.yaml
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/skills
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/claude-md/root.yaml
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents-md/root.yaml
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/skills
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
 
   compose:skill:
     desc: "Assemble one skill into examples/ staging (e.g. task compose:skill -- python)"
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
 
   compose:claude-md:
     desc: "Assemble one CLAUDE.md into examples/ staging (e.g. task compose:claude-md -- root)"
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
 
   compose:agents-md:
     desc: "Assemble one AGENTS.md into examples/ staging (e.g. task compose:agents-md -- root)"
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
 
   compose:agent:
     desc: "Assemble one agent into examples/ staging (e.g. task compose:agent -- architecture)"
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
 
   compose:agents:
     desc: "Assemble every agent recipe into examples/ staging"
     cmds:
-      - python3 tools/compose-layers.py --target examples .shared-llm/compose/agents
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
 
   # ---------------------------------------------------------------------------
   # install — the headline consumer feature. Two surfaces:
@@ -98,14 +98,14 @@ tasks:
   # ---------------------------------------------------------------------------
 
   setup:pi:
-    desc: "Symlink this kit's Pi extensions + codex-reviewer agent into ~/.pi and install their npm deps"
+    desc: "Reconcile this kit's Pi/Codex skill, agent, and extension symlinks into ~/.pi and ~/.codex (create, re-point, prune)"
     cmds:
-      - bash tools/setup-pi.sh
+      - python3 tools/harness.py sync
 
   setup:pi:unlink:
-    desc: "Remove the ~/.pi symlinks created by setup:pi (leaves settings.json + installed extensions)"
+    desc: "Remove every managed Pi/Codex symlink (leaves settings.json + installed extensions)"
     cmds:
-      - bash tools/setup-pi.sh --unlink
+      - python3 tools/harness.py unlink
 
   setup:pi:extensions:
     desc: "Install the pinned third-party Pi extensions from the manifest (idempotent)"

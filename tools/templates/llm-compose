@@ -6,15 +6,15 @@
 # the engine, passing every argument straight through.
 #
 # Engine location model (self-contained repos): the engine lives next to the
-# .shared-llm dir it serves, at  <parent-of-.shared-llm>/tools/compose-layers.py.
-# `task install repo` copies BOTH the .shared-llm tree and tools/compose-layers.py
+# .shared-llm dir it serves, at  <parent-of-.shared-llm>/tools/harness.py.
+# `task install repo` copies BOTH the .shared-llm tree and tools/harness.py
 # into a consumer repo, so that repo can recompose standalone — this wrapper is a
 # convenience, never a dependency.
 #
 # Resolution of the .shared-llm root, in order:
 #   1. $SHARED_LLM_DIR — explicit override (must be a dir named .shared-llm).
 #   2. walk up from $PWD looking for a .shared-llm/ directory.
-# Once found, the engine is <root>/../tools/compose-layers.py (the repo that owns
+# Once found, the engine is <root>/../tools/harness.py (the repo that owns
 # the .shared-llm dir). Fails loud if either the root or the engine is missing.
 #
 # Usage (from inside a repo that has a .shared-llm/ tree):
@@ -50,11 +50,11 @@ find_shared_llm() {
 
 SHARED_ROOT="$(find_shared_llm)"
 REPO_ROOT="$(dirname "$SHARED_ROOT")"
-ENGINE="$REPO_ROOT/tools/compose-layers.py"
+ENGINE="$REPO_ROOT/tools/harness.py"
 
 if [[ ! -f "$ENGINE" ]]; then
   echo "llm-compose: engine not found next to $SHARED_ROOT (expected $ENGINE)" >&2
-  echo "             a repo set up via 'task install repo' carries its own tools/compose-layers.py" >&2
+  echo "             a repo set up via 'task install repo' carries its own tools/harness.py" >&2
   exit 1
 fi
 
@@ -62,4 +62,4 @@ command -v python3 >/dev/null 2>&1 || { echo "llm-compose: python3 not on PATH" 
 
 # The engine resolves its own --shared-llm; pass ours explicitly so the wrapper's
 # walk-up wins regardless of where the engine file physically lives.
-exec python3 "$ENGINE" --shared-llm "$SHARED_ROOT" "$@"
+exec python3 "$ENGINE" compose --shared-llm "$SHARED_ROOT" "$@"

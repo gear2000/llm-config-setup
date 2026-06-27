@@ -1,24 +1,52 @@
 default:
     @just --list
 
+# ─── Harness setup: skills / agents / extensions ──────
+# One Python tool (tools/harness.py) both composes layer files and reconciles the
+# per-harness symlinks (pi, codex) — creating missing links, re-pointing drifted
+# ones, and PRUNING links whose source was renamed or deleted. These recipes are
+# the thin entry point; the Taskfile drives the same tool for compose in CI.
+
+# Reconcile all pi/codex links (create + re-point + prune). Pass flags through,
+# e.g. `just sync --plan` to preview, `just sync --harness pi`.
+sync *flags:
+    python3 tools/harness.py sync {{flags}}
+
+# Remove every managed pi/codex link.
+unlink *flags:
+    python3 tools/harness.py unlink {{flags}}
+
+# Compose skills/agents/CLAUDE.md from layers (same engine the Taskfile uses).
+compose *args:
+    python3 tools/harness.py compose {{args}}
+
+# Full setup: reconcile every link, then ensure the third-party Pi companions.
+setup: sync companions
+
+# Install the kit's pinned third-party Pi extensions from the manifest (idempotent; no-op without pi).
+companions:
+    @command -v pi >/dev/null || { echo "pi not found — skipping companions"; exit 0; }
+    bash tools/install-pi-extensions.sh
+
 # ─── Terraform Workflow ───────────────────────────────
-# Extensions: ~/.pi/extensions/tf-write.ts, tf-approve.ts
+# Extensions (auto-loaded from ~/.pi/agent/extensions/): tf-implement.ts,
+#   tf-approve.ts, iac-guard.ts, planish.ts
 # Agent:      ~/.pi/agents/tf-reviewer.md
 
-# Autonomous AFK loop: write and review terraform code until approved
-tf-write plan:
-    TF_PLAN_PATH={{plan}} pi -e ~/.pi/extensions/tf-write.ts
+# Load a plan and run the implement loop (write reviewed terraform until approved).
+tf-implement plan:
+    TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts
 
 # Human-gated terraform apply/destroy with agent-distilled plan table
 tf-approve:
-    pi -e ~/.pi/extensions/iac-guard.ts -e ~/.pi/extensions/tf-approve.ts
+    pi -e ~/.pi/agent/extensions/iac-guard.ts -e ~/.pi/agent/extensions/tf-approve.ts
 
-# Full workflow: write reviewed code then human-gated apply
+# Full workflow: plan + implement reviewed code, then human-gated apply
 tf-auto plan:
-    TF_PLAN_PATH={{plan}} pi -e ~/.pi/extensions/tf-write.ts && \
-    pi -e ~/.pi/extensions/iac-guard.ts -e ~/.pi/extensions/tf-approve.ts
+    TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts && \
+    pi -e ~/.pi/agent/extensions/iac-guard.ts -e ~/.pi/agent/extensions/tf-approve.ts
 
-# Start the terraform reviewer (Claude Code) — run before tf-write or tf-approve
+# Start the terraform reviewer (Claude Code) — run before tf-implement or tf-approve
 tf-reviewer-cc:
     tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'claude'
     for i in $(seq 1 60); do \
@@ -30,7 +58,7 @@ tf-reviewer-cc:
     sleep 1
     tmux send-keys -t tf-reviewer Enter
 
-# Start the terraform reviewer (Pi) — run before tf-write or tf-approve
+# Start the terraform reviewer (Pi) — run before tf-implement or tf-approve
 tf-reviewer-pi model="openai-codex/gpt-5.5":
     tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'pi --model {{model}} --thinking high -a --no-session'
     for i in $(seq 1 60); do \

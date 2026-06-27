@@ -5,7 +5,7 @@
 # Same compose mechanism as the per-repo recipes: a YAML recipe assembles layer .md
 # files into a SKILL.md. The ONLY thing different here is the DESTINATION = home.
 # This script does two things:
-#   1. compose  — run tools/compose-layers.py on the global recipe(s) to (re)generate
+#   1. compose  — run tools/harness.py on the global recipe(s) to (re)generate
 #                 the staged SKILL.md under examples/global-staging/ (engine unmodified).
 #   2. install  — COPY each staged skill into the three home skill dirs every harness
 #                 reads globally:
@@ -16,10 +16,10 @@
 # Why COPY (not symlink): the staged file is a GENERATED artifact under examples/
 # (gitignored). A symlink into home would dangle the moment staging is cleaned or
 # regenerated, and would point at an ignored path. A copy leaves home self-consistent —
-# a real file that survives staging cleanup. (setup-pi.sh symlinks because its sources
+# a real file that survives staging cleanup. (harness.py sync symlinks because its sources
 # are tracked, stable .ts files; a generated skill is the opposite case.)
 #
-# Safe-migration discipline (mirrors setup-pi.sh):
+# Safe-migration discipline (mirrors harness.py sync):
 #   - Idempotent: re-running installs nothing new when home already matches.
 #   - Never clobber a divergent/foreign file: an existing real file that does NOT match
 #     the staged skill is left untouched with a warning (e.g. a project skill symlinked
@@ -36,7 +36,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE="$REPO_ROOT/tools/compose-layers.py"
+COMPOSE="$REPO_ROOT/tools/harness.py"
 # Global recipes carry staging-relative outputs (global-staging/skills/<name>/SKILL.md).
 # Stage them under the gitignored examples/ dir by composing with --target examples,
 # so the kit's own tree is never polluted, then copy each skill into the home dirs.
@@ -95,7 +95,7 @@ for pair in "${GLOBAL_SKILLS[@]}"; do
   # --target pins output under REPO_ROOT/examples/ (gitignored staging) regardless of
   # cwd; the engine finds the .shared-llm source by walking up from its own location.
   # fail loud — set -e.
-  python3 "$COMPOSE" "$recipe" --target "$STAGING_BASE"
+  python3 "$COMPOSE" compose "$recipe" --target "$STAGING_BASE"
 done
 
 # --- install: copy each staged skill into the three home dirs ---
