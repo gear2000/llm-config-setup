@@ -17,7 +17,10 @@
  * no workflow coupling. The approved plan.html is the output — what happens next
  * is up to the caller.
  *
- * Slash cmd: /planish [path]  — open plan.html (or given path) for review only
+ * Slash cmd: /planish <what to plan>   — START a planning session: turns on
+ *                planMode so before_agent_start drives the agent through
+ *                grill → build plan.html → submit-for-review, until approved.
+ *            /planish --review <path>  — re-open an existing plan.html for review.
  *
  * HTTP server: http://localhost:4390 (lazy start, shared across a session)
  */
@@ -265,6 +268,23 @@ async function grill(questions: GrillQuestion[]): Promise<string[]> {
 // ─── Extension entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // /planish sets these; before_agent_start then drives the agent through the
+  // grill → build → review flow until the plan is approved.
+  let planMode = false;
+  let planTopic = "";
+
+  pi.on("before_agent_start", async (event: any) => {
+    if (!planMode) return;
+    const topic = planTopic ? `The user wants to plan: ${planTopic}\n\n` : "";
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        `\n\n${topic}You are helping the user create a PLAN with planish — produce a plan, not an implementation. Do NOT build or run anything unless the user explicitly asks after the plan is approved.\n\n` +
+        "STEP 1 — GRILL: Call the planish_grill tool with a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each one your recommended answer. If the answers raise new questions, call planish_grill again.\n\n" +
+        "STEP 2 — BUILD: Write the plan to plan.html — make it visual: a title, a summary table of the steps/phases with their key details, dependencies/ordering, and the key decisions. Style with Tailwind CDN (add <script src='https://cdn.tailwindcss.com'></script>).\n\n" +
+        "STEP 3 — REVIEW: Call planish_submit_plan with the file path. The user approves or requests changes in the browser; on changes, revise the file and submit again. The approved plan.html is the deliverable.",
+    };
+  });
 
   // ── planish_grill — ask a batch of questions before planning ──────────────
 
@@ -375,6 +395,7 @@ export default function (pi: ExtensionAPI) {
       try {
         const result = await review(filePath, ctx?.cwd ?? process.cwd());
         if (result.approved) {
+          planMode = false; // planning session done
           const note = result.feedback ? ` Human note: ${result.feedback}` : "";
           return {
             content: [{ type: "text", text: `Plan approved.${note}` }],
@@ -398,32 +419,46 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── /planish [path] — slash command for manual review ─────────────────────
+  // ── /planish [description] — START a planning session ─────────────────────
+  //
+  // Default use: /planish <what you want to plan>. Turns on planMode; the
+  // before_agent_start hook then drives the agent: grill → build plan.html →
+  // submit for browser review, iterating until approved.
+  // Escape hatch: /planish --review <path> re-opens an existing plan.html.
 
   (pi as any).registerCommand("planish", {
-    description: "Open a plan HTML file for review in the browser: /planish [path] (defaults to plan.html in cwd)",
+    description: "Start a planning session: /planish <what to plan> — grills you in the browser, builds a visual HTML plan, iterates until you approve. Re-open an existing plan with: /planish --review <path>",
     handler: async (args: string, ctx: any) => {
-      const filePath = args.trim() || "plan.html";
-      try {
-        ctx.ui.notify(`planish: opening ${filePath}…`, "info");
-        const result = await review(filePath, ctx?.cwd ?? process.cwd());
-        if (result.approved) {
+      const trimmed = args.trim();
+
+      // Escape hatch — re-open an existing plan for review.
+      const reviewMatch = trimmed.match(/^--review\s+(.+)$/);
+      if (reviewMatch) {
+        const filePath = reviewMatch[1].trim();
+        try {
+          ctx.ui.notify(`planish: opening ${filePath} for review…`, "info");
+          const result = await review(filePath, ctx?.cwd ?? process.cwd());
           ctx.ui.notify(
-            "planish: approved" + (result.feedback ? ` — note: ${result.feedback}` : ""),
-            "info"
+            result.approved
+              ? "planish: approved" + (result.feedback ? ` — note: ${result.feedback}` : "")
+              : `planish: changes requested — ${result.feedback || "(no feedback)"}`,
+            result.approved ? "info" : "warning"
           );
-        } else {
-          ctx.ui.notify(
-            `planish: changes requested — ${result.feedback || "(no feedback)"}`,
-            "warning"
-          );
+        } catch (err) {
+          ctx.ui.notify(`planish: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
-      } catch (err) {
-        ctx.ui.notify(
-          `planish: ${err instanceof Error ? err.message : String(err)}`,
-          "error"
-        );
+        return;
       }
+
+      // Default — kick off a planning session.
+      planMode = true;
+      planTopic = trimmed;
+      ctx.ui.notify(
+        trimmed
+          ? `planish: planning "${trimmed}" — Pi will grill you in the browser, then build a visual plan for your review.`
+          : "planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser, then build a visual plan for review.",
+        "info"
+      );
     },
   });
 }
