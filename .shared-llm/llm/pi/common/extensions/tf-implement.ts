@@ -8,11 +8,15 @@
  *    writing .tf files. When Pi signals ready (echo TF_REVIEW_READY), bundle the
  *    files and route them to an external reviewer via FIFOs.
  *
- * 2. Plannotator  /tf:auto [description]
- *    Use the Plannotator extension as the planning step first. Pi writes PLAN.md,
- *    submits it via plannotator_submit_plan, the user approves in the browser, then
- *    Pi implements the .tf files. The approved PLAN.md is read from cwd and passed
- *    to the reviewer as context.
+ * 2. Auto       /tf:auto [--planish] [description]
+ *    Always plans first, then implements. Planning medium is the user's choice:
+ *      • planish (--planish forces it, else prompted) — Pi grills the user via
+ *        planish_grill, writes plan.html, submits it via planish_submit_plan for
+ *        browser approval, then implements the .tf files. The approved plan.html
+ *        is read from cwd and passed to the reviewer as context.
+ *      • direct — Pi works out the plan with the user in the terminal, then
+ *        implements.
+ *    Both paths end in the same reviewer loop.
  *
  * Reviewer protocol (shared by both modes):
  *   Extension → tf-review-request.fifo  — JSON: { type: "code_review", files: Record<filename, content>, plan: string }
@@ -104,7 +108,8 @@ export default function (pi: ExtensionAPI) {
   // State persists across turns (closure-level, not event-level).
   let planContent = "";           // set in standalone mode
   let pendingIssues: string[] = [];
-  let planishMode = false;         // set by /tf:auto; clears on completion
+  let planishMode = false;         // /tf:auto with planish planning; clears on completion
+  let directMode = false;          // /tf:auto planning directly in the terminal; clears on completion
 
   function setupFifos(ctx: any): boolean {
     fs.mkdirSync(PI_DIR, { recursive: true });
@@ -135,6 +140,7 @@ export default function (pi: ExtensionAPI) {
         planContent = fs.readFileSync(planPath, "utf-8");
         pendingIssues = [];
         planishMode = false;
+        directMode = false;
         ctx.ui.notify(`tf:implement: plan loaded from ${planPath} — ask Pi to write .tf files`, "info");
       } catch (err) {
         ctx.ui.notify(
@@ -145,18 +151,52 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── /tf:auto [description] — planish-first workflow ──────────────────────
+  // ── /tf:auto [--planish] [description] — plan then implement ──────────────
+  //
+  // tf:auto always PLANS first, then implements. How it plans is your choice:
+  //   • planish — visual HTML plan in the browser, with a grill step (--planish
+  //     forces this and skips the prompt)
+  //   • direct  — plan in the terminal conversation
+  // Without --planish, it asks once which you want.
   (pi as any).registerCommand("tf:auto", {
-    description: "Plan with planish (HTML browser review) then implement: /tf:auto [optional description]",
+    description: "Plan (planish or direct) then implement: /tf:auto [--planish] [optional description]",
     handler: async (args: string, ctx: any) => {
       if (!setupFifos(ctx)) return;
       planContent = "";
       pendingIssues = [];
-      planishMode = true;
-      const hint = args.trim();
-      const msg = hint
-        ? `tf:auto: planish mode active — Pi will write a plan.html for "${hint}", open it in your browser for review, then implement the .tf files after you approve.`
-        : "tf:auto: planish mode active — tell Pi what Terraform infrastructure to build. It will create a visual plan.html for your browser review, then implement after approval.";
+
+      const forcePlanish = /(^|\s)--planish(\s|$)/.test(args);
+      const hint = args.replace(/(^|\s)--planish(\s|$)/, " ").trim();
+
+      let usePlanish: boolean;
+      if (forcePlanish) {
+        usePlanish = true;
+      } else {
+        const confirm = ctx?.ui?.confirm;
+        if (typeof confirm === "function") {
+          try {
+            usePlanish = await ctx.ui.confirm(
+              "Plan with planish?",
+              "Yes → planish: a visual HTML plan in your browser, with a grill step first.\n" +
+                "No → plan directly here in the terminal.\n\n" +
+                "Either way, Pi implements the .tf files after the plan is settled and routes them to the reviewer.",
+              { timeout: 120_000 }
+            );
+          } catch {
+            usePlanish = false;
+          }
+        } else {
+          usePlanish = false; // no UI available — plan directly
+        }
+      }
+
+      planishMode = usePlanish;
+      directMode = !usePlanish;
+
+      const subject = hint ? `"${hint}"` : "the Terraform infrastructure you describe";
+      const msg = usePlanish
+        ? `tf:auto: planish planning active — Pi will grill you in the browser, write a plan.html for ${subject}, and implement the .tf files after you approve.`
+        : `tf:auto: direct planning active — Pi will work out the plan for ${subject} with you here, then implement the .tf files and route them to the reviewer.`;
       ctx.ui.notify(msg, "info");
     },
   });
@@ -180,6 +220,7 @@ export default function (pi: ExtensionAPI) {
     try {
       planContent = fs.readFileSync(planPath, "utf-8");
       planishMode = false;
+      directMode = false;
       ctx.ui.notify(`tf-implement: plan loaded from ${planPath}`, "info");
     } catch (err) {
       ctx.ui.notify(
@@ -204,8 +245,22 @@ export default function (pi: ExtensionAPI) {
           `\n\n${issuesBlock}You are a Terraform infrastructure engineer.\n\n` +
           (pendingIssues.length > 0
             ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
-            : "STEP 1 — PLAN: Write a Terraform implementation plan to plan.html. Include a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs. Add <script src='https://cdn.tailwindcss.com'></script> for styling. Then submit it for user review by calling the planish_submit_plan tool.\n\n" +
-              "STEP 2 — IMPLEMENT: Once the plan is approved, write all .tf files to implement it exactly. Follow the approved plan.\n\n" +
+            : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with a batch of clarifying questions about the infrastructure (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question your recommended answer. Use the answers to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
+              "STEP 2 — PLAN: Write a Terraform implementation plan to plan.html. Include a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs. Add <script src='https://cdn.tailwindcss.com'></script> for styling. Then submit it for user review by calling the planish_submit_plan tool.\n\n" +
+              "STEP 3 — IMPLEMENT: Once the plan is approved, write all .tf files to implement it exactly. Follow the approved plan.\n\n" +
+              "STEP 4 — SIGNAL: When all .tf files are written and ready for review, run:\n  echo TF_REVIEW_READY\n\nDo NOT run terraform init, plan, apply, or destroy — only write .tf files."),
+      };
+    }
+
+    if (directMode) {
+      return {
+        systemPrompt:
+          event.systemPrompt +
+          `\n\n${issuesBlock}You are a Terraform infrastructure engineer.\n\n` +
+          (pendingIssues.length > 0
+            ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
+            : "STEP 1 — PLAN: Work out the plan with the user directly in this conversation. Ask your clarifying questions, state the resources you intend to create (type, name, key parameters), the file/module structure, and ordering. Get explicit agreement before writing any code.\n\n" +
+              "STEP 2 — IMPLEMENT: Once the user agrees, write all .tf files to implement the plan exactly.\n\n" +
               "STEP 3 — SIGNAL: When all .tf files are written and ready for review, run:\n  echo TF_REVIEW_READY\n\nDo NOT run terraform init, plan, apply, or destroy — only write .tf files."),
       };
     }
@@ -235,7 +290,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (!planContent && !planishMode) return; // no active session
+    if (!planContent && !planishMode && !directMode) return; // no active session
 
     // Collect all .tf files in cwd.
     const cwd: string = ctx?.cwd ?? process.cwd();
@@ -283,6 +338,7 @@ export default function (pi: ExtensionAPI) {
     if (response.status === "approved") {
       pendingIssues = [];
       planishMode = false;
+      directMode = false;
       return {
         block: true,
         reason: "Code approved by reviewer. tf:implement complete.",
@@ -323,6 +379,7 @@ export default function (pi: ExtensionAPI) {
       if (humanApproved) {
         pendingIssues = [];
         planishMode = false;
+        directMode = false;
         return { block: true, reason: "Approved by human override." };
       }
 

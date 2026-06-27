@@ -1,17 +1,25 @@
 /**
- * planish — visual HTML plan review for Pi
+ * planish — visual HTML plan review for Pi, grill-first
  *
- * Pi writes a plan as plan.html (structured tables, step lists, Tailwind CDN
- * for styling). planish opens it in the local browser with an approve /
- * request-changes toolbar. The result comes back as a tool response.
+ * Planning with planish is always a two-beat flow in the browser (port 4390):
  *
- * Standalone: no phase forcing, no execution assumption, no workflow coupling.
- * The approved plan.html is the output — what happens next is up to the caller.
+ *   1. GRILL   — planish_grill { questions[] }
+ *                Pi asks a batch of questions; the user answers them in a form
+ *                and submits. Always grill before writing a plan — it sharpens
+ *                the plan and avoids rework. Follow-ups: call planish_grill again.
  *
- * Pi tool:   planish_submit_plan { filePath: "plan.html" }
- * Slash cmd: /planish [path]  — opens plan.html (or given path) in browser
+ *   2. APPROVE — planish_submit_plan { filePath }
+ *                Pi writes the plan as plan.html (structured tables, Tailwind CDN)
+ *                and submits it. The user approves (optionally with a note) or
+ *                requests changes with feedback.
  *
- * HTTP server: http://localhost:4390 (lazy start, shared across reviews in a session)
+ * Standalone: no phase forcing beyond grill-then-plan, no execution assumption,
+ * no workflow coupling. The approved plan.html is the output — what happens next
+ * is up to the caller.
+ *
+ * Slash cmd: /planish [path]  — open plan.html (or given path) for review only
+ *
+ * HTTP server: http://localhost:4390 (lazy start, shared across a session)
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -27,20 +35,29 @@ const PORT = 4390;
 // ─── Server state (module-level) ─────────────────────────────────────────────
 
 let server: http.Server | null = null;
-let currentPlanHtml = "";
-let pendingResolve: ((r: { approved: boolean; feedback: string }) => void) | null = null;
+let currentHtml = "";
+// One interaction at a time. A plan review resolves { approved, feedback };
+// a grill resolves string[] (answers indexed by question). The matching POST
+// endpoint (/respond vs /grill-respond) resolves with the right shape.
+let pendingResolve: ((r: any) => void) | null = null;
 
-// ─── Browser ──────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function openBrowser(): void {
   const cmd = process.platform === "darwin" ? "open" : "xdg-open";
   spawnSync(cmd, [`http://localhost:${PORT}/`], { detached: true, stdio: "ignore" });
 }
 
-// ─── Toolbar injection ────────────────────────────────────────────────────────
+function esc(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ─── Plan review: toolbar injection ─────────────────────────────────────────────
 //
-// Appended before </body> (or at end if absent). Uses only inline styles so
-// it works regardless of what CSS the plan HTML loads.
+// Appended before </body> (or at end if absent). Inline styles only, so it works
+// regardless of what CSS the plan HTML loads.
 
 function withToolbar(html: string): string {
   const bar = `
@@ -97,27 +114,95 @@ async function planishSend(action) {
     : html + bar;
 }
 
+// ─── Grill: self-contained question form ────────────────────────────────────────
+
+interface GrillQuestion {
+  question: string;
+  note?: string;
+  recommendation?: string;
+}
+
+function grillFormHtml(questions: GrillQuestion[]): string {
+  const blocks = questions
+    .map(
+      (q, i) => `
+    <div class="pq">
+      <div class="pq-text">Q${i + 1}. ${esc(q.question)}</div>
+      ${q.note ? `<div class="pq-note">${esc(q.note)}</div>` : ""}
+      ${q.recommendation ? `<div class="pq-rec">Recommended: ${esc(q.recommendation)}</div>` : ""}
+      <textarea class="pq-a" data-i="${i}" placeholder="Your answer…"></textarea>
+    </div>`
+    )
+    .join("");
+
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>planish — grill</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0d1017;color:#c8ccd4;
+    padding:32px 24px 96px;line-height:1.5;max-width:860px;margin:0 auto;}
+  h1{font-size:18px;color:#e6e9ef;margin-bottom:6px;}
+  .sub{font-size:12px;color:#6b7280;margin-bottom:24px;}
+  .pq{border:1px solid #2e3440;border-radius:8px;padding:16px 18px;margin:14px 0;background:#11151c;}
+  .pq-text{font-size:14px;color:#e6e9ef;font-weight:600;margin-bottom:4px;}
+  .pq-note{font-size:12px;color:#6b7280;margin-bottom:8px;}
+  .pq-rec{font-size:12px;color:#98c379;margin-bottom:10px;}
+  .pq-a{width:100%;min-height:60px;background:#0d1017;border:1px solid #2e3440;border-radius:6px;
+    padding:9px 11px;color:#c8ccd4;font:13px/1.5 system-ui,sans-serif;resize:vertical;outline:none;}
+  .pq-a:focus{border-color:#456a8a;}
+  #bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;
+    padding:12px 24px;display:flex;justify-content:flex-end;z-index:9999;}
+  #submit{background:#16a34a;color:#fff;border:none;border-radius:6px;padding:9px 22px;
+    font-size:13px;font-weight:600;cursor:pointer;}
+  #done{display:none;text-align:center;color:#98c379;font-size:13px;padding:40px;}
+</style></head>
+<body>
+  <h1>A few questions before the plan</h1>
+  <div class="sub">Answer what you can, then click Submit. Blanks are fine — they come back as skipped.</div>
+  <div id="form">${blocks}</div>
+  <div id="done">Answers submitted — you can close this tab.</div>
+  <div id="bar"><button id="submit" onclick="planishGrillSend()">Submit Answers</button></div>
+<script>
+async function planishGrillSend(){
+  const answers=[];
+  document.querySelectorAll('.pq-a').forEach(function(t){answers[parseInt(t.dataset.i)]=t.value.trim();});
+  document.getElementById('form').style.display='none';
+  document.getElementById('bar').style.display='none';
+  document.getElementById('done').style.display='block';
+  await fetch('/grill-respond',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({answers:answers})}).catch(function(){});
+}
+</script>
+</body></html>`;
+}
+
 // ─── HTTP request handler ─────────────────────────────────────────────────────
 
 function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(withToolbar(currentPlanHtml));
+    res.end(currentHtml);
     return;
   }
 
-  if (req.method === "POST" && req.url === "/respond") {
+  if (req.method === "POST" && (req.url === "/respond" || req.url === "/grill-respond")) {
+    const isGrill = req.url === "/grill-respond";
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("OK");
       try {
-        const { action, feedback } = JSON.parse(body) as { action: string; feedback?: string };
-        if (pendingResolve) {
-          pendingResolve({ approved: action === "approve", feedback: feedback ?? "" });
-          pendingResolve = null;
+        const parsed = JSON.parse(body);
+        if (!pendingResolve) return;
+        if (isGrill) {
+          pendingResolve(Array.isArray(parsed.answers) ? parsed.answers : []);
+        } else {
+          pendingResolve({ approved: parsed.action === "approve", feedback: parsed.feedback ?? "" });
         }
+        pendingResolve = null;
       } catch { /* ignore malformed bodies */ }
     });
     return;
@@ -144,7 +229,7 @@ function ensureServer(): Promise<void> {
   });
 }
 
-// ─── Core review ─────────────────────────────────────────────────────────────
+// ─── Core interactions ─────────────────────────────────────────────────────────
 
 async function review(
   filePath: string,
@@ -155,9 +240,21 @@ async function review(
     throw new Error(`plan file not found: ${resolved}`);
   }
   if (pendingResolve) {
-    throw new Error("a plan review is already in progress — wait for it to complete");
+    throw new Error("a planish interaction is already in progress — wait for it to complete");
   }
-  currentPlanHtml = fs.readFileSync(resolved, "utf-8");
+  currentHtml = withToolbar(fs.readFileSync(resolved, "utf-8"));
+  await ensureServer();
+  return new Promise((resolve) => {
+    pendingResolve = resolve;
+    openBrowser();
+  });
+}
+
+async function grill(questions: GrillQuestion[]): Promise<string[]> {
+  if (pendingResolve) {
+    throw new Error("a planish interaction is already in progress — wait for it to complete");
+  }
+  currentHtml = grillFormHtml(questions);
   await ensureServer();
   return new Promise((resolve) => {
     pendingResolve = resolve;
@@ -169,19 +266,89 @@ async function review(
 
 export default function (pi: ExtensionAPI) {
 
-  // ── planish_submit_plan — Pi tool ─────────────────────────────────────────
+  // ── planish_grill — ask a batch of questions before planning ──────────────
+
+  (pi as any).registerTool({
+    name: "planish_grill",
+    label: "Grill Before Planning",
+    description:
+      "Ask the user a batch of questions in the browser BEFORE writing a plan. " +
+      "ALWAYS grill first when planning with planish — resolving the open questions up front " +
+      "sharpens the plan and avoids rework. Batch every question you can ask at once (the user " +
+      "answers them together in one form, which is far faster than one-at-a-time). For each " +
+      "question give the question text, optionally why it matters (note), and your recommended " +
+      "answer (recommendation). The user fills in the form and submits; you get the answers back. " +
+      "If the answers raise new questions, call planish_grill again. Once everything is resolved, " +
+      "write the plan to a .html file and call planish_submit_plan.",
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          description: "The batch of questions to ask the user.",
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "The question to ask." },
+              note: { type: "string", description: "Optional: why this matters / context." },
+              recommendation: { type: "string", description: "Optional: your recommended answer." },
+            },
+            required: ["question"],
+          },
+        },
+      },
+      required: ["questions"],
+    } as any,
+
+    async execute(
+      _id: string,
+      params: { questions?: GrillQuestion[] },
+      _signal: AbortSignal,
+      _onUpdate: unknown,
+      _ctx: any
+    ) {
+      const questions = Array.isArray(params?.questions) ? params!.questions! : [];
+      if (questions.length === 0) {
+        return { content: [{ type: "text", text: "Error: provide at least one question." }] };
+      }
+      try {
+        const answers = await grill(questions);
+        const text = questions
+          .map((q, i) => `Q${i + 1}: ${q.question}\nA: ${answers[i]?.trim() ? answers[i] : "(skipped)"}`)
+          .join("\n\n");
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Grill answers:\n\n${text}\n\n` +
+              "Incorporate these. If they raise new questions, call planish_grill again. " +
+              "Otherwise write the plan to a .html file and call planish_submit_plan.",
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `planish grill error: ${err instanceof Error ? err.message : String(err)}`,
+          }],
+        };
+      }
+    },
+  });
+
+  // ── planish_submit_plan — submit the plan for approval ────────────────────
 
   (pi as any).registerTool({
     name: "planish_submit_plan",
     label: "Submit Plan for Review",
     description:
       "Submit a plan HTML file for human review in the browser. " +
-      "Write your plan to a .html file first — use structured HTML: a title, " +
-      "a summary table of what will be created/changed, dependencies, and any relevant notes. " +
-      "Style with Tailwind CDN (add <script src='https://cdn.tailwindcss.com'></script>). " +
-      "Then call this tool with the file path. " +
-      "The user sees it in the browser and can approve (optionally with a note) " +
-      "or request changes with feedback. " +
+      "Grill the user first with planish_grill — do not write the plan until the open questions are answered. " +
+      "Write your plan to a .html file: a title, a summary table of what will be created/changed, " +
+      "dependencies, and any relevant notes. Style with Tailwind CDN " +
+      "(add <script src='https://cdn.tailwindcss.com'></script>). " +
+      "Then call this tool with the file path. The user sees it in the browser and can approve " +
+      "(optionally with a note) or request changes with feedback. " +
       "If changes are requested: revise the file in place and call this tool again.",
     parameters: {
       type: "object",
