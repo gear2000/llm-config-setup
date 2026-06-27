@@ -577,20 +577,33 @@ def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool) -> c
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.symlink_to(src)
 
-    # prune orphaned / dangling managed links (source renamed or deleted)
+    # prune orphaned / dangling managed links (source renamed or deleted), and
+    # WARN on a real file that shadows a managed extension — Pi loads every dest
+    # dir, so a real file sharing a name with a managed link double-loads and
+    # collides (duplicate command/tool registration). We never auto-delete a real
+    # file; we surface it loud so the human removes the stale copy.
     desired_by_dir: dict[Path, set] = collections.defaultdict(set)
     for dest in plan.desired:
         desired_by_dir[dest.parent].add(dest.name)
+    managed_names = {dest.name for dest in plan.desired}
     for d in plan.dest_dirs:
         if not d.is_dir():
             continue
         for entry in sorted(d.iterdir()):
             if entry.name in desired_by_dir[d]:
                 continue  # wanted — handled above
-            if link_is_ours(entry, family):
-                emit("prune", entry, None)
-                if not plan_only:
-                    entry.unlink()
+            if entry.is_symlink():
+                if link_is_ours(entry, family):
+                    emit("prune", entry, None)
+                    if not plan_only:
+                        entry.unlink()
+            elif entry.name in managed_names:
+                counts["shadow"] += 1
+                print(
+                    f"  [WARN] real file shadows managed '{entry.name}' — Pi double-loads "
+                    f"and collides; remove the stale copy: {entry}",
+                    file=sys.stderr,
+                )
     return counts
 
 
@@ -637,10 +650,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
     for h in harnesses:
         print(f"--- {h} ---")
         total += reconcile(PLAN_BUILDERS[h](root), family, plan_only=args.plan, force=args.force)
-    print(
+    line = (
         f"done. created {total['create']}, repointed {total['repoint']}, "
         f"pruned {total['prune']}, skipped-foreign {total['skip-foreign']}."
     )
+    if total["shadow"]:
+        line += f"  ⚠ {total['shadow']} shadow conflict(s) — remove the [WARN] real files above."
+    print(line)
 
 
 def cmd_unlink(args: argparse.Namespace) -> None:
