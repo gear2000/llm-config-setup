@@ -367,7 +367,7 @@ class Composer:
         if not skills_src.is_dir():
             return
         for skill_dir in sorted(skills_src.iterdir()):
-            if not skill_dir.is_dir():
+            if not skill_dir.is_dir() or skill_dir.name.startswith("."):
                 continue
             dest = self.target / ".claude" / "skills" / skill_dir.name
             print(f"  standalone-skill: {skill_dir.name} -> {dest}")
@@ -488,7 +488,7 @@ def _skill_dirs(root: Path) -> list[Path]:
     skills = root / ".claude/skills"
     if not skills.is_dir():
         return []
-    return [d for d in sorted(skills.iterdir()) if d.is_dir() and d.name != "_archived"]
+    return [d for d in sorted(skills.iterdir()) if d.is_dir() and not d.name.startswith(".") and d.name != "_archived"]
 
 
 def plan_pi(root: Path) -> LinkPlan:
@@ -516,7 +516,7 @@ def plan_pi(root: Path) -> LinkPlan:
     if ext_src.is_dir():
         for entry in sorted(ext_src.iterdir()):
             name = entry.name
-            if name in EXT_SKIP:
+            if name.startswith(".") or name in EXT_SKIP:
                 continue
             if entry.is_dir():
                 desired[agent_ext / name] = entry
