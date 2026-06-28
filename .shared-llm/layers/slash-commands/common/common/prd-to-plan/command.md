@@ -1,6 +1,6 @@
 # PRD to Plan
 
-Break a PRD into a phased implementation plan using vertical slices (tracer bullets). Output is a Markdown file in `./plans/`.
+Break a PRD into a phased implementation plan using vertical slices (tracer bullets). Output is a Markdown file under `work-log/<YYYY-MM-DD>/<slug>/plan/`.
 
 ## Process
 
@@ -52,7 +52,7 @@ Iterate until the user approves the breakdown.
 
 ### 6. Write the plan file
 
-Create `./plans/` if it doesn't exist. Write the plan as a Markdown file named after the feature (e.g. `./plans/user-onboarding.md`). Use the template below.
+Write the plan to `work-log/<YYYY-MM-DD>/<slug>/plan/plan.md` — a work-log-relative path (no leading `./`, no host or server assumptions), where `<slug>` is the slugified feature name and `<YYYY-MM-DD>` is today's date. Create the directory if it doesn't exist. Use the template below.
 
 <plan-template>
 # Plan: <Feature Name>
