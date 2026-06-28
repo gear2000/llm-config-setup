@@ -102,6 +102,100 @@ interface ReviewIssues {
 
 type ReviewResponse = ReviewApproved | ReviewIssues;
 
+// ─── Plan output directory ──────────────────────────────────────────────────────
+//
+// In planish mode the PLAN (plan.md + plan.html) is written into a RESOLVED
+// directory, never the cwd (the .tf implementation files still go to cwd — only
+// the plan moves). Precedence for the directory:
+//   1. --dir <path> passed to /tf:auto
+//   2. $PLANISH_DIR
+//   3. nearest .planish.json walking UP from cwd — its "dir" template
+//   4. fallback: /tmp/planish/{date}/{slug}
+// Template tokens: {date} → YYYY-MM-DD (local), {slug} → slugified topic,
+// {n} → next vN integer (glob the parent dir, max + 1, start at 1). A relative
+// template from .planish.json resolves against the directory holding that file;
+// a relative --dir / $PLANISH_DIR resolves against cwd.
+//
+// NOTE: this resolver is intentionally DUPLICATED (not shared) in planish.ts.
+// Keep the two copies in sync.
+
+function slugifyTopic(topic: string): string {
+  const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "plan";
+}
+
+function todayYmd(): string {
+  const d = new Date();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
+function findConfigUp(startDir: string, filename: string): string | null {
+  let dir = path.resolve(startDir);
+  while (true) {
+    const candidate = path.join(dir, filename);
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// Replace a {n} token in a path segment with the next version integer, found by
+// globbing the parent dir for siblings matching the segment's prefix/suffix.
+function expandVersionToken(absPath: string): string {
+  const parts = absPath.split(path.sep);
+  const idx = parts.findIndex((seg) => seg.includes("{n}"));
+  if (idx === -1) return absPath;
+  const [prefix, suffix] = parts[idx].split("{n}");
+  const parent = parts.slice(0, idx).join(path.sep) || path.sep;
+  let maxN = 0;
+  if (fs.existsSync(parent)) {
+    for (const entry of fs.readdirSync(parent)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) continue;
+      const mid = entry.slice(prefix.length, entry.length - suffix.length);
+      if (/^\d+$/.test(mid)) maxN = Math.max(maxN, parseInt(mid, 10));
+    }
+  }
+  parts[idx] = `${prefix}${maxN + 1}${suffix}`;
+  return parts.join(path.sep);
+}
+
+function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
+  let template: string;
+  let baseDir: string;
+
+  if (dirFlag && dirFlag.trim()) {
+    template = dirFlag.trim();
+    baseDir = cwd;
+  } else if (process.env.PLANISH_DIR && process.env.PLANISH_DIR.trim()) {
+    template = process.env.PLANISH_DIR.trim();
+    baseDir = cwd;
+  } else {
+    const configPath = findConfigUp(cwd, ".planish.json");
+    if (configPath) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      if (typeof parsed?.dir !== "string" || !parsed.dir.trim()) {
+        throw new Error(`${configPath} has no "dir" string field`);
+      }
+      template = parsed.dir.trim();
+      baseDir = path.dirname(configPath);
+    } else {
+      template = "/tmp/planish/{date}/{slug}";
+      baseDir = cwd;
+    }
+  }
+
+  const expanded = template
+    .replace(/\{date\}/g, todayYmd())
+    .replace(/\{slug\}/g, slugifyTopic(topic));
+  const absPath = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
+  const finalDir = expandVersionToken(absPath);
+  fs.mkdirSync(finalDir, { recursive: true });
+  return finalDir;
+}
+
 // ─── Extension entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -110,6 +204,7 @@ export default function (pi: ExtensionAPI) {
   let pendingIssues: string[] = [];
   let planishMode = false;         // /tf:auto with planish planning; clears on completion
   let directMode = false;          // /tf:auto planning directly in the terminal; clears on completion
+  let planDir = "";                // resolved at /tf:auto time (planish); where plan.md + plan.html land
 
   function setupFifos(ctx: any): boolean {
     fs.mkdirSync(PI_DIR, { recursive: true });
@@ -166,7 +261,15 @@ export default function (pi: ExtensionAPI) {
       pendingIssues = [];
 
       const forcePlanish = /(^|\s)--planish(\s|$)/.test(args);
-      const hint = args.replace(/(^|\s)--planish(\s|$)/, " ").trim();
+      let rest = args.replace(/(^|\s)--planish(\s|$)/, " ");
+      // Optional --dir <path> overrides where the plan (plan.md + plan.html) lands.
+      let dirFlag: string | undefined;
+      const dirMatch = rest.match(/(^|\s)--dir\s+(\S+)/);
+      if (dirMatch) {
+        dirFlag = dirMatch[2];
+        rest = rest.replace(/(^|\s)--dir\s+\S+/, " ");
+      }
+      const hint = rest.trim();
 
       let usePlanish: boolean;
       if (forcePlanish) {
@@ -193,9 +296,19 @@ export default function (pi: ExtensionAPI) {
       planishMode = usePlanish;
       directMode = !usePlanish;
 
+      if (usePlanish) {
+        try {
+          planDir = resolvePlanDir(ctx?.cwd ?? process.cwd(), hint, dirFlag);
+        } catch (err) {
+          ctx.ui.notify(`tf:auto: ${err instanceof Error ? err.message : String(err)}`, "error");
+          planishMode = false;
+          return;
+        }
+      }
+
       const subject = hint ? `"${hint}"` : "the Terraform infrastructure you describe";
       const msg = usePlanish
-        ? `tf:auto: planish planning active — Pi will grill you in the browser, write a plan.html for ${subject}, and implement the .tf files after you approve.`
+        ? `tf:auto: planish planning active — Pi will grill you in the browser, write the plan (plan.md + plan.html) to ${planDir} for ${subject}, and implement the .tf files in the working directory after you approve.`
         : `tf:auto: direct planning active — Pi will work out the plan for ${subject} with you here, then implement the .tf files and route them to the reviewer.`;
       ctx.ui.notify(msg, "info");
     },
@@ -238,7 +351,10 @@ export default function (pi: ExtensionAPI) {
         ? `The reviewer found these issues with your previous iteration. Fix them before signalling ready:\n\n${pendingIssues.join("\n")}\n\n`
         : "";
 
+    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in planish.ts and the Claude /do:planish command. Keep in sync. See do:planish.
     if (planishMode) {
+      const planHtml = path.join(planDir, "plan.html");
+      const planMd = path.join(planDir, "plan.md");
       return {
         systemPrompt:
           event.systemPrompt +
@@ -246,8 +362,11 @@ export default function (pi: ExtensionAPI) {
           (pendingIssues.length > 0
             ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
             : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with a batch of clarifying questions about the infrastructure (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question your recommended answer. Use the answers to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
-              "STEP 2 — PLAN: Write a Terraform implementation plan to plan.html. Include a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs. Add <script src='https://cdn.tailwindcss.com'></script> for styling. Then submit it for user review by calling the planish_submit_plan tool.\n\n" +
-              "STEP 3 — IMPLEMENT: Once the plan is approved, write all .tf files to implement it exactly. Follow the approved plan.\n\n" +
+              `STEP 2 — PLAN: Write a Terraform implementation plan to TWO files (the directory already exists):\n` +
+              `  • ${planHtml} — the visual plan: a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs. Add <script src='https://cdn.tailwindcss.com'></script> for styling.\n` +
+              `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
+              `Both files hold the same plan content. Then submit it for user review by calling the planish_submit_plan tool with the path ${planHtml}.\n\n` +
+              "STEP 3 — IMPLEMENT: Once the plan is approved, write all .tf files in the current working directory to implement it exactly. Follow the approved plan.\n\n" +
               "STEP 4 — SIGNAL: When all .tf files are written and ready for review, run:\n  echo TF_REVIEW_READY\n\nDo NOT run terraform init, plan, apply, or destroy — only write .tf files."),
       };
     }
@@ -308,11 +427,11 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
-    // In planish mode, read the approved plan from plan.html in cwd.
+    // In planish mode, read the approved plan from plan.html in the resolved planDir.
     let planForReview = planContent;
     if (planishMode && !planForReview) {
       try {
-        const planFilePath = path.join(cwd, "plan.html");
+        const planFilePath = path.join(planDir, "plan.html");
         if (fs.existsSync(planFilePath)) {
           planForReview = fs.readFileSync(planFilePath, "utf-8");
         }

@@ -57,6 +57,100 @@ function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// ─── Plan output directory ──────────────────────────────────────────────────────
+//
+// planish writes plan.md + plan.html into a RESOLVED directory, never the cwd
+// (writing into the cwd pollutes whatever repo you happen to be planning in).
+// Precedence for the directory:
+//   1. --dir <path> passed to /planish
+//   2. $PLANISH_DIR
+//   3. nearest .planish.json walking UP from cwd — its "dir" template
+//   4. fallback: /tmp/planish/{date}/{slug}
+// Template tokens: {date} → YYYY-MM-DD (local), {slug} → slugified topic,
+// {n} → next vN integer (glob the parent dir, max + 1, start at 1). A relative
+// template from .planish.json resolves against the directory holding that file;
+// a relative --dir / $PLANISH_DIR resolves against cwd.
+//
+// NOTE: this resolver is intentionally DUPLICATED (not shared) in tf-implement.ts.
+// Keep the two copies in sync.
+
+function slugifyTopic(topic: string): string {
+  const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "plan";
+}
+
+function todayYmd(): string {
+  const d = new Date();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
+function findConfigUp(startDir: string, filename: string): string | null {
+  let dir = path.resolve(startDir);
+  while (true) {
+    const candidate = path.join(dir, filename);
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// Replace a {n} token in a path segment with the next version integer, found by
+// globbing the parent dir for siblings matching the segment's prefix/suffix.
+function expandVersionToken(absPath: string): string {
+  const parts = absPath.split(path.sep);
+  const idx = parts.findIndex((seg) => seg.includes("{n}"));
+  if (idx === -1) return absPath;
+  const [prefix, suffix] = parts[idx].split("{n}");
+  const parent = parts.slice(0, idx).join(path.sep) || path.sep;
+  let maxN = 0;
+  if (fs.existsSync(parent)) {
+    for (const entry of fs.readdirSync(parent)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) continue;
+      const mid = entry.slice(prefix.length, entry.length - suffix.length);
+      if (/^\d+$/.test(mid)) maxN = Math.max(maxN, parseInt(mid, 10));
+    }
+  }
+  parts[idx] = `${prefix}${maxN + 1}${suffix}`;
+  return parts.join(path.sep);
+}
+
+function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
+  let template: string;
+  let baseDir: string;
+
+  if (dirFlag && dirFlag.trim()) {
+    template = dirFlag.trim();
+    baseDir = cwd;
+  } else if (process.env.PLANISH_DIR && process.env.PLANISH_DIR.trim()) {
+    template = process.env.PLANISH_DIR.trim();
+    baseDir = cwd;
+  } else {
+    const configPath = findConfigUp(cwd, ".planish.json");
+    if (configPath) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      if (typeof parsed?.dir !== "string" || !parsed.dir.trim()) {
+        throw new Error(`${configPath} has no "dir" string field`);
+      }
+      template = parsed.dir.trim();
+      baseDir = path.dirname(configPath);
+    } else {
+      template = "/tmp/planish/{date}/{slug}";
+      baseDir = cwd;
+    }
+  }
+
+  const expanded = template
+    .replace(/\{date\}/g, todayYmd())
+    .replace(/\{slug\}/g, slugifyTopic(topic));
+  const absPath = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
+  const finalDir = expandVersionToken(absPath);
+  fs.mkdirSync(finalDir, { recursive: true });
+  return finalDir;
+}
+
 // ─── Plan review: toolbar injection ─────────────────────────────────────────────
 //
 // Appended before </body> (or at end if absent). Inline styles only, so it works
@@ -272,17 +366,24 @@ export default function (pi: ExtensionAPI) {
   // grill → build → review flow until the plan is approved.
   let planMode = false;
   let planTopic = "";
+  let planDir = ""; // absolute dir for plan.md + plan.html; resolved at /planish time
 
   pi.on("before_agent_start", async (event: any) => {
     if (!planMode) return;
     const topic = planTopic ? `The user wants to plan: ${planTopic}\n\n` : "";
+    const planHtml = path.join(planDir, "plan.html");
+    const planMd = path.join(planDir, "plan.md");
+    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in tf-implement.ts and the Claude /do:planish command. Keep in sync. See do:planish.
     return {
       systemPrompt:
         event.systemPrompt +
         `\n\n${topic}You are helping the user create a PLAN with planish — produce a plan, not an implementation. Do NOT build or run anything unless the user explicitly asks after the plan is approved.\n\n` +
         "STEP 1 — GRILL: Call the planish_grill tool with a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each one your recommended answer. If the answers raise new questions, call planish_grill again.\n\n" +
-        "STEP 2 — BUILD: Write the plan to plan.html — make it visual: a title, a summary table of the steps/phases with their key details, dependencies/ordering, and the key decisions. Style with Tailwind CDN (add <script src='https://cdn.tailwindcss.com'></script>).\n\n" +
-        "STEP 3 — REVIEW: Call planish_submit_plan with the file path. The user approves or requests changes in the browser; on changes, revise the file and submit again. The approved plan.html is the deliverable.",
+        `STEP 2 — BUILD: Write the plan to TWO files (the directory already exists):\n` +
+        `  • ${planHtml} — the visual plan: a title, a summary table of the steps/phases with their key details, dependencies/ordering, and the key decisions. Style with Tailwind CDN (add <script src='https://cdn.tailwindcss.com'></script>).\n` +
+        `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
+        `Both files hold the same plan content.\n\n` +
+        `STEP 3 — REVIEW: Call planish_submit_plan with the path ${planHtml}. The user approves or requests changes in the browser; on changes, revise both files and submit again. The approved plan is the deliverable.`,
     };
   });
 
@@ -393,7 +494,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Error: filePath is required." }] };
       }
       try {
-        const result = await review(filePath, ctx?.cwd ?? process.cwd());
+        const result = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()));
         if (result.approved) {
           planMode = false; // planning session done
           const note = result.feedback ? ` Human note: ${result.feedback}` : "";
@@ -451,12 +552,28 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Default — kick off a planning session.
+      // Optional --dir <path> overrides where plan.md + plan.html are written; the
+      // remainder is the topic.
+      let dirFlag: string | undefined;
+      let topic = trimmed;
+      const dirMatch = topic.match(/(^|\s)--dir\s+(\S+)/);
+      if (dirMatch) {
+        dirFlag = dirMatch[2];
+        topic = topic.replace(/(^|\s)--dir\s+\S+/, " ").trim();
+      }
+
+      try {
+        planDir = resolvePlanDir(ctx?.cwd ?? process.cwd(), topic, dirFlag);
+      } catch (err) {
+        ctx.ui.notify(`planish: ${err instanceof Error ? err.message : String(err)}`, "error");
+        return;
+      }
       planMode = true;
-      planTopic = trimmed;
+      planTopic = topic;
       ctx.ui.notify(
-        trimmed
-          ? `planish: planning "${trimmed}" — Pi will grill you in the browser, then build a visual plan for your review.`
-          : "planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser, then build a visual plan for review.",
+        topic
+          ? `planish: planning "${topic}" — Pi will grill you in the browser, then build a visual plan in ${planDir} for your review.`
+          : `planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser, then build a visual plan in ${planDir} for review.`,
         "info"
       );
     },
