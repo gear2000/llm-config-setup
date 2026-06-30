@@ -4,16 +4,19 @@
  * Intercepts the agent's bash commands BEFORE they run (the blocking `tool_call`
  * hook) and gates infrastructure tooling — terraform / tofu / aws / kubectl:
  *
- *   - read/create operations (plan, describe, get …)  → run silently (ALLOW)
- *   - destroy operations (destroy, delete, terminate)  → ALWAYS require human
- *     approval via the native confirm dialog            (ASK, deterministic)
- *   - gray-zone updates/replaces (apply, update, put …) → an LLM verifier
- *     (`iac-verifier`, dispatched over the existing ~/.pi socket) decides
- *     ALLOW vs ASK by blast radius
+ *   - read / pure-create operations (plan, describe, get, create …)
+ *       → run silently (ALLOW)
+ *   - destroy / update operations (destroy, delete, update, patch …)
+ *       → ALWAYS require human approval (ASK, deterministic)
+ *   - apply commands (terraform apply, kubectl apply)
+ *       → run the dry-run first (terraform plan / kubectl diff),
+ *         build a table of adds / changes / destroys:
+ *           • adds only   → ALLOW automatically
+ *           • any changes or destroys → show table + require human approval
+ *   - unclassified gray-zone → an LLM verifier decides ALLOW vs ASK
  *
- * Fail-closed: any parse ambiguity, missing UI, or unavailable/timed-out
- * verifier falls back to human approval — the destroy guarantee never depends
- * on the LLM or the socket being up.
+ * Fail-closed: any parse ambiguity, missing UI, dry-run failure, or unavailable/
+ * timed-out verifier falls back to human approval.
  *
  * Auto-loaded (agent-scoped: ~/.pi/agent/extensions/). No `pi -e` needed.
  *
@@ -21,6 +24,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { spawnSync } from "node:child_process";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -30,17 +34,21 @@ import * as crypto from "node:crypto";
 // ─── Config ──────────────────────────────────────────────────────────────────
 const SOCKET_PATH = path.join(os.homedir(), ".pi", "codex-reviewer.sock");
 const VERIFIER_AGENT = "iac-verifier";
-const GRAY_TIMEOUT_MS = 25_000; // gate's max wait for a gray-zone verdict
-const CONFIRM_TIMEOUT_MS = 120_000; // human's window to approve a destructive command
+const GRAY_TIMEOUT_MS = 25_000;
+const CONFIRM_TIMEOUT_MS = 120_000;
+const DRY_RUN_TIMEOUT_MS = 300_000; // 5 min for terraform plan
 const POLL_INTERVAL_MS = 400;
 const DISPATCH_CONNECT_MS = 3_000;
 
-type Tier = "allow" | "ask" | "gray";
+// "plan-check" = run the tool's dry-run first, then decide based on the output.
+// Ranked between gray and ask: if a compound command also has an ASK segment,
+// ASK wins (we go straight to human without the dry-run).
+type Tier = "allow" | "ask" | "gray" | "plan-check";
 interface Decision {
   tier: Tier;
   reason: string;
 }
-const RANK: Record<Tier, number> = { allow: 0, gray: 1, ask: 2 };
+const RANK: Record<Tier, number> = { allow: 0, gray: 1, "plan-check": 1.5, ask: 2 };
 
 // ─── In-scope tools ──────────────────────────────────────────────────────────
 const TERRAFORM = new Set(["terraform", "tofu", "opentofu"]);
@@ -59,21 +67,36 @@ const TF_ALLOW = new Set([
 const TF_ASK = new Set(["destroy", "taint", "untaint", "import", "force-unlock"]);
 
 // ─── POLICY: aws (matched on the operation verb) ─────────────────────────────
-const AWS_ALLOW_PREFIX = /^(describe|list|get|search|lookup|scan|head|wait|test|validate|estimate|preview|generate|simulate)-/;
-const AWS_ASK_PREFIX = /^(delete|terminate|deregister|remove|purge|destroy|revoke)-/;
-const AWS_DOWNTIME_PREFIX = /^(stop|reboot)-/; // reversible but cause downtime → human approval
-const AWS_GRAY_PREFIX = /^(update|modify|put|set|create|attach|associate|disassociate|detach|enable|disable|register|tag|untag|start|restore|import|copy|replace|apply|run|send|publish|reset|rotate|cancel)-/;
+const AWS_ALLOW_PREFIX = /^(describe|list|get|search|lookup|scan|head|wait|test|validate|estimate|preview|generate|simulate|create)-/;
+const AWS_ASK_PREFIX = /^(delete|terminate|deregister|remove|purge|destroy|revoke|update|modify|replace|put|set)-/;
+const AWS_DOWNTIME_PREFIX = /^(stop|reboot)-/;
+// gray: remaining state-change verbs that don't clearly add, update, or delete
+const AWS_GRAY_PREFIX = /^(attach|associate|disassociate|detach|enable|disable|register|tag|untag|start|restore|import|copy|apply|run|send|publish|reset|rotate|cancel)-/;
 const AWS_DESTRUCTIVE_WORD = /(delete|terminate|destroy|remove|purge|deregister)/;
 
 // ─── POLICY: kubectl ─────────────────────────────────────────────────────────
 const KC_ALLOW = new Set([
+  // read-only
   "get", "describe", "logs", "top", "explain", "api-resources",
   "api-versions", "version", "cluster-info", "diff", "wait", "events", "whoami",
+  // pure adds (create a new resource, no in-place mutation of existing ones)
+  "create", "run", "expose",
+  // metadata-only (non-destructive labels/annotations; adding metadata is low-risk)
+  "label", "annotate",
+  // un-restricts capacity (makes nodes available, not destructive)
+  "uncordon",
 ]);
-const KC_ASK = new Set(["delete", "drain", "evict"]);
+const KC_ASK = new Set([
+  // removes resources
+  "delete", "drain", "evict",
+  // in-place mutations of existing resources
+  "patch", "edit", "set",
+  // scheduling policy changes
+  "taint", "cordon",
+]);
+// gray: verbs that may add OR update depending on context (goes to LLM verifier)
 const KC_GRAY = new Set([
-  "apply", "patch", "edit", "set", "scale", "replace", "label",
-  "annotate", "uncordon", "taint", "create", "expose", "run", "autoscale",
+  "scale", "replace", "autoscale",
 ]);
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
@@ -139,7 +162,6 @@ function stripWrappers(seg: string[]): string[] {
     if (ENV_ASSIGN.test(t)) { i++; continue; }
     if (WRAPPERS.has(basename(t))) {
       i++;
-      // skip a wrapper's own flags (and the value of -u/--user, common with sudo)
       while (i < seg.length && seg[i].startsWith("-")) {
         if (seg[i] === "-u" || seg[i] === "--user") i += 2;
         else i++;
@@ -154,7 +176,7 @@ function stripWrappers(seg: string[]): string[] {
 // ─── Per-tool classifiers ────────────────────────────────────────────────────
 function classifyTerraform(args: string[]): Decision {
   let i = 0;
-  while (i < args.length && args[i].startsWith("-")) i++; // global flags (e.g. -chdir=)
+  while (i < args.length && args[i].startsWith("-")) i++;
   const sub = args[i];
   const rest = args.slice(i + 1);
   if (!sub) return { tier: "allow", reason: "terraform (no subcommand — help/usage)" };
@@ -163,7 +185,8 @@ function classifyTerraform(args: string[]): Decision {
   if (TF_ASK.has(sub)) return { tier: "ask", reason: `terraform ${sub} (tears down / forces replacement)` };
   if (sub === "apply") {
     if (hasFlag(args, "-destroy")) return { tier: "ask", reason: "terraform apply -destroy" };
-    return { tier: "gray", reason: "terraform apply (may create, replace, or destroy)" };
+    // Dry-run first: run terraform plan, build table, auto-allow if adds-only.
+    return { tier: "plan-check", reason: "terraform apply — will run plan first to assess changes" };
   }
   if (sub === "refresh") return { tier: "gray", reason: "terraform refresh (mutates state)" };
   if (sub === "state") {
@@ -209,22 +232,21 @@ function classifyAws(args: string[]): Decision {
 
   if (AWS_ALLOW_PREFIX.test(o) || /-status$/.test(o) || o === "help" ||
       (service === "sts" && o === "get-caller-identity"))
-    return { tier: "allow", reason: `aws ${service} ${op} (read-only)` };
+    return { tier: "allow", reason: `aws ${service} ${op} (read-only or pure add)` };
 
   if (o === "schedule-key-deletion") return { tier: "ask", reason: "aws kms schedule-key-deletion" };
   if (service === "cloudformation" && o === "delete-stack")
     return { tier: "ask", reason: "aws cloudformation delete-stack" };
 
-  if (AWS_ASK_PREFIX.test(o)) return { tier: "ask", reason: `aws ${service} ${op} (destructive)` };
+  if (AWS_ASK_PREFIX.test(o)) return { tier: "ask", reason: `aws ${service} ${op} (destructive or in-place update)` };
   if (AWS_DOWNTIME_PREFIX.test(o)) return { tier: "ask", reason: `aws ${service} ${op} (causes downtime)` };
 
   if (service === "cloudformation" &&
-      (o === "update-stack" || o === "deploy" || o === "execute-change-set" || o === "create-change-set"))
+      (o === "deploy" || o === "execute-change-set" || o === "create-change-set"))
     return { tier: "gray", reason: `aws cloudformation ${op} (may replace/delete resources)` };
 
   if (AWS_GRAY_PREFIX.test(o)) return { tier: "gray", reason: `aws ${service} ${op} (state change — verify blast radius)` };
 
-  // unknown operation that still names a destructive verb → fail closed
   if (AWS_DESTRUCTIVE_WORD.test(o)) return { tier: "ask", reason: `aws ${service} ${op} (names a destructive verb)` };
 
   return { tier: "gray", reason: `aws ${service} ${op} (unclassified — verify)` };
@@ -235,7 +257,7 @@ function classifyKubectl(args: string[]): Decision {
   const verb = positionals[0];
   if (!verb) return { tier: "allow", reason: "kubectl (no verb — help/usage)" };
 
-  if (KC_ALLOW.has(verb)) return { tier: "allow", reason: `kubectl ${verb} (read-only)` };
+  if (KC_ALLOW.has(verb)) return { tier: "allow", reason: `kubectl ${verb} (read-only or pure add)` };
   if (verb === "config") return positionals[1] === "view"
     ? { tier: "allow", reason: "kubectl config view" }
     : { tier: "gray", reason: `kubectl config ${positionals[1] ?? "?"}` };
@@ -243,20 +265,23 @@ function classifyKubectl(args: string[]): Decision {
 
   if (verb === "delete")
     return { tier: "ask", reason: `kubectl delete${hasFlag(args, "--all") ? " --all" : ""} (removes resources)` };
-  if (KC_ASK.has(verb)) return { tier: "ask", reason: `kubectl ${verb} (evicts workloads)` };
+  if (KC_ASK.has(verb)) return { tier: "ask", reason: `kubectl ${verb} (in-place mutation or eviction)` };
+
   if (verb === "replace")
     return hasFlag(args, "--force")
       ? { tier: "ask", reason: "kubectl replace --force (delete + recreate)" }
-      : { tier: "gray", reason: "kubectl replace" };
+      : { tier: "ask", reason: "kubectl replace (replaces existing resource)" };
+
   if (verb === "scale")
     return flagValue(args, "--replicas") === "0"
       ? { tier: "ask", reason: "kubectl scale --replicas=0 (stops workload)" }
-      : { tier: "gray", reason: "kubectl scale" };
+      : { tier: "gray", reason: "kubectl scale (verify: scaling down may drop capacity)" };
+
   if (verb === "apply")
     return hasFlag(args, "--prune")
       ? { tier: "ask", reason: "kubectl apply --prune (deletes resources absent from config)" }
-      : { tier: "gray", reason: "kubectl apply (may update or replace)" };
-  if (verb === "cordon") return { tier: "ask", reason: "kubectl cordon (marks node unschedulable)" };
+      : { tier: "plan-check", reason: "kubectl apply — will run diff first to assess changes" };
+
   if (verb === "rollout") {
     const op = positionals[1];
     if (op === "restart" || op === "undo" || op === "pause")
@@ -265,7 +290,8 @@ function classifyKubectl(args: string[]): Decision {
       return { tier: "allow", reason: `kubectl rollout ${op} (read-only)` };
     return { tier: "gray", reason: `kubectl rollout ${op ?? "?"}` };
   }
-  if (KC_GRAY.has(verb)) return { tier: "gray", reason: `kubectl ${verb} (state change — verify)` };
+
+  if (KC_GRAY.has(verb)) return { tier: "gray", reason: `kubectl ${verb} (verify: may update or replace)` };
   return { tier: "gray", reason: `kubectl ${verb} (unrecognized — verify)` };
 }
 
@@ -298,6 +324,123 @@ export function classifyCommand(command: string): Decision {
   return worst;
 }
 
+// ─── Dry-run (plan-check tier) ───────────────────────────────────────────────
+interface PlanCheckResult {
+  tier: "allow" | "ask";
+  reason: string; // used as the confirm-dialog message when tier === "ask"
+}
+
+function fmtTable(adds: number, changes: number, destroys: number): string {
+  const rows = [
+    `  + ${adds.toString().padStart(3)}  to add`,
+    `  ~ ${changes.toString().padStart(3)}  to change${changes > 0 ? "  ← review required" : ""}`,
+    `  - ${destroys.toString().padStart(3)}  to destroy${destroys > 0 ? "  ← review required" : ""}`,
+  ];
+  return rows.join("\n");
+}
+
+function terraformPlanCheck(bin: string, applyArgs: string[]): PlanCheckResult {
+  // Rebuild the plan command from the apply args:
+  // - swap "apply" for "plan"
+  // - drop any -out=<file> (not needed for review)
+  // - add -no-color for clean parsing
+  const planArgs: string[] = [];
+  for (const a of applyArgs) {
+    if (a === "apply") planArgs.push("plan");
+    else if (a.startsWith("-out=") || a.startsWith("--out=")) continue;
+    else planArgs.push(a);
+  }
+  planArgs.push("-no-color");
+
+  const r = spawnSync(bin, planArgs, {
+    encoding: "utf-8",
+    timeout: DRY_RUN_TIMEOUT_MS,
+    env: process.env,
+    input: "",
+  });
+
+  if (r.error) {
+    return { tier: "ask", reason: `plan failed (${r.error.message}) — cannot auto-assess` };
+  }
+
+  const out = (r.stdout ?? "") + (r.stderr ?? "");
+
+  if (/no changes/i.test(out)) {
+    return { tier: "allow", reason: "terraform plan: no changes" };
+  }
+
+  const m = out.match(/Plan:\s*(\d+)\s*to add[^,]*,\s*(\d+)\s*to change[^,]*,\s*(\d+)\s*to destroy/i);
+  if (!m) {
+    return { tier: "ask", reason: `terraform plan output unparseable — failing closed\n\n${out.slice(0, 800)}` };
+  }
+
+  const adds = parseInt(m[1]);
+  const changes = parseInt(m[2]);
+  const destroys = parseInt(m[3]);
+
+  if (changes === 0 && destroys === 0) {
+    return { tier: "allow", reason: `terraform plan: ${adds} to add, no changes or destroys` };
+  }
+
+  return {
+    tier: "ask",
+    reason: `terraform plan — changes detected:\n\n${fmtTable(adds, changes, destroys)}\n\nRun terraform apply?`,
+  };
+}
+
+function kubectlDiffCheck(applyArgs: string[]): PlanCheckResult {
+  // Swap "apply" for "diff"; keep all other flags (-f, --filename, -n, etc.)
+  const diffArgs = applyArgs.map((a) => (a === "apply" ? "diff" : a));
+
+  const r = spawnSync("kubectl", diffArgs, {
+    encoding: "utf-8",
+    timeout: 60_000,
+    env: process.env,
+  });
+
+  if (r.error) {
+    return { tier: "ask", reason: `kubectl diff failed (${r.error.message}) — failing closed` };
+  }
+
+  // kubectl diff exits 0 = no differences, 1 = differences found, 2+ = error
+  if ((r.status ?? 0) >= 2) {
+    return { tier: "ask", reason: `kubectl diff error — failing closed\n\n${(r.stderr ?? "").slice(0, 400)}` };
+  }
+  if ((r.status ?? 0) === 0) {
+    return { tier: "allow", reason: "kubectl diff: no changes" };
+  }
+
+  const out = r.stdout ?? "";
+  // A line starting with "-" (not "---") means an existing value is being removed or replaced.
+  const hasUpdates = out.split("\n").some((l) => l.startsWith("-") && !l.startsWith("---"));
+
+  if (!hasUpdates) {
+    return { tier: "allow", reason: "kubectl diff: additions only — no existing resources modified" };
+  }
+
+  // Count distinct resources changing (rough: count "---" diff-header separators)
+  const resourceCount = (out.match(/^---/gm) ?? []).length;
+  return {
+    tier: "ask",
+    reason: `kubectl diff — changes detected in ${resourceCount || "some"} resource(s):\n\n` +
+      out.slice(0, 800) + (out.length > 800 ? "\n…(truncated)" : "") +
+      "\n\nRun kubectl apply?",
+  };
+}
+
+/** Dispatch the right dry-run for a plan-check command and return the verdict. */
+function runPlanCheck(command: string, classifierReason: string): PlanCheckResult {
+  for (const rawSeg of segments(tokenize(command))) {
+    const seg = stripWrappers(rawSeg);
+    if (seg.length === 0) continue;
+    const bin = basename(seg[0]);
+    const args = seg.slice(1);
+    if (TERRAFORM.has(bin)) return terraformPlanCheck(bin, args);
+    if (bin === "kubectl") return kubectlDiffCheck(args);
+  }
+  return { tier: "ask", reason: classifierReason };
+}
+
 // ─── Gray-zone verifier dispatch (reuses the codex-reviewer-hub socket) ──────
 interface Verdict { decision: "allow" | "ask"; summary: string; }
 
@@ -306,8 +449,8 @@ function buildHandoff(command: string, classifierReason: string, output: string)
     "# IaC command — approval verdict request",
     "",
     "A coding agent is about to run the infrastructure command below. It was classified as",
-    "**gray zone**: an apply/update/modify/put that may or may not destroy or replace existing",
-    "resources. Decide whether it is safe to run automatically (ALLOW) or a human must approve it (ASK).",
+    "**gray zone**: an operation that may or may not destroy or replace existing resources.",
+    "Decide whether it is safe to run automatically (ALLOW) or a human must approve it (ASK).",
     "",
     "## Command",
     "```",
@@ -319,9 +462,9 @@ function buildHandoff(command: string, classifierReason: string, output: string)
     "",
     "## How to decide",
     "- ALLOW only if you are confident the command cannot delete, destroy, or replace existing",
-    "  infrastructure or data (e.g. a pure create/tag/describe, or an in-place update with no replacement).",
-    "- ASK if it could destroy/replace resources, cause downtime, or you cannot tell from the command",
-    "  alone. When in doubt, ASK.",
+    "  infrastructure or data (e.g. a pure add with no in-place mutation).",
+    "- ASK if it could update/replace/destroy resources, cause downtime, or you cannot tell.",
+    "  When in doubt, ASK.",
     "",
     "## Output",
     `Write your verdict to \`${output}\` using EXACTLY this format and nothing else:`,
@@ -407,12 +550,12 @@ async function requestVerdict(command: string, classifierReason: string): Promis
 // ─── Human approval + audit ──────────────────────────────────────────────────
 async function confirmHuman(ctx: any, command: string, reason: string): Promise<boolean> {
   const confirm = ctx?.ui?.confirm;
-  if (typeof confirm !== "function") return false; // no UI to approve → fail closed (block)
+  if (typeof confirm !== "function") return false;
   const message = [reason, "", command, "", "Allow this command to run?"].join("\n");
   try {
     return await confirm.call(ctx.ui, "⚠ iac-guard — approval required", message, { timeout: CONFIRM_TIMEOUT_MS });
   } catch {
-    return false; // dialog failed → fail closed
+    return false;
   }
 }
 
@@ -434,11 +577,20 @@ export default function (pi: ExtensionAPI) {
 
     let reason = decision.reason;
 
-    if (decision.tier === "gray") {
+    if (decision.tier === "plan-check") {
+      // Run the dry-run (terraform plan / kubectl diff) synchronously, build table.
+      const result = runPlanCheck(command, decision.reason);
+      if (result.tier === "allow") {
+        audit(pi, command, "allow", `plan-check→ ALLOW (${result.reason})`);
+        return; // adds only — safe to run
+      }
+      reason = result.reason; // table summary for the confirm dialog
+      // Fall through to confirmHuman with the table as the reason.
+    } else if (decision.tier === "gray") {
       const verdict = await requestVerdict(command, decision.reason).catch(() => null);
       if (verdict?.decision === "allow") {
         audit(pi, command, "allow", `gray→verifier ALLOW (${verdict.summary})`);
-        return; // verifier cleared it
+        return;
       }
       reason = verdict
         ? `verifier requires approval — ${verdict.summary}`
@@ -451,6 +603,6 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason: `iac-guard: blocked — ${reason}` };
     }
     audit(pi, command, "approved", reason);
-    return; // human approved → run
+    return;
   });
 }
