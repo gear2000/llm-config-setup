@@ -156,6 +156,38 @@ Then run `task compose:all` (or `llm-compose`) to generate your output files.
 
     To produce a `CLAUDE.md` for one of your **real** packages/services, copy a leaf layer + its recipe (group F above) and point the new recipe's `output:` at the real path (e.g. `src/packages/<name>/CLAUDE.md`).
 
+---
+
+## I — Pi planning output directory (optional)
+
+The Pi `/planish` command writes a `plan.md` + `plan.html` pair somewhere. Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work.
+
+Put a `.planish.yaml` at your repo root (or any ancestor directory) to control where plans land:
+
+```yaml
+# .planish.yaml — controls where /planish writes plan.md + plan.html
+dir: docs/plans/{date}/{slug}/v{n}
+```
+
+**`dir` is the only field.** The path resolves relative to the directory that holds `.planish.yaml`. Pi walks upward from cwd to find it, so one file at the repo root covers everything inside.
+
+**Available tokens:**
+
+| Token | Value |
+|---|---|
+| `{date}` | Today's date — `YYYY-MM-DD` |
+| `{slug}` | Your topic, lowercased and hyphenated |
+| `{n}` | Next version integer — auto-incremented by scanning siblings |
+
+**Example outputs** for `dir: ops/mkdocs/docs/work-log/{date}/{slug}/plan` and topic `"redesign auth flow"`:
+
+```
+ops/mkdocs/docs/work-log/2026-06-29/redesign-auth-flow/plan/plan.md
+ops/mkdocs/docs/work-log/2026-06-29/redesign-auth-flow/plan/plan.html
+```
+
+You can override the config file for a single run with `--dir <path>` passed to `/planish`, or by setting `$PLANISH_DIR`.
+
 28. **Review outputs** — open the generated `CLAUDE.md`, `AGENTS.md`, and skill files at the repo root. Read them as an LLM would. Adjust the layer prose until the generated content reads naturally and accurately describes your project, then recompose.
 
 29. **Commit the generated files** — your consumer repo should commit the generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files. They are the deliverables and they sit at the locations each harness reads. (This kit, by contrast, gitignores its own `examples/` staging because it composes itself only to test the engine — it keeps a hand-maintained `CLAUDE.md` of its own.)
