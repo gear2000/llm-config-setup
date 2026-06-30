@@ -64,15 +64,52 @@ function esc(s: string): string {
 // Precedence for the directory:
 //   1. --dir <path> passed to /planish
 //   2. $PLANISH_DIR
-//   3. nearest .planish.json walking UP from cwd — its "dir" template
+//   3. nearest .planish.yaml walking UP from cwd — its "dir" template
 //   4. fallback: /tmp/planish/{date}/{slug}
 // Template tokens: {date} → YYYY-MM-DD (local), {slug} → slugified topic,
+// {type} → "plan" (hardcoded for the Pi planish extension),
 // {n} → next vN integer (glob the parent dir, max + 1, start at 1). A relative
-// template from .planish.json resolves against the directory holding that file;
+// template from .planish.yaml resolves against the directory holding that file;
 // a relative --dir / $PLANISH_DIR resolves against cwd.
 //
 // NOTE: this resolver is intentionally DUPLICATED (not shared) in tf-implement.ts.
 // Keep the two copies in sync.
+
+// Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
+// level of nested key: value blocks. Handles strings, integers, and booleans.
+function parseSimpleYaml(content: string): Record<string, any> {
+  const result: Record<string, any> = {};
+  let nested: Record<string, any> | null = null;
+  for (const raw of content.split("\n")) {
+    const line = raw.replace(/#.*$/, ""); // strip inline comments
+    if (!line.trim()) continue;
+    const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim();
+    const rest = line.slice(colon + 1).trim();
+    if (indent === 0) {
+      if (rest === "") {
+        nested = {};
+        result[key] = nested;
+      } else {
+        nested = null;
+        result[key] = parseYamlScalar(rest);
+      }
+    } else if (nested !== null) {
+      nested[key] = parseYamlScalar(rest);
+    }
+  }
+  return result;
+}
+
+function parseYamlScalar(v: string): string | number | boolean {
+  if (v === "true") return true;
+  if (v === "false") return false;
+  const n = Number(v);
+  if (!isNaN(n) && v.trim() !== "") return n;
+  return v.replace(/^["']|["']$/g, "");
+}
 
 function slugifyTopic(topic: string): string {
   const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -128,9 +165,9 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
     template = process.env.PLANISH_DIR.trim();
     baseDir = cwd;
   } else {
-    const configPath = findConfigUp(cwd, ".planish.json");
+    const configPath = findConfigUp(cwd, ".planish.yaml");
     if (configPath) {
-      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const parsed = parseSimpleYaml(fs.readFileSync(configPath, "utf-8"));
       if (typeof parsed?.dir !== "string" || !parsed.dir.trim()) {
         throw new Error(`${configPath} has no "dir" string field`);
       }
@@ -144,7 +181,8 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
 
   const expanded = template
     .replace(/\{date\}/g, todayYmd())
-    .replace(/\{slug\}/g, slugifyTopic(topic));
+    .replace(/\{slug\}/g, slugifyTopic(topic))
+    .replace(/\{type\}/g, "plan");
   const absPath = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
   const finalDir = expandVersionToken(absPath);
   fs.mkdirSync(finalDir, { recursive: true });
