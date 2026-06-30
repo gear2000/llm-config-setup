@@ -1,0 +1,6 @@
+type: skill
+name: do-planish
+description: .shared-llm/layers/slash-commands/common/common/do:planish/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/do:planish/command.md
+output: .claude/skills/do:planish/SKILL.md

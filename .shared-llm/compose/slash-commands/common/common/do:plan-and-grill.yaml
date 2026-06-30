@@ -1,0 +1,6 @@
+type: skill
+name: do-plan-and-grill
+description: .shared-llm/layers/slash-commands/common/common/do:plan-and-grill/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/do:plan-and-grill/command.md
+output: .claude/skills/do:plan-and-grill/SKILL.md
