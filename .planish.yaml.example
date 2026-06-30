@@ -1,0 +1,25 @@
+# .planish.yaml — Pi /planish output directory config
+#
+# Pi walks UP from cwd to find this file. Put it at your repo root so one
+# file covers the whole project. Copy and rename to .planish.yaml to activate.
+#
+# Only one field: dir — a path template for where plan.md + plan.html land.
+# Relative paths resolve from the directory holding this file (repo root).
+#
+# Tokens:
+#   {date}  — today's date, YYYY-MM-DD
+#   {slug}  — your /planish topic, lowercased and hyphenated
+#   {n}     — next version integer, auto-incremented by scanning siblings
+#
+# One-time override: /planish --dir <path>   or   $PLANISH_DIR=<path>
+
+# ── Common layouts — pick one and rename this file to .planish.yaml ──────────
+
+# Plans in a dated work-log (e.g. mkdocs docs tree):
+dir: docs/work-log/{date}/{slug}/plan
+
+# Plans in a flat plans/ folder, versioned:
+# dir: plans/{slug}/v{n}
+
+# Plans in a temp area (same as the built-in default):
+# dir: /tmp/planish/{date}/{slug}
