@@ -250,6 +250,7 @@ Common size-downgrade triggers (`big` → `small`): "just a config tweak", "sing
 - Per-phase `reviewer:` annotation present where adversarial review was decided.
 - Per-phase `deploy` / `live` required-flag intent present so `rphase:create` can emit correct gates.
 - **If `--route-phases`**: instruct the writer explicitly: "Every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch." A plan missing any size tag is incomplete.
+<!-- # dup 2 (plan-html-style) — canonical in common/common/do:planish/command.md -->
 - **`plan.html`**: render the executive summary + phases in the project dark style (the v3.html `<style>` block if present, else the `/design-doc` default), use the flow/box visual vocabulary for phase sequencing where it helps, and paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim before `</body>`. `<title>` = `<Title> — plan v<N>`. Downstream tooling reads `plan.md` only — `plan.html` is never parsed by `rphase:create` or `do:implement`.
 
 Only `plan.md` is the source of truth for execution. If the user later annotates `plan.html` and pastes feedback, treat it as a new grill round → bump to `v<N+1>` and re-finalize both outputs.

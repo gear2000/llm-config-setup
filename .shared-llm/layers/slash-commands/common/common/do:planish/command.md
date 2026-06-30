@@ -81,6 +81,7 @@ If the work-log server isn't reachable at http://localhost:8089 (start it with `
 - Per-phase detail blocks below the summary.
 - **Dropped vs plan-and-grill** (this is the light path): NO `--route-phases` `**Size**:` tags, NO required `## Team` section, NO mandatory `decisions.md` entry. Include a `## Team` section only if the grill settled a specific roster; otherwise omit it and let `/do:implement` infer a worker from the change scope (as `/do:oneshot` does).
 
+<!-- # ref 2 (plan-html-style) — duplicated in: do:plan-and-grill/command.md, do:oneshot/command.md, this_repo/claude/do:planish/command.md -->
 `plan.html` requirements (give these to the plan-writer verbatim):
 - Render the executive summary + phases in the project dark style — the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, otherwise the default style block from the `/design-doc` skill. Use the flow/box visual vocabulary for phase sequencing where it helps.
 - Paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>`.

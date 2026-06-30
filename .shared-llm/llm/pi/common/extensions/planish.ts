@@ -199,23 +199,25 @@ function withToolbar(html: string): string {
 <style>
   #planish-bar {
     position: fixed; bottom: 0; left: 0; right: 0;
-    background: #fff; border-top: 1px solid #e5e7eb;
+    background: #0d1017; border-top: 1px solid #1e222a;
     padding: 12px 16px; display: flex; gap: 12px; align-items: flex-start;
-    z-index: 9999; box-shadow: 0 -2px 8px rgba(0,0,0,.08);
-    font-family: system-ui, -apple-system, sans-serif;
+    z-index: 9999; box-shadow: 0 -2px 8px rgba(0,0,0,.4);
+    font-family: 'JetBrains Mono', monospace;
   }
   body { padding-bottom: 96px !important; }
   #planish-fb {
-    flex: 1; border: 1px solid #d1d5db; border-radius: 6px;
-    padding: 8px 10px; font-size: 13px; resize: none; font-family: inherit;
+    flex: 1; border: 1px solid #2e3440; border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; resize: none; font-family: inherit;
+    background: #0b0e14; color: #c8ccd4;
   }
-  #planish-fb.error { border-color: #ef4444; }
+  #planish-fb.error { border-color: #e06c75; }
   .pbtn {
-    padding: 8px 18px; border-radius: 6px; font-size: 13px;
+    padding: 7px 16px; border-radius: 6px; font-size: 12px;
     font-weight: 500; cursor: pointer; border: none; white-space: nowrap;
+    font-family: inherit;
   }
-  .pbtn-ok  { background: #16a34a; color: #fff; }
-  .pbtn-chg { background: #d97706; color: #fff; }
+  .pbtn-ok  { background: #0f2d17; color: #98c379; border: 1px solid #3a5a2a; }
+  .pbtn-chg { background: #1a1208; color: #d19a66; border: 1px solid #5a4226; }
 </style>
 <div id="planish-bar">
   <textarea id="planish-fb" placeholder="Feedback (optional for approval, required for changes)…" rows="2"></textarea>
@@ -285,7 +287,7 @@ function grillFormHtml(questions: GrillQuestion[]): string {
   .pq-note{font-size:12px;color:#6b7280;margin-bottom:8px;}
   .pq-rec{font-size:12px;color:#98c379;margin-bottom:10px;}
   .pq-a{width:100%;min-height:60px;background:#0d1017;border:1px solid #2e3440;border-radius:6px;
-    padding:9px 11px;color:#c8ccd4;font:13px/1.5 system-ui,sans-serif;resize:vertical;outline:none;}
+    padding:9px 11px;color:#c8ccd4;font:12px/1.5 'JetBrains Mono',monospace;resize:vertical;outline:none;}
   .pq-a:focus{border-color:#456a8a;}
   #bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;
     padding:12px 24px;display:flex;justify-content:flex-end;z-index:9999;}
@@ -418,7 +420,31 @@ export default function (pi: ExtensionAPI) {
         `\n\n${topic}You are helping the user create a PLAN with planish — produce a plan, not an implementation. Do NOT build or run anything unless the user explicitly asks after the plan is approved.\n\n` +
         "STEP 1 — GRILL: Call the planish_grill tool with a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each one your recommended answer. If the answers raise new questions, call planish_grill again.\n\n" +
         `STEP 2 — BUILD: Write the plan to TWO files (the directory already exists):\n` +
-        `  • ${planHtml} — the visual plan: a title, a summary table of the steps/phases with their key details, dependencies/ordering, and the key decisions. Style with Tailwind CDN (add <script src='https://cdn.tailwindcss.com'></script>).\n` +
+        // # ref 1 (plan-html-style) — also duplicated in: planish_submit_plan description below, tf-implement.ts STEP 2
+        `  • ${planHtml} — the visual plan: a title, a summary of phases, key decisions, and verification steps.\n` +
+        `    Use the v3 dark style (NO Tailwind CDN). Include in <head>:\n` +
+        `    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">\n` +
+        `    <style>\n` +
+        `      *{box-sizing:border-box;margin:0;padding:0;}\n` +
+        `      body{font-family:'JetBrains Mono',monospace;background:#0d1017;color:#c8ccd4;padding:40px;max-width:1040px;line-height:1.5;}\n` +
+        `      h1{font-family:'IBM Plex Sans',sans-serif;font-size:22px;font-weight:600;color:#e6e9ef;letter-spacing:-0.3px;margin-bottom:6px;}\n` +
+        `      .subtitle{font-size:11px;color:#545862;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid #1e222a;}\n` +
+        `      h2{font-family:'IBM Plex Sans',sans-serif;font-size:14px;font-weight:500;color:#e6e9ef;margin:32px 0 14px;padding-bottom:8px;border-bottom:1px solid #1e222a;}\n` +
+        `      .card{border:1px solid #1e222a;border-radius:10px;padding:18px 22px;background:#0f1219;margin-bottom:16px;}\n` +
+        `      .card.amber{border-left:3px solid #d19a66;background:#15120d;}\n` +
+        `      .card.blue{border-left:3px solid #7ab4db;background:#0d1320;}\n` +
+        `      .card.green{border-left:3px solid #7aa87a;background:#0f1f14;}\n` +
+        `      .card.red{border-left:3px solid #e06c75;background:#1c1012;}\n` +
+        `      .phase-num{font-size:10px;font-weight:600;color:#545862;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;}\n` +
+        `      .phase-title{font-size:13px;font-weight:500;color:#e6e9ef;margin-bottom:10px;}\n` +
+        `      ul{list-style:none;padding:0;}\n` +
+        `      li{font-size:11px;color:#a0a4ac;line-height:2;padding-left:12px;position:relative;}\n` +
+        `      li::before{content:'·';color:#d19a66;position:absolute;left:0;}\n` +
+        `      code{background:#1a1f29;color:#7ab4db;border-radius:3px;padding:1px 5px;font-size:11px;}\n` +
+        `      .chip{font-size:10px;padding:2px 8px;border-radius:9999px;border:1px solid #2a2e38;background:#13141a;color:#a0a4ac;display:inline-block;margin-left:6px;}\n` +
+        `      .chip.green{border-color:#3a5a2a;color:#98c379;} .chip.amber{border-color:#5a4226;color:#d19a66;}\n` +
+        `    </style>\n` +
+        `    Structure: page header (h1 + .subtitle), then h2 sections per phase with .card divs (.phase-num, .phase-title, task bullets, a Verification bullet at end).\n` +
         `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
         `Both files hold the same plan content.\n\n` +
         `STEP 3 — REVIEW: Call planish_submit_plan with the path ${planHtml}. The user approves or requests changes in the browser; on changes, revise both files and submit again. The approved plan is the deliverable.`,
@@ -503,9 +529,10 @@ export default function (pi: ExtensionAPI) {
     description:
       "Submit a plan HTML file for human review in the browser. " +
       "Grill the user first with planish_grill — do not write the plan until the open questions are answered. " +
-      "Write your plan to a .html file: a title, a summary table of what will be created/changed, " +
-      "dependencies, and any relevant notes. Style with Tailwind CDN " +
-      "(add <script src='https://cdn.tailwindcss.com'></script>). " +
+      // # dup 1 (plan-html-style)
+      "Write your plan to a .html file: a title, a summary of phases, key decisions, and verification steps. " +
+      "Use the v3 dark style (NO Tailwind CDN) — body background #0d1017, JetBrains Mono + IBM Plex Sans fonts, " +
+      ".card divs with colored left-border accents for each phase. " +
       "Then call this tool with the file path. The user sees it in the browser and can approve " +
       "(optionally with a note) or request changes with feedback. " +
       "If changes are requested: revise the file in place and call this tool again.",
