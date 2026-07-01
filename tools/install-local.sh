@@ -59,6 +59,7 @@ done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE="$REPO_ROOT/tools/harness.py"
+PYTHON_BIN="${PYTHON_BIN:-python3.14}"
 INSTALL_GLOBAL="$REPO_ROOT/tools/install-global.sh"
 WRAPPER_SRC="$REPO_ROOT/tools/templates/llm-compose"
 
@@ -80,7 +81,7 @@ HOME_AGENT_DIRS=(
 BIN_DIR="$HOME/.local/bin"
 WRAPPER_DST="$BIN_DIR/llm-compose"
 
-command -v python3 >/dev/null 2>&1 || { echo "error: python3 not on PATH" >&2; exit 1; }
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || { echo "error: $PYTHON_BIN not on PATH (set PYTHON_BIN=/path/to/python3.14)" >&2; exit 1; }
 [[ -f "$COMPOSE" ]] || { echo "error: compose engine not found: $COMPOSE" >&2; exit 1; }
 [[ -x "$INSTALL_GLOBAL" ]] || { echo "error: install-global.sh not found/executable: $INSTALL_GLOBAL" >&2; exit 1; }
 [[ -f "$WRAPPER_SRC" ]] || { echo "error: wrapper template not found: $WRAPPER_SRC" >&2; exit 1; }
@@ -108,7 +109,7 @@ echo ">>> [2/5] Generic agents -> ${HOME_AGENT_DIRS[*]}"
 agent_recipes=("$AGENT_RECIPE_DIR"/*.yaml)
 [[ -e "${agent_recipes[0]}" ]] || { echo "error: no agent recipes in $AGENT_RECIPE_DIR" >&2; exit 1; }
 for recipe in "${agent_recipes[@]}"; do
-  python3 "$COMPOSE" compose "$recipe" --target "$AGENT_STAGING_BASE" >/dev/null
+  "$PYTHON_BIN" "$COMPOSE" compose "$recipe" --target "$AGENT_STAGING_BASE" >/dev/null
 done
 
 agents_installed=0; agents_uptodate=0; agents_skipped=0
@@ -145,7 +146,7 @@ echo
 echo ">>> [3/5] Pi runtime (harness.py sync + settings + third-party extensions)"
 
 # (a) symlink wiring: create missing links, re-point drifted ones, prune orphans.
-python3 "$COMPOSE" sync
+"$PYTHON_BIN" "$COMPOSE" sync
 
 # (b) settings: scaffold from the template only when absent (never clobber the live copy).
 SETTINGS_TEMPLATE="$REPO_ROOT/.shared-llm/llm/pi/common/settings.template.json"
@@ -250,14 +251,13 @@ cat <<EOF
 ==============================================================
 INSTALLED (general / home, all-projects):
   - skills      : python, nextjs, backend, golang
-                  + slash-command skills (do-planish, do-research, do-plan-and-grill,
-                    qa, security, prd-to-plan, fail-loud, grill-me, playwright-cli,
-                    response, hub-connect, meta-auto-run, run-phase, run_phase,
-                    codex-delegate)
-                  -> ~/.claude/skills, ~/.codex/skills, ~/.pi/skills
-                  (these skill dirs ARE the typeable commands: /qa, /do-planish, …
-                   — Claude Code merged commands into skills, so no separate
-                   ~/.claude/commands/ step is needed)
+                  + routed slash-command skills:
+                    Pi standalone planner -> /planish TypeScript extension
+                    Pi workflow suite     -> /do-research, /do-plan-and-grill,
+                                            /do-oneshot, /do-implement, /do-loop, /do-full
+                    Claude workflow suite -> matching cc-* commands
+                    Removed standalone skill variants: /do-planish and /cc-planish
+                  -> ~/.claude/skills, ~/.codex/skills, ~/.pi/agent/skills
   - agents      : $(ls -1 "$AGENT_STAGING" | wc -l | tr -d ' ') generic personas
                   -> ~/.claude/agents, ~/.pi/agents
                   ($agents_installed copied, $agents_uptodate current, $agents_skipped skipped)

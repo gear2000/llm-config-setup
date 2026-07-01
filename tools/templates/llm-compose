@@ -17,6 +17,8 @@
 # Once found, the engine is <root>/../tools/harness.py (the repo that owns
 # the .shared-llm dir). Fails loud if either the root or the engine is missing.
 #
+# Set PYTHON_BIN to override the interpreter; defaults to python3.14.
+#
 # Usage (from inside a repo that has a .shared-llm/ tree):
 #   llm-compose                                   # compose all recipes
 #   llm-compose .shared-llm/compose/claude-md/root.yaml   # compose one
@@ -51,6 +53,7 @@ find_shared_llm() {
 SHARED_ROOT="$(find_shared_llm)"
 REPO_ROOT="$(dirname "$SHARED_ROOT")"
 ENGINE="$REPO_ROOT/tools/harness.py"
+PYTHON_BIN="${PYTHON_BIN:-python3.14}"
 
 if [[ ! -f "$ENGINE" ]]; then
   echo "llm-compose: engine not found next to $SHARED_ROOT (expected $ENGINE)" >&2
@@ -58,8 +61,8 @@ if [[ ! -f "$ENGINE" ]]; then
   exit 1
 fi
 
-command -v python3 >/dev/null 2>&1 || { echo "llm-compose: python3 not on PATH" >&2; exit 1; }
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || { echo "llm-compose: $PYTHON_BIN not on PATH (set PYTHON_BIN=/path/to/python3.14)" >&2; exit 1; }
 
 # The engine resolves its own --shared-llm; pass ours explicitly so the wrapper's
 # walk-up wins regardless of where the engine file physically lives.
-exec python3 "$ENGINE" compose --shared-llm "$SHARED_ROOT" "$@"
+exec "$PYTHON_BIN" "$ENGINE" compose --shared-llm "$SHARED_ROOT" "$@"

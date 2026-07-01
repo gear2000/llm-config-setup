@@ -9,8 +9,8 @@ This walks you from a clean machine to generated `CLAUDE.md` / `AGENTS.md` / ski
 **Prerequisites.** Install these first:
 
 - `task` (go-task) — the single entrypoint for every command below.
-- `python3` — runs the compose engine.
-- PyYAML — the engine's one Python dependency: `pip install pyyaml`.
+- `python3.14` — runs the compose/sync engine. Set `PYTHON_BIN=/path/to/python3.14` if it is not on `PATH` as `python3.14`.
+- PyYAML — the engine's one Python dependency: `python3.14 -m pip install pyyaml`.
 
 The Pi runtime extras (`pi` binary, `tmux`) are optional — needed only for the Pi flow.
 
@@ -20,7 +20,7 @@ Two install surfaces. Run both for a fresh setup.
    ```bash
    task install local
    ```
-   Installs the general home skills (`python`, `nextjs`, `backend`) into `~/.claude`, `~/.codex`, `~/.pi`; the 18 generic agents into `~/.claude/agents` and `~/.pi/agents`; the Pi runtime into `~/.pi`; and the `llm-compose` wrapper into `~/.local/bin`. Idempotent and non-clobbering. Add `-- --skip-pi-extensions` to skip the `pi install` network step.
+   Installs the general home skills (`python`, `nextjs`, `backend`, `golang`) plus routed slash-command skills. Pi standalone planning is `/planish` from the TypeScript extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, `/do-oneshot`, `/do-implement`, `/do-loop`, and `/do-full`; Claude Code gets the matching `cc-*` workflow-suite commands. The old standalone skill variants `/do-planish` and `/cc-planish` are intentionally removed. It also installs the 18 generic agents into `~/.claude/agents` and `~/.pi/agents`, the Pi runtime into `~/.pi`, and the `llm-compose` wrapper into `~/.local/bin`. Idempotent and non-clobbering. Add `-- --skip-pi-extensions` to skip the `pi install` network step.
 
 2. **Your target repo (per repo):**
    ```bash
@@ -160,7 +160,7 @@ Then run `task compose:all` (or `llm-compose`) to generate your output files.
 
 ## I — Pi planning output directory (optional)
 
-The Pi `/planish` command writes a `plan.md` + `plan.html` pair somewhere. Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work.
+The Pi `/planish` command is the standalone TypeScript extension/register planner with browser-backed grill/review tools. It writes a `plan.md` + `plan.html` pair somewhere. Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. For workflow-suite planning, use `/do-plan-and-grill` in Pi or `/cc-plan-and-grill` in Claude Code; `/do-planish` and `/cc-planish` are intentionally removed.
 
 Put a `.planish.yaml` at your repo root (or any ancestor directory) to control where plans land:
 

@@ -26,27 +26,27 @@ tasks:
   compose:all:
     desc: "Compose CLAUDE.md, AGENTS.md, skills, and agents to the repo root (consumer recipes only)"
     cmds:
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/claude-md/root.yaml
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents-md/root.yaml
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/skills
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/claude-md/root.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents-md/root.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/skills
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents
 
   compose:claude-md:
     desc: "Assemble one CLAUDE.md to the repo root (e.g. task compose:claude-md -- root)"
     cmds:
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
 
   compose:agents-md:
     desc: "Assemble one AGENTS.md to the repo root (e.g. task compose:agents-md -- root)"
     cmds:
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
 
   compose:skill:
     desc: "Assemble one skill to the repo root (e.g. task compose:skill -- python)"
     cmds:
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
 
   compose:agent:
     desc: "Assemble one agent persona to the repo root (e.g. task compose:agent -- deployer)"
     cmds:
-      - python3 tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --shared-llm .shared-llm --target . .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml

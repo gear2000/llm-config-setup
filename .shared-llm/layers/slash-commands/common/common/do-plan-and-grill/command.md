@@ -186,6 +186,8 @@ You run the grill directly — it's orchestration, not "work." When an answer re
 
 **Default — HTML-batch (fast).** The terminal one-at-a-time loop is slow because each question is its own LLM round-trip; ten simple questions can burn 40 minutes of waiting. Batching collapses that: ask everything independent in a single round.
 
+This command follows the canonical Planish HTML Grill Contract at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Use terminal questions only with explicit `--interactive` fallback.
+
 Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
 
 Each round:
@@ -194,7 +196,7 @@ Each round:
    - A context header: what's being planned, the draft shape, and enough background that each question is understandable on its own (not a wall of text — use headings/tables).
    - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
-   - The form toolkit pasted verbatim before `</body>` from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html`.
+   - Answer controls from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html` and annotation controls from `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` (or the combined Planish grill toolkit once extracted) pasted before `</body>`.
    - `<title>` = `<Title> — grill v<N>`.
 3. Tell the user the round is ready: _"Round <k> is up — http://localhost:8089/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/grill_current.html — fill it in, click Copy Answers, paste back here."_
 4. The user pastes the `## Answers —` block. Process every answer: revise the plan (dispatch plan-writer), and from what you learned, compute the next round's questions (the dependent ones now have concrete wording, plus anything the answers newly surfaced).
@@ -251,7 +253,7 @@ Common size-downgrade triggers (`big` → `small`): "just a config tweak", "sing
 - Per-phase `reviewer:` annotation present where adversarial review was decided.
 - Per-phase `deploy` / `live` required-flag intent present so `rphase-create` can emit correct gates.
 - **If `--route-phases`**: instruct the writer explicitly: "Every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch." A plan missing any size tag is incomplete.
-<!-- # dup 2 (plan-html-style) — canonical in common/common/do-planish/command.md -->
+<!-- # plan-html-style — keep in sync with .shared-llm/llm/common/common/planish-html-grill-contract.md -->
 - **`plan.html`**: render the executive summary + phases in the project dark style (the v3.html `<style>` block if present, else the `/design-doc` default), use the flow/box visual vocabulary for phase sequencing where it helps, and paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim before `</body>`. `<title>` = `<Title> — plan v<N>`. Downstream tooling reads `plan.md` only — `plan.html` is never parsed by `rphase-create` or `do-implement`.
 
 Only `plan.md` is the source of truth for execution. If the user later annotates `plan.html` and pastes feedback, treat it as a new grill round → bump to `v<N+1>` and re-finalize both outputs.

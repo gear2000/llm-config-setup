@@ -10,15 +10,15 @@ default:
 # Reconcile all pi/codex links (create + re-point + prune). Pass flags through,
 # e.g. `just sync --plan` to preview, `just sync --harness pi`.
 sync *flags:
-    python3 tools/harness.py sync {{flags}}
+    ${PYTHON_BIN:-python3.14} tools/harness.py sync {{flags}}
 
 # Remove every managed pi/codex link.
 unlink *flags:
-    python3 tools/harness.py unlink {{flags}}
+    ${PYTHON_BIN:-python3.14} tools/harness.py unlink {{flags}}
 
 # Compose skills/agents/CLAUDE.md from layers (same engine the Taskfile uses).
 compose *args:
-    python3 tools/harness.py compose {{args}}
+    ${PYTHON_BIN:-python3.14} tools/harness.py compose {{args}}
 
 # Full setup: reconcile every link, then ensure the third-party Pi companions.
 setup: sync companions
@@ -35,7 +35,7 @@ setup: sync companions
 # `just sync-to-private` (default path ../jiffy-rewrite-2026)
 # `just sync-to-private /path/to/jiffy-rewrite-2026 --dry-run`
 sync-to-private private_root="../jiffy-rewrite-2026" *flags:
-    python3 tools/sync-to-private.py --private-root {{private_root}} {{flags}}
+    ${PYTHON_BIN:-python3.14} tools/sync-to-private.py --private-root {{private_root}} {{flags}}
 
 # Install the kit's pinned third-party Pi extensions from the manifest (idempotent; no-op without pi).
 companions:

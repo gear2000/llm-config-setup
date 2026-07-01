@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Assemble layer .md files into skill, agent, CLAUDE.md, and AGENTS.md definitions.
 
 Reads compose YAML files from <shared-llm>/compose/ that specify which layer
@@ -39,12 +39,12 @@ section near the bottom. One file, three subcommands, driven by the justfile
 (setup) and the Taskfile (compose).
 
 Usage:
-    python tools/harness.py compose                                      # compose all
-    python tools/harness.py compose .shared-llm/compose/skills/x.yaml    # compose one
-    python tools/harness.py compose --shared-llm /path/.shared-llm --target /path/out
-    python tools/harness.py sync                                         # create + prune all harness links
-    python tools/harness.py sync --plan                                  # preview, touch nothing
-    python tools/harness.py unlink                                       # remove managed links
+    python3.14 tools/harness.py compose                                      # compose all
+    python3.14 tools/harness.py compose .shared-llm/compose/skills/x.yaml    # compose one
+    python3.14 tools/harness.py compose --shared-llm /path/.shared-llm --target /path/out
+    python3.14 tools/harness.py sync                                         # create + prune all harness links
+    python3.14 tools/harness.py sync --plan                                  # preview, touch nothing
+    python3.14 tools/harness.py unlink                                       # remove managed links
 """
 
 from __future__ import annotations
@@ -600,8 +600,9 @@ def plan_pi(root: Path) -> LinkPlan:
     agent_ext = HOME / ".pi/agent/extensions"
     hub_ext = HOME / ".pi/extensions"
 
-    # skills — Pi gets a skill only when it is portable to every harness (common).
-    # Pi does not support colons in command names, so any skill named "foo:bar"
+    # skills — Pi gets portable/common skills, including the do-* command family.
+    # Claude-only cc-* skills are deliberately excluded. Pi does not support colons
+    # in command names, so any skill named "foo:bar"
     # is installed under the hyphenated alias "foo-bar" instead.
     for d in _skill_dirs(root):
         if harness_of(root, d.name) == "common":

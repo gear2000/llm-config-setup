@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Pull common/ layer changes made in this kit back into a private consumer repo.
 
 Auto-diffs this repo's common/ layer trees against the private repo, but only

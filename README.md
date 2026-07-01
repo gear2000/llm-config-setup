@@ -82,7 +82,7 @@ There are two install surfaces. They are independent — run one, the other, or 
 
 Installs everything that lives in your `$HOME` and applies across every project:
 
-1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`) and copies each `SKILL.md` into the home skill dir every harness reads: `~/.claude/skills/`, `~/.codex/skills/`, `~/.pi/skills/`.
+1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and copies each skill into the home skill dirs each harness reads: `~/.claude/skills/`, `~/.codex/skills/`, `~/.pi/agent/skills/`. Slash-command skills are routed by harness: Pi standalone planning is `/planish` from the extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, `/do-oneshot`, `/do-implement`, `/do-loop`, and `/do-full`; Claude workflow-suite commands are the matching `cc-*` commands. The removed standalone skill variants `/do-planish` and `/cc-planish` are not installed.
 2. **The 18 generic agents** — composes the `agents/` recipes and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. (Codex has no user-agent directory, so it is skipped — the installer never invents one.)
 3. **Pi runtime** — `tools/harness.py sync` symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and `install-pi-extensions.sh` installs the pinned third-party extensions.
 4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` **only if absent** (never clobbers per-machine tweaks). See "Claude harness runtime config" below.
@@ -124,7 +124,7 @@ llm-compose             # the wrapper installed by `install local`
 
 ## The `llm-compose` wrapper
 
-`llm-compose` (installed to `~/.local/bin` by `task install local`) is a thin wrapper around the compose engine. It carries no logic of its own: it finds the nearest `.shared-llm/` root (walking up from `$PWD`, or `$SHARED_LLM_DIR` if set), locates the engine sitting next to it (`<repo>/tools/harness.py`, copied in by `install repo`), and execs its `compose` subcommand — passing every argument straight through.
+`llm-compose` (installed to `~/.local/bin` by `task install local`) is a thin wrapper around the compose engine. It carries no logic of its own: it finds the nearest `.shared-llm/` root (walking up from `$PWD`, or `$SHARED_LLM_DIR` if set), locates the engine sitting next to it (`<repo>/tools/harness.py`, copied in by `install repo`), and execs its `compose` subcommand — passing every argument straight through. It defaults to `python3.14`; set `PYTHON_BIN=/path/to/python3.14` to override.
 
 ```bash
 llm-compose                                          # compose all recipes
@@ -169,10 +169,10 @@ Compose one on its own with `task compose:agent -- <name>`, or all of them with 
 Recipe types: `skill` (frontmatter name + description), `agent` (name + description + model, optional color), `claude-md` / `agents-md` (plain concatenated markdown, no frontmatter), `prompt` (a whole feature prompt assembled from an explicit manifest), `copy` (one file copied verbatim, executable bit preserved — for hook scripts and the statusline), and `settings` (JSON inputs deep-merged: dicts recurse, lists concatenate, scalars overlay-win — for a `settings.json` base plus a this_repo overlay). A recipe may also declare a `catalog:` partial injected before its `inputs`.
 
 ```bash
-python3 tools/harness.py compose                                     # compose all
-python3 tools/harness.py compose .shared-llm/compose/claude-md/root.yaml  # compose one
-python3 tools/harness.py compose .shared-llm/compose/agents            # compose a SUBSET (a recipe dir)
-python3 tools/harness.py compose --target . .shared-llm/compose/claude-md/root.yaml  # land at the repo root
+python3.14 tools/harness.py compose                                     # compose all
+python3.14 tools/harness.py compose .shared-llm/compose/claude-md/root.yaml  # compose one
+python3.14 tools/harness.py compose .shared-llm/compose/agents            # compose a SUBSET (a recipe dir)
+python3.14 tools/harness.py compose --target . .shared-llm/compose/claude-md/root.yaml  # land at the repo root
 # or via Task (kit self-compose — stages into the gitignored examples/ dir):
 task compose:all
 task compose:claude-md -- root
@@ -195,8 +195,8 @@ See `ONBOARDING.md` for the consumer compose flow and committing the generated f
 ## Quickstart
 
 ```bash
-# 1. One dependency for the engine
-pip install pyyaml
+# 1. Python 3.14 + one dependency for the engine
+python3.14 -m pip install pyyaml
 
 # 2. Install the home pieces (skills, agents, Pi runtime, llm-compose)
 task install local
@@ -260,6 +260,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 **What it contains:**
 
+- `extensions/planish.ts` — The Pi-native standalone `/planish` planner. This is a TypeScript extension/register command, not a markdown skill: it adds browser-backed `planish_grill` and `planish_submit_plan` tools and writes `plan.md` + `plan.html` for review. The old standalone markdown skill variants `/do-planish` and `/cc-planish` are intentionally removed; use `/do-plan-and-grill` or `/cc-plan-and-grill` for workflow-suite planning.
 - `extensions/context-workflow.ts` — A Pi extension that wraps a structured write→test→review→fix→verify loop. Symlinked into `~/.pi/agent/extensions/` (auto-loaded by the Pi agent on startup).
 - `extensions/iac-guard.ts` — A Pi extension that **gates destructive infrastructure commands**. It hooks `tool_call` (before a command runs) and inspects `terraform` / `tofu` / `aws` / `kubectl`: read/create operations run freely; destroys (`destroy` / `delete` / `terminate`) **always require human approval** via the native confirm dialog; gray-zone updates/replaces are judged by the `iac-verifier` agent. Fail-closed — any ambiguity, missing UI, or unavailable verifier falls back to human approval. Symlinked into `~/.pi/agent/extensions/` (auto-loaded). See the policy tables at the top of the file to tune which verbs are allow/ask/gray.
 - `extensions/memsearch/` — A directory Pi extension (`index.ts` + `collection.ts`) that gives Pi memory over the **same shared store** Claude Code builds: per-project daily markdown logs under `<git-root>/.memsearch/memory/<YYYY-MM-DD>.md`, indexed into a per-project Milvus collection. The collection name is derived to **exactly match** memsearch's `derive-collection.sh`, so Pi and Claude converge on the same collection per repo.
@@ -307,7 +308,7 @@ If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.
 
 Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/node_modules/`), never committed here. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 
-**Prerequisites:** a Pi install (`npm install -g @earendil-works/pi-coding-agent`), `node` / `npm` on your `PATH`, and `tmux` (for the `task up` / `task hub` launch group).
+**Prerequisites:** Python 3.14 for compose/sync tooling, a Pi install (`npm install -g @earendil-works/pi-coding-agent`), `node` / `npm` on your `PATH`, and `tmux` (for the `task up` / `task hub` launch group).
 
 ## Output-style caveat
 

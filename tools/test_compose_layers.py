@@ -1,6 +1,6 @@
 """Tests for tools/harness.py compose — the layer composer.
 
-Run: python3 -m pytest tools/test_compose_layers.py -q
+Run: python3.14 -m pytest tools/test_compose_layers.py -q
 
 Covers the slash-command path that the cross-harness layout depends on:
 inputs are concatenated in order, the optional `frontmatter:` passthrough is
@@ -9,14 +9,18 @@ emitted (so a command keeps its `argument-hint` etc.), and the recipe's
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 import yaml
 
-COMPOSER = Path(__file__).resolve().parent / "harness.py"
+TOOLS_DIR = Path(__file__).resolve().parent
+COMPOSER = TOOLS_DIR / "harness.py"
+REPO_ROOT = TOOLS_DIR.parent
 
 
 def _write(path: Path, text: str) -> None:
@@ -150,6 +154,84 @@ def test_copy_rejects_multiple_inputs(tmp_path: Path) -> None:
     }, sort_keys=False))
     stderr = _compose_expect_fail(shared, tmp_path, recipe_rel)
     assert "exactly one input" in stderr
+
+
+def _load_harness_module():
+    spec = importlib.util.spec_from_file_location("harness_under_test", COMPOSER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_install_global_routes_slash_skills_by_harness(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    # The scripts default to python3.14 in production. The test pins the current
+    # interpreter so CI can run as long as it is new enough for harness.py.
+    env["PYTHON_BIN"] = sys.executable
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "tools/install-global.sh")],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"install-global failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+    claude = home / ".claude/skills"
+    pi = home / ".pi/agent/skills"
+    assert (claude / "cc-plan-and-grill/SKILL.md").exists(), "Claude should receive workflow cc-* planning skills"
+    assert (claude / "qa/SKILL.md").exists(), "Claude should receive portable non-do-* skills"
+    assert not (claude / "cc-planish").exists(), "Removed standalone cc-planish must not install"
+    assert not (claude / "do-planish").exists(), "Removed standalone do-planish must not install"
+
+    for name in ("do-full", "do-implement", "do-loop", "do-oneshot", "do-plan-and-grill", "do-research"):
+        assert (pi / name / "SKILL.md").exists(), f"Pi should receive portable {name}"
+    assert (pi / "qa/SKILL.md").exists(), "Pi should receive portable common skills"
+    assert not (pi / "do-planish").exists(), "Removed standalone do-planish must not install"
+    assert not (pi / "cc-planish").exists(), "Pi must not receive Claude-only/removed cc-planish"
+
+
+def test_plan_pi_routes_common_skills_and_planish_extension(tmp_path: Path) -> None:
+    harness = _load_harness_module()
+    root = tmp_path / "repo"
+    home = tmp_path / "home"
+    harness.HOME = home
+
+    for skill in ("do-plan-and-grill", "qa", "cc-plan-and-grill"):
+        _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
+    _write(root / ".shared-llm/compose/slash-commands/common/common/do-plan-and-grill.yaml", "name: do-plan-and-grill\n")
+    _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
+    _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
+    _write(root / ".shared-llm/llm/pi/common/extensions/planish.ts", "export default function() {}\n")
+
+    plan = harness.plan_pi(root)
+    assert plan.desired[home / ".pi/agent/skills/do-plan-and-grill"] == root / ".claude/skills/do-plan-and-grill"
+    assert plan.desired[home / ".pi/agent/skills/qa"] == root / ".claude/skills/qa"
+    assert home / ".pi/agent/skills/cc-plan-and-grill" not in plan.desired
+    assert plan.desired[home / ".pi/agent/extensions/planish.ts"] == root / ".shared-llm/llm/pi/common/extensions/planish.ts"
+
+
+def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields() -> None:
+    contract = REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md"
+    assert contract.exists()
+    for rel in (
+        ".shared-llm/layers/slash-commands/common/common/do-plan-and-grill/command.md",
+        ".shared-llm/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
+    ):
+        text = (REPO_ROOT / rel).read_text()
+        assert "planish-html-grill-contract.md" in text
+        assert "plain chat list of questions" in text
+
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "Copy Answers", "+ Note", "Copy Feedback"):
+        assert token in planish_ts
+
+    assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/common/do-planish.yaml").exists()
+    assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
 
 
 def test_settings_deep_merge(tmp_path: Path) -> None:

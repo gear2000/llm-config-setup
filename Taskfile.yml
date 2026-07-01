@@ -28,46 +28,46 @@ tasks:
     # global skills. Both stage into the gitignored examples/ dir, so the kit's own
     # root files are never touched and the working tree stays clean.
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/global
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/agents
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/global
 
   compose:consumer-all:
     desc: "Compose EVERY consumer recipe (claude-md/agents-md/skills/agents) into examples/ — requires filled this_repo stubs"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/claude-md/root.yaml
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents-md/root.yaml
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/skills
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/claude-md/root.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/agents-md/root.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/skills
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/agents
 
   compose:skill:
     desc: "Assemble one skill into examples/ staging (e.g. task compose:skill -- python)"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/skills/{{.CLI_ARGS}}.yaml
 
   compose:claude-md:
     desc: "Assemble one CLAUDE.md into examples/ staging (e.g. task compose:claude-md -- root)"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/claude-md/{{.CLI_ARGS}}.yaml
 
   compose:agents-md:
     desc: "Assemble one AGENTS.md into examples/ staging (e.g. task compose:agents-md -- root)"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/agents-md/{{.CLI_ARGS}}.yaml
 
   compose:agent:
     desc: "Assemble one agent into examples/ staging (e.g. task compose:agent -- architecture)"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/agents/{{.CLI_ARGS}}.yaml
 
   compose:agents:
     desc: "Assemble every agent recipe into examples/ staging"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/agents
 
   compose:slash-commands:
-    desc: "Assemble every slash-command skill recipe into examples/ staging (do-planish, qa, security, …)"
+    desc: "Assemble every slash-command skill recipe into examples/ staging (do-plan-and-grill, qa, security, …)"
     cmds:
-      - python3 tools/harness.py compose --target examples .shared-llm/compose/slash-commands
+      - ${PYTHON_BIN:-python3.14} tools/harness.py compose --target examples .shared-llm/compose/slash-commands
 
   # ---------------------------------------------------------------------------
   # install — the headline consumer feature. Two surfaces:
@@ -105,12 +105,12 @@ tasks:
   setup:pi:
     desc: "Reconcile this kit's Pi/Codex skill, agent, and extension symlinks into ~/.pi and ~/.codex (create, re-point, prune)"
     cmds:
-      - python3 tools/harness.py sync
+      - ${PYTHON_BIN:-python3.14} tools/harness.py sync
 
   setup:pi:unlink:
     desc: "Remove every managed Pi/Codex symlink (leaves settings.json + installed extensions)"
     cmds:
-      - python3 tools/harness.py unlink
+      - ${PYTHON_BIN:-python3.14} tools/harness.py unlink
 
   setup:pi:extensions:
     desc: "Install the pinned third-party Pi extensions from the manifest (idempotent)"
@@ -118,13 +118,14 @@ tasks:
       - bash tools/install-pi-extensions.sh {{.CLI_ARGS}}
 
   # ---------------------------------------------------------------------------
-  # setup:global — compose the GENERAL convention skills and install them into the
-  # user's HOME skill dirs (~/.claude, ~/.codex, ~/.pi), global/all-projects.
+  # setup:global — compose the GENERAL convention skills and routed slash skills,
+  # then install them into the user's HOME skill dirs (~/.claude/skills,
+  # ~/.codex/skills, ~/.pi/agent/skills), global/all-projects.
   # Separate from the per-repo compose; does not touch ~/.claude/CLAUDE.md.
   # ---------------------------------------------------------------------------
 
   setup:global:
-    desc: "Compose the general skills and install them into ~/.claude, ~/.codex, ~/.pi (global, all-projects)"
+    desc: "Compose routed home skills and install them into ~/.claude/skills, ~/.codex/skills, ~/.pi/agent/skills"
     cmds:
       - bash tools/install-global.sh
 

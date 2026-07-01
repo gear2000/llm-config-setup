@@ -45,6 +45,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_SHARED="$REPO_ROOT/.shared-llm"
 SRC_ENGINE="$REPO_ROOT/tools/harness.py"
 SRC_TASKFILE="$REPO_ROOT/tools/templates/llm.Taskfile.yml"
+PYTHON_BIN="${PYTHON_BIN:-python3.14}"
 
 TARGET="${1:-.}"
 mkdir -p "$TARGET"
@@ -53,7 +54,7 @@ TARGET="$(cd "$TARGET" && pwd)"
 [[ -d "$SRC_SHARED" ]] || { echo "error: source .shared-llm not found: $SRC_SHARED" >&2; exit 1; }
 [[ -f "$SRC_ENGINE" ]] || { echo "error: compose engine not found: $SRC_ENGINE" >&2; exit 1; }
 [[ -f "$SRC_TASKFILE" ]] || { echo "error: thin Taskfile template not found: $SRC_TASKFILE" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "error: python3 not on PATH" >&2; exit 1; }
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || { echo "error: $PYTHON_BIN not on PATH (set PYTHON_BIN=/path/to/python3.14)" >&2; exit 1; }
 
 echo "=============================================================="
 echo " install repo — set up target: $TARGET"
@@ -139,10 +140,10 @@ else
   #     (illustrative samples — not consumer deliverables; never written into the
   #     consumer's real src/ tree).
   ENGINE="$TARGET/tools/harness.py"
-  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/claude-md/root.yaml"
-  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents-md/root.yaml"
-  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/skills"
-  python3 "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents"
+  "$PYTHON_BIN" "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/claude-md/root.yaml"
+  "$PYTHON_BIN" "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents-md/root.yaml"
+  "$PYTHON_BIN" "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/skills"
+  "$PYTHON_BIN" "$ENGINE" compose --shared-llm "$TARGET/.shared-llm" --target "$TARGET" "$TARGET/.shared-llm/compose/agents"
   composed=1
 fi
 
@@ -175,7 +176,7 @@ else
 fi
 echo
 echo "NOT installed here (these come from \`task install local\`):"
-echo "  - global home skills (~/.claude, ~/.codex, ~/.pi /skills)"
+echo "  - global home skills (~/.claude/skills, ~/.codex/skills, ~/.pi/agent/skills)"
 echo "  - the generic agent personas in ~/.claude/agents, ~/.pi/agents"
 echo "  - Pi runtime (~/.pi extensions + agents)"
 echo "  - the ~/.local/bin/llm-compose wrapper"

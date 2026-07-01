@@ -191,14 +191,17 @@ You run the grill directly — it's orchestration, not "work." When an answer re
 
 **Default — HTML-batch (fast).** The terminal one-at-a-time loop is slow because each question is its own LLM round-trip; ten simple questions can burn 40 minutes of waiting. Batching collapses that: ask everything independent in a single round.
 
+This command follows the canonical Planish HTML Grill Contract at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Use terminal questions only with explicit `--interactive` fallback.
+
 Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
 
 Each round:
 1. Work out every question you can ask **right now** — split them into independent (answerable in any order) and dependent (wording hinges on an independent answer). Ask the independent ones this round.
-2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — overwrite the same file every round, then refresh the browser tab to load the new round (the static server serves the raw file — no live-reload). The file contains:
+2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — write a fresh `grill-v<round>.html` each round (kept for history) and overwrite `grill_current.html` with the same content, then refresh the tab (kept on `grill_current.html`) to load the new round (the static server serves the raw file — no live-reload). The file contains:
    - A context header: what's being planned, the draft shape, and enough background that each question is understandable on its own (not a wall of text — use headings/tables).
+   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
-   - The form toolkit pasted verbatim before `</body>` from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html`.
+   - Answer controls from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html` and annotation controls from `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` (or the combined Planish grill toolkit once extracted) pasted before `</body>`.
    - `<title>` = `<Title> — grill v<N>`.
 3. Tell the user the round is ready: _"Round <k> is up — http://localhost:8089/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/grill_current.html — fill it in, click Copy Answers, paste back here."_
 4. The user pastes the `## Answers —` block. Process every answer: revise the plan (dispatch plan-writer), and from what you learned, compute the next round's questions (the dependent ones now have concrete wording, plus anything the answers newly surfaced).
