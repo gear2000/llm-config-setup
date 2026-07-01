@@ -1,169 +1,47 @@
-<!-- TEMPLATE — fill in every {{...}} and "FILL THIS OUT" below, then DELETE this banner and rename this file to general.md (drop the "TEMPLATE." prefix). List all templates: find . -name 'TEMPLATE.*' -->
+# llm-config-setup
 
-# {{PROJECT_NAME}}
-
-<!-- TODO(project): Replace {{PROJECT_NAME}} with your project's name. Add a one-line description of what this repo contains and who it is for. -->
-
-Source code only — CI configs, docs, and ops tools live in a sibling repo (reached via the `ops/` symlink) so worktrees stay light. The essentials below are inline on purpose: don't go hunting through docs for them.
-
-## Coding conventions
-
-**Read before write.** Read a file before editing it. Before producing any data structure, read the Pydantic model that defines it — models are the contract and live co-located in each package. Never guess a shape; read the schema.
-
-**Respect package layering.** `src/packages/` are independent libraries. Imports point one way — a package must not reach "upward" into the app, or sideways into a sibling it shouldn't know about (the upward-import check enforces this).
-
-**Build deep modules.** Favour a small, narrow interface over a large hidden implementation. No shallow pass-through wrappers, no leaking a module's internals across a package boundary. If you're threading the same detail through three layers, the boundary is in the wrong place.
-
-**Fail loud; exceptions stay short and specific.** Catch only the specific exception you can actually handle, and keep the `try` body to the line(s) that can raise — let everything else propagate. No bare `except:`, no `except Exception` swallow, no `except … : pass`, no fake default to limp onward. A silent failure becomes a downstream mystery; a loud one gets fixed.
-
-**No shortcuts that create downstream debt.** No mocks, stubs, or "graceful degradation" to pass a test — build the real thing or fail. Never hand-create a resource (DB table, IAM role, S3 bucket, any infra) to go green; if it's missing, the automation is broken — fix that and report the gap. Greenfield: move forward, no backwards-compat shims. There is no `dry_run` mode anywhere — strip it on sight.
-
-## Running CI/CD
-
-The **Taskfile is the central entry point for all automation** — building, deploying, and running integration, acceptance, and E2E tests. Use it first:
-
-1. **`task <target>`** — the one place for build/deploy/test automation; always prefer it over a raw CLI command.
-2. **No target for what you need?** Check the **{{CI_DEPLOY_TOOL}}** jobs — thin triggers that ultimately call task targets for live-infra flows.
-3. **Not there either?** Ask the user, or add a new `task` target in the current convention.
-
-**{{CI_BUILD_TOOL}}** is push-triggered, so it always runs the build-time checks — lint, unit tests, and (for packages) package publish — on every push.
-
-<!-- TODO(project): Document any known intermittent CI step failures here (e.g. registry push timeouts, layer-cache blips) and how to distinguish them from real failures. Replace {{CI_BUILD_TOOL}} and {{CI_DEPLOY_TOOL}} with your actual tool names. -->
-
-Every test and build runs in Docker — `Dockerfile.test` (unit + integration) and `Dockerfile.e2e` (services only); never `python`/`pytest`/`npm`/`node` bare in a CI step. Deploys run only through the {{CI_DEPLOY_TOOL}}/task path — never infra tools (e.g. `terraform apply`) by hand.
-
-**Local quality gate — before you push, through `task`, never the tools bare:**
-
-- `task lint:fast` — fast native linter. Run before every commit.
-- `task lint:fix` — auto-fix safe issues.
-- `task lint:full` — full Docker lint matching the CI image.
-- `task lint:types` — type-checking on type-annotated packages.
-
-<!-- TODO(project): Replace the lint task names above if your project uses different targets (e.g. task check, task typecheck). Add any project-specific quality-gate steps. -->
-
-Loop: `lint:fast` → fix → push → watch {{CI_BUILD_TOOL}} → on failure, read the step logs, fix the **code**, push again. If a check fails, fix the code — never lower lint strictness, skip a CI stage, or suppress to go green.
-
-## Credentials
-
-<!-- TODO(project): Document your project's credentials here. Replace {{CRED_ROOT}} with the path to your credentials directory (e.g. ~/project/secrets/ or ~/creds/). Use the shape below — one bullet per credential. Never commit real values. -->
-
-All tokens live under `{{CRED_ROOT}}` (gitignored) — source the relevant env file; never hard-code or paste tokens. Cloud region: `{{CLOUD_REGION}}`.
-
-- **{{CI_BUILD_TOOL}}** (`<TOKEN_ENV_VAR>`) — `{{CRED_ROOT}}/<tool>/exports.env`
-- **Package registry / Docker registry** (`<REGISTRY_TOKEN_ENV_VAR>`) — `{{CRED_ROOT}}/<registry>/exports.env`
-- **{{CI_DEPLOY_TOOL}}** (`<DEPLOY_TOKEN_ENV_VAR>`, `<DEPLOY_URL_ENV_VAR>`) — `{{CRED_ROOT}}/<tool>/trigger.env`
-- **Cloud account — SaaS hub** (account `{{ACCOUNT_SAAS}}`) — `{{CRED_ROOT}}/cloud/saas/exports.env`
-- **Cloud account — target tenant** (account `{{ACCOUNT_TENANT}}`) — `{{CRED_ROOT}}/cloud/tenant/exports.env`
-- **Cloud test user** (for E2E tests) — `{{CRED_ROOT}}/cloud/test-user/`
-
-<!-- TODO(project): Add or remove credential entries as needed. Keep descriptions short: name → env var → path. -->
-
-## Key paths
-
-- **`src/packages/`** — Python libraries published to your package registry.
-- **`src/services/`** — deployable services (Lambda, containers, or binaries).
-- **`src/authoring/`** — IaC templates or configuration assets (delete if unused).
-- **`.original/`** — legacy read-only reference (delete if unused).
-- **`ops/`** — symlink to `{{OPS_REPO}}` (CI pipelines, docs, ops scripts). Gitignored; run `tools/setup-symlinks.sh` after a fresh clone.
-- **`infra/`** — symlink to `{{INFRA_REPO}}` (standalone infra). Gitignored; same setup.
-
-<!-- TODO(project): Replace {{OPS_REPO}} and {{INFRA_REPO}} with your sibling repo names, or delete those bullets if you have a single-repo layout. -->
-
-## Design docs are a starting point, not authoritative
-
-Docs centralized in your docs tool (e.g. mkdocs under the `ops/` symlink). Use them as a strong starting point for understanding a flow and as a map into the code — **not** as gospel. They drift. Lean on the code as the source of truth — read the doc to grasp intent and navigate, then confirm in the source. When it's genuinely unclear and a wrong guess could cause downstream problems, stop and ask the human rather than assume.
+A portable starter kit for composing AI-assistant instruction files (`CLAUDE.md`, `AGENTS.md`, skill files, and agent personas) from reusable markdown layers. Two install commands — `task install local` (home pieces: general skills, the 18 generic agents, the Pi runtime, the `llm-compose` wrapper) and `task install repo -- <dir>` (set up a target repo) — plus a `task compose:*` build step. See `README.md` for the full layout and install model, and `ONBOARDING.md` for how to adopt it.
 
 ---
 
-<!-- TEMPLATE — fill in every {{...}} and "FILL THIS OUT" below, then DELETE this banner and rename this file to agents.md (drop the "TEMPLATE." prefix). List all templates: find . -name 'TEMPLATE.*' -->
+# ⚠️ THIS IS A PUBLIC REPOSITORY — pre-push vetting is MANDATORY
 
-# Cross-Harness Orchestration
+Everything pushed here is world-readable, permanently, and may be cached or indexed even after deletion. This kit was extracted from a private project and **deliberately stripped of everything proprietary**. Keeping it that way is a hard rule.
 
-## Skills — shared across harnesses
+## Before ANY push — no exceptions
 
-<!-- TODO(project): document your harness wiring here, or delete this layer and drop agents.md from agents-md/root.yaml inputs. -->
+1. **Vet the full diff for proprietary content.** Nothing originating from any private or internal project may be transmitted. This includes, but is not limited to:
+   - Internal/private **project, product, service, or codename** strings.
+   - Internal **infrastructure or tooling** names (CI systems, registries, schedulers, hosts).
+   - Internal **hostnames, URLs, endpoints**, or network/cluster details.
+   - **Cloud account IDs, regions, resource names**, credential paths, tokens, or secrets of any kind.
+   - Private **design documents, architecture, design criteria, data models, or implementation approach** — even paraphrased. Generic software-engineering practice is fine; anything that reveals how a specific private system is built is not.
 
-## Hooks and MCP servers
+2. **An independent reviewer must PASS the change before it is pushed.** The reviewer is a human — or a separate agent that did **not** author the change — who reads the entire diff against the categories above and explicitly approves. An author vetting their own work does not count.
 
-<!-- TODO(project): document your harness wiring here, or delete this layer and drop agents.md from agents-md/root.yaml inputs. -->
+3. **If anything proprietary is found: STOP.** Do not push. Remove it, re-stage, and re-review from step 1.
 
-## Session memories
+**Never run `git push` here without a passing independent review.** When in doubt, do not push — ask a human.
 
-<!-- TODO(project): document your harness wiring here, or delete this layer and drop agents.md from agents-md/root.yaml inputs. -->
-
----
-
-## Response format
-
-CRITICAL — this governs every reply. The user reads on a small screen and delegates heavily; a wall of text breaks the loop. Brevity and back-and-forth are how we stay in sync — not a nicety, not optional.
-
-Structure every reply as labelled sections:
-
-1. **Summary** — 1-3 bullets: what was done or found. Essentials only.
-2. **Issues** (only if any) — numbered one-liners. No essays.
-3. **Next** — the one question or choice you need to proceed.
-
-ALWAYS end by handing control back: ask "Want more on any of these — 1, 2, or 3?" and expand only the point the user picks.
-
-When intent is unclear, CONFIRM FIRST — restate the goal in one line and ask before doing the work. A confirmed direction beats a fast wrong one.
-
-Never pre-explain, teach, or dump background unless asked.
-
-## One question at a time
-
-When you need to gather input or make decisions with the user, ask ONE question per turn. State it plainly, wait for the answer, then move to the next. Never list five questions and ask the user to answer all of them at once — people miss items, give vague answers, and make more mistakes when they have to hold multiple questions in their head at the same time.
-
-After the user answers, say: "Ready for the next one?" (or similar short prompt) before moving on. This keeps the user in the loop and lets them slow down or redirect at any point.
-
-Apply this rule whenever you are:
-- Gathering requirements or constraints before starting work.
-- Asking the user to make a design or architecture choice.
-- Clarifying ambiguous intent before executing.
-
-One question. Wait. Confirm. Next.
+A Claude Code hook (`.claude/settings.json` → `PreToolUse` on `git commit`) runs this same check automatically on every commit as a first line of defense — see `.claude/hooks/proprietary-check.md`. It supplements, not replaces, the independent human/agent review required before push.
 
 ---
 
-## Plain English
+# Background
 
-Everything you write to the user — replies, docs, commit messages, PR descriptions — is plain English. This is not a style nicety. It is the job.
+This kit started as Claude-only tooling — snippets of markdown composed into a single `CLAUDE.md`. It was later generalized to also target Codex and a custom **Pi** harness, so the same layered source now produces `CLAUDE.md`, `AGENTS.md`, and Pi-native runtime config.
 
-**Assume the reader is technical, does not carry your context, and is simply not as smart as you.** He has not read the files you just read. He is not holding the chain of reasoning you are holding. He is busy, and he delegates to you precisely so he doesn't have to rebuild it in his head. So making every point land is **your** responsibility — never his. If he misunderstands, you failed, not him.
+The guiding principle: **things that can be decomposed into reusable layers are layered and composed; things that cannot be meaningfully decomposed are kept as whole, directly-edited pieces** instead of being forced into the layering model.
 
-The goal of every message is to let him make an accurate, clear-minded, informed decision. Set the table before you speak: name the thing first, then talk about it. Never write "this", "that", "it", or "the X" pointing at something he cannot see in the conversation — name it plainly, so there is nothing left to guess.
+- **Layered** — prose lives in `.shared-llm/layers/` and is concatenated by `.shared-llm/compose/` recipes into `CLAUDE.md`, `AGENTS.md`, and skill files.
+- **Whole pieces** — runtime code and settings aren't decomposable prose, so they stay intact: `.shared-llm/llm/pi/common/` (Pi extensions like `context-workflow.ts` / `iac-guard.ts`, the `memsearch/` dir, agent persona files like `doc-reviewer.md` / `pr-reviewer.md`) is symlinked whole into `~/.pi/`; `.shared-llm/llm/claude/common/` (Claude Code hooks, statusline, settings templates) is copied whole into `~/.claude/`. Neither is ever concatenated into an output file.
 
-Write the way an engineer talks out loud in a standup — not the way a blog post or a release announcement is written. The test for any word: would you say it to a colleague's face in a meeting? Nobody has ever stood up and said "I'll mint a token." They say "I'll generate the token." Use the word you would actually say.
+---
 
-Being technical is never the problem; sounding smart is. Simple and brief at the same time — that is what it means to be the smartest person in the room. You make everyone else understand. You do not show off.
+# Working on this kit
 
-Two ways to fail, both banned:
-
-- **Too fancy** — reaching for the impressive word when a plain verb exists: "leverage", "utilize", "facilitate". Just say "use", "let", "help".
-- **Too cute / too compressed** — insider shorthand that trades clarity for cleverness: "mint", "sub". Being concise is not the goal. Being *understood* is the goal.
-
-**Real technical terms stay — they are not jargon.** `JWT`, `HMAC`, idempotent, race condition, presigned URL, primary key: these are the precise name for the thing, and a colleague doing the same work knows exactly what you mean. Keep them, and stay technical when technical is what's true. The rule targets *dressed-up prose*, not the real vocabulary of the craft. Plain English does not mean dumbed-down — it means no word chosen to sound smart, and nothing left for the reader to guess.
-
-**This is about prose, not identifiers.** It governs what you write to the user, in docs, in commit messages, in PR descriptions. It does **not** mean renaming real code: if the JWT spec calls a claim `sub`, the field stays `sub` in the code. You just don't *narrate* in that shorthand — say "the token's subject" or name what it actually is.
-
-### Say this, not that
-
-| Don't write | Write instead |
-|---|---|
-| mint a token | generate / create / issue a token |
-| "sub in X", "sub it out" | name it and say what it does: "the test harness connects to the real service" |
-| leverage X | use X |
-| utilize X | use X |
-| facilitate | let, help, make it easy to |
-| in order to | to |
-| sunset (a feature) | shut down, remove, retire |
-| delve into | look at, dig into |
-
-This list is **living**. When the user flags a word as jargon, add a row here in the same turn — don't argue the word was fine, just record it and move on. The list is never "done."
-
-### One question at a time
-
-When something is long, break it into smaller chunks. When you need the user to decide, ask ONE question per turn — never blast five or ten at once. People miss items and give vague, rushed answers when they have to hold several questions in their head at the same time.
-
-State the question plainly, then make sure he actually understood it before he answers. Presenting "A or B" is not enough on its own — if he doesn't understand what A and B mean and what each one costs him, the choice is not informed. Setting up the informed, clear-minded decision is your job, not just firing off the question.
-
-One question. Make sure it landed. Then the next.
+- **Edit the source under `.shared-llm/` — never hand-edit a generated output.** The source is the layer prose in `.shared-llm/layers/` (the `llm/`, `skills/`, and `agents/` trees) and the recipes in `.shared-llm/compose/`. The generated outputs (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`, agent `.md` files) are build artifacts.
+- `python3 tools/harness.py compose` (or `task compose:all`) regenerates outputs. In this repo, demo outputs land in `examples/` (gitignored) and never overwrite this governance file.
+- The Pi runtime under `.shared-llm/llm/pi/common/` is **not** a compose input — its files are symlinked into `~/.pi/` by `python3 tools/harness.py sync`, which reconciles the links (creates missing ones, re-points drifted ones, and prunes links whose source was renamed or deleted), never concatenated into any output. Edit those `.ts` / `.md` files directly.
+- The install machinery lives in `tools/` (`install-local.sh`, `install-repo.sh`, `install-global.sh`, `harness.py`, `install-pi-extensions.sh`) with copy-time templates in `tools/templates/` (the `llm-compose` wrapper and the thin per-repo `llm.Taskfile.yml`). Keep behavior and docs in sync when you change them.
+- When adding a `this_repo` layer, follow the placeholder convention (`{{TOKEN}}` + `<!-- TODO(project): … -->`) and ship it as a `TEMPLATE.*` stub; see `ONBOARDING.md`.
