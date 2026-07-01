@@ -190,8 +190,15 @@ cat <<EOF
  install local — SUMMARY
 ==============================================================
 INSTALLED (general / home, all-projects):
-  - skills      : python, nextjs, backend
+  - skills      : python, nextjs, backend, golang
+                  + slash-command skills (do-planish, do-research, do-plan-and-grill,
+                    qa, security, prd-to-plan, fail-loud, grill-me, playwright-cli,
+                    response, hub-connect, meta-auto-run, run-phase, run_phase,
+                    codex-delegate)
                   -> ~/.claude/skills, ~/.codex/skills, ~/.pi/skills
+                  (these skill dirs ARE the typeable commands: /qa, /do-planish, …
+                   — Claude Code merged commands into skills, so no separate
+                   ~/.claude/commands/ step is needed)
   - agents      : $(ls -1 "$AGENT_STAGING" | wc -l | tr -d ' ') generic personas
                   -> ~/.claude/agents, ~/.pi/agents
                   ($agents_installed copied, $agents_uptodate current, $agents_skipped skipped)

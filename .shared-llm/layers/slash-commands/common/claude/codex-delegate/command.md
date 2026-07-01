@@ -61,7 +61,7 @@ Relationship to `/codex:rescue`:
 
 - `/codex:rescue` is the right door when Claude is stuck, has tried and
   failed, or the situation has an emergency feel. Codex bails Claude out.
-- `/codex:delegate` is the right door for routine handoff. Same runtime,
+- `/codex-delegate` is the right door for routine handoff. Same runtime,
   no rescue framing. Use this when you want Codex to do a piece of work
   as a peer, not as a savior.
 - Internally they share the codex-companion runtime and the

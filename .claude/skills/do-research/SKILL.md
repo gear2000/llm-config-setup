@@ -1,9 +1,9 @@
 ---
 name: do-research
-description: 'Pure research and exploration. Produces research.md only — no plan, no implementation. Default transport is subagents (fresh context per Explore call); pass --team to run inside TeamCreate (TMUX windows, named members). The leader orchestrates the research, dispatching Explore agents and a synthesizer; the leader does not read code or write the research file itself — it always dispatches a subagent for that work. Invocation: /do:research [--team] <title>.'
+description: 'Pure research and exploration. Produces research.md only — no plan, no implementation. Default transport is subagents (fresh context per Explore call); pass --team to run inside TeamCreate (TMUX windows, named members). The leader orchestrates the research, dispatching Explore agents and a synthesizer; the leader does not read code or write the research file itself — it always dispatches a subagent for that work. Invocation: /do-research [--team] <title>.'
 ---
 
-# do:research — Research → Stop
+# do-research — Research → Stop
 
 Pure research and exploration. The leader does not investigate the codebase or write the file directly — it dispatches Explore agents and a synthesizer.
 
@@ -18,7 +18,7 @@ Why: leader context fills up fast when it does work. Subagents have fresh contex
 ## Invocation
 
 ```
-/do:research [--team] <title>
+/do-research [--team] <title>
 ```
 
 - **`<title>`** — Required. Slugified for directory name. Example: `worker-pipeline-v2`

@@ -1,6 +1,6 @@
-# do:planish — Research → Grill → Plan (HTML-first express lane)
+# do-planish — Research → Grill → Plan (HTML-first express lane)
 
-The everyday HTML-first planner. One focused research pass, an HTML-batch grill, and a dual `plan.md` + `plan.html` you can read and annotate. Lighter than `/do:plan-and-grill` (no `--route-phases`, no required Team section, no decisions log); heavier than `/do:oneshot` (which sketches and implements in one shot, no persisted plan). Use it when you want a real plan you can read and mark up — without the full grill ceremony.
+The everyday HTML-first planner. One focused research pass, an HTML-batch grill, and a dual `plan.md` + `plan.html` you can read and annotate. Lighter than `/do-plan-and-grill` (no `--route-phases`, no required Team section, no decisions log); heavier than `/do:oneshot` (which sketches and implements in one shot, no persisted plan). Use it when you want a real plan you can read and mark up — without the full grill ceremony.
 
 ## Cardinal rule: delegate, don't do
 
@@ -14,7 +14,7 @@ If you find yourself reading files, writing markdown, or running commands direct
 ## Invocation
 
 ```
-/do:planish [--team] <title>
+/do-planish [--team] <title>
 ```
 
 - **`<title>`** — Required. Slugified for the work-log directory.
@@ -22,13 +22,13 @@ If you find yourself reading files, writing markdown, or running commands direct
 
 ## When to use this vs other do: skills
 
-- **`/do:research`** — research only, no plan
+- **`/do-research`** — research only, no plan
 - **`/do:oneshot`** — research + sketch + implement in one shot
-- **`/do:planish`** — research + HTML-batch grill + persisted dual plan, no implementation ← **you are here**
-- **`/do:plan-and-grill`** — the heavy planner: multi-aspect research fan-out, full grill, Team section, decisions log, optional `--route-phases` size tags
+- **`/do-planish`** — research + HTML-batch grill + persisted dual plan, no implementation ← **you are here**
+- **`/do-plan-and-grill`** — the heavy planner: multi-aspect research fan-out, full grill, Team section, decisions log, optional `--route-phases` size tags
 - **`/do:implement`** — execute an existing persisted plan.md
 
-If the work is risky or large enough that you want multi-aspect research, a Team roster, per-phase size tags, or a decisions log, reach for `/do:plan-and-grill` instead.
+If the work is risky or large enough that you want multi-aspect research, a Team roster, per-phase size tags, or a decisions log, reach for `/do-plan-and-grill` instead.
 
 ## Workflow
 
@@ -37,7 +37,7 @@ If the work is risky or large enough that you want multi-aspect research, a Team
 1. Slugify the title. Determine version by globbing `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v*/`.
    <!-- <YYYY-MM-DD> is the ISO date the work was started (NOT modified). Use the date at the time of the first invocation of this skill in this work-log. -->
 2. Ask 1–2 brief scope questions — save the real questions for the grill.
-3. **Dispatch EXACTLY ONE Explore subagent** (or one named team member with `--team`) with a single focused question covering: what the change touches, current behavior, constraints, and prior incidents in git history if relevant. This is the light path — NOT the multi-aspect fan-out `/do:plan-and-grill` uses.
+3. **Dispatch EXACTLY ONE Explore subagent** (or one named team member with `--team`) with a single focused question covering: what the change touches, current behavior, constraints, and prior incidents in git history if relevant. This is the light path — NOT the multi-aspect fan-out `/do-plan-and-grill` uses.
    - It returns a brief summary. It MAY write a short `research.md` into `.../plan/v<N>/research.md` if the work warrants one — but with no required frontmatter and no section ceremony. A paragraph or two is fine; skip it entirely for small work.
 
 Output paths use the form `work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/...`.
@@ -48,7 +48,7 @@ Output paths use the form `work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/...`.
 
 <!-- NOTE: this grill->build->review flow mirrors the planish Pi extension (planish.ts) and tf-implement.ts. The ~10-line prompt is intentionally duplicated, NOT shared. Keep in sync. -->
 
-Same mechanism as `/do:plan-and-grill` Step 4's HTML-batch grill. You run the grill directly — it's orchestration, not "work." There is no separate draft step in this light path: you grill off the research summary, holding the plan shape in your head as it firms up, and the plan gets written once at finalize.
+Same mechanism as `/do-plan-and-grill` Step 4's HTML-batch grill. You run the grill directly — it's orchestration, not "work." There is no separate draft step in this light path: you grill off the research summary, holding the plan shape in your head as it firms up, and the plan gets written once at finalize.
 
 Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
 
@@ -69,7 +69,7 @@ Each round:
 - Resolve every branch. If an answer changes an earlier decision, revisit it before finalizing.
 - Don't assume silence is approval.
 
-If the work-log server isn't reachable at http://localhost:8089 (start it with `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`), switch to `/do:plan-and-grill --interactive` — planish is HTML-first by design.
+If the work-log server isn't reachable at http://localhost:8089 (start it with `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`), switch to `/do-plan-and-grill --interactive` — planish is HTML-first by design.
 
 ### Step 3: Finalize Plan (delegate — dual plan.md + plan.html)
 
@@ -81,7 +81,7 @@ If the work-log server isn't reachable at http://localhost:8089 (start it with `
 - Per-phase detail blocks below the summary.
 - **Dropped vs plan-and-grill** (this is the light path): NO `--route-phases` `**Size**:` tags, NO required `## Team` section, NO mandatory `decisions.md` entry. Include a `## Team` section only if the grill settled a specific roster; otherwise omit it and let `/do:implement` infer a worker from the change scope (as `/do:oneshot` does).
 
-<!-- # ref 2 (plan-html-style) — duplicated in: do:plan-and-grill/command.md, do:oneshot/command.md, this_repo/claude/do:planish/command.md -->
+<!-- # ref 2 (plan-html-style) — duplicated in: do-plan-and-grill/command.md, do:oneshot/command.md, this_repo/claude/do-planish/command.md -->
 `plan.html` requirements (give these to the plan-writer verbatim):
 - Render the executive summary + phases in the project dark style — the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, otherwise the default style block from the `/design-doc` skill. Use the flow/box visual vocabulary for phase sequencing where it helps.
 - Paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>`.

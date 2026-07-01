@@ -64,6 +64,11 @@ tasks:
     cmds:
       - python3 tools/harness.py compose --target examples .shared-llm/compose/agents
 
+  compose:slash-commands:
+    desc: "Assemble every slash-command skill recipe into examples/ staging (do-planish, qa, security, …)"
+    cmds:
+      - python3 tools/harness.py compose --target examples .shared-llm/compose/slash-commands
+
   # ---------------------------------------------------------------------------
   # install — the headline consumer feature. Two surfaces:
   #   task install local            general/home pieces (all-projects)

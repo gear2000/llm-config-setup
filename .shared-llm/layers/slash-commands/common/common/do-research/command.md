@@ -1,4 +1,4 @@
-# do:research — Research → Stop
+# do-research — Research → Stop
 
 Pure research and exploration. The leader does not investigate the codebase or write the file directly — it dispatches Explore agents and a synthesizer.
 
@@ -13,7 +13,7 @@ Why: leader context fills up fast when it does work. Subagents have fresh contex
 ## Invocation
 
 ```
-/do:research [--team] <title>
+/do-research [--team] <title>
 ```
 
 - **`<title>`** — Required. Slugified for directory name. Example: `worker-pipeline-v2`

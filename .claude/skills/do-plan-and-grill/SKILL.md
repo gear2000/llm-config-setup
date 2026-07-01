@@ -1,4 +1,9 @@
-# do:plan-and-grill — Research → Draft → Grill → Iterate → Finalize
+---
+name: do-plan-and-grill
+description: 'Research a problem, draft a plan, then grill the user iteratively until the plan is rock solid. Flow: research (Explore subagents) → synthesizer → plan-writer → grill the user → finalize plan → STOP. Default transport is subagents (fresh context per call); pass --team to run inside TeamCreate. The leader orchestrates and runs the grill conversation; the leader does not read code or write files itself — it always dispatches a subagent for that work. The grill phase is the core value — iterate until every decision is resolved. Pass --route-phases to add mandatory per-phase size tagging (required for /do:loop --afk execution). Invocation: /do-plan-and-grill [--team] [--route-phases] <title>.'
+---
+
+# do-plan-and-grill — Research → Draft → Grill → Iterate → Finalize
 
 Like `/do:plan` but with an iterative grilling phase after the initial draft. The plan gets refined through back-and-forth with the user until every decision is resolved.
 
@@ -14,7 +19,7 @@ If you find yourself reading files, writing markdown, or running commands direct
 ## Invocation
 
 ```
-/do:plan-and-grill [--team] [--route-phases] [--interactive] [--docs] <title>
+/do-plan-and-grill [--team] [--route-phases] [--interactive] [--docs] <title>
 ```
 
 - **`<title>`** — Required. Slugified for directory name.
@@ -145,7 +150,7 @@ links:
 
 ### Step 2: Research (delegate)
 
-Dispatch Explore subagents (or named team members with `--team`) covering the relevant aspects, each writing to a section file. Then dispatch a synthesizer subagent to consolidate into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/research.md`. Same pattern as `/do:research` — see that skill for details.
+Dispatch Explore subagents (or named team members with `--team`) covering the relevant aspects, each writing to a section file. Then dispatch a synthesizer subagent to consolidate into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/research.md`. Same pattern as `/do-research` — see that skill for details.
 
 ### Step 3: Draft Plan (delegate)
 
@@ -250,7 +255,6 @@ Common size-downgrade triggers (`big` → `small`): "just a config tweak", "sing
 - Per-phase `reviewer:` annotation present where adversarial review was decided.
 - Per-phase `deploy` / `live` required-flag intent present so `rphase:create` can emit correct gates.
 - **If `--route-phases`**: instruct the writer explicitly: "Every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch." A plan missing any size tag is incomplete.
-<!-- # dup 2 (plan-html-style) — canonical in common/common/do:planish/command.md -->
 - **`plan.html`**: render the executive summary + phases in the project dark style (the v3.html `<style>` block if present, else the `/design-doc` default), use the flow/box visual vocabulary for phase sequencing where it helps, and paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim before `</body>`. `<title>` = `<Title> — plan v<N>`. Downstream tooling reads `plan.md` only — `plan.html` is never parsed by `rphase:create` or `do:implement`.
 
 Only `plan.md` is the source of truth for execution. If the user later annotates `plan.html` and pastes feedback, treat it as a new grill round → bump to `v<N+1>` and re-finalize both outputs.

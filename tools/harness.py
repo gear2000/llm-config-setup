@@ -397,7 +397,7 @@ class Composer:
 # wires those outputs and the Pi extensions into the per-harness discovery dirs
 # the tools read at startup, by symlink:
 #
-#   pi     skills   .claude/skills/<name>     -> ~/.pi/skills/<name>    (portable skills only)
+#   pi     skills   .claude/skills/<name>     -> ~/.pi/agent/skills/<name>  (portable skills only; Pi reads <agentDir>/skills)
 #          agents   .claude/agents/<name>.md  -> ~/.pi/agents/<name>.md
 #          ext      .shared-llm/llm/pi/common/extensions/<x>
 #                                             -> ~/.pi/agent/extensions/<x>  (or ~/.pi/extensions for *-hub.ts)
@@ -493,15 +493,22 @@ def _skill_dirs(root: Path) -> list[Path]:
 
 def plan_pi(root: Path) -> LinkPlan:
     desired: dict[Path, Path] = {}
-    pi_skills = HOME / ".pi/skills"
+    # Pi reads user skills from <agentDir>/skills, i.e. ~/.pi/agent/skills — NOT
+    # ~/.pi/skills. Don't "fix" this back without re-checking the Pi runtime.
+    pi_skills = HOME / ".pi/agent/skills"
+    # NOTE: ~/.pi/agents is unverified against the current Pi runtime layout —
+    # audit separately; not in scope for this rename.
     pi_agents = HOME / ".pi/agents"
     agent_ext = HOME / ".pi/agent/extensions"
     hub_ext = HOME / ".pi/extensions"
 
-    # skills — Pi gets a skill only when it is portable to every harness (common)
+    # skills — Pi gets a skill only when it is portable to every harness (common).
+    # Pi does not support colons in command names, so any skill named "foo:bar"
+    # is installed under the hyphenated alias "foo-bar" instead.
     for d in _skill_dirs(root):
         if harness_of(root, d.name) == "common":
-            desired[pi_skills / d.name] = d
+            pi_name = d.name.replace(":", "-")
+            desired[pi_skills / pi_name] = d
 
     # agents — composed personas under .claude/agents/ AND the hand-authored Pi
     # agent personas kept in the runtime tree (.shared-llm/llm/pi/common/agents/,
