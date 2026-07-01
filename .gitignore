@@ -13,6 +13,11 @@
 # NEVER pushed: this is a PUBLIC repo. See CLAUDE.md "Pre-push vetting".
 /.vetting/
 
+# memsearch plugin — local per-developer session index/state (PID lock file +
+# auto-generated session logs embedding this machine's absolute $HOME paths).
+# Never committed; same convention as jiffy-rewrite-2026.
+/.memsearch/
+
 # npm — safety net so an accidental install under the repo is never tracked
 node_modules/
 
