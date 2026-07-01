@@ -9,10 +9,6 @@
 # consumer install does NOT compose these into the consumer repo.
 /samples/
 
-# Vetting — local-only proprietary-content denylist + checker.
-# NEVER pushed: this is a PUBLIC repo. See CLAUDE.md "Pre-push vetting".
-/.vetting/
-
 # memsearch plugin — local per-developer session index/state (PID lock file +
 # auto-generated session logs embedding this machine's absolute $HOME paths).
 # Never committed; same convention as jiffy-rewrite-2026.

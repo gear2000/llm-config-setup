@@ -23,9 +23,18 @@ Everything pushed here is world-readable, permanently, and may be cached or inde
 
 **Never run `git push` here without a passing independent review.** When in doubt, do not push — ask a human.
 
-## Local vetting aid
+A Claude Code hook (`.claude/settings.json` → `PreToolUse` on `git commit`) runs this same check automatically on every commit as a first line of defense — see `.claude/hooks/proprietary-check.md`. It supplements, not replaces, the independent human/agent review required before push.
 
-A local, gitignored checklist lives under `.vetting/` (never committed — it would itself leak the terms it screens for). Run `.vetting/check.sh` before a push to scan tracked files against the known-proprietary denylist. A clean scan is **necessary but not sufficient**: it catches known strings only — the human/agent reviewer must still judge design and approach leakage that no denylist can catch.
+---
+
+# Background
+
+This kit started as Claude-only tooling — snippets of markdown composed into a single `CLAUDE.md`. It was later generalized to also target Codex and a custom **Pi** harness, so the same layered source now produces `CLAUDE.md`, `AGENTS.md`, and Pi-native runtime config.
+
+The guiding principle: **things that can be decomposed into reusable layers are layered and composed; things that cannot be meaningfully decomposed are kept as whole, directly-edited pieces** instead of being forced into the layering model.
+
+- **Layered** — prose lives in `.shared-llm/layers/` and is concatenated by `.shared-llm/compose/` recipes into `CLAUDE.md`, `AGENTS.md`, and skill files.
+- **Whole pieces** — runtime code and settings aren't decomposable prose, so they stay intact: `.shared-llm/llm/pi/common/` (Pi extensions like `context-workflow.ts` / `iac-guard.ts`, the `memsearch/` dir, agent persona files like `doc-reviewer.md` / `pr-reviewer.md`) is symlinked whole into `~/.pi/`; `.shared-llm/llm/claude/common/` (Claude Code hooks, statusline, settings templates) is copied whole into `~/.claude/`. Neither is ever concatenated into an output file.
 
 ---
 

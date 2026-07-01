@@ -1,0 +1,33 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": ".claude/statusline.sh",
+    "padding": 0
+  },
+  "preferences": {
+    "tmuxSplitPanes": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "agent",
+            "if": "Bash(git commit*)",
+            "model": "claude-sonnet-5",
+            "timeout": 120,
+            "statusMessage": "Checking staged diff for proprietary content...",
+            "prompt": "About to run `git commit` in a PUBLIC repo. Run `git diff --cached` and `git diff --cached --stat` to see exactly what would be committed. Then read and follow `.claude/hooks/proprietary-check.md` in full. Return your verdict as hookSpecificOutput.permissionDecision (allow/deny/ask) with a clear permissionDecisionReason."
+          }
+        ]
+      }
+    ]
+  }
+}
