@@ -20,7 +20,7 @@ If you find yourself reading files, writing markdown, or running commands direct
 - **`<title>`** — Required. Slugified for the work-log directory.
 - **`--team`** — Optional. Wraps agents in TeamCreate (TMUX windows, named members). Default is subagents.
 
-## When to use this vs other do: skills
+## When to use this vs other do-* skills
 
 - **`/do-research`** — research only, no plan
 - **`/do-oneshot`** — research + sketch + implement in one shot

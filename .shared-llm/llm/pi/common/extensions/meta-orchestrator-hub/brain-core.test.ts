@@ -31,7 +31,7 @@ function makeState(): BrainState {
 		sessionName: "sess",
 		sessionDir: "/tmp/meta-orch/sess",
 		planPath: "/tmp/meta-orch/sess/plan.md",
-		availableAgents: ["code-review", "deployer", "config0-onboarding-agent"],
+		availableAgents: ["code-review", "deployer", "onboarding-agent"],
 		dirs: { logsDir: "/tmp/meta-orch/sess/logs" },
 		runDir: "/tmp/meta-orch/sess",
 		planHash: "deadbeef0000",

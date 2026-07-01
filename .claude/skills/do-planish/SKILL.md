@@ -1,6 +1,6 @@
 ---
 name: do-planish
-description: 'Your everyday HTML-first planner — one focused research pass, an HTML-batch grill, and a dual plan.md + plan.html you can read and annotate in the browser. Lighter than /do-plan-and-grill (no --route-phases, no required Team section, no decisions log; reach for plan-and-grill on heavy or risky work that wants multi-aspect research and per-phase size tags). Heavier than /do:oneshot (which sketches and implements in one shot). Flow: research (one Explore subagent) → HTML-batch grill → finalize dual plan → STOP. Default transport is subagents (fresh context per call); pass --team to run inside TeamCreate. The leader orchestrates and runs the grill conversation; it does not read code or write files itself — it always dispatches a subagent for that work. Invocation: /do-planish [--team] <title>.'
+description: 'Your everyday HTML-first planner — one focused research pass, an HTML-batch grill, and a dual plan.md + plan.html you can read and annotate in the browser. Lighter than /do-plan-and-grill (no --route-phases, no required Team section, no decisions log; reach for plan-and-grill on heavy or risky work that wants multi-aspect research and per-phase size tags). Heavier than /do-oneshot (which sketches and implements in one shot). Flow: research (one Explore subagent) → HTML-batch grill → finalize dual plan → STOP. Default transport is subagents (fresh context per call); pass --team to run inside TeamCreate. The leader orchestrates and runs the grill conversation; it does not read code or write files itself — it always dispatches a subagent for that work. Invocation: /do-planish [--team] <title>.'
 ---
 
 # do-planish — Research → Grill → Plan (HTML-first express lane)
@@ -25,7 +25,7 @@ If you find yourself reading files, writing markdown, or running commands direct
 - **`<title>`** — Required. Slugified for the work-log directory.
 - **`--team`** — Optional. Wraps agents in TeamCreate (TMUX windows, named members). Default is subagents.
 
-## When to use this vs other do: skills
+## When to use this vs other do-* skills
 
 - **`/do-research`** — research only, no plan
 - **`/do-oneshot`** — research + sketch + implement in one shot

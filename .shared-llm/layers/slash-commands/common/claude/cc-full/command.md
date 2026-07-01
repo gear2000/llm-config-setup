@@ -18,7 +18,7 @@ The three stages share ONE work-log directory, because Stage 1 creates it and St
 
 Two rules, both load-bearing:
 
-1. **Delegate, don't do.** Same as every `do:` skill — you orchestrate, subagents do the work. The sub-skills already enforce this internally; you inherit it. Do not read code or write files yourself.
+1. **Delegate, don't do.** Same as every `do-*` skill — you orchestrate, subagents do the work. The sub-skills already enforce this internally; you inherit it. Do not read code or write files yourself.
 2. **Conduct, don't re-implement.** You do NOT re-specify how research, grilling, phase-creation, or implementation work. You invoke the sub-skill and let it run its own current workflow. Your only added value is the control flow *between* stages: capture each stage's output path, override its terminal STOP, move to the next stage. When `cc-loop` improves later, `cc-full` inherits it for free — keep it that way.
 
 ## Invocation
