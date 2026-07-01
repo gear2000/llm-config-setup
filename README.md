@@ -313,6 +313,29 @@ Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/nod
 
 An active `explanatory` or `learning` Claude Code output style (set via `/config`) competes with the brevity rule in `.shared-llm/layers/llm/common/common/response.md` and can override it. For terse, structured replies use the default or `concise` output style.
 
+## Syncing changes back into a private consumer repo
+
+This kit is a git repo of its own — if you edit or add common/ layer content
+directly here (a new skill, a tweaked prompt fragment, a new cc-* command),
+`just sync-to-private` pulls those changes into a private repo that already
+installed the kit:
+
+```
+just sync-to-private                                  # default ../jiffy-rewrite-2026
+just sync-to-private /path/to/private-repo --dry-run   # preview first
+```
+
+It only UPDATES files the private repo already has at the same path — a brand
+new common/ file (one the private repo never adopted) is reported, not copied,
+since adopting it may need a new compose recipe or a `harness.py sync` entry, a
+call only you can make. It never touches anything under a `this_repo/` path, and
+never touches `compose/*.yaml` recipe files — a private recipe often mixes a
+this_repo overlay into the same file (e.g. a per-repo agent description on top
+of the common body), and a blind overwrite from the common-only public version
+would delete that overlay wiring. See `tools/sync-to-private.py` for the exact
+scope. The reverse direction (private → public) is the private repo's own
+`task llm:sync-public FILES="..."` — unchanged by this.
+
 ## What is intentionally out of scope
 
 A shared cross-harness skill library (distributing skills across multiple AI assistants beyond the home-install path above) is intentionally out of scope for this kit — it is a candidate for a separate future kit.

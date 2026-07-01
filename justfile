@@ -23,6 +23,20 @@ compose *args:
 # Full setup: reconcile every link, then ensure the third-party Pi companions.
 setup: sync companions
 
+# ─── Sync back to the private consumer repo ────────────
+# This kit is the SOURCE for common/ layer content — when you edit/generate
+# something here, pull it into the private repo with this. Auto-diffs every
+# common/ layer tree (agents, llm, skills, slash-commands, the Claude/Pi
+# harness runtime config) against the private repo and copies over anything
+# new or changed, then recomposes + verifies there. Never touches this_repo/
+# paths or compose/ recipe files — those wire proprietary overlays on the
+# private side and stay untouched. See tools/sync-to-private.py for the scope.
+#
+# `just sync-to-private` (default path ../jiffy-rewrite-2026)
+# `just sync-to-private /path/to/jiffy-rewrite-2026 --dry-run`
+sync-to-private private_root="../jiffy-rewrite-2026" *flags:
+    python3 tools/sync-to-private.py --private-root {{private_root}} {{flags}}
+
 # Install the kit's pinned third-party Pi extensions from the manifest (idempotent; no-op without pi).
 companions:
     @command -v pi >/dev/null || { echo "pi not found — skipping companions"; exit 0; }
