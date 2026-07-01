@@ -8,7 +8,7 @@ Stop. One bullet. One question:
 
 - Found: [plain description of the problem]. Fix now or add to a follow-up list?
 
-Default is fix now. Only defer when the user explicitly says to.
+Default is fix now. This repo is greenfield — there is no legacy code to protect and no backwards compatibility to maintain, so the cost of fixing in place is almost always lower than the cost of carrying the debt forward. Only defer when the user explicitly says to.
 
 **AFK / autonomous mode (no user present):**
 
