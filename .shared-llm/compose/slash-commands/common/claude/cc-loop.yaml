@@ -1,0 +1,6 @@
+type: skill
+name: cc-loop
+description: .shared-llm/layers/slash-commands/common/claude/cc-loop/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/claude/cc-loop/command.md
+output: .claude/skills/cc-loop/SKILL.md

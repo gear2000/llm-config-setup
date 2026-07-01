@@ -1,0 +1,6 @@
+type: skill
+name: cc-full
+description: .shared-llm/layers/slash-commands/common/claude/cc-full/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/claude/cc-full/command.md
+output: .claude/skills/cc-full/SKILL.md
