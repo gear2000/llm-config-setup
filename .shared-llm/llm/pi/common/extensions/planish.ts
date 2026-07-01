@@ -289,6 +289,32 @@ function grillFormHtml(questions: GrillQuestion[]): string {
   .pq-a{width:100%;min-height:60px;background:#0d1017;border:1px solid #2e3440;border-radius:6px;
     padding:9px 11px;color:#c8ccd4;font:12px/1.5 'JetBrains Mono',monospace;resize:vertical;outline:none;}
   .pq-a:focus{border-color:#456a8a;}
+  /* bullets/prose inside a question — keep it tight, never a wall of text */
+  .pq ul,.pq ol{margin:4px 0 10px;padding-left:18px;}
+  .pq li{font-size:12px;color:#c8ccd4;line-height:1.55;margin:2px 0;}
+  .pq b,.pq strong{color:#e6e9ef;}
+  .pq code{background:#0d1017;border:1px solid #1e222a;border-radius:3px;padding:0 4px;font-size:11px;color:#7ab4db;}
+  /* ── diagram vocabulary (offline-safe; the LLM picks by complexity) ──
+     simple → Mermaid (author adds its <script> per-page); medium → ascii;
+     complex → flow rows. All render with no CDN so the file works offline. */
+  .grill-fig{margin:8px 0 12px;background:#0b0e14;border:1px solid #1e222a;border-radius:6px;
+    padding:12px 14px;overflow-x:auto;}
+  .grill-fig-cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:8px;}
+  .grill-fig pre,pre.ascii{margin:0;font:12px/1.5 'JetBrains Mono',monospace;color:#c8ccd4;white-space:pre;}
+  .flow{display:flex;flex-direction:column;gap:7px;}
+  .flow-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .flow-box{border:1px solid #2e3440;border-radius:6px;padding:6px 11px;background:#141820;color:#c8ccd4;
+    font-size:12px;line-height:1.4;white-space:nowrap;}
+  .flow-box small{display:block;color:#6b7280;font-size:10px;white-space:normal;}
+  .flow-box.in{border-color:#7aa87a;color:#98c379;background:#111a14;}    /* input  */
+  .flow-box.sut{border-color:#d19a66;color:#d19a66;background:#1a1610;}   /* main   */
+  .flow-box.out{border-color:#456a8a;color:#7ab4db;background:#0f151d;}   /* output */
+  .flow-arrow{color:#6b7280;font-size:14px;}
+  .flow-note{font-size:11px;color:#6b7280;margin-top:2px;}
+  .chip{display:inline-block;font-size:10px;padding:1px 7px;border-radius:9999px;border:1px solid #2e3440;
+    color:#a0a4ac;margin-right:4px;}
+  .chip.in{border-color:#7aa87a;color:#98c379;} .chip.sut{border-color:#d19a66;color:#d19a66;}
+  .chip.out{border-color:#456a8a;color:#7ab4db;}
   #bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;
     padding:12px 24px;display:flex;justify-content:flex-end;z-index:9999;}
   #submit{background:#16a34a;color:#fff;border:none;border-radius:6px;padding:9px 22px;
@@ -413,12 +439,12 @@ export default function (pi: ExtensionAPI) {
     const topic = planTopic ? `The user wants to plan: ${planTopic}\n\n` : "";
     const planHtml = path.join(planDir, "plan.html");
     const planMd = path.join(planDir, "plan.md");
-    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in tf-implement.ts and the Claude /do:planish command. Keep in sync. See do:planish.
+    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in tf-implement.ts and the Claude /do-planish command. Keep in sync. See do-planish.
     return {
       systemPrompt:
         event.systemPrompt +
         `\n\n${topic}You are helping the user create a PLAN with planish — produce a plan, not an implementation. Do NOT build or run anything unless the user explicitly asks after the plan is approved.\n\n` +
-        "STEP 1 — GRILL: Call the planish_grill tool with a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each one your recommended answer. If the answers raise new questions, call planish_grill again.\n\n" +
+        "STEP 1 — GRILL: Call the planish_grill tool with a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each one your recommended answer. Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its <script> to the page <head>); a bit more complex → an ASCII tree in a <pre>; quite complex → the row-by-row HTML flow (.grill-fig / .flow / .flow-box, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake. If the answers raise new questions, call planish_grill again.\n\n" +
         `STEP 2 — BUILD: Write the plan to TWO files (the directory already exists):\n` +
         // # ref 1 (plan-html-style) — also duplicated in: planish_submit_plan description below, tf-implement.ts STEP 2
         `  • ${planHtml} — the visual plan: a title, a summary of phases, key decisions, and verification steps.\n` +

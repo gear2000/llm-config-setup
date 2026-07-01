@@ -1,6 +1,6 @@
 # do-plan-and-grill — Research → Draft → Grill → Iterate → Finalize
 
-Like `/do:plan` but with an iterative grilling phase after the initial draft. The plan gets refined through back-and-forth with the user until every decision is resolved.
+Like `/do-plan` but with an iterative grilling phase after the initial draft. The plan gets refined through back-and-forth with the user until every decision is resolved.
 
 ## Cardinal rule: delegate, don't do
 
@@ -25,14 +25,14 @@ If you find yourself reading files, writing markdown, or running commands direct
 
 ## --route-phases flag
 
-Use this flag when the plan will be executed AFK via `/do:loop --afk`. Without size tags, `/do:loop --afk` refuses to start.
+Use this flag when the plan will be executed AFK via `/do-loop --afk`. Without size tags, `/do-loop --afk` refuses to start.
 
 **Content contract:**
 
 - **WITH `--route-phases`**: every phase MUST have a `**Size**: small|big` line directly under its phase header. A plan missing any size tag is incomplete — re-grill until all are set.
-- **WITHOUT `--route-phases`**: phases must NOT have `**Size**:` lines. The plain grill produces a clean plan that `/do:loop --interactive` and `/do:implement` consume.
+- **WITHOUT `--route-phases`**: phases must NOT have `**Size**:` lines. The plain grill produces a clean plan that `/do-loop --interactive` and `/do-implement` consume.
 
-**Downstream effect:** `/do:loop --afk` refuses plans without size tags. `/do:loop --interactive` accepts both.
+**Downstream effect:** `/do-loop --afk` refuses plans without size tags. `/do-loop --interactive` accepts both.
 
 **What changes with `--route-phases`:**
 
@@ -42,7 +42,7 @@ Use this flag when the plan will be executed AFK via `/do:loop --afk`. Without s
 4. **Finalization step** — the plan-writer receives an explicit instruction: every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch.
 5. **Last-phase live-deploy gate** — before finalizing, scan the last phase's verification list. At least one entry must match a live-deploy pattern (`sync-to-git.sh`, `curl https://`, `aws lambda invoke`, `aws logs tail`, `terraform apply`, Jenkins triggers, playwright against live URL). If none found, tell the user and re-enter the grill until the gate passes.
 6. **decisions.md entry** — uses route-phases format (see Step 6 below).
-7. **Stop message** — tells the user phase counts and suggests `/rphase:create <path>` as the next step.
+7. **Stop message** — tells the user phase counts and suggests `/rphase-create <path>` as the next step.
 
 **Sizing heuristic for the plan-writer (--route-phases only):**
 
@@ -149,7 +149,7 @@ Dispatch Explore subagents (or named team members with `--team`) covering the re
 
 ### Step 3: Draft Plan (delegate)
 
-**Dispatch a plan-writer subagent** with research.md as input and the user's stated goal. Same prompt template as `/do:plan` (see that skill's Step 3 for the full prompt + required frontmatter + required sections, including the `## Team` section spec).
+**Dispatch a plan-writer subagent** with research.md as input and the user's stated goal. Same prompt template as `/do-plan` (see that skill's Step 3 for the full prompt + required frontmatter + required sections, including the `## Team` section spec).
 
 The plan-writer MUST emit:
 1. The required frontmatter at the top of `plan.md` (`status`, `tldr`, `decision`, `execution: sequential|parallel`, `links`).
@@ -190,8 +190,9 @@ Ensure the work-log static server is up (idempotent — no-op if already running
 
 Each round:
 1. Work out every question you can ask **right now** — split them into independent (answerable in any order) and dependent (wording hinges on an independent answer). Ask the independent ones this round.
-2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — overwrite the same file every round, then refresh the browser tab to load the new round (the static server serves the raw file — no live-reload). The file contains:
+2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — write a fresh `grill-v<round>.html` each round (kept for history) and overwrite `grill_current.html` with the same content, then refresh the tab (kept on `grill_current.html`) to load the new round (the static server serves the raw file — no live-reload). The file contains:
    - A context header: what's being planned, the draft shape, and enough background that each question is understandable on its own (not a wall of text — use headings/tables).
+   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
    - The form toolkit pasted verbatim before `</body>` from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html`.
    - `<title>` = `<Title> — grill v<N>`.
@@ -218,10 +219,10 @@ Each round:
 - Deployment strategy — how code reaches production
 - Post-deployment verification — how do we confirm it's running correctly (logs, not just status codes)
 - Error handling strategy — where exceptions propagate vs are caught
-- **Team roster** — does this need 1 or 2 workers? Is the deploy nontrivial enough to dispatch a `deployer`? Is the work risky enough to want a `plan-watchdog`? Does any phase need a specialist (`database`, `security`, `devops`)? Resolve this in the grill — it goes in the plan's `## Team` section that drives `/do:implement`.
+- **Team roster** — does this need 1 or 2 workers? Is the deploy nontrivial enough to dispatch a `deployer`? Is the work risky enough to want a `plan-watchdog`? Does any phase need a specialist (`database`, `security`, `devops`)? Resolve this in the grill — it goes in the plan's `## Team` section that drives `/do-implement`.
 - **Execution mode** — `sequential` (each phase consumes prior phase's handoff section; default) or `parallel` (phases independent, no handoff injection). Mixed plans set `execution: parallel` and tag individual phases with `depends_on: [phase-id, ...]`. Defaults to `sequential` if not raised — confirm explicitly when the work is parallel-eligible (e.g., independent package edits, parallel team-of-workers).
-- **Review style per risky phase** — for phases touching auth/security/infra/migrations, ask whether the review gate should be `auto` (default automated review), `adversarial` (a fresh adversarial reviewer — Codex via `codex:rescue` or fresh Claude agent — hunts bugs, security issues, scope creep), or `both`. Capture per-phase in plan.md so `rphase:create` emits the right `reviewer` field.
-- **Deploy/live gate applicability** — for each phase, is `deploy` required? Is `live` required? Greenfield phases that produce libraries (no service to deploy to yet) keep these optional. Capture decisions so `rphase:create` emits correct `required:` flags on the verification array.
+- **Review style per risky phase** — for phases touching auth/security/infra/migrations, ask whether the review gate should be `auto` (default automated review), `adversarial` (a fresh adversarial reviewer — Codex via `codex:rescue` or fresh Claude agent — hunts bugs, security issues, scope creep), or `both`. Capture per-phase in plan.md so `rphase-create` emits the right `reviewer` field.
+- **Deploy/live gate applicability** — for each phase, is `deploy` required? Is `live` required? Greenfield phases that produce libraries (no service to deploy to yet) keep these optional. Capture decisions so `rphase-create` emits correct `required:` flags on the verification array.
 
 **With `--route-phases` — additional per-phase checks (walk phases in order):**
 
@@ -242,16 +243,16 @@ Common size-downgrade triggers (`big` → `small`): "just a config tweak", "sing
 
 ### Step 5: Finalize Plan (delegate)
 
-**Dispatch the plan-writer subagent one more time** with all the grill decisions, asking it to produce the final plan as **two outputs** — `plan.md` (canonical, what `/do:implement` and `/rphase:create` consume) and `plan.html` (the visual, annotatable surface you read and can still mark up). Same content; markdown is the agent/tooling surface, HTML is the human surface. Make sure:
+**Dispatch the plan-writer subagent one more time** with all the grill decisions, asking it to produce the final plan as **two outputs** — `plan.md` (canonical, what `/do-implement` and `/rphase-create` consume) and `plan.html` (the visual, annotatable surface you read and can still mark up). Same content; markdown is the agent/tooling surface, HTML is the human surface. Make sure:
 
 - Frontmatter at top reflects grill outcomes (`status: Accepted`, `decision:` sentence, `execution: sequential|parallel`).
 - `## Executive Summary` section immediately after the frontmatter — updated to reflect any grill decisions that changed the plan. Bullet-point format: any point longer than two lines must be rewritten as bullets. A final plan.md missing this section is rejected — re-dispatch.
 - `## Team` section matches the agreed roster.
 - Per-phase `reviewer:` annotation present where adversarial review was decided.
-- Per-phase `deploy` / `live` required-flag intent present so `rphase:create` can emit correct gates.
+- Per-phase `deploy` / `live` required-flag intent present so `rphase-create` can emit correct gates.
 - **If `--route-phases`**: instruct the writer explicitly: "Every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch." A plan missing any size tag is incomplete.
 <!-- # dup 2 (plan-html-style) — canonical in common/common/do-planish/command.md -->
-- **`plan.html`**: render the executive summary + phases in the project dark style (the v3.html `<style>` block if present, else the `/design-doc` default), use the flow/box visual vocabulary for phase sequencing where it helps, and paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim before `</body>`. `<title>` = `<Title> — plan v<N>`. Downstream tooling reads `plan.md` only — `plan.html` is never parsed by `rphase:create` or `do:implement`.
+- **`plan.html`**: render the executive summary + phases in the project dark style (the v3.html `<style>` block if present, else the `/design-doc` default), use the flow/box visual vocabulary for phase sequencing where it helps, and paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim before `</body>`. `<title>` = `<Title> — plan v<N>`. Downstream tooling reads `plan.md` only — `plan.html` is never parsed by `rphase-create` or `do-implement`.
 
 Only `plan.md` is the source of truth for execution. If the user later annotates `plan.html` and pastes feedback, treat it as a new grill round → bump to `v<N+1>` and re-finalize both outputs.
 
@@ -291,16 +292,16 @@ Append; do NOT overwrite. See `mkdocs/docs/work-log/README.md` for the full form
 1. **Dispatch a nav-sync subagent** to update `~/project/repos/your-repo-ops/mkdocs/mkdocs.yml` under `- Logs:`.
 2. If `--team`: SendMessage `STOP_PULSE` to team-pulse if it was running.
 3. Call `ExitPlanMode`.
-4. Without `--route-phases`: Tell the user: _"Plan finalized at `<path>`. Run `/do:implement <path>/plan.md` when ready."_
+4. Without `--route-phases`: Tell the user: _"Plan finalized at `<path>`. Run `/do-implement <path>/plan.md` when ready."_
    With `--route-phases`: Tell the user:
    ```
    Plan finalized at <path>.
    N phases tagged: <count_small> small, <count_big> big.
    Execution: <sequential | parallel>.
-   Run `/rphase:create <path>` next to convert to phase JSON files.
-   Then `/do:loop --afk <phases_root>` to execute AFK.
+   Run `/rphase-create <path>` next to convert to phase JSON files.
+   Then `/do-loop --afk <phases_root>` to execute AFK.
    ```
-5. **STOP.** Do not call `/rphase:create`. Do not implement. The user runs the next step deliberately.
+5. **STOP.** Do not call `/rphase-create`. Do not implement. The user runs the next step deliberately.
 
 ### Nav Structure
 

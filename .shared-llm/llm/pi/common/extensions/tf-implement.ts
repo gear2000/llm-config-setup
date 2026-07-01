@@ -351,7 +351,7 @@ export default function (pi: ExtensionAPI) {
         ? `The reviewer found these issues with your previous iteration. Fix them before signalling ready:\n\n${pendingIssues.join("\n")}\n\n`
         : "";
 
-    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in planish.ts and the Claude /do:planish command. Keep in sync. See do:planish.
+    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in planish.ts and the Claude /do-planish command. Keep in sync. See do-planish.
     if (planishMode) {
       const planHtml = path.join(planDir, "plan.html");
       const planMd = path.join(planDir, "plan.md");
@@ -361,7 +361,7 @@ export default function (pi: ExtensionAPI) {
           `\n\n${issuesBlock}You are a Terraform infrastructure engineer.\n\n` +
           (pendingIssues.length > 0
             ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
-            : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with a batch of clarifying questions about the infrastructure (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question your recommended answer. Use the answers to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
+            : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with a batch of clarifying questions about the infrastructure (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question your recommended answer. Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its <script> to the page <head>); a bit more complex → an ASCII tree in a <pre>; quite complex → the row-by-row HTML flow (.grill-fig / .flow / .flow-box, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake. Use the answers to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
               `STEP 2 — PLAN: Write a Terraform implementation plan to TWO files (the directory already exists):\n` +
               // # dup 1 (plan-html-style) — canonical in planish.ts STEP 2 BUILD
               `  • ${planHtml} — the visual plan: a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs.\n` +
