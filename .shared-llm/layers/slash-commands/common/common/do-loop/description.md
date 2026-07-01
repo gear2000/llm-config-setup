@@ -1,0 +1,4 @@
+Run all available phases of a phase-driven plan sequentially inside the current agent session. The orchestrator (main thread) stays alive across phases, so BLOCKED phases pause in chat — no relaunch — and the orchestrator can pre-research fix options before asking the user (interactive mode) or escalate via code-review subagent (afk mode).
+--interactive (default): per-phase Sonnet worker, leader judges PASSED /FAILED/BLOCKED, user mediates blocked phases.
+--afk: per-phase routing by Size tag (small=Agent subagent, big= TeamCreate-of-one with team-pulse), automated code-review subagent after PASSED, single auto-fix pass on NEEDS_CHANGES. Requires plan produced by /do-plan-and-grill --route-phases (every phase has Size).
+Invocation: /do-loop [--interactive|--afk] <phases-path-or-work-log-name> [-i N] [-t SECS] [--pulse].

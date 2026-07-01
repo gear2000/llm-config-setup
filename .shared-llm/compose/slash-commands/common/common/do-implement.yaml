@@ -1,0 +1,6 @@
+type: skill
+name: do-implement
+description: .shared-llm/layers/slash-commands/common/common/do-implement/description.md
+inputs:
+- .shared-llm/layers/slash-commands/common/common/do-implement/command.md
+output: .claude/skills/do-implement/SKILL.md
