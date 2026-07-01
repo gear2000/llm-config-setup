@@ -9,9 +9,10 @@ emitted (so a command keeps its `argument-hint` etc.), and the recipe's
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
 
 import yaml
 
@@ -106,6 +107,80 @@ def test_resources_copied_into_output(tmp_path: Path) -> None:
     _compose(shared, target, recipe_rel)
     copied = target / ".claude/skills/rescmd/references/guide.md"
     assert copied.exists() and copied.read_text() == "REFERENCE GUIDE"
+
+
+def _compose_expect_fail(shared_llm: Path, target: Path, recipe_rel: str) -> str:
+    """Run compose expecting a non-zero exit; return stderr."""
+    result = subprocess.run(
+        [sys.executable, str(COMPOSER), "compose", recipe_rel,
+         "--shared-llm", str(shared_llm), "--target", str(target)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0, "compose unexpectedly succeeded"
+    return result.stderr
+
+
+def test_copy_verbatim_preserves_executable_bit(tmp_path: Path) -> None:
+    shared = tmp_path / ".shared-llm"
+    src = shared / "llm/claude/common/hooks/hook.sh"
+    _write(src, "#!/usr/bin/env bash\necho hi\n")
+    src.chmod(0o755)
+    recipe_rel = ".shared-llm/compose/hooks/common/hook.yaml"
+    _write(shared.parent / recipe_rel, yaml.safe_dump({
+        "type": "copy",
+        "inputs": [".shared-llm/llm/claude/common/hooks/hook.sh"],
+        "output": ".claude/hooks/hook.sh",
+    }, sort_keys=False))
+    _compose(shared, tmp_path, recipe_rel)
+    out = tmp_path / ".claude/hooks/hook.sh"
+    assert out.read_text() == "#!/usr/bin/env bash\necho hi\n"
+    assert out.stat().st_mode & 0o111, "executable bit not preserved"
+
+
+def test_copy_rejects_multiple_inputs(tmp_path: Path) -> None:
+    shared = tmp_path / ".shared-llm"
+    _write(shared / "llm/claude/common/hooks/a.sh", "a")
+    _write(shared / "llm/claude/common/hooks/b.sh", "b")
+    recipe_rel = ".shared-llm/compose/hooks/common/two.yaml"
+    _write(shared.parent / recipe_rel, yaml.safe_dump({
+        "type": "copy",
+        "inputs": [".shared-llm/llm/claude/common/hooks/a.sh",
+                   ".shared-llm/llm/claude/common/hooks/b.sh"],
+        "output": ".claude/hooks/x.sh",
+    }, sort_keys=False))
+    stderr = _compose_expect_fail(shared, tmp_path, recipe_rel)
+    assert "exactly one input" in stderr
+
+
+def test_settings_deep_merge(tmp_path: Path) -> None:
+    shared = tmp_path / ".shared-llm"
+    base = {
+        "permissions": {"defaultMode": "acceptEdits"},
+        "hooks": {"PostToolUse": [{"matcher": "Edit"}]},
+        "effortLevel": "low",
+    }
+    overlay = {
+        "hooks": {"PreToolUse": [{"matcher": "Bash"}], "PostToolUse": [{"matcher": "Write"}]},
+        "effortLevel": "max",
+    }
+    _write(shared / "llm/claude/common/settings.json", json.dumps(base))
+    _write(shared / "llm/claude/this_repo/settings.json", json.dumps(overlay))
+    recipe_rel = ".shared-llm/compose/settings/settings.yaml"
+    _write(shared.parent / recipe_rel, yaml.safe_dump({
+        "type": "settings",
+        "inputs": [".shared-llm/llm/claude/common/settings.json",
+                   ".shared-llm/llm/claude/this_repo/settings.json"],
+        "output": ".claude/settings.json",
+    }, sort_keys=False))
+    _compose(shared, tmp_path, recipe_rel)
+    merged = json.loads((tmp_path / ".claude/settings.json").read_text())
+    # dict recurses (permissions survives from base, hooks gains PreToolUse)
+    assert merged["permissions"]["defaultMode"] == "acceptEdits"
+    assert set(merged["hooks"].keys()) == {"PostToolUse", "PreToolUse"}
+    # list concatenates (both PostToolUse entries kept, base first)
+    assert merged["hooks"]["PostToolUse"] == [{"matcher": "Edit"}, {"matcher": "Write"}]
+    # scalar overlay wins
+    assert merged["effortLevel"] == "max"
 
 
 if __name__ == "__main__":

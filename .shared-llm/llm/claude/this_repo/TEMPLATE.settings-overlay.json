@@ -1,0 +1,13 @@
+{
+  "_TEMPLATE": "Fill in (or delete) this project settings overlay. It deep-merges ON TOP of the home settings.template.json via `type: settings` compose — dicts recurse, hook arrays concatenate, scalars overlay-win. Use it for PROJECT-specific hooks (the home base already carries the generic prettier/typescript/console-log hooks). To adopt: (1) rename to drop the TEMPLATE. prefix, (2) remove this _TEMPLATE key, (3) point the command at your project hook, (4) add a `type: settings` recipe that merges the home base + this overlay into .claude/settings.json. Delete both files if you don't need project hooks.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\"" }
+        ]
+      }
+    ]
+  }
+}

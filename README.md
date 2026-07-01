@@ -85,7 +85,8 @@ Installs everything that lives in your `$HOME` and applies across every project:
 1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`) and copies each `SKILL.md` into the home skill dir every harness reads: `~/.claude/skills/`, `~/.codex/skills/`, `~/.pi/skills/`.
 2. **The 18 generic agents** — composes the `agents/` recipes and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. (Codex has no user-agent directory, so it is skipped — the installer never invents one.)
 3. **Pi runtime** — `tools/harness.py sync` symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and `install-pi-extensions.sh` installs the pinned third-party extensions.
-4. **The `llm-compose` wrapper** — copies `tools/templates/llm-compose` to `~/.local/bin/llm-compose` (executable).
+4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` **only if absent** (never clobbers per-machine tweaks). See "Claude harness runtime config" below.
+5. **The `llm-compose` wrapper** — copies `tools/templates/llm-compose` to `~/.local/bin/llm-compose` (executable).
 
 It is idempotent and safe: a re-run installs nothing new when home already matches, and it never clobbers a divergent or foreign file (an existing file that does not match this kit's copy, or a symlink it did not create, is left untouched with a warning).
 
@@ -165,7 +166,7 @@ Compose one on its own with `task compose:agent -- <name>`, or all of them with 
 - **source** — the `.shared-llm/` dir (layers + recipes). Inputs and descriptions resolve against it. Selected via `--shared-llm`, then `$SHARED_LLM_DIR`, then a walk-up for `.shared-llm/`.
 - **target** — the output base where each recipe's `output:` path lands. Selected via `--target`, default the current directory.
 
-Recipe types: `skill` (frontmatter name + description), `agent` (name + description + model, optional color), `claude-md` / `agents-md` (plain concatenated markdown, no frontmatter), and `prompt` (a whole feature prompt assembled from an explicit manifest). A recipe may also declare a `catalog:` partial injected before its `inputs`.
+Recipe types: `skill` (frontmatter name + description), `agent` (name + description + model, optional color), `claude-md` / `agents-md` (plain concatenated markdown, no frontmatter), `prompt` (a whole feature prompt assembled from an explicit manifest), `copy` (one file copied verbatim, executable bit preserved — for hook scripts and the statusline), and `settings` (JSON inputs deep-merged: dicts recurse, lists concatenate, scalars overlay-win — for a `settings.json` base plus a this_repo overlay). A recipe may also declare a `catalog:` partial injected before its `inputs`.
 
 ```bash
 python3 tools/harness.py compose                                     # compose all
@@ -223,6 +224,35 @@ find . -name 'TEMPLATE.*'
 ```
 
 See `ONBOARDING.md` for the ordered, token-by-token fill checklist.
+
+## Claude harness runtime config
+
+`.shared-llm/llm/claude/common/` holds Claude Code-specific runtime config —
+hooks, the statusline, and a home settings template. Like the Pi runtime config,
+these are **not composed into prose**; `task install local` places them at the
+home level so they apply to every project:
+
+- **`hooks/*.sh`** — four generic, project-agnostic quality hooks (prettier
+  format, TypeScript check, console.log warn/audit). Copied into `~/.claude/hooks/`
+  and wired in the settings template. They **self-gate by file type** — a
+  TypeScript hook no-ops in a Python repo — so firing in every project is safe.
+- **`statusline.sh`** — a dependency-free statusline (dir, branch, model, context
+  bar). Copied to `~/.claude/statusline.sh`.
+- **`settings.template.json`** — general Claude Code settings (statusline pointer,
+  agent-teams flag, the generic hook wiring, `permissions.defaultMode: acceptEdits`,
+  plugins). Scaffolded to `~/.claude/settings.json` **only when absent** — a
+  re-run never overwrites your per-machine tweaks. Bump `defaultMode` or add
+  personal permissions in `~/.claude/settings.local.json` (gitignored), which
+  Claude Code merges on top.
+
+For a repo that needs its **own** project-specific hooks, two optional
+`TEMPLATE.*` stubs ship under `.shared-llm/llm/claude/this_repo/`
+(`TEMPLATE.example-hook.py`, `TEMPLATE.settings-overlay.json`) — fill them in and
+merge the overlay onto the base with a `type: settings` recipe, or delete them.
+
+This is the machinery behind the two new compose types: **`type: copy`** (a file
+copied verbatim, executable bit preserved) and **`type: settings`** (JSON inputs
+deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 ## Pi harness runtime config (optional)
 

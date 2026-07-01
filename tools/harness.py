@@ -21,6 +21,12 @@ Compose YAML types:
                        feature prompt assembled from an explicit manifest of
                        layer fragments (credentials/CI pointer, the per-feature
                        context, the chosen agent role) for a systemPrompt harness
+    type: copy       — one source file copied verbatim (executable bit preserved)
+                       to the output. For code that lives in the layer tree but
+                       is not composable prose: hook scripts, statusline.sh.
+    type: settings   — JSON inputs deep-merged left-to-right (dicts recurse,
+                       lists concatenate, scalars overlay-win). For settings.json
+                       assembled from a common base + a this_repo overlay.
 
 Optional keys:
     catalog: <path>  — shared partial injected FIRST before 'inputs' (single-source for
@@ -46,6 +52,7 @@ from __future__ import annotations
 import argparse
 import collections
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shutil
@@ -105,11 +112,21 @@ def read_file(path: Path) -> str:
     return path.read_text()
 
 
-VALID_TYPES = {"skill", "agent", "claude-md", "agents-md", "prompt"}
+VALID_TYPES = {"skill", "agent", "claude-md", "agents-md", "prompt", "copy", "settings"}
 
 # Types that produce plain concatenated markdown with no name/description
 # frontmatter (CLAUDE.md / AGENTS.md / whole feature prompts).
 PLAIN_TYPES = ("claude-md", "agents-md", "prompt")
+
+# Types that are NOT markdown concatenation at all — they bypass the
+# description read + concatenation flow entirely:
+#   copy     — a single source file copied verbatim (preserving the executable
+#              bit) to the output. For hook scripts / statusline.sh, which
+#              are code, not composable prose.
+#   settings — JSON inputs deep-merged left-to-right into one JSON document
+#              (dicts merge recursively, lists concatenate, scalars overlay-win).
+#              For settings.json = a common base + a this_repo overlay.
+STRUCTURED_TYPES = ("copy", "settings")
 
 
 def load_compose_yaml(path: Path) -> dict[str, Any]:
@@ -135,7 +152,11 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
             print(f"error: {path} missing required field: {field}", file=sys.stderr)
             sys.exit(1)
 
-    if compose_type not in PLAIN_TYPES:
+    if compose_type == "copy" and len(data.get("inputs", [])) != 1:
+        print(f"error: {path} type 'copy' needs exactly one input (a single file)", file=sys.stderr)
+        sys.exit(1)
+
+    if compose_type not in PLAIN_TYPES and compose_type not in STRUCTURED_TYPES:
         for field in ("name", "description"):
             if field not in data:
                 print(f"error: {path} missing required field: {field}", file=sys.stderr)
@@ -239,6 +260,67 @@ class Prompt:
         output_path.write_text(body)
 
 
+class CopyFile:
+    """Copies one source file verbatim to the output, preserving its mode.
+
+    For code that lives in the layer tree but is not composable prose — hook
+    scripts, statusline.sh. `shutil.copy2` carries the executable bit across, so
+    a `chmod +x`-ed hook source lands executable (git tracks that bit, so
+    compose:check catches a mode drift the same as a content drift).
+    """
+
+    def write(self, source_path: Path, output_path: Path) -> None:
+        if not source_path.exists():
+            print(f"error: file not found: {source_path}", file=sys.stderr)
+            sys.exit(1)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, output_path)
+
+
+def deep_merge(base: Any, overlay: Any) -> Any:
+    """Deep-merge two JSON-like values, overlay winning.
+
+    - dict + dict  -> recurse key by key
+    - list + list  -> concatenate (base first) — so a common base's hook array
+                      and a this_repo overlay's hook array both survive
+    - anything else -> overlay replaces base
+    """
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        merged = dict(base)
+        for key, value in overlay.items():
+            merged[key] = deep_merge(merged[key], value) if key in merged else value
+        return merged
+    if isinstance(base, list) and isinstance(overlay, list):
+        return base + overlay
+    return overlay
+
+
+class SettingsMerge:
+    """Deep-merges JSON inputs left-to-right into one JSON document.
+
+    For settings.json = a generic common base + a this_repo overlay. The `hooks`
+    object merges key by key and each hook-event array concatenates, so the
+    common base carries the portable hooks (formatting, quality checks) and the
+    this_repo overlay adds the repo-specific ones without either clobbering the
+    other.
+    """
+
+    def write(self, source_paths: list[Path], output_path: Path) -> None:
+        merged: Any = {}
+        for src in source_paths:
+            if not src.exists():
+                print(f"error: file not found: {src}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                data = json.loads(src.read_text())
+            except json.JSONDecodeError as exc:
+                print(f"error: invalid JSON in {src}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            merged = deep_merge(merged, data)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(merged, indent=2) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Composer
 # ---------------------------------------------------------------------------
@@ -254,6 +336,8 @@ class Composer:
         self.claude_md_handler = ClaudeMd()
         self.agents_md_handler = AgentsMd()
         self.prompt_handler = Prompt()
+        self.copy_handler = CopyFile()
+        self.settings_handler = SettingsMerge()
 
     def resolve_input(self, relative: str) -> Path:
         """Resolve an input/catalog/description path against the SOURCE root.
@@ -304,6 +388,20 @@ class Composer:
         """Process a single compose YAML."""
         data = load_compose_yaml(yaml_path)
         compose_type = self._resolve_type(data)
+
+        # Structured/verbatim types bypass the markdown concatenation flow.
+        if compose_type == "copy":
+            source_path = self.resolve_input(data["inputs"][0])
+            output_path = self.resolve_output(data["output"])
+            print(f"  copy: {output_path.name} -> {output_path}")
+            self.copy_handler.write(source_path, output_path)
+            return
+        if compose_type == "settings":
+            source_paths = [self.resolve_input(rel) for rel in data["inputs"]]
+            output_path = self.resolve_output(data["output"])
+            print(f"  settings: {output_path.name} -> {output_path}")
+            self.settings_handler.write(source_paths, output_path)
+            return
 
         if compose_type not in PLAIN_TYPES:
             desc_path = self.resolve_input(data["description"])

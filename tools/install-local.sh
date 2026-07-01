@@ -2,7 +2,7 @@
 # install-local.sh — install the GENERAL / home pieces of this kit into the user's
 # HOME (all-projects, NOT repo-specific). Driven by `task install local`.
 #
-# Installs FOUR things, all $HOME-relative so a sandbox HOME redirects everything:
+# Installs FIVE things, all $HOME-relative so a sandbox HOME redirects everything:
 #   1. General home skills  — delegates to install-global.sh (composes the global
 #                             python/nextjs/backend recipes, copies into the home
 #                             skill dirs each harness reads).
@@ -17,7 +17,12 @@
 #                             scaffolds ~/.pi/agent/settings.json from the template
 #                             when absent, and installs the pinned third-party set via
 #                             install-pi-extensions.sh.
-#   4. The llm-compose wrapper — copies tools/templates/llm-compose to
+#   4. Claude runtime       — copies the generic hooks (~/.claude/hooks/) + statusline
+#                             (~/.claude/statusline.sh), and scaffolds
+#                             ~/.claude/settings.json from settings.template.json ONLY
+#                             when absent (never clobbers per-machine tweaks). The
+#                             hooks self-gate by file type, so home-level is safe.
+#   5. The llm-compose wrapper — copies tools/templates/llm-compose to
 #                             ~/.local/bin/llm-compose (executable).
 #
 # What this does NOT install: repo-specific files (the .shared-llm/ tree, generated
@@ -88,14 +93,14 @@ echo "=============================================================="
 # 1. General home skills (delegate to install-global.sh)
 # ---------------------------------------------------------------------------
 echo
-echo ">>> [1/4] General home skills (install-global.sh)"
+echo ">>> [1/5] General home skills (install-global.sh)"
 "$INSTALL_GLOBAL"
 
 # ---------------------------------------------------------------------------
 # 2. The 18 generic agents — compose to staging, copy to home agent dir(s)
 # ---------------------------------------------------------------------------
 echo
-echo ">>> [2/4] Generic agents -> ${HOME_AGENT_DIRS[*]}"
+echo ">>> [2/5] Generic agents -> ${HOME_AGENT_DIRS[*]}"
 [[ -d "$AGENT_RECIPE_DIR" ]] || { echo "error: agent recipe dir missing: $AGENT_RECIPE_DIR" >&2; exit 1; }
 
 # Compose every agent recipe; --target pins staging under REPO_ROOT/examples/ so the
@@ -137,7 +142,7 @@ echo "agents: $agents_installed copied, $agents_uptodate already current, $agent
 #    settings.json when absent and install the pinned third-party set.
 # ---------------------------------------------------------------------------
 echo
-echo ">>> [3/4] Pi runtime (harness.py sync + settings + third-party extensions)"
+echo ">>> [3/5] Pi runtime (harness.py sync + settings + third-party extensions)"
 
 # (a) symlink wiring: create missing links, re-point drifted ones, prune orphans.
 python3 "$COMPOSE" sync
@@ -162,10 +167,64 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. The llm-compose wrapper -> ~/.local/bin
+# 4. Claude runtime — generic hooks + statusline + settings scaffold (home level).
+#    Hooks + statusline are copied into ~/.claude (never clobber a divergent or
+#    foreign copy). ~/.claude/settings.json is scaffolded from the template ONLY
+#    when absent, so re-running never wipes per-machine tweaks (same discipline as
+#    the Pi settings scaffold above). The generic hooks self-gate by file type, so
+#    firing in every project is safe.
 # ---------------------------------------------------------------------------
 echo
-echo ">>> [4/4] llm-compose wrapper -> $WRAPPER_DST"
+echo ">>> [4/5] Claude runtime (hooks + statusline + settings)"
+
+CLAUDE_SRC="$REPO_ROOT/.shared-llm/llm/claude/common"
+CLAUDE_HOME="$HOME/.claude"
+
+# (a) generic hooks -> ~/.claude/hooks (never clobber a divergent/foreign copy)
+if [[ -d "$CLAUDE_SRC/hooks" ]]; then
+  mkdir -p "$CLAUDE_HOME/hooks"
+  hooks_installed=0; hooks_uptodate=0; hooks_skipped=0
+  for hook in "$CLAUDE_SRC/hooks"/*; do
+    [[ -f "$hook" ]] || continue
+    name="$(basename "$hook")"; target="$CLAUDE_HOME/hooks/$name"
+    if [[ -L "$target" ]]; then
+      echo "skip hook $name -> $target is a symlink (foreign — leaving it)" >&2
+      hooks_skipped=$((hooks_skipped + 1)); continue
+    fi
+    if [[ -e "$target" ]]; then
+      if cmp -s "$target" "$hook"; then hooks_uptodate=$((hooks_uptodate + 1)); continue
+      else
+        echo "skip hook $name -> $target exists and differs (not ours — back it up and re-run)" >&2
+        hooks_skipped=$((hooks_skipped + 1)); continue
+      fi
+    fi
+    cp "$hook" "$target"; chmod +x "$target"; hooks_installed=$((hooks_installed + 1))
+  done
+  echo "hooks: $hooks_installed copied, $hooks_uptodate current, $hooks_skipped skipped (foreign/divergent)"
+fi
+
+# (b) statusline -> ~/.claude/statusline.sh (never clobber a divergent/foreign copy)
+if [[ -f "$CLAUDE_SRC/statusline.sh" ]]; then
+  target="$CLAUDE_HOME/statusline.sh"
+  if [[ -L "$target" ]]; then echo "statusline: skip -> $target is a symlink (foreign)" >&2
+  elif [[ -e "$target" ]] && ! cmp -s "$target" "$CLAUDE_SRC/statusline.sh"; then
+    echo "statusline: skip -> $target exists and differs (not ours — back it up and re-run)" >&2
+  elif [[ -e "$target" ]]; then echo "statusline: already current"
+  else mkdir -p "$CLAUDE_HOME"; cp "$CLAUDE_SRC/statusline.sh" "$target"; chmod +x "$target"; echo "statusline: installed"; fi
+fi
+
+# (c) settings: scaffold from the template only when absent (never clobber live tweaks).
+if [[ -f "$CLAUDE_SRC/settings.template.json" ]]; then
+  mkdir -p "$CLAUDE_HOME"
+  if [[ -f "$CLAUDE_HOME/settings.json" ]]; then echo "settings: preserved existing $CLAUDE_HOME/settings.json"
+  else cp "$CLAUDE_SRC/settings.template.json" "$CLAUDE_HOME/settings.json"; echo "settings: scaffolded from template"; fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5. The llm-compose wrapper -> ~/.local/bin
+# ---------------------------------------------------------------------------
+echo
+echo ">>> [5/5] llm-compose wrapper -> $WRAPPER_DST"
 mkdir -p "$BIN_DIR"
 wrapper_action="installed"
 if [[ -L "$WRAPPER_DST" ]]; then
@@ -203,6 +262,8 @@ INSTALLED (general / home, all-projects):
                   -> ~/.claude/agents, ~/.pi/agents
                   ($agents_installed copied, $agents_uptodate current, $agents_skipped skipped)
   - pi runtime  : extensions + agent personas symlinked into ~/.pi$( [[ "$SKIP_PI_EXTENSIONS" -eq 1 ]] && echo " (third-party 'pi install' SKIPPED)" )
+  - claude cfg  : generic hooks -> ~/.claude/hooks, statusline -> ~/.claude/statusline.sh,
+                  settings scaffolded to ~/.claude/settings.json (only if absent — never clobbered)
   - bin wrapper : llm-compose -> ~/.local/bin/llm-compose ($wrapper_action)
 
 NOT installed here (these come from \`task install repo -- <dir>\`):
