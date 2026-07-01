@@ -1,3 +1,8 @@
+---
+name: cc-oneshot
+description: 'Combined research + plan + implement in one shot. The lightweight shortcut through the build pipeline — for tasks too small for /cc-plan-and-grill but large enough that you want some research and a quick HTML grill to shape a plan before implementing. Persists a lightweight plan.md + plan.html sketch (a record of intent, not a gate), then implements — no full plan-and-grill ceremony. Default transport is subagents (fresh context per call); pass --team to use TeamCreate (named members, TMUX windows, team-pulse heartbeat). The team leader orchestrates and delegates — does not work directly, always dispatches a subagent for concrete work. Enforces the live-deploy gate. Invocation: /cc-oneshot [--team] <title>.'
+---
+
 # cc-oneshot — Research + Plan + Implement, in one shot
 
 The lightweight shortcut through the build pipeline. For tasks that need some research and a sketch of a plan but don't warrant the full `/cc-plan-and-grill` ceremony with a persisted plan.md.
@@ -48,9 +53,8 @@ Even a one-shot resolves its open questions before it runs — but lightly: usua
 
 1. From the Explore returns, work out the handful of questions worth asking — scope edges, the real choices, anything the change hinges on.
 2. Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
-3. **Dispatch a subagent** to write a fresh `grill-v<round>.html` (kept for history) plus `grill_current.html` (same content — the tab you keep open) into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/`:
+3. **Dispatch a subagent** to write `grill_current.html` into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/`:
    - A short context header (what's being changed; the shape so far from the Explore summary).
-   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - One `<div class="grill-q">` block per question — `.grill-q-text`, an optional `.grill-q-note` (why it matters), your `.grill-q-rec` recommendation, and a `<textarea class="grill-a">`.
    - The form toolkit pasted verbatim before `</body>` from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html`. `<title>` = `<Title> — grill v<N>`.
 4. Tell the user: _"Grill is up — http://localhost:8089/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/grill_current.html — fill it in, click Copy Answers, paste back here."_

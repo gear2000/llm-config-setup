@@ -1,3 +1,8 @@
+---
+name: cc-planish
+description: 'Your everyday HTML-first planner — one focused research pass, an HTML-batch grill, and a dual plan.md + plan.html you can read and annotate in the browser. Lighter than /cc-plan-and-grill (no --route-phases, no required Team section, no decisions log; reach for plan-and-grill on heavy or risky work that wants multi-aspect research and per-phase size tags). Heavier than /cc-oneshot (which sketches and implements in one shot). Flow: research (one Explore subagent) → HTML-batch grill → finalize dual plan → STOP. Default transport is subagents (fresh context per call); pass --team to run inside TeamCreate. The leader orchestrates and runs the grill conversation; it does not read code or write files itself — it always dispatches a subagent for that work. Invocation: /cc-planish [--team] <title>.'
+---
+
 # cc-planish — Research → Grill → Plan (HTML-first express lane)
 
 The everyday HTML-first planner. One focused research pass, an HTML-batch grill, and a dual `plan.md` + `plan.html` you can read and annotate. Lighter than `/cc-plan-and-grill` (no `--route-phases`, no required Team section, no decisions log); heavier than `/cc-oneshot` (which sketches and implements in one shot, no persisted plan). Use it when you want a real plan you can read and mark up — without the full grill ceremony.
@@ -54,9 +59,8 @@ Ensure the work-log static server is up (idempotent — no-op if already running
 
 Each round:
 1. Work out every question you can ask **right now** — split independent (answerable in any order) from dependent (wording hinges on an independent answer). Ask the independent ones this round.
-2. **Dispatch a subagent** to write `grill_current.html` into `.../plan/v<N>/grill_current.html` — write a fresh `grill-v<round>.html` each round (kept for history) and overwrite `grill_current.html` with the same content, then refresh the tab (kept on `grill_current.html`) to load the new round (the static server serves the raw file — no live-reload). Give the subagent the research summary, the decisions locked so far, and this round's questions. The file contains:
+2. **Dispatch a subagent** to write `grill_current.html` into `.../plan/v<N>/grill_current.html` — overwrite the same file every round, then refresh the browser tab to load the new round (the static server serves the raw file — no live-reload). Give the subagent the research summary, the decisions locked so far, and this round's questions. The file contains:
    - A context header: what's being planned, the plan shape so far (from the research + answers so far), and enough background that each question stands on its own — headings/tables, not a wall of text.
-   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
    - The form toolkit pasted verbatim before `</body>` from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html`.
    - `<title>` = `<Title> — grill v<N>`.

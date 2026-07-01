@@ -1,3 +1,8 @@
+---
+name: cc-plan-and-grill
+description: 'Research a problem, draft a plan, then grill the user iteratively until the plan is rock solid. Flow: research (Explore subagents) → synthesizer → plan-writer → grill the user → finalize plan → STOP. Default transport is subagents (fresh context per call); pass --team to run inside TeamCreate. The leader orchestrates and runs the grill conversation; the leader does not read code or write files itself — it always dispatches a subagent for that work. The grill phase is the core value — iterate until every decision is resolved. Pass --route-phases to add mandatory per-phase size tagging (required for /cc-loop --afk execution). Invocation: /cc-plan-and-grill [--team] [--route-phases] <title>.'
+---
+
 # cc-plan-and-grill — Research → Draft → Grill → Iterate → Finalize
 
 Like `/cc-plan` but with an iterative grilling phase after the initial draft. The plan gets refined through back-and-forth with the user until every decision is resolved.
@@ -190,9 +195,8 @@ Ensure the work-log static server is up (idempotent — no-op if already running
 
 Each round:
 1. Work out every question you can ask **right now** — split them into independent (answerable in any order) and dependent (wording hinges on an independent answer). Ask the independent ones this round.
-2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — write a fresh `grill-v<round>.html` each round (kept for history) and overwrite `grill_current.html` with the same content, then refresh the tab (kept on `grill_current.html`) to load the new round (the static server serves the raw file — no live-reload). The file contains:
+2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — overwrite the same file every round, then refresh the browser tab to load the new round (the static server serves the raw file — no live-reload). The file contains:
    - A context header: what's being planned, the draft shape, and enough background that each question is understandable on its own (not a wall of text — use headings/tables).
-   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
    - The form toolkit pasted verbatim before `</body>` from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html`.
    - `<title>` = `<Title> — grill v<N>`.
