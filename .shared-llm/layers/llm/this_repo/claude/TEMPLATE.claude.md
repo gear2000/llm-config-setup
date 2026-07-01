@@ -16,7 +16,7 @@ All branches share the same name. `main` of every repo is the integration point 
 
 ## Every plan ends with a docs-check phase
 
-When using `/do:plan*` or any planning skill in this repo, the final phase of every plan MUST be a docs-check that runs:
+When using `/do-plan*` or any planning skill in this repo, the final phase of every plan MUST be a docs-check that runs:
 
 ```bash
 # Example — adapt {{SOURCE_GLOB}} and {{DOCS_UPDATE_SKILL}} for your project:
