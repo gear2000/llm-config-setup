@@ -50,6 +50,9 @@ pi install npm:@juicesharp/rpiv-btw@1.12.0     # review-plan-implement-verify wo
 # Added:
 pi install npm:pi-markdown-preview@0.10.0      # rendered markdown / Mermaid / LaTeX preview
 pi install npm:@plannotator/pi-extension@0.20.1 # browser-based plan / diff / PR review UI
+pi install npm:@hypabolic/pi-hypa@0.1.6        # compress noisy tool output out of context
+pi install npm:pi-simplify@0.2.2               # review recently changed code for clarity
+pi install npm:@quintinshaw/pi-dynamic-workflows@2.10.0 # dynamic workflows / subagent fan-out
 ```
 
 ### Runtime dependencies (the kit never installs these — install them yourself if you want the feature)
@@ -60,19 +63,19 @@ pi install npm:@plannotator/pi-extension@0.20.1 # browser-based plan / diff / PR
   - Optional: Mermaid CLI for Mermaid-in-PDF.
 - **@plannotator/pi-extension** opens reviews in your **default browser**. Requires **Pi >= 0.74.0**.
 
-## Skipped: pi-cursor-sdk (Pi too old)
+## Skipped: pi-cursor-sdk (opt-in; this project doesn't use Cursor)
 
-`pi-cursor-sdk` (use Cursor's models inside Pi) is **commented out** in the manifest and **not installed**.
+`pi-cursor-sdk` (use Cursor's models inside Pi) is **commented out** in the manifest and **not installed** — this project doesn't use Cursor.
 
-- The author **recommends Pi >= 0.79.1**. The Pi installed here is **0.75.4** — below that.
-- Its npm peer metadata is *intentionally unpinned*, so `npm`/`pi install` would **not** block it — but the runtime path is unsupported below 0.79.1, so installing it now would be a silently-broken extension. We skip it on purpose.
-- To enable later: update Pi to >= 0.79.1 (`pi update pi`, or `npm install -g @earendil-works/pi-coding-agent`), then uncomment the `npm:pi-cursor-sdk@0.1.42` line in `third-party-extensions.txt` and re-run `tools/install-pi-extensions.sh`.
+- The author **recommends Pi >= 0.79.1** and Node >= 22.19; check `pi --version` before enabling.
+- Its npm peer metadata is *intentionally unpinned*, so `npm`/`pi install` would **not** block it on an older Pi — the runtime path is just unsupported below 0.79.1, i.e. a silently-broken extension.
+- To enable in a project that uses Cursor: uncomment the `npm:pi-cursor-sdk@0.1.42` line in `third-party-extensions.txt` and re-run `tools/install-pi-extensions.sh`.
 
 ## For another project / an LLM picking this up
 
 To reproduce this exact set anywhere Pi is installed (>= 0.74.0):
 
-1. Copy `third-party-extensions.txt` and `tools/install-pi-extensions.sh` into the project (or just run the seven `pi install` commands above).
+1. Copy `third-party-extensions.txt` and `tools/install-pi-extensions.sh` into the project (or just run the ten `pi install` commands above).
 2. Run `tools/install-pi-extensions.sh`.
-3. Confirm with `pi list` — you should see the seven entries.
+3. Confirm with `pi list` — you should see the ten entries.
 4. For pi-cursor-sdk, first ensure Pi >= 0.79.1, then uncomment its manifest line and re-run.

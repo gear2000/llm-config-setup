@@ -899,6 +899,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         hint = {"mac": "brew install", "ubuntu": "sudo apt install"}.get(args.os, "install")
         sys.exit(f"error: missing prerequisite(s): {', '.join(missing)}  (try: {hint} {' '.join(missing)})")
     print("init: all prerequisites present. Next: `just configure -d <repo> -l cc,pi` then `just update`.")
+    print("init: for the Pi harness, also run `just pi-extensions` to install the pinned third-party extensions.")
 
 
 # --- copy ------------------------------------------------------------------
