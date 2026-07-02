@@ -48,6 +48,8 @@ destinations:
 
 `just update` reads this file and runs every operation centrally against the paths it lists. Because the engine is never copied into a destination, it can never drift out of sync with a per-repo copy of itself.
 
+> **Skill placement per harness** (`do-*` → Pi, `cc-*` → Claude, common → both) and how to verify it on any machine: see **[HARNESS-ROUTING.md](HARNESS-ROUTING.md)**.
+
 ## The three operations
 
 `just update` is three operations (plus an optional fourth):

@@ -1460,6 +1460,52 @@ def cmd_global(args: argparse.Namespace) -> None:
     do_home_runtime(cfg, log)
 
 
+def do_check(cfg: dict, log: RunLog) -> bool:
+    """Assert the placement invariants: do-* Pi-only, cc-* Claude-only. Returns
+    True if everything holds. Prints PASS/FAIL per check."""
+    ok = True
+
+    def report(label: str, bad: list[str]) -> None:
+        nonlocal ok
+        if bad:
+            ok = False
+            log.always(f"  FAIL  {label}: {' '.join(sorted(bad))}")
+        else:
+            log.always(f"  PASS  {label}")
+
+    def names(d: Path, pred) -> list[str]:
+        return [p.name for p in d.iterdir() if pred(p)] if d.is_dir() else []
+
+    uses_pi = any("pi" in d.get("harnesses", []) for d in cfg["destinations"]) or "pi" in cfg.get("global", [])
+    uses_codex = any("codex" in d.get("harnesses", []) for d in cfg["destinations"]) or "codex" in cfg.get("global", [])
+
+    if uses_pi:
+        pi = _pi_global_skills()
+        report(f"Pi {pi} has NO cc-*", names(pi, lambda p: p.name.startswith("cc-")))
+        report(f"Pi {pi} has no broken links", names(pi, lambda p: p.is_symlink() and not p.exists()))
+    if uses_codex:
+        cx = _codex_global_skills()
+        report(f"Codex {cx} has NO do-*", names(cx, lambda p: p.name.startswith("do-")))
+        report(f"Codex {cx} has NO cc-*", names(cx, lambda p: p.name.startswith("cc-")))
+
+    for d in cfg["destinations"]:
+        dest = Path(d["path"]).expanduser()
+        cs = dest / ".claude/skills"
+        ps = dest / PI_ONLY_SKILLS_DIR
+        report(f"[{dest.name}] .claude/skills has NO do-*",
+               names(cs, lambda p: p.is_dir() and p.name.startswith("do-")))
+        report(f"[{dest.name}] .pi-skills is do-* only",
+               names(ps, lambda p: not p.name.startswith(("do-", "."))))
+    return ok
+
+
+def cmd_check(args: argparse.Namespace) -> None:
+    log = RunLog(verbose=True)
+    if not do_check(load_config(), log):
+        sys.exit("check: FAILED — placement invariants violated (see above)")
+    log.always("check: all placement invariants hold ✓")
+
+
 def cmd_update(args: argparse.Namespace) -> None:
     cfg = load_config()
     if not cfg["destinations"] and not cfg["global"]:
@@ -1526,6 +1572,9 @@ def main() -> None:
 
     pg = sub.add_parser("global", help="Compose + route the global home skills into ~/.claude, ~/.pi/agent, ~/.agents.")
     pg.set_defaults(func=cmd_global)
+
+    pck = sub.add_parser("check", help="Verify skill placement per harness (do-* Pi-only, cc-* Claude-only).")
+    pck.set_defaults(func=cmd_check)
 
     pup = sub.add_parser("update", help="copy -> compose -> link (+ global) across all configured destinations.")
     pup.add_argument("-v", "--verbose", action="store_true", help="Print per-file detail (always written to the log).")

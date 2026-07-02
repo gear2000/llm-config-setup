@@ -350,6 +350,25 @@ def test_do_star_is_pi_only_cc_star_is_claude_only(tmp_path: Path) -> None:
     assert not (codex / "cc-plan-and-grill").exists()
 
 
+def test_check_passes_after_update_and_fails_on_violation(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    _add_slash_skill(dest, "do-loop", "claude")
+    _add_slash_skill(dest, "cc-loop", "claude")
+    cfg = _cfg(m, dest, ["cc", "pi", "codex"])
+    m.do_compose(cfg, _quiet(m))
+    m.do_link(cfg, _quiet(m))
+
+    assert m.do_check(cfg, _quiet(m)) is True  # invariants hold after a clean update
+
+    # Inject a violation: a do-* leaks into Claude's .claude/skills.
+    _write(dest / ".claude/skills/do-sneaky/SKILL.md", "---\nname: do-sneaky\n---\n")
+    assert m.do_check(cfg, _quiet(m)) is False
+
+
 # --- global home runtime (agents + claude/pi runtime) ----------------------
 
 def test_home_runtime_copies_agents_and_excludes_codex(tmp_path: Path) -> None:

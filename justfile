@@ -25,6 +25,11 @@ configure *args:
 update *args:
     ${PYTHON_BIN:-python3} tools/harness.py update {{args}}
 
+# Verify skill placement per harness (do-* Pi-only, cc-* Claude-only, common both).
+# Run this on any machine after `just update` to confirm the layout is correct.
+check:
+    ${PYTHON_BIN:-python3} tools/harness.py check
+
 # ── Hidden building blocks (run independently; `just update` runs them in order)
 [private]
 copy:
