@@ -7,7 +7,9 @@ Like `/do-plan` but with an iterative grilling phase after the initial draft. Th
 Your job is to **orchestrate** and to **run the grill conversation**.
 
 - Reading code, writing research.md, drafting plan.md, applying plan revisions: dispatch fresh subagents.
-- The grill itself (asking the user one question at a time, processing answers): you do this — that's the orchestration loop, not "work."
+- The grill itself (writing `grill_current.html`, giving the user the URL, processing their pasted answers block): you do this — that's the orchestration loop, not "work."
+
+Default grill mode is HTML-batch, always. Do not ask questions inline in the terminal unless `--interactive` was explicitly typed. Conversational phrasing from the user is not a reason to switch modes.
 
 If you find yourself reading files, writing markdown, or running commands directly, **stop, dispatch a fresh subagent for the work, return to orchestrating.**
 
@@ -20,7 +22,7 @@ If you find yourself reading files, writing markdown, or running commands direct
 - **`<title>`** — Required. Slugified for directory name.
 - **`--team`** — Optional. Run inside TeamCreate during the research phase (TMUX windows, named members). Default is subagents.
 - **`--route-phases`** — Optional. Enables mandatory per-phase size tagging. See [## --route-phases flag](#--route-phases-flag) below.
-- **`--interactive`** — Optional. Grill one question at a time in the terminal (the classic flow). **Default is HTML-batch** — see [## Grill modes](#grill-modes). Use `--interactive` when you can't open the HTML grill in a browser (headless / no display), or when you simply prefer the terminal.
+- **`--interactive`** — Optional. Grill one question at a time in the terminal (the classic flow). **Default is HTML-batch** — see [## Grill modes](#grill-modes). Use `--interactive` ONLY in environments where the HTML grill genuinely cannot be opened (headless, no display, browser unavailable). Phrases like "go back and forth", "show me and we'll iterate", "let's talk through this" are NOT signals for this flag. HTML-batch is the default and stays the default unless the user types `--interactive` explicitly.
 - **`--docs`** — Optional. Capture domain terms + hard decisions to `auto-docs/` as the grill resolves them, **without** asking first. Without this flag, Step 1 asks you once whether to capture. See [## Domain capture](#domain-capture).
 
 ## --route-phases flag
@@ -170,9 +172,9 @@ will challenge them.
 
 The plan-writer's output is a *draft* — the grill will refine it.
 
-Without `--route-phases`: Present the draft summary to the user with: _"Here's the draft based on the research. Now I'll walk through every decision point with you to make sure this is right."_
+Without `--route-phases`: Present the draft summary to the user with: _"Draft is ready. Starting the grill now — one moment."_ Immediately proceed to Step 4 (HTML grill) — do NOT ask follow-up questions in the terminal first.
 
-With `--route-phases`: Present the draft summary with: _"Here's the draft based on the research. Now I'll walk every phase with you to lock the size tag and the verification."_
+With `--route-phases`: Present the draft summary with: _"Draft is ready. Starting the grill now — one moment."_ Immediately proceed to Step 4 (HTML grill) — do NOT ask follow-up questions in the terminal first.
 
 ### Step 4: Grill (the core step)
 
@@ -185,6 +187,8 @@ You run the grill directly — it's orchestration, not "work." When an answer re
 #### Grill modes
 
 **Default — HTML-batch (fast).** The terminal one-at-a-time loop is slow because each question is its own LLM round-trip; ten simple questions can burn 40 minutes of waiting. Batching collapses that: ask everything independent in a single round.
+
+**Never ask questions inline in the terminal in this mode.** A bulleted list of questions in a chat message is NOT the HTML grill — it is the same slow interactive pattern with worse UX. If you find yourself typing questions into the terminal, stop, dispatch the subagent to write `grill_current.html`, and give the user the URL.
 
 This command follows the canonical Planish HTML Grill Contract at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Use terminal questions only with explicit `--interactive` fallback.
 
