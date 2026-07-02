@@ -38,7 +38,8 @@ def _patch_home(m, home: Path) -> None:
     m.HOME = home
     m.CONFIG_PATH = home / ".shared-llm.yaml"
     m.DEFAULT_SOURCE = home / ".shared-llm"
-    m.OLD_GLOBAL_PI_DIRS = (home / ".pi/skills", home / ".pi/agent/skills")
+    # Global skill dirs are computed from HOME at call time (_pi_global_skills /
+    # _codex_global_skills), so patching HOME here is enough — no real home touched.
 
 
 def _write(path: Path, text: str) -> None:
@@ -153,24 +154,28 @@ def test_compose_reads_destination_shared_llm_and_merges_overlay(tmp_path: Path)
 
 # --- link ------------------------------------------------------------------
 
-def test_link_creates_repo_scoped_pi_and_codex(tmp_path: Path) -> None:
+def test_link_creates_global_pi_and_codex(tmp_path: Path) -> None:
     m = _load()
-    _patch_home(m, tmp_path / "home")
+    home = tmp_path / "home"
+    _patch_home(m, home)
     dest = tmp_path / "dest"
     _scaffold_dest(dest)
     cfg = _cfg(m, dest, ["cc", "pi", "codex"])
     m.do_compose(cfg, _quiet(m))
     m.do_link(cfg, _quiet(m))
 
-    pi_link = dest / ".pi/skills/demo"
-    codex_link = dest / ".agents/skills/demo"
+    # Links land in the GLOBAL (no-trust-gate) dirs, not repo-scoped.
+    pi_link = home / ".pi/agent/skills/demo"
+    codex_link = home / ".agents/skills/demo"
     assert pi_link.is_symlink() and pi_link.resolve() == (dest / ".claude/skills/demo").resolve()
     assert codex_link.is_symlink() and codex_link.resolve() == (dest / ".claude/skills/demo").resolve()
-    # cc gets no link dir (reads .claude/ directly)
+    # No repo-scoped .pi/skills is created.
+    assert not (dest / ".pi/skills").exists()
+    # cc reads .claude/ directly.
     assert (dest / ".claude/skills/demo/SKILL.md").exists()
 
 
-def test_link_cleans_stale_global_pi_and_warns_on_collision(tmp_path: Path) -> None:
+def test_link_prunes_our_stale_global_link_not_foreign(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
     _patch_home(m, home)
@@ -179,20 +184,37 @@ def test_link_cleans_stale_global_pi_and_warns_on_collision(tmp_path: Path) -> N
     cfg = _cfg(m, dest, ["pi"])
     m.do_compose(cfg, _quiet(m))
 
-    # Seed an OLD global Pi link that points into this destination family (ours) —
-    # link must clean it up so it can't shadow the new repo-local link.
-    old_global = home / ".pi/agent/skills"
-    old_global.mkdir(parents=True, exist_ok=True)
-    stale = old_global / "demo"
-    stale.symlink_to(dest / ".claude/skills/demo")
-    assert stale.is_symlink()
+    g = home / ".pi/agent/skills"
+    g.mkdir(parents=True, exist_ok=True)
+    # A stale link WE own (points into the dest) for a skill no longer present.
+    ours_stale = g / "gone"
+    ours_stale.symlink_to(dest / ".claude/skills/gone")
+    # A foreign real dir that must never be touched.
+    (g / "foreign").mkdir()
+    (g / "foreign/SKILL.md").write_text("not ours\n")
 
     m.do_link(cfg, _quiet(m))
 
-    # Repo-local link exists; the stale global link was removed.
-    assert (dest / ".pi/skills/demo").is_symlink()
-    # After cleanup the global link is gone (it was ours).
-    assert not stale.exists() and not stale.is_symlink()
+    assert (g / "demo").is_symlink()          # desired link created
+    assert not ours_stale.exists()            # our stale link pruned
+    assert (g / "foreign/SKILL.md").exists()  # foreign left untouched
+
+
+def test_link_cleans_up_abandoned_repo_scoped_pi(tmp_path: Path) -> None:
+    """The reverted repo-scoped approach left <repo>/.pi/skills links; link removes them."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    cfg = _cfg(m, dest, ["pi"])
+    m.do_compose(cfg, _quiet(m))
+    # simulate the old repo-scoped link
+    rs = dest / ".pi/skills"
+    rs.mkdir(parents=True)
+    (rs / "demo").symlink_to(dest / ".claude/skills/demo")
+
+    m.do_link(cfg, _quiet(m))
+    assert not (dest / ".pi/skills").exists()  # abandoned repo-scoped dir cleaned
 
 
 # --- update (orchestration + idempotency) ----------------------------------
@@ -211,15 +233,14 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
 
     m.cmd_update(argparse.Namespace(verbose=False))
 
-    # Second run: capture link reconcile output — must be a clean no-op.
-    counts = m.reconcile(m.plan_pi_repo(dest), m.repo_family(dest),
-                         plan_only=True, force=False, repo_root=dest)
-    assert counts["create"] == 0 and counts["repoint"] == 0 and counts["prune"] == 0
-
-    # Compose output stable, links intact.
+    # First run created the global links.
     assert (dest / ".claude/skills/demo/SKILL.md").exists()
-    assert (dest / ".pi/skills/demo").is_symlink()
-    assert (dest / ".agents/skills/demo").is_symlink()
+    assert (home / ".pi/agent/skills/demo").is_symlink()
+    assert (home / ".agents/skills/demo").is_symlink()
+
+    # Second run: global reconcile is a clean no-op (nothing created/repointed/pruned).
+    c = m._reconcile_global(home / ".pi/agent/skills", m._common_pi_skills(dest), [dest], m.RunLog(verbose=False))
+    assert c["create"] == 0 and c["repoint"] == 0 and c["prune"] == 0
 
 
 # --- global home-skill routing ---------------------------------------------

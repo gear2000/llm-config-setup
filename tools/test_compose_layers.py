@@ -196,27 +196,23 @@ def _load_harness_module():
     return module
 
 
-def test_plan_pi_repo_routes_common_skills_repo_scoped(tmp_path: Path) -> None:
-    """Repo-scoped Pi links target <repo>/.pi/skills, take only common-scoped
-    skills (not cc-*), and point back at <repo>/.claude/skills."""
+def test_common_pi_skills_selects_common_not_cc(tmp_path: Path) -> None:
+    """Pi gets common-scoped skills (incl. do-*), never cc-* (claude-scoped)."""
     harness = _load_harness_module()
     root = tmp_path / "repo"
-
     for skill in ("do-plan-and-grill", "qa", "cc-plan-and-grill"):
         _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
     _write(root / ".shared-llm/compose/slash-commands/common/common/do-plan-and-grill.yaml", "name: do-plan-and-grill\n")
     _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
     _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
 
-    plan = harness.plan_pi_repo(root)
-    assert plan.desired[root / ".pi/skills/do-plan-and-grill"] == root / ".claude/skills/do-plan-and-grill"
-    assert plan.desired[root / ".pi/skills/qa"] == root / ".claude/skills/qa"
-    # cc-* (claude-scoped) is excluded from Pi.
-    assert root / ".pi/skills/cc-plan-and-grill" not in plan.desired
+    got = harness._common_pi_skills(root)
+    assert got["do-plan-and-grill"] == root / ".claude/skills/do-plan-and-grill"
+    assert got["qa"] == root / ".claude/skills/qa"
+    assert "cc-plan-and-grill" not in got  # claude-scoped excluded from Pi
 
 
-def test_plan_codex_repo_routes_common_and_codex_to_agents_skills(tmp_path: Path) -> None:
-    """Repo-scoped Codex links target <repo>/.agents/skills (item 4)."""
+def test_common_codex_skills_includes_common_and_codex(tmp_path: Path) -> None:
     harness = _load_harness_module()
     root = tmp_path / "repo"
     for skill in ("qa", "cc-plan-and-grill"):
@@ -224,9 +220,9 @@ def test_plan_codex_repo_routes_common_and_codex_to_agents_skills(tmp_path: Path
     _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
     _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
 
-    plan = harness.plan_codex_repo(root)
-    assert plan.desired[root / ".agents/skills/qa"] == root / ".claude/skills/qa"
-    assert root / ".agents/skills/cc-plan-and-grill" not in plan.desired
+    got = harness._common_codex_skills(root)
+    assert got["qa"] == root / ".claude/skills/qa"
+    assert "cc-plan-and-grill" not in got
 
 
 def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields() -> None:

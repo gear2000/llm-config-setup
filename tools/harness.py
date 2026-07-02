@@ -969,95 +969,163 @@ def do_compose(cfg: dict, log: RunLog) -> None:
         _compose_destination(Path(d["path"]).expanduser(), log)
 
 
-# --- link (repo-scoped per destination) ------------------------------------
+# --- link (GLOBAL per-harness skill dirs) ----------------------------------
+#
+# Skills link into each harness's GLOBAL discovery dir, NOT a repo-scoped one:
+#   pi     -> ~/.pi/agent/skills        codex -> ~/.agents/skills
+# Global dirs have NO trust gate; Pi's project-local `.pi/skills/` loads only
+# after a project is "trusted" (pi docs, skills.md), which silently hid the
+# skills — the repo-scoped approach was reverted for that reason. Claude Code
+# still needs no link (it reads <repo>/.claude/skills directly).
+#
+# All destinations' skills are aggregated into ONE reconcile per global dir, so a
+# second destination does not prune the first's links. On a same-name collision
+# the last destination wins and we WARN (we can't control it; just surface it).
 
-def plan_pi_repo(repo_root: Path) -> LinkPlan:
-    """Repo-scoped Pi skills: <repo>/.pi/skills/<name> -> <repo>/.claude/skills/<name>
-    for portable (common) skills. Pi walks up from cwd and reads <repo>/.pi/skills,
-    so a destination's skills stay scoped to that destination — no global clobber
-    between two destinations (resolved decision #3)."""
-    skills = repo_root / ".pi/skills"
-    desired: dict[Path, Path] = {}
-    for d in _skill_dirs(repo_root):
-        if harness_of(repo_root, d.name) == "common":
-            desired[skills / d.name.replace(":", "-")] = d
-    return LinkPlan(desired, [skills])
-
-
-def plan_codex_repo(repo_root: Path) -> LinkPlan:
-    """Repo-scoped Codex skills: <repo>/.agents/skills/<name> -> <repo>/.claude/skills/<name>
-    for common + codex skills. Confirmed against the installed Codex manual:
-    repo skills live in <repo>/.agents/skills, followed through symlinks. Codex
-    does not shadow on name collision, so no special-casing (resolved decision #4)."""
-    skills = repo_root / ".agents/skills"
-    desired: dict[Path, Path] = {}
-    for d in _skill_dirs(repo_root):
-        if harness_of(repo_root, d.name) in ("common", "codex"):
-            desired[skills / d.name] = d
-    return LinkPlan(desired, [skills])
+# Computed from HOME at call time (NOT module-level constants) so a test that
+# redirects HOME reaches the right dirs and never touches the real home.
+def _pi_global_skills() -> Path:
+    return HOME / ".pi/agent/skills"
 
 
-# Old GLOBAL Pi skill dirs that predate repo-scoping. `link` prunes our own stale
-# links from these once, so an obsolete global link can't shadow a new repo-local
-# one (Pi loads global before repo-local and keeps the first found).
-OLD_GLOBAL_PI_DIRS = (HOME / ".pi/skills", HOME / ".pi/agent/skills")
+def _codex_global_skills() -> Path:
+    return HOME / ".agents/skills"
 
 
-def _cleanup_stale_global_pi(family: str, log: RunLog) -> int:
-    removed = 0
-    for d in OLD_GLOBAL_PI_DIRS:
-        if not d.is_dir():
+def _common_pi_skills(dest: Path) -> dict[str, Path]:
+    """name -> source skill dir for the common (portable) skills Pi should get.
+    Pi has no colon in command names, so foo:bar links as foo-bar."""
+    out: dict[str, Path] = {}
+    for d in _skill_dirs(dest):
+        if harness_of(dest, d.name) == "common":
+            out[d.name.replace(":", "-")] = d
+    return out
+
+
+def _common_codex_skills(dest: Path) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for d in _skill_dirs(dest):
+        if harness_of(dest, d.name) in ("common", "codex"):
+            out[d.name] = d
+    return out
+
+
+def _resolves_into(link: Path, roots: list[Path]) -> bool:
+    """True iff `link` is a symlink pointing (literally or resolved) into one of
+    `roots` via a managed .claude/skills path — i.e. a link WE created. Works on a
+    dangling link via the literal target string. Never true for a real file."""
+    if not link.is_symlink():
+        return False
+    literal = os.readlink(link)
+    target = os.path.realpath(link)
+    for r in roots:
+        try:
+            Path(target).relative_to(r)
+            return True
+        except ValueError:
+            pass
+        if str(r) in literal and "/.claude/skills/" in literal:
+            return True
+    return False
+
+
+def _reconcile_global(link_dir: Path, desired: dict[str, Path],
+                      owned_roots: list[Path], log: RunLog) -> collections.Counter:
+    """Reconcile a GLOBAL skill dir against `desired` (name -> source). Creates and
+    re-points our links, prunes links we own that are no longer desired, and never
+    touches a foreign link or real file."""
+    counts: collections.Counter = collections.Counter()
+    link_dir.mkdir(parents=True, exist_ok=True)
+    for name, src in sorted(desired.items()):
+        dest = link_dir / name
+        if dest.is_symlink():
+            if os.readlink(dest) == str(src):
+                continue
+            if _resolves_into(dest, owned_roots):
+                dest.unlink()
+                dest.symlink_to(src)
+                counts["repoint"] += 1
+                log(f"    repoint {dest} -> {src}")
+            else:
+                counts["skip-foreign"] += 1
+        elif dest.exists():
+            counts["skip-foreign"] += 1
+        else:
+            dest.symlink_to(src)
+            counts["create"] += 1
+            log(f"    create {dest} -> {src}")
+    for entry in sorted(link_dir.iterdir()):
+        if entry.name in desired:
             continue
-        for entry in sorted(d.iterdir()):
-            if entry.is_symlink() and link_is_ours(entry, family):
-                log(f"    cleanup stale global Pi link: {entry}")
-                entry.unlink()
+        if entry.is_symlink() and _resolves_into(entry, owned_roots):
+            entry.unlink()
+            counts["prune"] += 1
+            log(f"    prune {entry}")
+    return counts
+
+
+def _cleanup_repo_scoped_pi(dests: list[Path], log: RunLog) -> int:
+    """Remove the abandoned repo-scoped <repo>/.pi/skills links from the reverted
+    approach, so nothing dangles. Leaves other .pi/ contents alone."""
+    removed = 0
+    for dest in dests:
+        rs = dest / ".pi/skills"
+        if not rs.is_dir():
+            continue
+        for e in sorted(rs.iterdir()):
+            if e.is_symlink() and _resolves_into(e, [dest]):
+                e.unlink()
                 removed += 1
+        try:
+            rs.rmdir()
+            (dest / ".pi").rmdir()
+        except OSError:
+            pass
     return removed
 
 
-def _warn_global_pi_collisions(plan: LinkPlan, log: RunLog) -> int:
-    """Warn (do not police) when a repo-local skill name also exists in a global
-    Pi dir — Pi would use the global one and ignore the repo-local (resolved
-    decision #3: we can't control this; just surface it)."""
-    warned = 0
-    repo_names = {dest.name for dest in plan.desired}
-    for d in OLD_GLOBAL_PI_DIRS:
-        if not d.is_dir():
-            continue
-        for entry in sorted(d.iterdir()):
-            if entry.name in repo_names:
-                log.always(
-                    f"  ⚠ global Pi skill '{entry.name}' at {entry} will SHADOW the "
-                    f"repo-local one (Pi loads global first). Remove it to use the repo-local skill."
-                )
-                warned += 1
-    return warned
-
-
 def do_link(cfg: dict, log: RunLog) -> None:
+    dests = [Path(d["path"]).expanduser() for d in cfg["destinations"]]
+    pi_desired: dict[str, Path] = {}
+    codex_desired: dict[str, Path] = {}
+    want_pi = want_codex = False
+    collisions: list[str] = []
+
     for d in cfg["destinations"]:
         dest = Path(d["path"]).expanduser()
         harnesses = d.get("harnesses", [])
-        family = repo_family(dest)
-        for h in harnesses:
-            if h == "cc":
-                log(f"  [{dest.name}] cc: no link needed (reads .claude/ directly)")
-                continue
-            if h == "pi":
-                removed = _cleanup_stale_global_pi(family, log)
-                plan = plan_pi_repo(dest)
-                _warn_global_pi_collisions(plan, log)
-            elif h == "codex":
-                plan = plan_codex_repo(dest)
-            else:
-                continue
-            counts = reconcile(plan, family, plan_only=False, force=False, repo_root=dest)
-            extra = f", cleaned {removed} stale global" if h == "pi" and removed else ""
-            log.always(
-                f"  [{dest.name}] {h}: created {counts['create']}, repointed {counts['repoint']}, "
-                f"pruned {counts['prune']}, skipped-foreign {counts['skip-foreign']}{extra}"
-            )
+        if "cc" in harnesses:
+            log(f"  [{dest.name}] cc: no link needed (reads .claude/ directly)")
+        if "pi" in harnesses:
+            want_pi = True
+            for name, src in _common_pi_skills(dest).items():
+                if name in pi_desired and pi_desired[name] != src:
+                    collisions.append(f"pi:{name}")
+                pi_desired[name] = src
+        if "codex" in harnesses:
+            want_codex = True
+            for name, src in _common_codex_skills(dest).items():
+                if name in codex_desired and codex_desired[name] != src:
+                    collisions.append(f"codex:{name}")
+                codex_desired[name] = src
+
+    # Clean up the abandoned repo-scoped .pi/skills links (reverted approach).
+    cleaned = _cleanup_repo_scoped_pi(dests, log)
+    if cleaned:
+        log.always(f"  cleaned {cleaned} obsolete repo-scoped .pi/skills link(s)")
+
+    if want_pi:
+        pi_dir = _pi_global_skills()
+        c = _reconcile_global(pi_dir, pi_desired, dests, log)
+        log.always(f"  pi (global {pi_dir}): created {c['create']}, "
+                   f"repointed {c['repoint']}, pruned {c['prune']}, skipped-foreign {c['skip-foreign']}")
+    if want_codex:
+        codex_dir = _codex_global_skills()
+        c = _reconcile_global(codex_dir, codex_desired, dests, log)
+        log.always(f"  codex (global {codex_dir}): created {c['create']}, "
+                   f"repointed {c['repoint']}, pruned {c['prune']}, skipped-foreign {c['skip-foreign']}")
+    for c in sorted(set(collisions)):
+        log.always(f"  ⚠ name collision across destinations: {c} (last destination wins)")
 
 
 # --- global home-skill flow (ported from the retired install-global.sh) ----
