@@ -196,20 +196,23 @@ def _load_harness_module():
     return module
 
 
-def test_common_pi_skills_selects_common_not_cc(tmp_path: Path) -> None:
-    """Pi gets common-scoped skills (incl. do-*), never cc-* (claude-scoped)."""
+def test_common_pi_skills_takes_do_star_from_pi_dir_and_common_not_cc(tmp_path: Path) -> None:
+    """Pi links every do-* (from the routed .pi-skills dir) plus common skills from
+    .claude/skills, but never cc-* (Claude-only)."""
     harness = _load_harness_module()
     root = tmp_path / "repo"
-    for skill in ("do-plan-and-grill", "qa", "cc-plan-and-grill"):
+    # do-* live in the Pi-only routed dir after compose
+    _write(root / ".pi-skills/do-plan-and-grill/SKILL.md", "---\nname: do-plan-and-grill\n---\n")
+    # common + cc-* stay in .claude/skills
+    for skill in ("qa", "cc-plan-and-grill"):
         _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
-    _write(root / ".shared-llm/compose/slash-commands/common/common/do-plan-and-grill.yaml", "name: do-plan-and-grill\n")
     _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
     _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
 
     got = harness._common_pi_skills(root)
-    assert got["do-plan-and-grill"] == root / ".claude/skills/do-plan-and-grill"
-    assert got["qa"] == root / ".claude/skills/qa"
-    assert "cc-plan-and-grill" not in got  # claude-scoped excluded from Pi
+    assert got["do-plan-and-grill"] == root / ".pi-skills/do-plan-and-grill"  # Pi-only source
+    assert got["qa"] == root / ".claude/skills/qa"                            # common
+    assert "cc-plan-and-grill" not in got                                    # Claude-only
 
 
 def test_common_codex_skills_includes_common_and_codex(tmp_path: Path) -> None:

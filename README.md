@@ -54,7 +54,12 @@ destinations:
 
 1. **copy** — kit → hub (`~/.shared-llm`) → each destination's own `.shared-llm/`. It copies the **common** layers and recipes only; it **never** touches a destination's `this_repo/` overlays or its `compose/` recipes. It overwrites, and flags (does not block) when it overwrites a diverged local edit. There is no auto-prune — a removed common file is left in place.
 2. **compose** — each destination composes from its **own** `.shared-llm/`, merging the freshly-copied common layers with that repo's `this_repo/` overlays. Outputs land at the destination's root (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`).
-3. **link** — symlinks each destination's common skills into the harness **global** skill dirs: Pi → `~/.pi/agent/skills/`, Codex → `~/.agents/skills/`, each pointing back at that repo's `<repo>/.claude/skills/<name>`. Global dirs have **no trust gate** (Pi's project-local `.pi/skills/` loads only after a project is "trusted", which silently hides skills — so global is used instead). All destinations are reconciled into each global dir together, so one destination never prunes another's links; a same-name collision across destinations warns (last wins). **Claude Code needs no link** — it reads `<repo>/.claude/` directly.
+3. **link** — routes skills per harness **by name prefix**, then symlinks into each harness's **global** skill dir:
+   - `do-*` → **Pi only**. During compose, `do-*` skills are moved out of `.claude/skills` (which Claude Code reads) into a Pi-only `<repo>/.pi-skills/` dir, so Claude never sees them; `link` then symlinks them into `~/.pi/agent/skills/`.
+   - `cc-*` → **Claude Code only** (stays in `<repo>/.claude/skills/`, never linked to Pi/Codex).
+   - everything else (**common**) → all harnesses (`.claude/skills` for Claude; symlinked into `~/.pi/agent/skills/` and `~/.agents/skills/` for Pi/Codex).
+
+   Global dirs are used (not Pi's project-local `.pi/skills/`) because project-local skills load **only after a project is "trusted"** — that silently hid them. All destinations reconcile into each global dir together, so one never prunes another's links; a same-name collision across destinations warns (last wins). **Claude Code needs no link** — it reads `<repo>/.claude/` directly.
 4. **global** (only when `global:` is set) — installs the home / all-projects pieces: the general home skills, the 18 generic agents, and the Pi + Claude runtime. See "The global step" below.
 
 ### Recipe path resolution — one rule

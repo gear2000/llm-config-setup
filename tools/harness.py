@@ -946,6 +946,36 @@ CONSUMER_RECIPE_GROUPS = (
 )
 
 
+# Per-harness skill routing is by NAME PREFIX (matches the retired install-global):
+#   do-*  -> Pi ONLY      cc-*  -> Claude Code ONLY      (anything else) -> both
+# Claude Code reads <repo>/.claude/skills directly, so to keep do-* OUT of Claude
+# they are routed out of .claude/skills into a Pi-only source dir after compose.
+# Pi links do-* from there; common skills stay in .claude/skills for both.
+PI_ONLY_SKILLS_DIR = ".pi-skills"
+
+
+def _route_do_skills(dest: Path, log: RunLog) -> int:
+    """Move composed do-* skill dirs OUT of .claude/skills (which Claude Code
+    reads) into <repo>/.pi-skills, so do-* are Pi-only. Idempotent: compose
+    rewrites .claude/skills/do-* each run and this relocates them."""
+    claude_skills = dest / ".claude/skills"
+    pi_src = dest / PI_ONLY_SKILLS_DIR
+    moved = 0
+    if not claude_skills.is_dir():
+        return 0
+    for d in sorted(claude_skills.iterdir()):
+        if not d.is_dir() or not d.name.startswith("do-"):
+            continue
+        target = pi_src / d.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.move(str(d), str(target))
+        moved += 1
+        log(f"    route do-* (Pi-only): {d.name} -> {PI_ONLY_SKILLS_DIR}/")
+    return moved
+
+
 def _compose_destination(dest: Path, log: RunLog) -> None:
     shared = dest / ".shared-llm"
     if not shared.is_dir():
@@ -962,6 +992,9 @@ def _compose_destination(dest: Path, log: RunLog) -> None:
         elif path.is_file():
             composer.compose_one(path)
     composer.copy_standalone_skills()
+    moved = _route_do_skills(dest, log)
+    if moved:
+        log.always(f"  routed {moved} do-* skill(s) to {PI_ONLY_SKILLS_DIR}/ (Pi-only, out of Claude's .claude/skills)")
 
 
 def do_compose(cfg: dict, log: RunLog) -> None:
@@ -993,18 +1026,33 @@ def _codex_global_skills() -> Path:
 
 
 def _common_pi_skills(dest: Path) -> dict[str, Path]:
-    """name -> source skill dir for the common (portable) skills Pi should get.
-    Pi has no colon in command names, so foo:bar links as foo-bar."""
+    """name -> source skill dir Pi should link. Pi gets: every do-* (routed into
+    <repo>/.pi-skills, Pi-only) PLUS common skills from .claude/skills. Never cc-*
+    (Claude-only) and never claude-scoped repo skills. Pi has no colon in command
+    names, so foo:bar links as foo-bar."""
     out: dict[str, Path] = {}
+    # do-* — Pi-only, routed out of .claude/skills into .pi-skills.
+    pi_src = dest / PI_ONLY_SKILLS_DIR
+    if pi_src.is_dir():
+        for d in sorted(pi_src.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                out[d.name.replace(":", "-")] = d
+    # common (portable) skills that stay in .claude/skills — never cc-*, never do-*.
     for d in _skill_dirs(dest):
+        if d.name.startswith("cc-") or d.name.startswith("do-"):
+            continue
         if harness_of(dest, d.name) == "common":
             out[d.name.replace(":", "-")] = d
     return out
 
 
 def _common_codex_skills(dest: Path) -> dict[str, Path]:
+    """Codex gets common + codex-scoped skills from .claude/skills — never do-*
+    (Pi-only) and never cc-* (Claude-only)."""
     out: dict[str, Path] = {}
     for d in _skill_dirs(dest):
+        if d.name.startswith("cc-") or d.name.startswith("do-"):
+            continue
         if harness_of(dest, d.name) in ("common", "codex"):
             out[d.name] = d
     return out

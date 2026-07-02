@@ -66,6 +66,19 @@ def _scaffold_dest(dest: Path) -> None:
     }, sort_keys=False))
 
 
+def _add_slash_skill(dest: Path, name: str, scope: str) -> None:
+    """Add a slash-command skill recipe at compose/slash-commands/common/<scope>/<name>.yaml."""
+    s = dest / ".shared-llm"
+    _write(s / f"layers/slash-commands/common/{scope}/{name}/command.md", f"{name} body\n")
+    _write(s / f"layers/slash-commands/common/{scope}/{name}/description.md", f"{name} desc\n")
+    _write(s / f"compose/slash-commands/common/{scope}/{name}.yaml", yaml.safe_dump({
+        "type": "skill", "name": name,
+        "description": f".shared-llm/layers/slash-commands/common/{scope}/{name}/description.md",
+        "inputs": [f".shared-llm/layers/slash-commands/common/{scope}/{name}/command.md"],
+        "output": f".claude/skills/{name}/SKILL.md",
+    }, sort_keys=False))
+
+
 def _cfg(m, dest: Path, harnesses):
     return {
         "source": str(m.DEFAULT_SOURCE),
@@ -295,6 +308,46 @@ def test_global_leaves_foreign_and_divergent_untouched(tmp_path: Path) -> None:
     cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": []}
     m.do_global(cfg, _quiet(m))
     assert (cc / "qa/SKILL.md").read_text() == "MY OWN qa skill — do not overwrite.\n"
+
+
+def test_do_star_is_pi_only_cc_star_is_claude_only(tmp_path: Path) -> None:
+    """The core routing rule: do-* -> Pi only (out of Claude's .claude/skills),
+    cc-* -> Claude only (never Pi/codex), common -> both."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)                        # 'demo' = common
+    _add_slash_skill(dest, "do-plan-and-grill", "common")   # do-* (recipe scope common)
+    _add_slash_skill(dest, "do-loop", "claude")             # do-* even if recipe is claude-scoped
+    _add_slash_skill(dest, "cc-plan-and-grill", "claude")   # cc-*
+    cfg = _cfg(m, dest, ["cc", "pi", "codex"])
+    m.do_compose(cfg, _quiet(m))
+    m.do_link(cfg, _quiet(m))
+
+    cs = dest / ".claude/skills"
+    pi = home / ".pi/agent/skills"
+    codex = home / ".agents/skills"
+
+    # Claude Code (.claude/skills): cc-* + common present, NO do-*
+    assert (cs / "cc-plan-and-grill/SKILL.md").exists()
+    assert (cs / "demo/SKILL.md").exists()
+    assert not (cs / "do-plan-and-grill").exists(), "do-* must be routed OUT of Claude's dir"
+    assert not (cs / "do-loop").exists()
+    # do-* routed to the Pi-only source dir
+    assert (dest / ".pi-skills/do-plan-and-grill/SKILL.md").exists()
+    assert (dest / ".pi-skills/do-loop/SKILL.md").exists()
+
+    # Pi: do-* + common, NO cc-*
+    assert (pi / "do-plan-and-grill").is_symlink()
+    assert (pi / "do-loop").is_symlink()
+    assert (pi / "demo").is_symlink()
+    assert not (pi / "cc-plan-and-grill").exists(), "cc-* must never reach Pi"
+
+    # Codex: common only, no do-* (Pi-only) and no cc-* (Claude-only)
+    assert (codex / "demo").is_symlink()
+    assert not (codex / "do-plan-and-grill").exists()
+    assert not (codex / "cc-plan-and-grill").exists()
 
 
 # --- global home runtime (agents + claude/pi runtime) ----------------------
