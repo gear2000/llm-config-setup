@@ -13,6 +13,11 @@ Default grill mode is HTML-batch, always. Do not ask questions inline in the ter
 
 If you find yourself reading files, writing markdown, or running commands directly, **stop, dispatch a fresh subagent for the work, return to orchestrating.**
 
+**Narrate every dispatch — silence looks like a hang.** Delegated work produces nothing on screen, so:
+
+- Before each dispatch, post one line in the chat: _"Dispatching <what> subagent: <what it will do>."_
+- When a dispatch returns, say in one line what came back before moving on.
+
 ## Invocation
 
 ```
@@ -192,13 +197,20 @@ You run the grill directly — it's orchestration, not "work." When an answer re
 
 This command follows the canonical Planish HTML Grill Contract at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Use terminal questions only with explicit `--interactive` fallback.
 
+**Write for the user (hard rules — see the contract's "Write for the user" section):**
+- Open the page by explaining, in plain English, what the plan is trying to do and what you found so far.
+- Every question is about a mechanism or design choice — never "these files changed" or a tour of methods.
+- Define every acronym at first use.
+- File paths, method names, and change lists go ONLY in an `Appendix` section at the bottom of the page — never at the top, never inside a question.
+
 Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
 
 Each round:
 1. Work out every question you can ask **right now** — split them into independent (answerable in any order) and dependent (wording hinges on an independent answer). Ask the independent ones this round.
 2. **Dispatch a subagent** to write `grill_current.html` into the plan work-log dir (`.../plan/v<N>/grill_current.html`) — write a fresh `grill-v<round>.html` each round (kept for history) and overwrite `grill_current.html` with the same content, then refresh the tab (kept on `grill_current.html`) to load the new round (the static server serves the raw file — no live-reload). The file contains:
    - A context header: what's being planned, the draft shape, and enough background that each question is understandable on its own (not a wall of text — use headings/tables).
-   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram chosen by complexity: simple → a Mermaid block (add its `<script>` to the page `<head>`); a bit more complex → an ASCII tree in a `<pre>`; quite complex → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
+   - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram — two modes only, NEVER Mermaid (CDN-rendered, breaks silently on any syntax slip): default → an ASCII tree in a `<pre>`; when ASCII can't carry it → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
+   - `<meta name="desdoc-key" content="<date>-<slug>-r<round>">` in `<head>` — a unique value per round, so the annotation toolkit starts each round with a clean slate instead of resurrecting the previous round's sticky notes (`grill_current.html` reuses one path across rounds).
    - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
    - Answer controls from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html` and annotation controls from `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` (or the combined Planish grill toolkit once extracted) pasted before `</body>`.
    - `<title>` = `<Title> — grill v<N>`.

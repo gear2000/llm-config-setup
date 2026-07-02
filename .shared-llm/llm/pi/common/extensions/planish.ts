@@ -49,9 +49,14 @@ let pendingResolve: ((r: any) => void) | null = null;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function openBrowser(): void {
+// Returns false when the opener is missing or exits non-zero (headless box,
+// no default browser). Callers MUST surface that — a silent failure here left
+// the user staring at a blocked "working…" spinner with no idea a page was
+// waiting for them at localhost:4390.
+function openBrowser(): boolean {
   const cmd = process.platform === "darwin" ? "open" : "xdg-open";
-  spawnSync(cmd, [`http://localhost:${PORT}/`], { detached: true, stdio: "ignore" });
+  const r = spawnSync(cmd, [`http://localhost:${PORT}/`], { detached: true, stdio: "ignore" });
+  return !r.error && r.status === 0;
 }
 
 function esc(s: string): string {
@@ -260,9 +265,10 @@ interface GrillQuestion {
   question: string;
   note?: string;
   recommendation?: string;
-  /** Simple flow: rendered as Mermaid. Use for the first/lightest visualization. */
-  mermaid?: string;
-  /** Medium complexity: rendered as a monospace ASCII/tree diagram. */
+  // No mermaid field: Mermaid rendered from a CDN at view time, so any syntax
+  // slip = a silently broken diagram. ASCII/tree and raw HTML flow are the only
+  // two modes — both render offline with zero parse risk.
+  /** ASCII/tree diagram, rendered monospace in a <pre>. The default visual mode. */
   ascii?: string;
   /** Complex decisions: raw HTML using .grill-fig / .flow / .flow-box, inserted intentionally. */
   visualHtml?: string;
@@ -276,9 +282,6 @@ interface GrillPayload {
 
 function renderQuestionVisual(q: GrillQuestion): string {
   const parts: string[] = [];
-  if (q.mermaid?.trim()) {
-    parts.push(`<div class="grill-fig"><div class="grill-fig-cap">simple flow</div><pre class="mermaid">${esc(q.mermaid)}</pre></div>`);
-  }
   if (q.ascii?.trim()) {
     parts.push(`<div class="grill-fig"><div class="grill-fig-cap">tree / shape</div><pre class="ascii">${esc(q.ascii)}</pre></div>`);
   }
@@ -291,12 +294,18 @@ function renderQuestionVisual(q: GrillQuestion): string {
   return parts.join("\n");
 }
 
+// Every grill round is served at the SAME URL (localhost:4390/), so keying the
+// sticky-note storage by pathname alone made round 2 load round 1's notes.
+// Each rendered page gets a fresh nonce baked into its storage key, and the
+// page prunes every other planish_notes__ key on load — new round, clean slate.
+let grillRoundCounter = 0;
+
 function grillFormHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): string {
+  const roundKey = `${Date.now().toString(36)}r${++grillRoundCounter}`;
   const payload: GrillPayload = Array.isArray(payloadOrQuestions)
     ? { questions: payloadOrQuestions }
     : payloadOrQuestions;
   const questions = payload.questions ?? [];
-  const hasMermaid = questions.some((q) => Boolean(q.mermaid?.trim()));
   const title = payload.title?.trim() || "A few questions before the plan";
   const contextHtml = payload.contextHtml?.trim()
     ? `<section class="context card">${payload.contextHtml}</section>`
@@ -318,10 +327,6 @@ function grillFormHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(title)} — grill</title>
-${hasMermaid ? `<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
-</script>` : ""}
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{font-family:system-ui,-apple-system,sans-serif;background:#0d1017;color:#c8ccd4;
@@ -341,8 +346,8 @@ ${hasMermaid ? `<script type="module">
   .pq b,.pq strong{color:#e6e9ef;}
   .pq code{background:#0d1017;border:1px solid #1e222a;border-radius:3px;padding:0 4px;font-size:11px;color:#7ab4db;}
   /* ── diagram vocabulary (offline-safe; the LLM picks by complexity) ──
-     simple → Mermaid (author adds its <script> per-page); medium → ascii;
-     complex → flow rows. All render with no CDN so the file works offline. */
+     default → ascii/tree in <pre>; complex → flow rows in raw HTML.
+     Two modes only — no CDN-rendered diagram libs (they break silently). */
   .grill-fig{margin:8px 0 12px;background:#0b0e14;border:1px solid #1e222a;border-radius:6px;
     padding:12px 14px;overflow-x:auto;}
   .grill-fig-cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:8px;}
@@ -406,7 +411,8 @@ ${hasMermaid ? `<script type="module">
     document.getElementById('form').style.display='none';document.getElementById('done').style.display='block';
     await fetch('/grill-respond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answers:answers})}).catch(function(){});
   };
-  const KEY='planish_notes__'+btoa(location.pathname).replace(/[+/=]/g,'');let notes=[],ctr=0,vis=true;
+  const KEY='planish_notes__${roundKey}';let notes=[],ctr=0,vis=true;
+  try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('planish_notes__')===0&&k!==KEY)localStorage.removeItem(k);});}catch(e){}
   function save(){localStorage.setItem(KEY,JSON.stringify(notes.map(function(n){return {id:n.id,x:parseFloat(n.el.style.left),y:parseFloat(n.el.style.top),text:n.el.querySelector('textarea').value};})));var c=document.getElementById('desdoc-cnt');if(c)c.textContent=notes.length;}
   function mk(x,y,id,text){id=id||String(++ctr);var el=document.createElement('div');el.className='sticky-note';el.style.left=x+'px';el.style.top=y+'px';el.innerHTML='<div class="sticky-head"><span>Note '+id+'</span><span onclick="ddDel(\\''+id+'\\')" style="cursor:pointer;font-weight:700;padding:0 3px;color:#3a2808;">✕</span></div><textarea placeholder="Add note…">'+(text||'')+'</textarea>';document.body.appendChild(el);el.querySelector('textarea').addEventListener('input',save);var h=el.firstElementChild;h.addEventListener('mousedown',function(e){if(e.target.onclick)return;var ox=e.clientX-el.getBoundingClientRect().left,oy=e.clientY-el.getBoundingClientRect().top;var mv=function(e2){el.style.left=(e2.clientX-ox+scrollX)+'px';el.style.top=(e2.clientY-oy+scrollY)+'px';};var up=function(){save();removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};addEventListener('mousemove',mv);addEventListener('mouseup',up);e.preventDefault();});notes.push({id:id,el:el});save();}
   window.ddDel=function(id){var i=notes.findIndex(function(n){return n.id===id;});if(i<0)return;notes[i].el.remove();notes.splice(i,1);save();};
@@ -480,7 +486,7 @@ function ensureServer(): Promise<void> {
 // planish call failed with "already in progress". Abort resolves `null`, clears
 // the lock, and the execute() handlers translate that into a clear cancellation
 // message so the agent can fall back to chat.
-function awaitBrowser<T>(signal?: AbortSignal): Promise<T | null> {
+function awaitBrowser<T>(signal?: AbortSignal, onStatus?: (text: string) => void): Promise<T | null> {
   return new Promise((resolve) => {
     const onAbort = () => {
       if (pendingResolve === wrapped) pendingResolve = null;
@@ -492,14 +498,20 @@ function awaitBrowser<T>(signal?: AbortSignal): Promise<T | null> {
     };
     pendingResolve = wrapped as (v: unknown) => void;
     signal?.addEventListener("abort", onAbort, { once: true });
-    openBrowser();
+    const opened = openBrowser();
+    onStatus?.(
+      (opened ? "" : "Could not open a browser automatically. ") +
+        `Page ready at http://localhost:${PORT}/ — waiting for you in the browser. ` +
+        "If no tab appeared, open that URL yourself. Esc cancels."
+    );
   });
 }
 
 async function review(
   filePath: string,
   cwd: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onStatus?: (text: string) => void
 ): Promise<{ approved: boolean; feedback: string } | null> {
   const resolved = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath);
   if (!fs.existsSync(resolved)) {
@@ -510,16 +522,20 @@ async function review(
   }
   currentHtml = withToolbar(fs.readFileSync(resolved, "utf-8"));
   await ensureServer();
-  return awaitBrowser<{ approved: boolean; feedback: string }>(signal);
+  return awaitBrowser<{ approved: boolean; feedback: string }>(signal, onStatus);
 }
 
-async function grill(payload: GrillPayload, signal?: AbortSignal): Promise<string[] | null> {
+async function grill(
+  payload: GrillPayload,
+  signal?: AbortSignal,
+  onStatus?: (text: string) => void
+): Promise<string[] | null> {
   if (pendingResolve) {
     throw new Error("a planish interaction is already in progress — wait for it to complete (or abort it from the TUI)");
   }
   currentHtml = grillFormHtml(payload);
   await ensureServer();
-  return awaitBrowser<string[]>(signal);
+  return awaitBrowser<string[]>(signal, onStatus);
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────
@@ -541,7 +557,7 @@ export default function (pi: ExtensionAPI) {
       systemPrompt:
         event.systemPrompt +
         `\n\n${topic}You are helping the user create a PLAN with planish — produce a plan, not an implementation. Do NOT build or run anything unless the user explicitly asks after the plan is approved.\n\n` +
-        "STEP 1 — GRILL: Call the planish_grill tool with title, contextHtml, and a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each question your recommended answer. Do NOT make a plain Q&A-only grill. Use the Planish visual ladder: simple decisions include a Mermaid flow in the mermaid field; medium decisions include an ASCII/tree diagram in ascii; complex decisions include visualHtml using .grill-fig/.flow/.flow-box. A diagram only when it genuinely helps — never for its own sake. If the answers raise new questions, call planish_grill again.\n\n" +
+        "STEP 1 — GRILL: Call the planish_grill tool with title, contextHtml, and a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each question your recommended answer. Do NOT make a plain Q&A-only grill. Write for the user: open contextHtml with a plain-English explanation of what the plan is trying to do and what you found so far; ask about the mechanism or design choice, never 'these files changed'; define every acronym at first use; file paths/method names/change lists go only in an Appendix section at the BOTTOM of the page. Visuals (two modes only — NEVER Mermaid): default is an ASCII/tree diagram in ascii; when ASCII can't carry it, visualHtml using .grill-fig/.flow/.flow-box drawn row by row. A diagram only when it genuinely helps — never for its own sake. If the answers raise new questions, call planish_grill again.\n\n" +
         `STEP 2 — BUILD: Write the plan to TWO files (the directory already exists):\n` +
         // # ref 1 (plan-html-style) — also duplicated in: planish_submit_plan description below, tf-implement.ts STEP 2
         `  • ${planHtml} — the visual plan: a title, a summary of phases, key decisions, and verification steps.\n` +
@@ -582,7 +598,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Ask the user a VISUAL, annotatable batch of questions in the browser BEFORE writing a plan. " +
       "ALWAYS grill first when planning with planish. Do not send a plain Q&A-only form unless the user explicitly asked for terminal fallback. " +
-      "Provide title and contextHtml so the page explains what is being decided. For each question give question, note, recommendation, and when useful a visual: mermaid for simple flow, ascii for a medium tree/shape, visualHtml for complex .grill-fig/.flow/.flow-box diagrams. " +
+      "Provide title and contextHtml so the page explains, in plain English, what is being decided and what you found — define acronyms at first use, and keep file paths/method names out of questions (Appendix at the bottom only). For each question give question, note, recommendation, and when useful a visual: ascii for a tree/shape (the default), visualHtml for complex .grill-fig/.flow/.flow-box diagrams. Never Mermaid. " +
       "The browser page includes Copy Answers plus sticky-note annotation/feedback controls. If the answers raise new questions, call planish_grill again. Once everything is resolved, write the plan to .md + .html and call planish_submit_plan.",
     parameters: {
       type: "object",
@@ -597,16 +613,15 @@ export default function (pi: ExtensionAPI) {
         },
         questions: {
           type: "array",
-          description: "The batch of questions to ask the user. Nontrivial questions should include mermaid, ascii, or visualHtml so the page is not plain Q&A-only.",
+          description: "The batch of questions to ask the user. Nontrivial questions should include ascii or visualHtml so the page is not plain Q&A-only.",
           items: {
             type: "object",
             properties: {
               question: { type: "string", description: "The question to ask." },
               note: { type: "string", description: "Optional: why this matters / context." },
               recommendation: { type: "string", description: "Your recommended answer. Strongly expected for every question." },
-              mermaid: { type: "string", description: "Simple-flow Mermaid diagram source for this question." },
-              ascii: { type: "string", description: "Medium-complexity ASCII/tree diagram for this question." },
-              visualHtml: { type: "string", description: "Complex raw HTML visual using .grill-fig / .flow / .flow-box." },
+              ascii: { type: "string", description: "ASCII/tree diagram for this question (the default visual mode)." },
+              visualHtml: { type: "string", description: "Complex raw HTML visual using .grill-fig / .flow / .flow-box, drawn row by row. Use when ASCII can't carry it. Never Mermaid." },
             },
             required: ["question"],
           },
@@ -619,15 +634,19 @@ export default function (pi: ExtensionAPI) {
       _id: string,
       params: GrillPayload,
       signal: AbortSignal,
-      _onUpdate: unknown,
+      onUpdate: any,
       _ctx: any
     ) {
       const questions = Array.isArray(params?.questions) ? params!.questions! : [];
       if (questions.length === 0) {
         return { content: [{ type: "text", text: "Error: provide at least one question." }] };
       }
+      // Stream the URL into the TUI the moment the wait starts. This blocking
+      // call used to be completely silent — if the browser tab failed to open,
+      // the user saw "working…" and nothing else, forever.
+      const onStatus = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
       try {
-        const answers = await grill({ title: params?.title, contextHtml: params?.contextHtml, questions }, signal);
+        const answers = await grill({ title: params?.title, contextHtml: params?.contextHtml, questions }, signal, onStatus);
         if (answers === null) {
           return {
             content: [{
@@ -691,15 +710,16 @@ export default function (pi: ExtensionAPI) {
       _id: string,
       params: { filePath?: string },
       signal: AbortSignal,
-      _onUpdate: unknown,
+      onUpdate: any,
       ctx: any
     ) {
       const filePath = (params?.filePath ?? "").trim();
       if (!filePath) {
         return { content: [{ type: "text", text: "Error: filePath is required." }] };
       }
+      const onStatus = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
       try {
-        const result = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()), signal);
+        const result = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()), signal, onStatus);
         if (result === null) {
           return {
             content: [{
@@ -753,7 +773,9 @@ export default function (pi: ExtensionAPI) {
         const filePath = reviewMatch[1].trim();
         try {
           ctx.ui.notify(`planish: opening ${filePath} for review…`, "info");
-          const result = await review(filePath, ctx?.cwd ?? process.cwd());
+          const result = await review(filePath, ctx?.cwd ?? process.cwd(), undefined, (text) =>
+            ctx.ui.notify(`planish: ${text}`, "info")
+          );
           if (result === null) {
             ctx.ui.notify("planish: review cancelled", "warning");
             return;

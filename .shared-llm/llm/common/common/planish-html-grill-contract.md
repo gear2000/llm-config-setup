@@ -17,6 +17,19 @@ There are exactly two ways answers travel back, and a session uses ONE:
 
 A blocking tool call pointed at a page without a Submit button deadlocks the session. Any grill implementation must make the abort path work: cancelling the tool call from the TUI must unblock it cleanly.
 
+## Write for the user
+
+The grill is an interview about the design, not a changelog. Hard rules:
+
+1. **Open in plain English.** The context header explains what the plan is trying to do and what was found so far, in complete sentences a teammate could follow without reading the code.
+2. **Questions are about the mechanism or design choice** — which approach, what trade-off, what behavior. Never "these files changed" or a walk through methods; that is noise, not a question.
+3. **Technical terms are fine; acronyms must be defined at first use.** Never assume the reader knows an acronym.
+4. **File paths, method names, and change lists go in an `Appendix` section at the BOTTOM of the page** — never at the top, never inside a question block.
+
+## Fresh annotations every round
+
+Rounds often reuse one URL/path (`grill_current.html`, a localhost server), and note storage is keyed per page — so every generated round page must carry a unique key: `<meta name="desdoc-key" content="<date>-<slug>-r<round>">` in `<head>` (the annotation toolkit uses it and clears the previous round's notes). Server-rendered grills (Pi `planish_grill`) do this automatically. A round that shows the previous round's sticky notes is a bug.
+
 ## Required page sections
 
 Every grill round must include:
@@ -27,13 +40,14 @@ Every grill round must include:
 4. **Answer controls** — Copy Answers emits markdown for paste-back or tool return.
 5. **Annotation controls** — sticky-note feedback and Copy Feedback / finalize behavior.
 
-## Diagram ladder
+## Diagram modes — two only, never Mermaid
 
 Pick the lightest diagram that genuinely helps. Do not add diagrams for decoration, but do add them whenever a question would otherwise require the user to mentally simulate flow, ownership, dependency order, or data shape.
 
-- **Simple** → Mermaid flow.
-- **Medium** → ASCII/tree diagram in a `<pre>` block.
-- **Complex** → full HTML flow using `.grill-fig`, `.flow`, `.flow-row`, `.flow-box`, `.flow-arrow`, and `.chip`.
+- **Default** → ASCII/tree diagram in a `<pre>` block.
+- **When ASCII can't carry it** → full HTML drawn row by row using `.grill-fig`, `.flow`, `.flow-row`, `.flow-box`, `.flow-arrow`, and `.chip`.
+
+**Mermaid is forbidden.** It renders from a CDN at view time, so any syntax slip produces a silently broken diagram — it has caused more problems than it solved.
 
 ## Question block shape
 
@@ -77,5 +91,7 @@ A customized planning change is incomplete if tests or review show any of these:
 - plain Q&A-only grill as the default path,
 - missing Copy Answers,
 - missing annotation/feedback controls,
-- dropped Mermaid/ASCII/HTML visual fields,
+- dropped ASCII/HTML visual fields, or any Mermaid reintroduced,
+- questions leading with file lists/undefined acronyms instead of plain-English mechanism questions,
+- a round page missing its unique `desdoc-key` (stale annotations),
 - suite planners drifting away from this contract.

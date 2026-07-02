@@ -43,7 +43,17 @@
     if(navigator.clipboard&&navigator.clipboard.writeText){
       return navigator.clipboard.writeText(text).catch(function(){ddExec(text);});}
     ddExec(text);return Promise.resolve();}
-  const KEY='desdoc__'+btoa(location.pathname).replace(/[+/=]/g,'');
+  // Notes are keyed per page. When the page carries <meta name="desdoc-key">
+  // (a unique token the generator stamps per round), use it — pages that reuse
+  // one path across rounds (grill_current.html, localhost servers) would
+  // otherwise resurrect the previous round's notes. Keyed rounds live under
+  // their own desdoc_r__ prefix and prune ONLY that prefix, so notes on
+  // ordinary path-keyed documents are never touched. Fallback: pathname.
+  var ddMeta=document.querySelector('meta[name="desdoc-key"]');
+  const KEY=(ddMeta&&ddMeta.content)
+    ? 'desdoc_r__'+btoa(ddMeta.content).replace(/[+/=]/g,'')
+    : 'desdoc__'+btoa(location.pathname).replace(/[+/=]/g,'');
+  if(ddMeta){try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('desdoc_r__')===0&&k!==KEY)localStorage.removeItem(k);});}catch(e){}}
   let notes=[],ctr=0,vis=true;
   function save(){
     localStorage.setItem(KEY,JSON.stringify(
