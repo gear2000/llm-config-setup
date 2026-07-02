@@ -1,6 +1,6 @@
 # llm-config-setup
 
-A portable starter kit for assembling `CLAUDE.md`, `AGENTS.md`, skill files, and agent personas from composable markdown layers. Install it into your home and into a target repo with two commands, fill in the placeholders, run compose, and get instruction files tailored to your project.
+A portable starter kit for assembling `CLAUDE.md`, `AGENTS.md`, skill files, and agent personas from composable markdown layers. One centralized engine reads a small config file, copies the reusable layers into each repo you register, composes the instruction files, and wires up the per-harness skill links — for every repo at once, from one command.
 
 ## What it does
 
@@ -10,16 +10,60 @@ This kit treats those files as **build artifacts** assembled from **layers**:
 
 - `.shared-llm/layers/` — the source prose, split into reusable layers.
 - `.shared-llm/compose/` — YAML recipes that declare which layers to combine and where to write the output.
-- `tools/harness.py` — the engine that reads recipes and writes output files (the `compose` subcommand).
+- `tools/harness.py` — the engine that reads recipes and writes output files, reconciles the skill symlinks, and runs the whole flow. It is the **one** engine, it lives **only** in this kit, and it is **never** copied into a repo you set up. (A per-repo copy used to drift out of sync and silently break Pi skill discovery; centralizing the engine is the core fix.)
 
-Two commands install it:
+You drive it with `just` against a single config file, `~/.shared-llm.yaml`, that lists your destinations. Register a repo once, then rebuild every registered repo with one `just update`.
 
-- `task install local` — the home pieces (general skills, the 18 generic agents, the Pi runtime, the `llm-compose` wrapper).
-- `task install repo -- <dir>` — sets up a target repo (copies the layer tree + engine + a thin Taskfile, then composes its `CLAUDE.md` / `AGENTS.md`).
+## The command surface
+
+```bash
+just init -o mac|ubuntu          # one-time OS prereq check (python3 + just)
+just configure -s ~/.shared-llm  # set the source hub (default; run once)
+just configure -d /path/to/repo -l cc,pi   # register a destination repo + its harness list
+just configure -g cc,pi          # set the GLOBAL (home / all-projects) harness list
+just update                      # the headline command: copy → compose → link (+ global), every destination
+just update -v                   # same, with per-file detail printed
+```
+
+- **Harness tokens** are `cc` (Claude Code), `pi` (Pi), and `codex` (Codex). A destination's `-l` list defaults to `cc,pi`.
+- `just update` always writes a full run log under `/tmp/.shared-llm/log/<timestamp>.log`; `-v` also prints the per-file detail to the terminal.
+- **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and — when a `global:` list is set — `just global`.
+- `just pi-extensions` installs the pinned third-party Pi extensions via the `pi` CLI (a network step; no-op if `pi` is absent).
+- `just test` runs the composer/flow test suite.
+- The Pi launch group — `just hub`, `just builder`, `just pi-status`, `just pi-clean` — and the terraform workflow recipes (`just tf-implement`, `just tf-approve`, `just tf-auto`, `just tf-reviewer-cc` / `-pi`) are covered under "Pi harness runtime config" below.
+
+## The config file — `~/.shared-llm.yaml`
+
+`just configure` maintains this file; you rarely edit it by hand. Its shape:
+
+```yaml
+source: ~/.shared-llm            # the local hub: kit common content is copied here, then to each dest
+global: [cc, pi]                 # home / all-projects harnesses to set up (omit to skip the global step)
+destinations:
+  - path: ~/project/repo/foo
+    harnesses: [cc, pi]
+  - path: ~/project/repo/bar
+    harnesses: [cc, pi, codex]
+```
+
+`just update` reads this file and runs every operation centrally against the paths it lists. Because the engine is never copied into a destination, it can never drift out of sync with a per-repo copy of itself.
+
+## The three operations
+
+`just update` is three operations (plus an optional fourth):
+
+1. **copy** — kit → hub (`~/.shared-llm`) → each destination's own `.shared-llm/`. It copies the **common** layers and recipes only; it **never** touches a destination's `this_repo/` overlays or its `compose/` recipes. It overwrites, and flags (does not block) when it overwrites a diverged local edit. There is no auto-prune — a removed common file is left in place.
+2. **compose** — each destination composes from its **own** `.shared-llm/`, merging the freshly-copied common layers with that repo's `this_repo/` overlays. Outputs land at the destination's root (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`).
+3. **link** — repo-scoped skill symlinks, per destination and per harness: Pi reads `<repo>/.pi/skills/`, Codex reads `<repo>/.agents/skills/`, each pointing back at `<repo>/.claude/skills/`. **Claude Code needs no link** — it reads `.claude/` directly.
+4. **global** (only when `global:` is set) — installs the home / all-projects pieces: the general home skills, the 18 generic agents, and the Pi + Claude runtime. See "The global step" below.
+
+### Recipe path resolution — one rule
+
+Every path in a compose recipe YAML — both `.shared-llm/...` inputs and any repo-relative path like `ops/...` — resolves against the **repo root**. There is no prefix-stripping and no dual-mode resolution: one rule, everywhere.
 
 ## The `.shared-llm/` layout
 
-The repo splits into the **source tree** (`.shared-llm/`) and the **install/engine machinery** (`tools/`, `Taskfile.yml`).
+The repo splits into the **source tree** (`.shared-llm/`) and the **engine + config machinery** (`tools/`, `justfile`).
 
 ```
 .shared-llm/
@@ -50,93 +94,63 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **install/engi
     claude-md/example-service.yaml — recipe: per-service CLAUDE.md
     agents-md/root.yaml           — recipe: root AGENTS.md
     skills/python.yaml            — recipe: per-repo python skill (general layer + this_repo layer)
-    global/python.yaml            — recipe: GENERAL python skill (no this_repo layer; home install)
-    global/nextjs.yaml            — recipe: general nextjs skill (home install)
-    global/backend.yaml           — recipe: general backend skill (home install)
+    global/python.yaml            — recipe: GENERAL python skill (no this_repo layer; global step)
+    global/nextjs.yaml            — recipe: general nextjs skill (global step)
+    global/backend.yaml           — recipe: general backend skill (global step)
+    slash-commands/               — recipes: the routed slash-command skills
     agents/<name>.yaml            — recipe: one generic agent persona (18 of them)
   llm/pi/common/                  — Pi harness runtime config (NOT a compose input; see below)
+  llm/claude/common/              — Claude harness runtime config (NOT a compose input; see below)
 tools/
-  harness.py                      — compose engine (compose) + Pi/Codex symlink reconciler (sync/unlink)
-  install-local.sh                — `task install local` worker (home pieces)
-  install-repo.sh                 — `task install repo` worker (target repo)
-  install-global.sh               — composes + installs the general home skills
-  install-pi-extensions.sh        — installs the pinned third-party Pi extensions
-  templates/
-    llm-compose                   — the wrapper copied to ~/.local/bin/llm-compose
-    llm.Taskfile.yml              — the thin compose Taskfile copied into a target repo
-Taskfile.yml                      — install:*, compose:*, setup:*, plus the Pi launch group
+  harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
+  install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
+justfile                          — init / configure / update, the building blocks, tests, and the Pi launch group
 ONBOARDING.md                     — token-by-token checklist for filling the TEMPLATE stubs
 ```
 
 **layers vs compose vs llm/pi:**
 
 - **layers** are pure source prose — never generated, never frontmatter. The portable `common/` layers ship ready-to-use; the `this_repo/` layers ship as `TEMPLATE.*` stubs you fill in.
-- **compose** recipes are the build instructions: each YAML names the input layers, the output path, and (for skills/agents) the frontmatter name + description. The engine concatenates the inputs and writes the output.
-- **llm/pi** is the Pi coding agent's runtime config (extensions, agent personas, settings template). It is **not** a compose input — its files are never concatenated into any output. `tools/harness.py sync` symlinks them straight into `~/.pi/` (reconciling: it creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted). See "Pi harness runtime config" below.
+- **compose** recipes are the build instructions: each YAML names the input layers, the output path, and (for skills/agents) the frontmatter name + description. The engine concatenates the inputs and writes the output. Every path in a recipe resolves against the repo root.
+- **llm/pi** and **llm/claude** are runtime config for the coding agents (Pi extensions and agent personas; Claude hooks, statusline, settings). They are **not** compose inputs — their files are never concatenated into any output. The **global** step symlinks the Pi files into `~/.pi/` (reconciling: create missing, re-point drifted, prune renamed/deleted) and copies the Claude files into `~/.claude/`. See "Pi harness runtime config" and "Claude harness runtime config" below.
 
-## The install model
+## Setting up a destination repo
 
-There are two install surfaces. They are independent — run one, the other, or both.
+There is no scaffolding command — a destination is set up by hand once, then driven by `just update` forever after:
 
-### `task install local` — the home pieces (all projects)
+1. **Copy the kit's `.shared-llm/` into the repo.** The `this_repo/` layers arrive as fillable `TEMPLATE.*` stubs.
+2. **Fill the `TEMPLATE.*` stubs** (see `ONBOARDING.md`), deleting the `TEMPLATE.` prefix from each as you finish it.
+3. **Register it:** `just configure -d /path/to/repo -l cc,pi`.
+4. **Build it:** `just update`.
 
-Installs everything that lives in your `$HOME` and applies across every project:
+From then on, `just update` keeps every registered destination in sync: it re-copies the common layers (step 1's `this_repo/` overlays are never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
 
-1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and copies each skill into the home skill dirs each harness reads: `~/.claude/skills/`, `~/.codex/skills/`, `~/.pi/agent/skills/`. Slash-command skills are routed by harness: Pi standalone planning is `/planish` from the extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, `/do-oneshot`, `/do-implement`, `/do-loop`, and `/do-full`; Claude workflow-suite commands are the matching `cc-*` commands. The removed standalone skill variants `/do-planish` and `/cc-planish` are not installed.
-2. **The 18 generic agents** — composes the `agents/` recipes and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. (Codex has no user-agent directory, so it is skipped — the installer never invents one.)
-3. **Pi runtime** — `tools/harness.py sync` symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and `install-pi-extensions.sh` installs the pinned third-party extensions.
-4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` **only if absent** (never clobbers per-machine tweaks). See "Claude harness runtime config" below.
-5. **The `llm-compose` wrapper** — copies `tools/templates/llm-compose` to `~/.local/bin/llm-compose` (executable).
+## Where compose outputs land
 
-It is idempotent and safe: a re-run installs nothing new when home already matches, and it never clobbers a divergent or foreign file (an existing file that does not match this kit's copy, or a symlink it did not create, is left untouched with a warning).
+**Recipe `output:` paths are root-relative**, and they resolve against the destination's root. So a real destination's generated files land exactly where each harness reads them — `CLAUDE.md` and `AGENTS.md` at the root, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md` — with no manual move.
 
-```bash
-task install local
-# skip the third-party `pi install` network step:
-task install local -- --skip-pi-extensions
-```
+A destination composes only the **consumer-relevant** recipe groups (root `CLAUDE.md`/`AGENTS.md`, the skills, the agents, the slash commands). It deliberately does **not** compose the home-only `global/` skills (those install into `~/` via the global step) or the `example-package` / `example-service` **demo** recipes (illustrative samples only — a consumer repo never gets a stray `src/packages/example_package/CLAUDE.md`).
 
-### `task install repo -- <dir>` — set up a target repo (per repo)
+**The kit never clobbers its own files when it composes itself.** This repo ships its `this_repo` layers as `TEMPLATE.*` stubs and keeps a hand-maintained `CLAUDE.md` / `README`. When the global step composes the kit's own home skills and agents, it stages them under `examples/` — a **gitignored** staging dir — before copying them into `$HOME`, so a self-compose never overwrites the kit's real root files. The `example-package` / `example-service` demo recipes compose under a gitignored `samples/` area and are excluded from every consumer install.
 
-Makes a target repo **self-contained**:
+## The global step — home skills + runtime
 
-1. Copies the portable `.shared-llm/` layer tree, the compose engine (`tools/harness.py`), and a thin compose Taskfile into `<dir>`. The `this_repo` layers arrive as fillable `TEMPLATE.*` stubs. (If `<dir>` already has a `Taskfile.yml`, the thin one is dropped alongside as `tools/llm.Taskfile.yml` to include, rather than overwriting yours.)
-2. Prints the list of `TEMPLATE.*` stubs you must fill, then pauses. Set `INSTALL_REPO_YES=1` (or pipe non-TTY stdin) to skip the pause for automation.
-3. Composes the consumer-relevant recipes against the target (`--target <dir>`) — but only if every stub is filled and renamed. The generated `CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, and the 18 `.claude/agents/<name>.md` land **at the repo root**, ready to commit — no manual move. The home-only `global/` skills and the `example-*` demo recipes are deliberately not composed into the consumer tree. While stubs remain, compose is skipped and the remaining stubs are reported (you cannot compose against an unfilled stub).
-4. Prints a summary of what was generated and what is not installed here (the home pieces come from `task install local`).
+When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
-```bash
-task install repo -- /path/to/repo
-# default target is the current directory:
-task install repo
-# non-interactive (skip the fill pause):
-INSTALL_REPO_YES=1 task install repo -- /path/to/repo
-```
+1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, then copies each into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills/` (Codex). Pi standalone planning is `/planish` from the extension; the workflow-suite commands are `/do-*` on Pi and the matching `cc-*` on Claude Code. The removed `/do-planish` and `/cc-planish` standalone variants are not installed.
+2. **The 18 generic agents** — composes the `agents/` recipes and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
+3. **Pi runtime** — symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
+4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent (never clobbers per-machine tweaks).
 
-After the repo is set up, you fill the stubs (see `ONBOARDING.md`), then recompose with the thin Taskfile it carries or the wrapper:
+Third-party Pi extensions are a separate network step — `just pi-extensions`.
 
-```bash
-cd /path/to/repo
-task compose:all        # uses the thin Taskfile copied in by install repo
-# or:
-llm-compose             # the wrapper installed by `install local`
-```
+### Pi global-vs-repo skill precedence
 
-## The `llm-compose` wrapper
-
-`llm-compose` (installed to `~/.local/bin` by `task install local`) is a thin wrapper around the compose engine. It carries no logic of its own: it finds the nearest `.shared-llm/` root (walking up from `$PWD`, or `$SHARED_LLM_DIR` if set), locates the engine sitting next to it (`<repo>/tools/harness.py`, copied in by `install repo`), and execs its `compose` subcommand — passing every argument straight through. It defaults to `python3.14`; set `PYTHON_BIN=/path/to/python3.14` to override.
-
-```bash
-llm-compose                                          # compose all recipes
-llm-compose .shared-llm/compose/claude-md/root.yaml  # compose one
-llm-compose --target /some/out                       # override the output base
-```
-
-The wrapper is a convenience, not a requirement: a repo set up via `install repo` carries its own engine and thin Taskfile, so it can always recompose with `task compose:all` even without the wrapper.
+Pi loads a **global** skill before a repo-local one of the same name and keeps the first it finds. The **link** step prunes the stale global Pi links it created in earlier versions (so an obsolete global link can't shadow a new repo-local one), and **warns** when a repo-local skill name still collides with a global one it does not own — it surfaces the collision but does not police it.
 
 ## The 18 generic agents
 
-`task install local` ships these brand-free agent personas into your home agent dirs. They contain no project-specific references — adopt them as-is. Each is composed from a body layer (`agents/common/<name>.md`) plus a one-line description (`agents/common/<name>.description.md`).
+The global step ships these brand-free agent personas into your home agent dirs. They contain no project-specific references — adopt them as-is. Each is composed from a body layer (`agents/common/<name>.md`) plus a one-line description (`agents/common/<name>.description.md`).
 
 - **architecture** — deep-module / layering review and refactoring guidance.
 - **backend** — backend service and API implementation.
@@ -157,11 +171,9 @@ The wrapper is a convenience, not a requirement: a repo set up via `install repo
 - **security** — security review scoped to real blast radius.
 - **team-pulse** — heartbeat / liveness monitor for an agent team.
 
-Compose one on its own with `task compose:agent -- <name>`, or all of them with `task compose:agents`.
-
 ## The compose engine
 
-`tools/harness.py compose` reads a recipe YAML and writes one output file. It decouples two roots:
+Under the config-driven surface, `tools/harness.py` has a low-level `compose` subcommand that reads a single recipe YAML (or a directory of them) and writes the output. `just update` uses it per destination; the tests and the global staging compose call it directly. It decouples two roots:
 
 - **source** — the `.shared-llm/` dir (layers + recipes). Inputs and descriptions resolve against it. Selected via `--shared-llm`, then `$SHARED_LLM_DIR`, then a walk-up for `.shared-llm/`.
 - **target** — the output base where each recipe's `output:` path lands. Selected via `--target`, default the current directory.
@@ -169,44 +181,30 @@ Compose one on its own with `task compose:agent -- <name>`, or all of them with 
 Recipe types: `skill` (frontmatter name + description), `agent` (name + description + model, optional color), `claude-md` / `agents-md` (plain concatenated markdown, no frontmatter), `prompt` (a whole feature prompt assembled from an explicit manifest), `copy` (one file copied verbatim, executable bit preserved — for hook scripts and the statusline), and `settings` (JSON inputs deep-merged: dicts recurse, lists concatenate, scalars overlay-win — for a `settings.json` base plus a this_repo overlay). A recipe may also declare a `catalog:` partial injected before its `inputs`.
 
 ```bash
-python3.14 tools/harness.py compose                                     # compose all
-python3.14 tools/harness.py compose .shared-llm/compose/claude-md/root.yaml  # compose one
-python3.14 tools/harness.py compose .shared-llm/compose/agents            # compose a SUBSET (a recipe dir)
-python3.14 tools/harness.py compose --target . .shared-llm/compose/claude-md/root.yaml  # land at the repo root
-# or via Task (kit self-compose — stages into the gitignored examples/ dir):
-task compose:all
-task compose:claude-md -- root
-task compose:skill -- python
-task compose:agent -- deployer
+# low-level, mostly for tests / manual staging (the everyday path is `just update`):
+python3 tools/harness.py compose .shared-llm/compose/claude-md/root.yaml --target /tmp/out
+python3 tools/harness.py compose .shared-llm/compose/agents --target /tmp/out   # a SUBSET (a recipe dir)
 ```
-
-The `recipe` argument also accepts a **directory** of recipes — `harness.py compose .shared-llm/compose/agents` composes just that group. This is how a consumer install composes the consumer-relevant recipes (root `CLAUDE.md`/`AGENTS.md`, the skills, the agents) while leaving the home-only `global/` skills and the `example-*` demo samples out of the consumer's tree.
-
-## Where compose outputs land
-
-**Recipe `output:` paths are root-relative.** A real recipe writes to the location it actually belongs: `CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`. So when you set up a real project with `task install repo`, the engine composes with `--target <dir>` (or the thin Taskfile's `--target .`) and the generated files land **at that repo's root** — no manual move, no `examples/` prefix to strip.
-
-**The kit never clobbers its own files when it composes itself.** This repo ships its `this_repo` layers as `TEMPLATE.*` stubs and keeps a hand-maintained `CLAUDE.md` / `README` of its own. Its `task compose:*` targets all pass `--target examples` — a **gitignored staging dir** — so a kit self-compose writes into `examples/` and leaves the kit's real root files untouched. After `task compose:all`, `git status` stays clean. (`install-local.sh` and `install-global.sh` likewise stage the agents and global skills under `examples/` before copying them into `$HOME`.)
-
-**The `example-package` / `example-service` recipes are demos, not deliverables.** They compose under a gitignored `samples/` area and are deliberately excluded from the consumer install — a consumer repo never gets a stray `src/packages/example_package/CLAUDE.md`. To make per-package / per-service `CLAUDE.md` files for your real components, copy a leaf layer + its recipe (see `ONBOARDING.md` group F) and point its `output:` at the real path.
-
-See `ONBOARDING.md` for the consumer compose flow and committing the generated files.
 
 ## Quickstart
 
 ```bash
-# 1. Python 3.14 + one dependency for the engine
-python3.14 -m pip install pyyaml
+# 1. Python 3 + one dependency for the engine
+python3 -m pip install pyyaml
 
-# 2. Install the home pieces (skills, agents, Pi runtime, llm-compose)
-task install local
+# 2. Check prerequisites (python3 + just)
+just init -o ubuntu        # or: just init -o mac
 
-# 3. Set up a target repo
-task install repo -- /path/to/your/repo
+# 3. Point the engine at the source hub, and set the global harness list
+just configure -s ~/.shared-llm
+just configure -g cc,pi
 
-# 4. Fill the TEMPLATE.* stubs it printed (see ONBOARDING.md), then compose
-cd /path/to/your/repo
-task compose:all
+# 4. Set up a destination repo: copy .shared-llm/ into it, fill the TEMPLATE.* stubs
+#    (see ONBOARDING.md), then register it
+just configure -d /path/to/your/repo -l cc,pi
+
+# 5. Build everything — every destination, plus the global home pieces
+just update
 ```
 
 ## Placeholder convention
@@ -229,8 +227,8 @@ See `ONBOARDING.md` for the ordered, token-by-token fill checklist.
 
 `.shared-llm/llm/claude/common/` holds Claude Code-specific runtime config —
 hooks, the statusline, and a home settings template. Like the Pi runtime config,
-these are **not composed into prose**; `task install local` places them at the
-home level so they apply to every project:
+these are **not composed into prose**; the global step of `just update` places
+them at the home level so they apply to every project:
 
 - **`hooks/*.sh`** — four generic, project-agnostic quality hooks (prettier
   format, TypeScript check, console.log warn/audit). Copied into `~/.claude/hooks/`
@@ -250,13 +248,13 @@ For a repo that needs its **own** project-specific hooks, two optional
 (`TEMPLATE.example-hook.py`, `TEMPLATE.settings-overlay.json`) — fill them in and
 merge the overlay onto the base with a `type: settings` recipe, or delete them.
 
-This is the machinery behind the two new compose types: **`type: copy`** (a file
+This is the machinery behind the two runtime compose types: **`type: copy`** (a file
 copied verbatim, executable bit preserved) and **`type: settings`** (JSON inputs
 deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 ## Pi harness runtime config (optional)
 
-`.shared-llm/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, `tools/harness.py sync` symlinks them directly into `~/.pi/` (reconciling: it creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted) so Pi can discover and load them at runtime. `task install local` runs this for you.
+`.shared-llm/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, the global step of `just update` symlinks them directly into `~/.pi/` (reconciling: it creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted) so Pi can discover and load them at runtime.
 
 **What it contains:**
 
@@ -270,7 +268,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 - `extensions/codex-reviewer-hub.ts`, `extensions/doc-review-hub.ts`, `extensions/pr-review-hub.ts` — Pi extensions that each listen on a Unix socket and dispatch a sub-agent request: adversarial code review, document review, and PR/branch review respectively. `extensions/hub-common.ts` is the shared socket/dispatch helper they import. The hub extensions are symlinked into `~/.pi/extensions/` (loaded when Pi is launched with `-e`).
 - `agents/codex-reviewer.md`, `agents/doc-reviewer.md`, `agents/pr-reviewer.md` — The system prompts for the review agents invoked by the hub extensions. Symlinked into `~/.pi/agents/`.
 - `agents/iac-verifier.md` — The system prompt for the gray-zone verifier the `iac-guard` gate consults (judges an update/apply's blast radius → ALLOW or ASK). Symlinked into `~/.pi/agents/`.
-- `third-party-extensions.txt` — Pinned manifest of **third-party** Pi extensions, one `pi install` source per line. `tools/install-pi-extensions.sh` reads it and installs each via `pi install` (skipping any already present), so the set reproduces on any machine with one command. `task setup:pi:extensions` runs that installer.
+- `third-party-extensions.txt` — Pinned manifest of **third-party** Pi extensions, one `pi install` source per line. `tools/install-pi-extensions.sh` reads it and installs each via `pi install` (skipping any already present), so the set reproduces on any machine with one command. `just pi-extensions` runs that installer.
 - `THIRD-PARTY-EXTENSIONS.md` — The per-extension reference: what each one does, its runtime deps, and the own-vs-third-party rule below.
 - `settings.template.json` — A starter Pi settings file (provider, model, thinking level). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten. Its `packages` array starts empty — the installer fills it.
 
@@ -278,65 +276,52 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 Two kinds of Pi extension, two install paths. **Do not mix them.**
 
-- **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by `tools/harness.py sync` — copied/layered, never installed from a registry.
+- **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by the global step of `just update` — copied/layered, never installed from a registry.
 - **THIRD-PARTY** are **installed from source** via `pi install`, declared as pinned sources in `third-party-extensions.txt` — never copied or vendored into this repo (no committed `node_modules`).
 
 There is one install path for third-party extensions: `pi install` + the manifest. See `.shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md` for the full set and per-extension runtime deps.
 
-**Setup (also run by `task install local`):**
+**Wiring (part of `just update` when `global:` includes `pi`):**
 
 ```bash
-# Wire everything up (idempotent — safe to re-run)
-task setup:pi
-
-# Undo: remove the symlinks (leaves settings.json and installed third-party extensions)
-task setup:pi:unlink
+just update          # symlinks the OWN extensions + personas into ~/.pi/ (global step)
+just pi-extensions   # installs the pinned THIRD-PARTY extensions via `pi install`
 ```
 
 **Launching (requires `tmux`):**
 
 ```bash
-task up        # symlinks + socket hub (in tmux) + builder Pi — one command
-task hub       # just the hub (serves the review sub-agent sockets + iac-verifier verdicts)
-task status    # show hub + socket state
-task clean     # stop the hub, remove stale sockets
+just hub         # start the socket hub in tmux (serves the review sub-agent sockets + iac-verifier verdicts)
+just builder     # launch a builder Pi (iac-guard auto-loads)
+just pi-status   # show hub + socket state
+just pi-clean    # stop the hub, remove stale sockets
 ```
 
-The `iac-guard` gate auto-loads in every Pi session. The hub only needs to be running for the gray-zone verifier path — if it is down, the gate fails closed to human approval. These launch tasks are named unprefixed so a higher-level Taskfile can import them (`includes: { pi: { taskfile: ./Taskfile.yml, dir: . } }` → `task pi:up`), or run them directly with `task -d <this-dir> up`.
+The `iac-guard` gate auto-loads in every Pi session. The hub only needs to be running for the gray-zone verifier path — if it is down, the gate fails closed to human approval.
 
-If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), `tools/harness.py sync` leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks that resolve into this repo family.
+If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), the global step leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks that resolve into this repo family.
 
 Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/node_modules/`), never committed here. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 
-**Prerequisites:** Python 3.14 for compose/sync tooling, a Pi install (`npm install -g @earendil-works/pi-coding-agent`), `node` / `npm` on your `PATH`, and `tmux` (for the `task up` / `task hub` launch group).
+**Prerequisites:** Python 3 + PyYAML for the engine, `just` as the entrypoint, a Pi install (`npm install -g @earendil-works/pi-coding-agent`), `node` / `npm` on your `PATH`, and `tmux` (for the `just hub` / `just builder` launch group).
+
+## Terraform workflow (Pi)
+
+A small group of `just` recipes drives a reviewed terraform loop on Pi, gated by `iac-guard`:
+
+```bash
+just tf-reviewer-cc          # start the terraform reviewer (Claude Code) — run first
+just tf-reviewer-pi          # or the reviewer on Pi
+just tf-implement <plan>     # load a plan and write reviewed terraform until approved
+just tf-approve              # human-gated apply/destroy with an agent-distilled plan table
+just tf-auto <plan>          # implement, then human-gated apply
+just tf-reviewer-down        # stop the reviewer
+```
 
 ## Output-style caveat
 
 An active `explanatory` or `learning` Claude Code output style (set via `/config`) competes with the brevity rule in `.shared-llm/layers/llm/common/common/response.md` and can override it. For terse, structured replies use the default or `concise` output style.
 
-## Syncing changes back into a private consumer repo
-
-This kit is a git repo of its own — if you edit or add common/ layer content
-directly here (a new skill, a tweaked prompt fragment, a new cc-* command),
-`just sync-to-private` pulls those changes into a private repo that already
-installed the kit:
-
-```
-just sync-to-private                                  # default ../jiffy-rewrite-2026
-just sync-to-private /path/to/private-repo --dry-run   # preview first
-```
-
-It only UPDATES files the private repo already has at the same path — a brand
-new common/ file (one the private repo never adopted) is reported, not copied,
-since adopting it may need a new compose recipe or a `harness.py sync` entry, a
-call only you can make. It never touches anything under a `this_repo/` path, and
-never touches `compose/*.yaml` recipe files — a private recipe often mixes a
-this_repo overlay into the same file (e.g. a per-repo agent description on top
-of the common body), and a blind overwrite from the common-only public version
-would delete that overlay wiring. See `tools/sync-to-private.py` for the exact
-scope. The reverse direction (private → public) is the private repo's own
-`task llm:sync-public FILES="..."` — unchanged by this.
-
 ## What is intentionally out of scope
 
-A shared cross-harness skill library (distributing skills across multiple AI assistants beyond the home-install path above) is intentionally out of scope for this kit — it is a candidate for a separate future kit.
+A shared cross-harness skill library (distributing skills across multiple AI assistants beyond the global-install path above) is intentionally out of scope for this kit — it is a candidate for a separate future kit.

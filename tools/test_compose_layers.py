@@ -124,6 +124,37 @@ def _compose_expect_fail(shared_llm: Path, target: Path, recipe_rel: str) -> str
     return result.stderr
 
 
+def test_input_outside_shared_llm_resolves_against_repo_root(tmp_path: Path) -> None:
+    """A recipe input that does NOT start with `.shared-llm/` (repo content that
+    lives outside the layer tree) resolves against the repo root, identically to
+    a `.shared-llm/...` path. This is the single-rule resolver (review item 1):
+    no prefix-stripping, no second base — every input path is `repo_root / path`.
+    """
+    shared = tmp_path / ".shared-llm"
+    _write(shared / "layers/agents/this_repo/desc.md", "A test agent.\n")
+    _write(shared / "layers/agents/this_repo/body.md", "LAYER BODY from .shared-llm tree.\n")
+    # A file OUTSIDE .shared-llm/, elsewhere in the repo (mirrors the private
+    # repo's `ops/mkdocs/...` doc pulled into a skill). It must resolve to
+    # repo_root / "external/docs/platform.md", NOT shared / "external/...".
+    _write(tmp_path / "external/docs/platform.md", "EXTERNAL DOC outside .shared-llm.\n")
+    recipe_rel = ".shared-llm/compose/agents/demo.yaml"
+    _write(shared.parent / recipe_rel, yaml.safe_dump({
+        "type": "agent",
+        "name": "demo-agent",
+        "model": "opus",
+        "description": ".shared-llm/layers/agents/this_repo/desc.md",
+        "inputs": [
+            ".shared-llm/layers/agents/this_repo/body.md",
+            "external/docs/platform.md",
+        ],
+        "output": ".claude/agents/demo-agent.md",
+    }, sort_keys=False))
+    _compose(shared, tmp_path, recipe_rel)
+    out = (tmp_path / ".claude/agents/demo-agent.md").read_text()
+    assert "LAYER BODY from .shared-llm tree." in out
+    assert "EXTERNAL DOC outside .shared-llm." in out
+
+
 def test_copy_verbatim_preserves_executable_bit(tmp_path: Path) -> None:
     shared = tmp_path / ".shared-llm"
     src = shared / "llm/claude/common/hooks/hook.sh"
@@ -165,54 +196,37 @@ def _load_harness_module():
     return module
 
 
-def test_install_global_routes_slash_skills_by_harness(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    # The scripts default to python3.14 in production. The test pins the current
-    # interpreter so CI can run as long as it is new enough for harness.py.
-    env["PYTHON_BIN"] = sys.executable
-    result = subprocess.run(
-        ["bash", str(REPO_ROOT / "tools/install-global.sh")],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"install-global failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-
-    claude = home / ".claude/skills"
-    pi = home / ".pi/agent/skills"
-    assert (claude / "cc-plan-and-grill/SKILL.md").exists(), "Claude should receive workflow cc-* planning skills"
-    assert (claude / "qa/SKILL.md").exists(), "Claude should receive portable non-do-* skills"
-    assert not (claude / "cc-planish").exists(), "Removed standalone cc-planish must not install"
-    assert not (claude / "do-planish").exists(), "Removed standalone do-planish must not install"
-
-    for name in ("do-full", "do-implement", "do-loop", "do-oneshot", "do-plan-and-grill", "do-research"):
-        assert (pi / name / "SKILL.md").exists(), f"Pi should receive portable {name}"
-    assert (pi / "qa/SKILL.md").exists(), "Pi should receive portable common skills"
-    assert not (pi / "do-planish").exists(), "Removed standalone do-planish must not install"
-    assert not (pi / "cc-planish").exists(), "Pi must not receive Claude-only/removed cc-planish"
-
-
-def test_plan_pi_routes_common_skills_and_planish_extension(tmp_path: Path) -> None:
+def test_plan_pi_repo_routes_common_skills_repo_scoped(tmp_path: Path) -> None:
+    """Repo-scoped Pi links target <repo>/.pi/skills, take only common-scoped
+    skills (not cc-*), and point back at <repo>/.claude/skills."""
     harness = _load_harness_module()
     root = tmp_path / "repo"
-    home = tmp_path / "home"
-    harness.HOME = home
 
     for skill in ("do-plan-and-grill", "qa", "cc-plan-and-grill"):
         _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
     _write(root / ".shared-llm/compose/slash-commands/common/common/do-plan-and-grill.yaml", "name: do-plan-and-grill\n")
     _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
     _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
-    _write(root / ".shared-llm/llm/pi/common/extensions/planish.ts", "export default function() {}\n")
 
-    plan = harness.plan_pi(root)
-    assert plan.desired[home / ".pi/agent/skills/do-plan-and-grill"] == root / ".claude/skills/do-plan-and-grill"
-    assert plan.desired[home / ".pi/agent/skills/qa"] == root / ".claude/skills/qa"
-    assert home / ".pi/agent/skills/cc-plan-and-grill" not in plan.desired
-    assert plan.desired[home / ".pi/agent/extensions/planish.ts"] == root / ".shared-llm/llm/pi/common/extensions/planish.ts"
+    plan = harness.plan_pi_repo(root)
+    assert plan.desired[root / ".pi/skills/do-plan-and-grill"] == root / ".claude/skills/do-plan-and-grill"
+    assert plan.desired[root / ".pi/skills/qa"] == root / ".claude/skills/qa"
+    # cc-* (claude-scoped) is excluded from Pi.
+    assert root / ".pi/skills/cc-plan-and-grill" not in plan.desired
+
+
+def test_plan_codex_repo_routes_common_and_codex_to_agents_skills(tmp_path: Path) -> None:
+    """Repo-scoped Codex links target <repo>/.agents/skills (item 4)."""
+    harness = _load_harness_module()
+    root = tmp_path / "repo"
+    for skill in ("qa", "cc-plan-and-grill"):
+        _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
+    _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
+    _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
+
+    plan = harness.plan_codex_repo(root)
+    assert plan.desired[root / ".agents/skills/qa"] == root / ".claude/skills/qa"
+    assert root / ".agents/skills/cc-plan-and-grill" not in plan.desired
 
 
 def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields() -> None:

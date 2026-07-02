@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.14
+#!/usr/bin/env python3
 """Assemble layer .md files into skill, agent, CLAUDE.md, and AGENTS.md definitions.
 
 Reads compose YAML files from <shared-llm>/compose/ that specify which layer
@@ -33,18 +33,20 @@ Optional keys:
                        content repeated across many outputs, e.g. the service catalog).
                        Exactly one source file; the tool reads it once and prepends it.
 
-This file also reconciles the per-harness symlinks (pi / codex) that wire the
-composed outputs into the dirs the tools read at startup — see the reconciler
-section near the bottom. One file, three subcommands, driven by the justfile
-(setup) and the Taskfile (compose).
+This is the ONE engine and it lives ONLY in the llm-config-setup kit — it is
+never copied into a destination. The config-driven surface (configure / copy /
+compose-dests / link / global / update) reads ~/.shared-llm.yaml and runs every
+operation centrally against the destination paths it lists, so the engine can
+never drift out of sync with a per-repo copy of itself. It also reconciles the
+per-harness symlinks (repo-scoped pi/codex skills, the global Pi runtime) — see
+the reconciler section below.
 
 Usage:
-    python3.14 tools/harness.py compose                                      # compose all
-    python3.14 tools/harness.py compose .shared-llm/compose/skills/x.yaml    # compose one
-    python3.14 tools/harness.py compose --shared-llm /path/.shared-llm --target /path/out
-    python3.14 tools/harness.py sync                                         # create + prune all harness links
-    python3.14 tools/harness.py sync --plan                                  # preview, touch nothing
-    python3.14 tools/harness.py unlink                                       # remove managed links
+    python3 tools/harness.py init -o mac|ubuntu                           # prereq check
+    python3 tools/harness.py configure -d /path/to/repo -l cc,pi          # edit ~/.shared-llm.yaml
+    python3 tools/harness.py update -v                                    # copy -> compose -> link (+ global)
+    # low-level (used by tests + the global staging compose):
+    python3 tools/harness.py compose .shared-llm/compose/skills/x.yaml --shared-llm /p/.shared-llm --target /out
 """
 
 from __future__ import annotations
@@ -326,11 +328,30 @@ class SettingsMerge:
 # ---------------------------------------------------------------------------
 
 class Composer:
-    """Discovers compose YAMLs and dispatches to the right output handler."""
+    """Discovers compose YAMLs and dispatches to the right output handler.
 
-    def __init__(self, source_root: Path, target_root: Path) -> None:
-        self.source = source_root
-        self.target = target_root
+    INPUT resolution is ONE rule. Every input/catalog/description path in a
+    recipe is repo-root-relative and resolves against `repo_root`: a path that
+    starts with `.shared-llm/...` (layer content) and one that starts with
+    `ops/...` (repo content outside the layer tree) resolve identically —
+    `repo_root / path`. This replaced the old dual resolver that silently forked
+    between the kit and a consumer repo.
+
+    OUTPUT resolution uses `output_base`, which defaults to `repo_root` (so a
+    normal compose reads and writes the same repo — the consumer flow). It is
+    only ever pointed elsewhere for the kit's OWN self-compose, which stages
+    outputs into the gitignored examples/ dir while still reading inputs from the
+    real kit root. That is a safe output redirect, not an input fork.
+
+    `shared_root` locates the compose/ and skills/ dirs for discovery; it
+    defaults to `repo_root/.shared-llm` and never affects path resolution.
+    """
+
+    def __init__(self, repo_root: Path, output_base: Path | None = None,
+                 shared_root: Path | None = None) -> None:
+        self.repo_root = repo_root
+        self.output = output_base if output_base is not None else repo_root
+        self.shared = shared_root if shared_root is not None else repo_root / ".shared-llm"
         self.skill_handler = ClaudeSkill()
         self.agent_handler = ClaudeAgent()
         self.claude_md_handler = ClaudeMd()
@@ -340,33 +361,28 @@ class Composer:
         self.settings_handler = SettingsMerge()
 
     def resolve_input(self, relative: str) -> Path:
-        """Resolve an input/catalog/description path against the SOURCE root.
+        """Resolve an input/catalog/description path against the repo root.
 
-        A literal that already names the source root (`.shared-llm/...`) is kept
-        repo-relative by stripping that prefix, so recipes can carry the full
-        `.shared-llm/layers/...` path the repo commits while still resolving
-        against an arbitrary --shared-llm base.
+        Every recipe path is repo-root-relative as written (`.shared-llm/...`
+        for layer content, `ops/...` for repo content that lives outside the
+        layer tree). One rule, no prefix-stripping, no second base.
         """
-        rel = relative
-        base = self.source.name  # ".shared-llm"
-        if rel.startswith(base + "/"):
-            rel = rel[len(base) + 1 :]
-        return self.source / rel
+        return self.repo_root / relative
 
     def resolve_output(self, relative: str) -> Path:
-        """Resolve an output path against the TARGET root."""
-        return self.target / relative
+        """Resolve an output path against the output base (defaults to repo root)."""
+        return self.output / relative
 
     def discover(self, root: Path | None = None) -> list[Path]:
-        """Find all recipe YAML files under a directory (default <source>/compose/).
+        """Find all recipe YAML files under a directory (default <shared>/compose/).
 
-        Pass an explicit `root` (e.g. <source>/compose/agents) to compose only a
+        Pass an explicit `root` (e.g. <shared>/compose/agents) to compose only a
         SUBSET of recipes — this is how a consumer install composes the
         consumer-relevant recipes (root CLAUDE.md/AGENTS.md, skills, agents) while
         leaving the home-only `global/` skills and the `example-*` demo samples out
         of the consumer's tree.
         """
-        compose_dir = root if root is not None else self.source / "compose"
+        compose_dir = root if root is not None else self.shared / "compose"
         if not compose_dir.is_dir():
             print(f"error: compose directory not found: {compose_dir}", file=sys.stderr)
             sys.exit(1)
@@ -461,13 +477,13 @@ class Composer:
         repo's .codex-plugin points Codex at the same .claude/skills/ dir, so both
         harnesses pick them up from one copy. Stale dest dirs are cleared first.
         """
-        skills_src = self.source / "skills"
+        skills_src = self.shared / "skills"
         if not skills_src.is_dir():
             return
         for skill_dir in sorted(skills_src.iterdir()):
             if not skill_dir.is_dir() or skill_dir.name.startswith("."):
                 continue
-            dest = self.target / ".claude" / "skills" / skill_dir.name
+            dest = self.output / ".claude" / "skills" / skill_dir.name
             print(f"  standalone-skill: {skill_dir.name} -> {dest}")
             if dest.exists():
                 shutil.rmtree(dest)
@@ -488,22 +504,24 @@ class Composer:
 
 
 # ===========================================================================
-# Symlink reconciler — sync / unlink
+# Symlink reconciler
 # ===========================================================================
 #
-# compose (above) turns layer files into outputs under .claude/. The reconciler
-# wires those outputs and the Pi extensions into the per-harness discovery dirs
-# the tools read at startup, by symlink:
+# compose turns layer files into outputs under .claude/. The reconciler wires
+# those outputs into the per-harness discovery dirs the tools read at startup,
+# by symlink. Two callers use it:
 #
-#   pi     skills   .claude/skills/<name>     -> ~/.pi/agent/skills/<name>  (portable skills only; Pi reads <agentDir>/skills)
-#          agents   .claude/agents/<name>.md  -> ~/.pi/agents/<name>.md
-#          ext      .shared-llm/llm/pi/common/extensions/<x>
-#                                             -> ~/.pi/agent/extensions/<x>  (or ~/.pi/extensions for *-hub.ts)
-#   codex  skills   .claude/skills/<name>     -> ~/.codex/skills/<name> (portable + codex skills)
+#   link (per destination, repo-scoped — plan_pi_repo / plan_codex_repo):
+#     pi     .claude/skills/<name>  -> <repo>/.pi/skills/<name>      (common skills)
+#     codex  .claude/skills/<name>  -> <repo>/.agents/skills/<name>  (common + codex skills)
 #
-# Unlike the old add-only bash, this RECONCILES desired-vs-actual: it creates
-# missing links, re-points drifted ones, and PRUNES links whose source was
-# renamed or deleted (the gap that left dangling links). It only ever touches a
+#   do_home_runtime (global Pi runtime — plan_pi_runtime):
+#     ext      .shared-llm/llm/pi/common/extensions/<x> -> ~/.pi/agent/extensions/<x>
+#              (or ~/.pi/extensions for *-hub.ts)
+#     personas .shared-llm/llm/pi/common/agents/<x>.md  -> ~/.pi/agents/<x>.md
+#
+# It RECONCILES desired-vs-actual: creates missing links, re-points drifted ones,
+# and PRUNES links whose source was renamed or deleted. It only ever touches a
 # link that resolves into THIS repo family — never a foreign link or a real file.
 
 HOME = Path.home()
@@ -563,10 +581,17 @@ def harness_of(root: Path, name: str) -> str:
     return "unknown"
 
 
-def link_is_ours(dest: Path, family: str) -> bool:
+def link_is_ours(dest: Path, family: str, repo_root: Path | None = None) -> bool:
     """True iff dest is a symlink whose literal OR resolved target points into
     our repo family's managed dirs. Works on a dangling link (the literal target
-    string still carries the marker). Never returns True for a real file."""
+    string still carries the marker). Never returns True for a real file.
+
+    `repo_root` is the repo whose managed links we're reconciling — the fallback
+    "resolves inside this clone" check uses it. It defaults to the engine's own
+    repo (project_root()) only for the legacy global sync path; the
+    config-driven, per-destination link step passes the DESTINATION root so a
+    link is judged against the repo it actually belongs to, not the kit that
+    happens to host the engine (review item 1)."""
     if not dest.is_symlink():
         return False
     literal = os.readlink(dest)
@@ -574,9 +599,9 @@ def link_is_ours(dest: Path, family: str) -> bool:
     for t in (literal, resolved):
         if family in t and any(m in t for m in MANAGED_MARKERS):
             return True
-    # Also ours if it resolves inside the current clone.
+    # Also ours if it resolves inside the repo we're reconciling.
     try:
-        Path(resolved).relative_to(project_root())
+        Path(resolved).relative_to(repo_root if repo_root is not None else project_root())
         return True
     except ValueError:
         return False
@@ -589,35 +614,21 @@ def _skill_dirs(root: Path) -> list[Path]:
     return [d for d in sorted(skills.iterdir()) if d.is_dir() and not d.name.startswith(".") and d.name != "_archived"]
 
 
-def plan_pi(root: Path) -> LinkPlan:
-    desired: dict[Path, Path] = {}
-    # Pi reads user skills from <agentDir>/skills, i.e. ~/.pi/agent/skills — NOT
-    # ~/.pi/skills. Don't "fix" this back without re-checking the Pi runtime.
-    pi_skills = HOME / ".pi/agent/skills"
-    # NOTE: ~/.pi/agents is unverified against the current Pi runtime layout —
-    # audit separately; not in scope for this rename.
+def plan_pi_runtime(root: Path) -> LinkPlan:
+    """Global Pi RUNTIME links: the bundled extensions and the hand-authored Pi
+    agent personas (tf-reviewer, doc-reviewer, …) under
+    .shared-llm/llm/pi/common/. Skills are handled separately by do_global (copied,
+    routed) and the composed generic agents are COPIED by do_home_runtime, so this
+    plan deliberately excludes both — it is only the stable .ts/.md runtime sources
+    that are safe to symlink."""
     pi_agents = HOME / ".pi/agents"
     agent_ext = HOME / ".pi/agent/extensions"
     hub_ext = HOME / ".pi/extensions"
-
-    # skills — Pi gets portable/common skills, including the do-* command family.
-    # Claude-only cc-* skills are deliberately excluded. Pi does not support colons
-    # in command names, so any skill named "foo:bar"
-    # is installed under the hyphenated alias "foo-bar" instead.
-    for d in _skill_dirs(root):
-        if harness_of(root, d.name) == "common":
-            pi_name = d.name.replace(":", "-")
-            desired[pi_skills / pi_name] = d
-
-    # agents — composed personas under .claude/agents/ AND the hand-authored Pi
-    # agent personas kept in the runtime tree (.shared-llm/llm/pi/common/agents/,
-    # e.g. the hub reviewers + tf-reviewer). Both feed ~/.pi/agents/.
-    for agents_src in (root / ".claude/agents", root / ".shared-llm/llm/pi/common/agents"):
-        if agents_src.is_dir():
-            for f in sorted(agents_src.glob("*.md")):
-                desired[pi_agents / f.name] = f
-
-    # extensions — dirs + flat .ts (minus *.test.ts and the skip-list); hub routing
+    desired: dict[Path, Path] = {}
+    personas = root / ".shared-llm/llm/pi/common/agents"
+    if personas.is_dir():
+        for f in sorted(personas.glob("*.md")):
+            desired[pi_agents / f.name] = f
     ext_src = root / ".shared-llm/llm/pi/common/extensions"
     if ext_src.is_dir():
         for entry in sorted(ext_src.iterdir()):
@@ -629,25 +640,11 @@ def plan_pi(root: Path) -> LinkPlan:
             elif name.endswith(".ts") and not name.endswith(".test.ts"):
                 is_hub = name.endswith("-hub.ts") or name.startswith("hub-")
                 desired[(hub_ext if is_hub else agent_ext) / name] = entry
-
-    return LinkPlan(desired, [pi_skills, pi_agents, agent_ext, hub_ext])
-
-
-def plan_codex(root: Path) -> LinkPlan:
-    desired: dict[Path, Path] = {}
-    codex_home = Path(os.environ.get("CODEX_HOME", str(HOME / ".codex")))
-    codex_skills = codex_home / "skills"
-    # Codex gets portable (common) and codex-specific skills; not claude-only.
-    for d in _skill_dirs(root):
-        if harness_of(root, d.name) in ("common", "codex"):
-            desired[codex_skills / d.name] = d
-    return LinkPlan(desired, [codex_skills])
+    return LinkPlan(desired, [pi_agents, agent_ext, hub_ext])
 
 
-PLAN_BUILDERS = {"pi": plan_pi, "codex": plan_codex}
-
-
-def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool) -> collections.Counter:
+def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool,
+              repo_root: Path | None = None) -> collections.Counter:
     counts: collections.Counter = collections.Counter()
     tag = "plan" if plan_only else "done"
 
@@ -668,7 +665,7 @@ def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool) -> c
                     dest.unlink()
                     dest.symlink_to(src)
                 continue  # already correct
-            if link_is_ours(dest, family):
+            if link_is_ours(dest, family, repo_root):
                 emit("repoint", dest, src)
                 if not plan_only:
                     dest.unlink()
@@ -699,7 +696,7 @@ def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool) -> c
             if entry.name in desired_by_dir[d]:
                 continue  # wanted — handled above
             if entry.is_symlink():
-                if link_is_ours(entry, family):
+                if link_is_ours(entry, family, repo_root):
                     emit("prune", entry, None)
                     if not plan_only:
                         entry.unlink()
@@ -718,24 +715,31 @@ def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool) -> c
 # ---------------------------------------------------------------------------
 
 def cmd_compose(args: argparse.Namespace) -> None:
-    source_root = find_shared_llm(args.shared_llm)
-    target_root = Path(args.target).expanduser().resolve() if args.target else Path.cwd()
-    composer = Composer(source_root, target_root)
+    shared_root = find_shared_llm(args.shared_llm)
+    # Inputs resolve against the repo that owns the .shared-llm we found (its
+    # parent). Outputs default to that same repo (consumer flow: read and write
+    # one repo). An explicit --target redirects ONLY where outputs land — used by
+    # the kit self-compose to stage into examples/ — while inputs still resolve
+    # against the real repo root.
+    repo_root = shared_root.parent
+    output_base = Path(args.target).expanduser().resolve() if args.target else repo_root
+    composer = Composer(repo_root, output_base=output_base, shared_root=shared_root)
 
-    print(f"shared-llm source: {source_root}")
-    print(f"target output: {target_root}")
+    print(f"shared-llm source: {shared_root}")
+    print(f"repo root: {repo_root}")
+    print(f"output base: {output_base}")
 
     if args.recipe:
         recipe = Path(args.recipe)
         if not recipe.is_absolute():
             # A recipe path may be given repo-relative (`.shared-llm/compose/...`)
-            # or source-relative (`compose/...`). Resolve against the source root,
+            # or source-relative (`compose/...`). Resolve against the shared root,
             # stripping the source dir name if the caller included it.
             rel = args.recipe
-            base = source_root.name
+            base = shared_root.name
             if rel.startswith(base + "/"):
                 rel = rel[len(base) + 1 :]
-            recipe = source_root / rel
+            recipe = shared_root / rel
         # A directory composes the subset of recipes under it; a file composes one.
         if recipe.is_dir():
             composer.compose_dir(recipe)
@@ -747,39 +751,620 @@ def cmd_compose(args: argparse.Namespace) -> None:
     print("done.")
 
 
-def cmd_sync(args: argparse.Namespace) -> None:
-    root = project_root()
-    family = repo_family(root)
-    harnesses = list(PLAN_BUILDERS) if args.harness == "all" else [args.harness]
-    print(f"repo: {root}  family: {family}  mode: {'plan' if args.plan else 'apply'}")
-    total: collections.Counter = collections.Counter()
-    for h in harnesses:
-        print(f"--- {h} ---")
-        total += reconcile(PLAN_BUILDERS[h](root), family, plan_only=args.plan, force=args.force)
-    line = (
-        f"done. created {total['create']}, repointed {total['repoint']}, "
-        f"pruned {total['prune']}, skipped-foreign {total['skip-foreign']}."
-    )
-    if total["shadow"]:
-        line += f"  ⚠ {total['shadow']} shadow conflict(s) — remove the [WARN] real files above."
-    print(line)
+# ===========================================================================
+# Config-driven, centralized multi-destination flow:
+#   configure / copy / compose / link / update / init
+#
+# The engine lives ONLY in this kit and is never copied into a destination. All
+# operations run centrally from here against destination paths read from
+# ~/.shared-llm.yaml. This is what makes engine drift impossible: there is only
+# ever one engine (review item 1 root cause).
+# ===========================================================================
+
+CONFIG_PATH = HOME / ".shared-llm.yaml"
+DEFAULT_SOURCE = HOME / ".shared-llm"
+VALID_HARNESSES = ("cc", "pi", "codex")
+
+# The ONLY trees `copy` propagates: pure common layer + runtime content. It never
+# touches a destination's this_repo/ overlays or its compose/ recipes — those are
+# destination-owned and wire the private overlays (resolved decision #6). Paths
+# are relative to a `.shared-llm/` dir.
+COMMON_ROOTS = (
+    "layers/agents/common",
+    "layers/llm/common",
+    "layers/skills/common",
+    "layers/slash-commands/common",
+    "llm/claude/common",
+    "llm/pi/common",
+)
 
 
-def cmd_unlink(args: argparse.Namespace) -> None:
-    root = project_root()
-    family = repo_family(root)
-    harnesses = list(PLAN_BUILDERS) if args.harness == "all" else [args.harness]
-    removed = 0
-    for h in harnesses:
-        for d in PLAN_BUILDERS[h](root).dest_dirs:
-            if not d.is_dir():
+class RunLog:
+    """Prints to stdout when verbose; always appends to the run log file."""
+
+    def __init__(self, verbose: bool, path: Path | None = None) -> None:
+        self.verbose = verbose
+        self.path = path
+        self._fh = None
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = path.open("a")
+
+    def __call__(self, msg: str) -> None:
+        if self.verbose:
+            print(msg)
+        if self._fh is not None:
+            self._fh.write(msg + "\n")
+
+    def always(self, msg: str) -> None:
+        """Print regardless of verbosity (for summary lines), and log it."""
+        print(msg)
+        if self._fh is not None:
+            self._fh.write(msg + "\n")
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+
+
+def load_config() -> dict:
+    cfg: dict = {}
+    if CONFIG_PATH.exists():
+        cfg = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+    cfg.setdefault("source", str(DEFAULT_SOURCE))
+    cfg.setdefault("global", [])
+    cfg.setdefault("destinations", [])
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+
+
+def parse_harnesses(spec: str) -> list[str]:
+    out: list[str] = []
+    for h in spec.split(","):
+        h = h.strip()
+        if not h:
+            continue
+        if h not in VALID_HARNESSES:
+            sys.exit(f"error: unknown harness '{h}' (valid: {', '.join(VALID_HARNESSES)})")
+        if h not in out:
+            out.append(h)
+    return out
+
+
+def _print_config(cfg: dict) -> None:
+    print(f"  source: {cfg['source']}")
+    print(f"  global: {', '.join(cfg['global']) or '(none)'}")
+    if not cfg["destinations"]:
+        print("  destinations: (none)")
+    for d in cfg["destinations"]:
+        print(f"  dest: {d['path']}  [{', '.join(d.get('harnesses', []))}]")
+
+
+def cmd_configure(args: argparse.Namespace) -> None:
+    existed = CONFIG_PATH.exists()
+    cfg = load_config()
+    if args.source:
+        cfg["source"] = str(Path(args.source).expanduser())
+    if args.global_list is not None:
+        cfg["global"] = parse_harnesses(args.global_list)
+    if args.dest:
+        path = str(Path(args.dest).expanduser().resolve())
+        harnesses = parse_harnesses(args.list) if args.list else ["cc", "pi"]
+        for d in cfg["destinations"]:
+            if d.get("path") == path:
+                d["harnesses"] = harnesses
+                break
+        else:
+            cfg["destinations"].append({"path": path, "harnesses": harnesses})
+    save_config(cfg)
+    print(f"{'updated' if existed else 'created'} {CONFIG_PATH}")
+    _print_config(cfg)
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    print(f"init: checking prerequisites (os: {args.os}) ...")
+    missing: list[str] = []
+    for tool in ("python3", "just"):
+        found = shutil.which(tool)
+        if found:
+            print(f"  ✓ {tool}: {found}")
+        else:
+            print(f"  ✗ {tool}: NOT FOUND")
+            missing.append(tool)
+    if missing:
+        hint = {"mac": "brew install", "ubuntu": "sudo apt install"}.get(args.os, "install")
+        sys.exit(f"error: missing prerequisite(s): {', '.join(missing)}  (try: {hint} {' '.join(missing)})")
+    print("init: all prerequisites present. Next: `just configure -d <repo> -l cc,pi` then `just update`.")
+
+
+# --- copy ------------------------------------------------------------------
+
+def _iter_common_rels(shared: Path):
+    """Yield each common file's path relative to a `.shared-llm/` dir.
+    Skips anything under a this_repo/ segment (defense in depth)."""
+    for root in COMMON_ROOTS:
+        base = shared / root
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if p.is_file() and "this_repo" not in p.relative_to(shared).parts:
+                yield p.relative_to(shared)
+
+
+def _copy_common(src_shared: Path, dst_shared: Path, log: RunLog) -> collections.Counter:
+    """Copy every common file from one `.shared-llm/` dir to another. Overwrites;
+    FLAGS (does not block) when an existing dest file's content differs before it
+    is overwritten (resolved decision #6). Never touches this_repo/ or compose/
+    recipes. No auto-prune — a removed common file is left in place (matches the
+    no-uninstall philosophy; drop it by hand if needed)."""
+    counts: collections.Counter = collections.Counter()
+    for rel in _iter_common_rels(src_shared):
+        src = src_shared / rel
+        dst = dst_shared / rel
+        if dst.exists():
+            if src.read_bytes() == dst.read_bytes():
+                counts["same"] += 1
                 continue
-            for entry in sorted(d.iterdir()):
-                if link_is_ours(entry, family):
-                    print(f"  unlink: {entry}")
-                    entry.unlink()
-                    removed += 1
-    print(f"done. unlinked {removed}.")
+            counts["changed"] += 1
+            log(f"    ~ changed (overwriting local edit): {rel}")
+        else:
+            counts["new"] += 1
+            log(f"    + new: {rel}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    return counts
+
+
+def do_copy(cfg: dict, log: RunLog) -> None:
+    kit_shared = project_root() / ".shared-llm"
+    hub = Path(cfg["source"]).expanduser()
+    log.always(f"copy: kit {kit_shared} -> hub {hub}")
+    c = _copy_common(kit_shared, hub, log)
+    log.always(f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
+    for d in cfg["destinations"]:
+        dest_shared = Path(d["path"]).expanduser() / ".shared-llm"
+        log.always(f"copy: hub -> {d['path']}/.shared-llm")
+        c = _copy_common(hub, dest_shared, log)
+        log.always(f"  {Path(d['path']).name}: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
+
+
+# --- compose (config-driven, per destination) ------------------------------
+
+# Consumer recipe groups composed for a destination (never global/ or example-*).
+CONSUMER_RECIPE_GROUPS = (
+    "compose/claude-md/root.yaml",
+    "compose/agents-md/root.yaml",
+    "compose/skills",
+    "compose/agents",
+    "compose/slash-commands",
+    "compose/settings",
+    "compose/hooks",
+    "compose/statusline",
+)
+
+
+def _compose_destination(dest: Path, log: RunLog) -> None:
+    shared = dest / ".shared-llm"
+    if not shared.is_dir():
+        log.always(f"compose: skip {dest} — no .shared-llm/ (run copy/configure first)")
+        return
+    composer = Composer(dest, shared_root=shared)
+    log.always(f"compose: {dest}")
+    for group in CONSUMER_RECIPE_GROUPS:
+        # group is like "compose/skills" (a dir) or "compose/claude-md/root.yaml" (a file)
+        path = shared / Path(group)
+        if path.is_dir():
+            for yp in composer.discover(path):
+                composer.compose_one(yp)
+        elif path.is_file():
+            composer.compose_one(path)
+    composer.copy_standalone_skills()
+
+
+def do_compose(cfg: dict, log: RunLog) -> None:
+    for d in cfg["destinations"]:
+        _compose_destination(Path(d["path"]).expanduser(), log)
+
+
+# --- link (repo-scoped per destination) ------------------------------------
+
+def plan_pi_repo(repo_root: Path) -> LinkPlan:
+    """Repo-scoped Pi skills: <repo>/.pi/skills/<name> -> <repo>/.claude/skills/<name>
+    for portable (common) skills. Pi walks up from cwd and reads <repo>/.pi/skills,
+    so a destination's skills stay scoped to that destination — no global clobber
+    between two destinations (resolved decision #3)."""
+    skills = repo_root / ".pi/skills"
+    desired: dict[Path, Path] = {}
+    for d in _skill_dirs(repo_root):
+        if harness_of(repo_root, d.name) == "common":
+            desired[skills / d.name.replace(":", "-")] = d
+    return LinkPlan(desired, [skills])
+
+
+def plan_codex_repo(repo_root: Path) -> LinkPlan:
+    """Repo-scoped Codex skills: <repo>/.agents/skills/<name> -> <repo>/.claude/skills/<name>
+    for common + codex skills. Confirmed against the installed Codex manual:
+    repo skills live in <repo>/.agents/skills, followed through symlinks. Codex
+    does not shadow on name collision, so no special-casing (resolved decision #4)."""
+    skills = repo_root / ".agents/skills"
+    desired: dict[Path, Path] = {}
+    for d in _skill_dirs(repo_root):
+        if harness_of(repo_root, d.name) in ("common", "codex"):
+            desired[skills / d.name] = d
+    return LinkPlan(desired, [skills])
+
+
+# Old GLOBAL Pi skill dirs that predate repo-scoping. `link` prunes our own stale
+# links from these once, so an obsolete global link can't shadow a new repo-local
+# one (Pi loads global before repo-local and keeps the first found).
+OLD_GLOBAL_PI_DIRS = (HOME / ".pi/skills", HOME / ".pi/agent/skills")
+
+
+def _cleanup_stale_global_pi(family: str, log: RunLog) -> int:
+    removed = 0
+    for d in OLD_GLOBAL_PI_DIRS:
+        if not d.is_dir():
+            continue
+        for entry in sorted(d.iterdir()):
+            if entry.is_symlink() and link_is_ours(entry, family):
+                log(f"    cleanup stale global Pi link: {entry}")
+                entry.unlink()
+                removed += 1
+    return removed
+
+
+def _warn_global_pi_collisions(plan: LinkPlan, log: RunLog) -> int:
+    """Warn (do not police) when a repo-local skill name also exists in a global
+    Pi dir — Pi would use the global one and ignore the repo-local (resolved
+    decision #3: we can't control this; just surface it)."""
+    warned = 0
+    repo_names = {dest.name for dest in plan.desired}
+    for d in OLD_GLOBAL_PI_DIRS:
+        if not d.is_dir():
+            continue
+        for entry in sorted(d.iterdir()):
+            if entry.name in repo_names:
+                log.always(
+                    f"  ⚠ global Pi skill '{entry.name}' at {entry} will SHADOW the "
+                    f"repo-local one (Pi loads global first). Remove it to use the repo-local skill."
+                )
+                warned += 1
+    return warned
+
+
+def do_link(cfg: dict, log: RunLog) -> None:
+    for d in cfg["destinations"]:
+        dest = Path(d["path"]).expanduser()
+        harnesses = d.get("harnesses", [])
+        family = repo_family(dest)
+        for h in harnesses:
+            if h == "cc":
+                log(f"  [{dest.name}] cc: no link needed (reads .claude/ directly)")
+                continue
+            if h == "pi":
+                removed = _cleanup_stale_global_pi(family, log)
+                plan = plan_pi_repo(dest)
+                _warn_global_pi_collisions(plan, log)
+            elif h == "codex":
+                plan = plan_codex_repo(dest)
+            else:
+                continue
+            counts = reconcile(plan, family, plan_only=False, force=False, repo_root=dest)
+            extra = f", cleaned {removed} stale global" if h == "pi" and removed else ""
+            log.always(
+                f"  [{dest.name}] {h}: created {counts['create']}, repointed {counts['repoint']}, "
+                f"pruned {counts['prune']}, skipped-foreign {counts['skip-foreign']}{extra}"
+            )
+
+
+# --- global home-skill flow (ported from the retired install-global.sh) ----
+#
+# Two skill families, one mechanism (a recipe assembles layers into a skill dir;
+# the destination is HOME). Family A = convention skills (python/nextjs/...).
+# Family B = the slash-command group, routed by recipe scope. Skills are COPIED
+# (not symlinked) into home: the staged source under examples/ is a regenerated,
+# gitignored artifact, so a symlink would dangle on the next clean/rebuild.
+#
+# Safe-migration discipline (mirrors the reconciler): idempotent; never clobber a
+# foreign symlink or a divergent real dir; prune only byte-identical stale copies.
+
+import filecmp
+
+GLOBAL_CONVENTION_SKILLS = {
+    "python": "compose/global/python.yaml",
+    "nextjs": "compose/global/nextjs.yaml",
+    "backend": "compose/global/backend.yaml",
+    "golang": "compose/global/golang.yaml",
+}
+
+# Removed standalone planner skills — pruned from home dirs when found (matched by
+# their SKILL.md `name:` so we never delete a foreign dir of the same name).
+DEPRECATED_GLOBAL_SKILLS = ("do-planish", "cc-planish")
+
+
+def _global_home_dirs() -> dict[str, Path]:
+    """Home skill dir per harness token. Codex uses ~/.agents/skills (item 4)."""
+    return {
+        "cc": HOME / ".claude/skills",
+        "pi": HOME / ".pi/agent/skills",
+        "codex": HOME / ".agents/skills",
+    }
+
+
+def _global_targets_for(scope: str, name: str) -> set[str]:
+    """Harness tokens a slash-command skill routes to, from its recipe scope.
+    Mirrors install-global.sh's slash_skill_bases: common goes to pi+codex, and
+    also to cc UNLESS it's a do-* workflow command (cc has cc-* counterparts)."""
+    if scope == "claude":
+        return {"cc"}
+    if scope == "common":
+        targets = {"pi", "codex"}
+        if not name.startswith("do-"):
+            targets.add("cc")
+        return targets
+    if scope == "codex":
+        return {"codex"}
+    if scope == "pi":
+        return {"pi"}
+    return set()
+
+
+def _dirs_equal(a: Path, b: Path) -> bool:
+    cmp = filecmp.dircmp(a, b)
+    if cmp.left_only or cmp.right_only or cmp.diff_files or cmp.funny_files:
+        return False
+    return all(_dirs_equal(a / sub, b / sub) for sub in cmp.common_dirs)
+
+
+def _install_skill_dir(staged: Path, target: Path, log: RunLog) -> str:
+    if target.is_symlink():
+        log(f"    skip {target} (symlink — foreign)")
+        return "skip"
+    if target.is_dir():
+        if _dirs_equal(staged, target):
+            return "uptodate"
+        log(f"    skip {target} (exists & differs — not ours)")
+        return "skip"
+    if target.exists():
+        log(f"    skip {target} (non-dir — foreign)")
+        return "skip"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(staged, target)
+    log(f"    installed {target}")
+    return "installed"
+
+
+def _prune_stale_skill(name: str, staged: Path, keep: set[str],
+                       home_dirs: dict[str, Path], log: RunLog) -> int:
+    """Remove byte-identical copies from home dirs whose token is NOT in keep."""
+    removed = 0
+    for tok, base in home_dirs.items():
+        if tok in keep:
+            continue
+        target = base / name
+        if target.is_symlink() or not target.exists():
+            continue
+        if target.is_dir() and _dirs_equal(staged, target):
+            shutil.rmtree(target)
+            removed += 1
+            log(f"    pruned stale {target}")
+    return removed
+
+
+def _prune_deprecated_global(home_dirs: dict[str, Path], log: RunLog) -> int:
+    removed = 0
+    for name in DEPRECATED_GLOBAL_SKILLS:
+        for base in home_dirs.values():
+            target = base / name
+            skill_md = target / "SKILL.md"
+            if target.is_symlink() or not target.exists():
+                continue
+            if skill_md.is_file() and f"name: {name}" in skill_md.read_text():
+                shutil.rmtree(target)
+                removed += 1
+                log(f"    removed deprecated {target}")
+    return removed
+
+
+def do_global(cfg: dict, log: RunLog) -> None:
+    wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
+    if not wanted:
+        return
+    kit = project_root()
+    kit_shared = kit / ".shared-llm"
+    staging = kit / "examples"
+    home_dirs = {tok: d for tok, d in _global_home_dirs().items() if tok in wanted}
+    log.always(f"global: routing home skills to {', '.join(wanted)}")
+
+    composer = Composer(kit, output_base=staging, shared_root=kit_shared)
+    # Family A — convention skills (staged under examples/global-staging/skills/).
+    for recipe in GLOBAL_CONVENTION_SKILLS.values():
+        composer.compose_one(kit_shared / recipe)
+    # Family B — the whole slash-command group (staged under examples/.claude/skills/).
+    composer.compose_dir(kit_shared / "compose/slash-commands")
+
+    installed = uptodate = skipped = pruned = 0
+
+    # Family A: every convention skill goes to every wanted home dir.
+    conv_staging = staging / "global-staging/skills"
+    for name in GLOBAL_CONVENTION_SKILLS:
+        staged = conv_staging / name
+        if not staged.is_dir():
+            log.always(f"  ⚠ convention skill missing after compose: {staged}")
+            continue
+        for base in home_dirs.values():
+            r = _install_skill_dir(staged, base / name, log)
+            installed += r == "installed"
+            uptodate += r == "uptodate"
+            skipped += r == "skip"
+
+    # Family B: route each slash skill by its recipe scope, intersected with the
+    # configured global harness list.
+    slash_staging = staging / ".claude/skills"
+    if slash_staging.is_dir():
+        for staged in sorted(slash_staging.iterdir()):
+            if not staged.is_dir():
+                continue
+            name = staged.name
+            scope = harness_of(kit, name)
+            keep = _global_targets_for(scope, name) & set(wanted)
+            for tok in keep:
+                r = _install_skill_dir(staged, home_dirs[tok] / name, log)
+                installed += r == "installed"
+                uptodate += r == "uptodate"
+                skipped += r == "skip"
+            pruned += _prune_stale_skill(name, staged, keep, home_dirs, log)
+
+    pruned += _prune_deprecated_global(home_dirs, log)
+    log.always(
+        f"  global: {installed} installed, {uptodate} current, {skipped} skipped "
+        f"(foreign/divergent), {pruned} stale/deprecated removed"
+    )
+
+
+# --- global home RUNTIME (ported from the retired install-local.sh) ---------
+#
+# Beyond skills, `install local` also laid down the home runtime: the 18 generic
+# agents, the Pi extension/persona symlinks + settings, and the Claude hooks /
+# statusline / settings. Ported here so install-local.sh can be retired. Codex
+# has no user-agent dir concept, so agents skip it (never invent a dir).
+
+# Home agent dir per harness token (codex intentionally absent).
+GENERIC_AGENT_HOME = {"cc": ".claude/agents", "pi": ".pi/agents"}
+
+
+def _install_file(staged: Path, target: Path, log: RunLog) -> str:
+    """Foreign-safe single-file copy (agents, hooks, statusline). Preserves mode."""
+    if target.is_symlink():
+        log(f"    skip {target} (symlink — foreign)")
+        return "skip"
+    if target.exists():
+        if target.read_bytes() == staged.read_bytes():
+            return "uptodate"
+        log(f"    skip {target} (exists & differs — not ours)")
+        return "skip"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(staged, target)
+    log(f"    installed {target}")
+    return "installed"
+
+
+def _scaffold_settings(template: Path, target: Path, log: RunLog) -> None:
+    """Copy a settings template into place ONLY when absent — never clobber
+    per-machine tweaks."""
+    if not template.is_file():
+        return
+    if target.exists():
+        log(f"    settings: preserved existing {target}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(template, target)
+    log(f"    settings: scaffolded {target}")
+
+
+def _install_claude_runtime(kit_shared: Path, log: RunLog) -> None:
+    src = kit_shared / "llm/claude/common"
+    claude_home = HOME / ".claude"
+    if (src / "hooks").is_dir():
+        for hook in sorted((src / "hooks").iterdir()):
+            if hook.is_file():
+                _install_file(hook, claude_home / "hooks" / hook.name, log)
+    if (src / "statusline.sh").is_file():
+        _install_file(src / "statusline.sh", claude_home / "statusline.sh", log)
+    _scaffold_settings(src / "settings.template.json", claude_home / "settings.json", log)
+
+
+def do_home_runtime(cfg: dict, log: RunLog) -> None:
+    wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
+    if not wanted:
+        return
+    kit = project_root()
+    kit_shared = kit / ".shared-llm"
+    staging = kit / "examples"
+    log.always(f"home-runtime: {', '.join(wanted)}")
+
+    # 1. Generic agents — compose to staging, copy into the wanted home agent dirs.
+    composer = Composer(kit, output_base=staging, shared_root=kit_shared)
+    composer.compose_dir(kit_shared / "compose/agents")
+    staged_agents = staging / ".claude/agents"
+    agent_bases = [HOME / rel for tok, rel in GENERIC_AGENT_HOME.items() if tok in wanted]
+    a_ins = a_up = a_sk = 0
+    if staged_agents.is_dir():
+        for staged in sorted(staged_agents.glob("*.md")):
+            for base in agent_bases:
+                r = _install_file(staged, base / staged.name, log)
+                a_ins += r == "installed"
+                a_up += r == "uptodate"
+                a_sk += r == "skip"
+    log.always(f"  agents: {a_ins} copied, {a_up} current, {a_sk} skipped (foreign/divergent)")
+
+    # 2. Claude runtime — hooks + statusline + settings scaffold.
+    if "cc" in wanted:
+        _install_claude_runtime(kit_shared, log)
+
+    # 3. Pi runtime — extension/persona symlinks + settings scaffold.
+    if "pi" in wanted:
+        counts = reconcile(plan_pi_runtime(kit), repo_family(kit),
+                           plan_only=False, force=False, repo_root=kit)
+        log.always(
+            f"  pi runtime: created {counts['create']}, repointed {counts['repoint']}, "
+            f"pruned {counts['prune']}, skipped-foreign {counts['skip-foreign']}"
+        )
+        _scaffold_settings(kit_shared / "llm/pi/common/settings.template.json",
+                           HOME / ".pi/agent/settings.json", log)
+
+
+# --- update (copy -> compose -> link, with a full run log) -----------------
+
+def _log_path() -> Path:
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    return Path("/tmp/.shared-llm/log") / f"{stamp}.log"
+
+
+def cmd_copy(args: argparse.Namespace) -> None:
+    do_copy(load_config(), RunLog(verbose=True))
+
+
+def cmd_compose_cfg(args: argparse.Namespace) -> None:
+    do_compose(load_config(), RunLog(verbose=True))
+
+
+def cmd_link(args: argparse.Namespace) -> None:
+    do_link(load_config(), RunLog(verbose=True))
+
+
+def cmd_global(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    log = RunLog(verbose=True)
+    do_global(cfg, log)
+    do_home_runtime(cfg, log)
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    if not cfg["destinations"] and not cfg["global"]:
+        sys.exit("error: nothing configured. Run `just configure -d <repo> -l cc,pi` first.")
+    log_path = _log_path()
+    log = RunLog(verbose=args.verbose, path=log_path)
+    log.always(f"update: log -> {log_path}")
+    log.always("=== copy ===")
+    do_copy(cfg, log)
+    log.always("=== compose ===")
+    do_compose(cfg, log)
+    log.always("=== link ===")
+    do_link(cfg, log)
+    if cfg["global"]:
+        log.always("=== global ===")
+        do_global(cfg, log)
+        do_home_runtime(cfg, log)
+    log.always("update: done.")
+    log.close()
+    if not args.verbose:
+        print(f"(run `just update -v` or see {log_path} for the per-file detail)")
 
 
 def main() -> None:
@@ -802,15 +1387,33 @@ def main() -> None:
     pc.add_argument("--target", help="Output base dir where 'output:' paths land (default: cwd).")
     pc.set_defaults(func=cmd_compose)
 
-    ps = sub.add_parser("sync", help="Reconcile per-harness symlinks: create, re-point, prune.")
-    ps.add_argument("--harness", choices=["pi", "codex", "all"], default="all")
-    ps.add_argument("--plan", action="store_true", help="Preview the changes; touch nothing.")
-    ps.add_argument("--force", action="store_true", help="Re-create even a correct link.")
-    ps.set_defaults(func=cmd_sync)
+    # --- config-driven, centralized surface (the user-facing flow) ---
+    pi = sub.add_parser("init", help="Check OS prerequisites (python3, just).")
+    pi.add_argument("-o", "--os", choices=["mac", "ubuntu"], default="ubuntu")
+    pi.set_defaults(func=cmd_init)
 
-    pu = sub.add_parser("unlink", help="Remove every managed symlink for a harness.")
-    pu.add_argument("--harness", choices=["pi", "codex", "all"], default="all")
-    pu.set_defaults(func=cmd_unlink)
+    pcfg = sub.add_parser("configure", help="Create/update ~/.shared-llm.yaml.")
+    pcfg.add_argument("-s", "--source", help="Set the source hub path (default ~/.shared-llm).")
+    pcfg.add_argument("-d", "--dest", help="Add/update a destination repo path.")
+    pcfg.add_argument("-l", "--list", help="Harnesses for -d (comma-separated: cc,pi,codex). Default cc,pi.")
+    pcfg.add_argument("-g", "--global-list", help="Set the global harness list (comma-separated).")
+    pcfg.set_defaults(func=cmd_configure)
+
+    pcp = sub.add_parser("copy", help="Kit -> hub -> each destination's .shared-llm/ (common only).")
+    pcp.set_defaults(func=cmd_copy)
+
+    pcd = sub.add_parser("compose-dests", help="Compose every configured destination from its own .shared-llm/.")
+    pcd.set_defaults(func=cmd_compose_cfg)
+
+    pl = sub.add_parser("link", help="Reconcile repo-scoped pi/codex skill links per destination.")
+    pl.set_defaults(func=cmd_link)
+
+    pg = sub.add_parser("global", help="Compose + route the global home skills into ~/.claude, ~/.pi/agent, ~/.agents.")
+    pg.set_defaults(func=cmd_global)
+
+    pup = sub.add_parser("update", help="copy -> compose -> link (+ global) across all configured destinations.")
+    pup.add_argument("-v", "--verbose", action="store_true", help="Print per-file detail (always written to the log).")
+    pup.set_defaults(func=cmd_update)
 
     args = parser.parse_args()
     args.func(args)
