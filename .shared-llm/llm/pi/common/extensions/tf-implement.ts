@@ -11,9 +11,11 @@
  * 2. Auto       /tf:auto [--planish] [description]
  *    Always plans first, then implements. Planning medium is the user's choice:
  *      • planish (--planish forces it, else prompted) — Pi grills the user via
- *        planish_grill, writes plan.html, submits it via planish_submit_plan for
- *        browser approval, then implements the .tf files. The approved plan.html
- *        is read from cwd and passed to the reviewer as context.
+ *        planish_grill (annotatable browser page; feedback comes back as a
+ *        pasted ## Feedback block), writes plan.html, serves it for review via
+ *        planish_submit_plan (approval = pasted ## FINALIZED / explicit OK),
+ *        then implements the .tf files. The approved plan.html is read from
+ *        cwd and passed to the reviewer as context.
  *      • direct — Pi works out the plan with the user in the terminal, then
  *        implements.
  *    Both paths end in the same reviewer loop.
@@ -109,15 +111,51 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 // the plan moves). Precedence for the directory:
 //   1. --dir <path> passed to /tf:auto
 //   2. $PLANISH_DIR
-//   3. nearest .planish.json walking UP from cwd — its "dir" template
+//   3. nearest .planish.yaml walking UP from cwd — its "dir" template
 //   4. fallback: /tmp/planish/{date}/{slug}
 // Template tokens: {date} → YYYY-MM-DD (local), {slug} → slugified topic,
-// {n} → next vN integer (glob the parent dir, max + 1, start at 1). A relative
-// template from .planish.json resolves against the directory holding that file;
-// a relative --dir / $PLANISH_DIR resolves against cwd.
+// {type} → "plan", {n} → next vN integer (glob the parent dir, max + 1, start
+// at 1). A relative template from .planish.yaml resolves against the directory
+// holding that file; a relative --dir / $PLANISH_DIR resolves against cwd.
 //
 // NOTE: this resolver is intentionally DUPLICATED (not shared) in planish.ts.
 // Keep the two copies in sync.
+
+// Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
+// level of nested key: value blocks. Handles strings, integers, and booleans.
+function parseSimpleYaml(content: string): Record<string, any> {
+  const result: Record<string, any> = {};
+  let nested: Record<string, any> | null = null;
+  for (const raw of content.split("\n")) {
+    const line = raw.replace(/#.*$/, ""); // strip inline comments
+    if (!line.trim()) continue;
+    const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim();
+    const rest = line.slice(colon + 1).trim();
+    if (indent === 0) {
+      if (rest === "") {
+        nested = {};
+        result[key] = nested;
+      } else {
+        nested = null;
+        result[key] = parseYamlScalar(rest);
+      }
+    } else if (nested !== null) {
+      nested[key] = parseYamlScalar(rest);
+    }
+  }
+  return result;
+}
+
+function parseYamlScalar(v: string): string | number | boolean {
+  if (v === "true") return true;
+  if (v === "false") return false;
+  const n = Number(v);
+  if (!isNaN(n) && v.trim() !== "") return n;
+  return v.replace(/^["']|["']$/g, "");
+}
 
 function slugifyTopic(topic: string): string {
   const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -173,15 +211,17 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
     template = process.env.PLANISH_DIR.trim();
     baseDir = cwd;
   } else {
-    const configPath = findConfigUp(cwd, ".planish.json");
-    if (configPath) {
-      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      if (typeof parsed?.dir !== "string" || !parsed.dir.trim()) {
-        throw new Error(`${configPath} has no "dir" string field`);
+    const configPath = findConfigUp(cwd, ".planish.yaml");
+    const parsed = configPath ? parseSimpleYaml(fs.readFileSync(configPath, "utf-8")) : null;
+    if (configPath && parsed?.dir !== undefined) {
+      // dir present but unusable is a config typo — fail loud, never fall back.
+      if (typeof parsed.dir !== "string" || !parsed.dir.trim()) {
+        throw new Error(`${configPath} "dir" must be a non-empty string`);
       }
       template = parsed.dir.trim();
-      baseDir = path.dirname(configPath);
+      baseDir = path.dirname(configPath!);
     } else {
+      // no config, or a host-only config — default template.
       template = "/tmp/planish/{date}/{slug}";
       baseDir = cwd;
     }
@@ -189,7 +229,8 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
 
   const expanded = template
     .replace(/\{date\}/g, todayYmd())
-    .replace(/\{slug\}/g, slugifyTopic(topic));
+    .replace(/\{slug\}/g, slugifyTopic(topic))
+    .replace(/\{type\}/g, "plan");
   const absPath = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
   const finalDir = expandVersionToken(absPath);
   fs.mkdirSync(finalDir, { recursive: true });
@@ -308,7 +349,7 @@ export default function (pi: ExtensionAPI) {
 
       const subject = hint ? `"${hint}"` : "the Terraform infrastructure you describe";
       const msg = usePlanish
-        ? `tf:auto: planish planning active — Pi will grill you in the browser, write the plan (plan.md + plan.html) to ${planDir} for ${subject}, and implement the .tf files in the working directory after you approve.`
+        ? `tf:auto: planish planning active — Pi will grill you in the browser (annotate → Copy Feedback → paste back), write the plan (plan.md + plan.html) to ${planDir} for ${subject}, and implement the .tf files in the working directory after you paste your approval.`
         : `tf:auto: direct planning active — Pi will work out the plan for ${subject} with you here, then implement the .tf files and route them to the reviewer.`;
       ctx.ui.notify(msg, "info");
     },
@@ -361,7 +402,7 @@ export default function (pi: ExtensionAPI) {
           `\n\n${issuesBlock}You are a Terraform infrastructure engineer.\n\n` +
           (pendingIssues.length > 0
             ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
-            : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with title, contextHtml, and a batch of clarifying infrastructure questions (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question your recommended answer. Do NOT make a plain Q&A-only grill. Visuals (two modes only — NEVER Mermaid): default → ascii tree/shape, complex → visualHtml with .grill-fig/.flow/.flow-box drawn row by row. A diagram only when it genuinely helps — never for its own sake. Use the answers to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
+            : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with title, contextHtml, and a batch of clarifying infrastructure questions (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question a concrete recommended answer — the page is annotation-only, and a question with no note means the user accepted your recommendation. The tool serves the page and returns immediately: give the user the URL, END YOUR TURN, and wait for their pasted ## Feedback block. Do NOT make a plain Q&A-only grill. Visuals (two modes only — NEVER Mermaid): default → ascii tree/shape, complex → visualHtml with .grill-fig/.flow/.flow-box drawn row by row. A diagram only when it genuinely helps — never for its own sake. Use the feedback to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
               `STEP 2 — PLAN: Write a Terraform implementation plan to TWO files (the directory already exists):\n` +
               // # dup 1 (plan-html-style) — canonical in planish.ts STEP 2 BUILD
               `  • ${planHtml} — the visual plan: a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs.\n` +
@@ -369,8 +410,8 @@ export default function (pi: ExtensionAPI) {
               `    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">\n` +
               `    <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'JetBrains Mono',monospace;background:#0d1017;color:#c8ccd4;padding:40px;max-width:1040px;line-height:1.5;}h1{font-family:'IBM Plex Sans',sans-serif;font-size:22px;font-weight:600;color:#e6e9ef;letter-spacing:-0.3px;margin-bottom:6px;}.subtitle{font-size:11px;color:#545862;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid #1e222a;}h2{font-family:'IBM Plex Sans',sans-serif;font-size:14px;font-weight:500;color:#e6e9ef;margin:32px 0 14px;padding-bottom:8px;border-bottom:1px solid #1e222a;}table{width:100%;border-collapse:collapse;margin-bottom:16px;}th{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#545862;padding:8px 12px;border-bottom:1px solid #1e222a;text-align:left;}td{font-size:11px;color:#a0a4ac;padding:7px 12px;border-bottom:1px solid #1e222a;}tr:last-child td{border-bottom:none;}.card{border:1px solid #1e222a;border-radius:10px;padding:18px 22px;background:#0f1219;margin-bottom:16px;}.card.amber{border-left:3px solid #d19a66;background:#15120d;}code{background:#1a1f29;color:#7ab4db;border-radius:3px;padding:1px 5px;font-size:11px;}</style>\n` +
               `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
-              `Both files hold the same plan content. Then submit it for user review by calling the planish_submit_plan tool with the path ${planHtml}.\n\n` +
-              "STEP 3 — IMPLEMENT: Once the plan is approved, write all .tf files in the current working directory to implement it exactly. Follow the approved plan.\n\n" +
+              `Both files hold the same plan content; give the .html annotation controls before </body> and a unique <meta name="desdoc-key"> — no answer boxes, no submit buttons. NEVER revise the plan in place: freeze every build/revision as plan-v<k>.md + plan-v<k>.html alongside (v1 first, incrementing; never edit an existing plan-v* file). Then serve it for user review by calling the planish_submit_plan tool with the path ${planHtml}; it returns immediately — tell the user, END YOUR TURN, and wait for their pasted feedback (## FINALIZED or explicit approval = approved; notes = revise both files, freeze the next plan-v<k> pair, and resubmit).\n\n` +
+              "STEP 3 — IMPLEMENT: Once the user pastes their approval, write all .tf files in the current working directory to implement it exactly. Follow the approved plan.\n\n" +
               "STEP 4 — SIGNAL: When all .tf files are written and ready for review, run:\n  echo TF_REVIEW_READY\n\nDo NOT run terraform init, plan, apply, or destroy — only write .tf files."),
       };
     }

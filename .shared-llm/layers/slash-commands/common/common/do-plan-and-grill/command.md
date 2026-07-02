@@ -7,7 +7,7 @@ Like `/do-plan` but with an iterative grilling phase after the initial draft. Th
 Your job is to **orchestrate** and to **run the grill conversation**.
 
 - Reading code, writing research.md, drafting plan.md, applying plan revisions: dispatch fresh subagents.
-- The grill itself (writing `grill_current.html`, giving the user the URL, processing their pasted answers block): you do this — that's the orchestration loop, not "work."
+- The grill itself (writing `grill_current.html`, giving the user the URL, processing their pasted feedback block): you do this — that's the orchestration loop, not "work."
 
 Default grill mode is HTML-batch, always. Do not ask questions inline in the terminal unless `--interactive` was explicitly typed. Conversational phrasing from the user is not a reason to switch modes.
 
@@ -178,6 +178,8 @@ will challenge them.
 
 The plan-writer's output is a *draft* — the grill will refine it.
 
+**Versioned, never in place:** every plan-writer dispatch — draft, each grill revision, finalization — overwrites `plan.md` (the canonical latest, the only file downstream tooling reads) AND freezes the same content as `plan-v<k>.md` (`plan-v1.md` for the draft, incrementing every revision; matching `plan-v<k>.html` whenever an HTML twin is produced). Never edit an existing `plan-v*` file. Together with the `grill-v<round>.html` history this shows how the plan evolved — see the contract's "Versioned history" section.
+
 Without `--route-phases`: Present the draft summary to the user with: _"Draft is ready. Starting the grill now — one moment."_ Immediately proceed to Step 4 (HTML grill) — do NOT ask follow-up questions in the terminal first.
 
 With `--route-phases`: Present the draft summary with: _"Draft is ready. Starting the grill now — one moment."_ Immediately proceed to Step 4 (HTML grill) — do NOT ask follow-up questions in the terminal first.
@@ -196,22 +198,20 @@ You run the grill directly — it's orchestration, not "work." When an answer re
 
 **Never ask questions inline in the terminal in this mode.** A bulleted list of questions in a chat message is NOT the HTML grill — it is the same slow interactive pattern with worse UX. If you find yourself typing questions into the terminal, stop, dispatch the subagent to write `grill_current.html`, and give the user the URL.
 
-**Transport — how answers come back. Pick ONE per session by what's available; never mix:**
+**Feedback — how answers come back. ONE way, everywhere: annotate → Copy Feedback → paste back.** The page never carries answer boxes or a Submit button. The user drops sticky notes on the questions (+ Note → type → next note), clicks **Copy Feedback**, and pastes the `## Feedback` block into the chat/TUI themselves. A question with no note means "go with the recommendation." No tool call ever blocks waiting on the browser.
 
-- **`planish_grill` tool available (Pi with the planish extension):** run EVERY round through the `planish_grill` tool. Its page (served at `http://localhost:4390/`) carries a **Submit Answers** button that returns the answers directly to the blocked tool call. Do NOT hand-write `grill_current.html`, do NOT point the user at any other page, and do NOT ask the user to paste answers into the terminal — while `planish_grill` is open, the TUI is blocked inside the tool call and pasted text goes nowhere. Only Submit Answers (or the user aborting the tool call) unblocks it.
-- **No `planish_grill` tool (e.g. Claude Code):** use the static-file flow below — write `grill_current.html`, give the user the URL, and process the `## Answers` block they paste back. The page has **Copy Answers** (no Submit button) and that is correct here: your turn ends after giving the URL, so nothing is blocked and paste-back works.
-
-Mixing them is a deadlock: a blocking `planish_grill` call while the user fills a Copy-Answers-only page means nothing ever submits and the session hangs.
+- **`planish_grill` tool available (Pi with the planish extension):** run each round through the `planish_grill` tool — it builds and serves the page at `http://localhost:4390/` and returns immediately. Give the user the URL and END YOUR TURN; the pasted `## Feedback` block is the round's result. Do NOT hand-write `grill_current.html` when the tool is available.
+- **No `planish_grill` tool (e.g. Claude Code):** use the static-file flow below — write `grill_current.html`, give the user the URL, end your turn, and process the `## Feedback` block they paste back.
 
 This command follows the canonical Planish HTML Grill Contract at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Use terminal questions only with explicit `--interactive` fallback.
 
-**Write for the user (hard rules, both transports — see the contract's "Write for the user" section):**
+**Write for the user (hard rules, both surfaces — see the contract's "Write for the user" section):**
 - Open the page by explaining, in plain English, what the plan is trying to do and what you found so far.
 - Every question is about a mechanism or design choice — never "these files changed" or a tour of methods.
 - Define every acronym at first use.
 - File paths, method names, and change lists go ONLY in an `Appendix` section at the bottom of the page — never at the top, never inside a question.
 
-**The steps below describe the static-file transport.** With `planish_grill`, the same content (context header, per-question note/recommendation, ascii/visualHtml diagrams) goes into the tool's parameters instead — the tool builds and serves the page itself, and returns the answers when the user clicks Submit.
+**The steps below describe the static-file flow.** With `planish_grill`, the same content (context header, per-question note/recommendation, ascii/visualHtml diagrams) goes into the tool's parameters instead — the tool builds and serves the page itself and returns at once; the user's pasted `## Feedback` block is the round's result.
 
 Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
 
@@ -221,11 +221,11 @@ Each round:
    - A context header: what's being planned, the draft shape, and enough background that each question is understandable on its own (not a wall of text — use headings/tables).
    - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram — two modes only, NEVER Mermaid (CDN-rendered, breaks silently on any syntax slip): default → an ASCII tree in a `<pre>`; when ASCII can't carry it → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the form toolkit). A diagram only when it genuinely helps — never for its own sake.
    - `<meta name="desdoc-key" content="<date>-<slug>-r<round>">` in `<head>` — a unique value per round, so the annotation toolkit starts each round with a clean slate instead of resurrecting the previous round's sticky notes (`grill_current.html` reuses one path across rounds).
-   - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation), and a `<textarea class="grill-a">`.
-   - Answer controls from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html` and annotation controls from `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` (or the combined Planish grill toolkit once extracted) pasted before `</body>`.
+   - One `<div class="grill-q">` block per question, each with `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters) and `.grill-q-rec` (your recommendation). **No answer boxes** — the user answers by dropping a sticky note on the block.
+   - Question/diagram styles from `.shared-llm/llm/claude/common/toolkits/form-toolkit.html` (style-only) and the sticky-note annotation controls from `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` — the annotation bar is the page's ONLY interactive control.
    - `<title>` = `<Title> — grill v<N>`.
-3. Tell the user the round is ready: _"Round <k> is up — http://localhost:8089/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/grill_current.html — fill it in, click Copy Answers, paste back here."_
-4. The user pastes the `## Answers —` block. Process every answer: revise the plan (dispatch plan-writer), and from what you learned, compute the next round's questions (the dependent ones now have concrete wording, plus anything the answers newly surfaced).
+3. Tell the user the round is ready: _"Round <k> is up — http://<host>:8089/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/grill_current.html — drop a note on anything to answer or change (+ Note), click Copy Feedback, paste back here. No note on a question = the recommendation stands."_ `<host>` = the `host:` field of the nearest `.planish.yaml` when set (the machine name remote browsers use, e.g. a Tailscale name), else `localhost`. **Also send the file when you can:** if this session has a file-send tool (e.g. `SendUserFile` in the Claude Code app), send `grill_current.html` as a downloadable file too — remote/app sessions often can't reach the URL, and the page is self-contained so it works opened straight from a download.
+4. The user pastes the `## Feedback —` block (each note is tagged with the nearest question/heading). Process every note — and treat un-noted questions as accepted recommendations: revise the plan (dispatch plan-writer), and from what you learned, compute the next round's questions (the dependent ones now have concrete wording, plus anything the feedback newly surfaced).
 5. Repeat. The LLM decides each round's batch size — converge as questions run out. A round with no open questions ends the grill.
 
 **`--interactive` — one at a time (portable).** No web server needed. Present one decision, give your recommendation, ask, wait, process, move on. Never dump a list. This is the classic flow; use it anywhere you can't open the HTML grill in a browser.
@@ -234,7 +234,7 @@ Each round:
 - Resolve every branch. If an answer changes other decisions, revisit those before finalizing.
 - Always recommend. Every question carries your best answer + reasoning, never a bare ask.
 - Challenge when the user's answer conflicts with the research — say so.
-- Revise on every change. Even a tiny plan tweak goes through the plan-writer subagent.
+- Revise on every change. Even a tiny plan tweak goes through the plan-writer subagent — which freezes the next `plan-v<k>.md` snapshot; never revise in place.
 - Don't assume silence is approval.
 
 **Topics to always cover:**
@@ -281,6 +281,7 @@ Common size-downgrade triggers (`big` → `small`): "just a config tweak", "sing
 - **If `--route-phases`**: instruct the writer explicitly: "Every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch." A plan missing any size tag is incomplete.
 <!-- # plan-html-style — keep in sync with .shared-llm/llm/common/common/planish-html-grill-contract.md -->
 - **`plan.html`**: render the executive summary + phases in the project dark style (the v3.html `<style>` block if present, else the `/design-doc` default), use the flow/box visual vocabulary for phase sequencing where it helps, and paste `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim before `</body>`. `<title>` = `<Title> — plan v<N>`. Downstream tooling reads `plan.md` only — `plan.html` is never parsed by `rphase-create` or `do-implement`.
+- **Freeze the final version too**: write the finalized pair as the next `plan-v<k>.md` + `plan-v<k>.html` alongside the canonical `plan.md` / `plan.html` (see Step 3's versioning rule). If this session has a file-send tool (e.g. `SendUserFile`), also send `plan.html` as a downloadable file.
 
 Only `plan.md` is the source of truth for execution. If the user later annotates `plan.html` and pastes feedback, treat it as a new grill round → bump to `v<N+1>` and re-finalize both outputs.
 

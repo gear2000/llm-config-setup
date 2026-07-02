@@ -163,16 +163,18 @@ Then run `just update` to (re)generate every registered destination's output fil
 
 ## I — Pi planning output directory (optional)
 
-The Pi `/planish` command is the standalone TypeScript extension/register planner with browser-backed grill/review tools. It writes a `plan.md` + `plan.html` pair somewhere. Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. For workflow-suite planning, use `/do-plan-and-grill` in Pi or `/cc-plan-and-grill` in Claude Code; `/do-planish` and `/cc-planish` are intentionally removed.
+The Pi `/planish` command is the standalone TypeScript extension/register planner with browser-backed grill/review tools (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). It writes a `plan.md` + `plan.html` pair somewhere. Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. For workflow-suite planning, use `/do-plan-and-grill` in Pi or `/cc-plan-and-grill` in Claude Code; `/do-planish` and `/cc-planish` are intentionally removed.
 
-Put a `.planish.yaml` at your repo root (or any ancestor directory) to control where plans land:
+Put a `.planish.yaml` at your repo root (or any ancestor directory) to control where plans land and which hostname URLs use:
 
 ```yaml
-# .planish.yaml — controls where /planish writes plan.md + plan.html
+# .planish.yaml — controls where /planish writes plan.md + plan.html,
+# and the hostname planning-flow URLs use (remote/Tailscale sessions)
 dir: docs/plans/{date}/{slug}/v{n}
+host: your-machine-name   # optional — default localhost
 ```
 
-**`dir` is the only field.** The path resolves relative to the directory that holds `.planish.yaml`. Pi walks upward from cwd to find it, so one file at the repo root covers everything inside.
+**Two fields.** `dir` — where plans land; the path resolves relative to the directory that holds `.planish.yaml`, and Pi walks upward from cwd to find the file, so one at the repo root covers everything inside. `host` — optional; the machine name your browser uses to reach this box (e.g. a Tailscale name) when you work remotely. Every URL the planning flows hand out uses it instead of `localhost`, and the planish server (port 4390) binds `0.0.0.0` so those remote connections are accepted. `$PLANISH_HOST` overrides it for a single session, and `host:` works standalone (with `dir` falling back to `/tmp/planish/{date}/{slug}`).
 
 **Available tokens:**
 

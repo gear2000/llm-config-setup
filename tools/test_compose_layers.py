@@ -240,11 +240,86 @@ def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields
         assert "plain chat list of questions" in text
 
     planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
-    for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "Copy Answers", "+ Note", "Copy Feedback"):
+    for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "+ Note", "Copy Feedback"):
         assert token in planish_ts
 
     assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/common/do-planish.yaml").exists()
     assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
+
+
+def test_grill_feedback_is_annotation_only() -> None:
+    """One feedback transport everywhere: sticky notes -> Copy Feedback -> paste back.
+    No page-level answer boxes, no Submit/Approve buttons, no browser->agent POST."""
+    # Pi runtime serves its pages and returns immediately — no blocking POST plumbing.
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    for banned in ("Copy Answers", "Submit Answers", "grill-respond", "/respond",
+                   "Request Changes", "pendingResolve", "grill-a"):
+        assert banned not in planish_ts, f"planish.ts must not contain {banned!r}"
+
+    # Grill-authoring commands: notes are the only answer channel.
+    for rel in (
+        ".shared-llm/layers/slash-commands/common/common/do-plan-and-grill/command.md",
+        ".shared-llm/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
+        ".shared-llm/layers/slash-commands/common/common/do-oneshot/command.md",
+        ".shared-llm/layers/slash-commands/common/claude/cc-oneshot/command.md",
+    ):
+        text = (REPO_ROOT / rel).read_text()
+        assert "Copy Feedback" in text, rel
+        for banned in ("Copy Answers", "Submit Answers", "textarea", "grill-a"):
+            assert banned not in text, f"{rel} must not contain {banned!r}"
+
+    # Toolkits: the form toolkit is style-only; the annotation toolkit is the
+    # single interactive surface, with anchor-tagged Copy Feedback.
+    form = (REPO_ROOT / ".shared-llm/llm/claude/common/toolkits/form-toolkit.html").read_text()
+    for banned in ("<script", "<button", "textarea", "Copy Answers"):
+        assert banned not in form, f"form-toolkit.html must not contain {banned!r}"
+    ann = (REPO_ROOT / ".shared-llm/llm/claude/common/toolkits/annotation-toolkit.html").read_text()
+    for token in ("+ Note", "Copy Feedback", "desdoc-key", "ddAnchor"):
+        assert token in ann, f"annotation-toolkit.html must contain {token!r}"
+
+    # The shared contract spells out the single transport.
+    contract = (REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md").read_text()
+    for token in ("One feedback transport", "Copy Feedback", "No answer boxes"):
+        assert token in contract, f"contract must contain {token!r}"
+
+
+def test_plan_versioning_downloadable_and_host() -> None:
+    """Plans freeze plan-v<k> history (never revised in place), pages are also
+    offered as downloadable files where the harness can send them, and URLs
+    honor the .planish.yaml host: field for remote (Tailscale) sessions."""
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    for token in ("plan-v<k>", "resolveHost", "PLANISH_HOST", "0.0.0.0"):
+        assert token in planish_ts, f"planish.ts must contain {token!r}"
+    assert "listen(PORT, \"127.0.0.1\"" not in planish_ts  # bind follows the host
+
+    # tf-implement's duplicated resolver must stay in sync: same config file.
+    tf_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/tf-implement.ts").read_text()
+    assert ".planish.yaml" in tf_ts, "tf-implement resolver must read .planish.yaml"
+    assert ".planish.json" not in tf_ts, "drifted .planish.json reference"
+    assert "plan-v<k>" in tf_ts
+
+    example = (REPO_ROOT / ".planish.yaml.example").read_text()
+    assert "host:" in example, ".planish.yaml.example must document host:"
+
+    for rel in (
+        ".shared-llm/layers/slash-commands/common/common/do-plan-and-grill/command.md",
+        ".shared-llm/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
+    ):
+        text = (REPO_ROOT / rel).read_text()
+        for token in ("plan-v1.md", "never in place", "SendUserFile", "`host:`"):
+            assert token in text, f"{rel} must contain {token!r}"
+
+    for rel in (
+        ".shared-llm/layers/slash-commands/common/common/do-oneshot/command.md",
+        ".shared-llm/layers/slash-commands/common/claude/cc-oneshot/command.md",
+    ):
+        text = (REPO_ROOT / rel).read_text()
+        for token in ("SendUserFile", "`host:`"):
+            assert token in text, f"{rel} must contain {token!r}"
+
+    contract = (REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md").read_text()
+    for token in ("Versioned history", "downloadable", "host:"):
+        assert token in contract, f"contract must contain {token!r}"
 
 
 def test_settings_deep_merge(tmp_path: Path) -> None:

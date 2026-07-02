@@ -6,6 +6,13 @@
      Toggle Notes, Copy Feedback (markdown of all notes →
      clipboard), Finalize (lock + summary).
 
+     This bar is the ONLY feedback mechanism on grill/plan/design
+     pages — no page-level answer boxes, no Submit buttons. The
+     user annotates, clicks Copy Feedback, and pastes the block
+     into the assistant chat themselves. Copy Feedback tags each
+     note with the nearest question/heading so the paste reads
+     unambiguously.
+
      Notes persist in localStorage keyed by the page pathname,
      so a browser refresh keeps them.
      ═══════════════════════════════════════════════════════════ -->
@@ -92,16 +99,34 @@
     addEventListener('click',h);
   };
   window.ddToggle=function(){vis=!vis;notes.forEach(n=>n.el.style.display=vis?'':'none');};
+  // Nearest anchor above the note (question text or heading), so the copied
+  // feedback says WHAT each note is about — notes are the only answer channel.
+  function ddAnchor(noteY){
+    var best=null,bestY=-1;
+    document.querySelectorAll('.grill-q-text,h1,h2,h3').forEach(function(el){
+      var y=el.getBoundingClientRect().top+scrollY;
+      if(y<=noteY+28&&y>bestY){bestY=y;best=el;}
+    });
+    if(!best)return '';
+    var t=best.textContent.trim().replace(/\s+/g,' ');
+    if(t.length>70)t=t.slice(0,67)+'…';
+    return t?' @ "'+t+'"':'';
+  }
+  function ddItems(){
+    return notes.map(function(n){
+      var y=parseFloat(n.el.style.top)||0;
+      return '- [Note '+n.id+ddAnchor(y)+'] '+(n.el.querySelector('textarea').value||'(empty)');
+    }).join('\n');
+  }
   window.ddCopy=function(){
-    const items=notes.map(n=>'- [Note '+n.id+'] '+(n.el.querySelector('textarea').value||'(empty)')).join('\n');
-    const out='## Feedback — '+document.title+'\nFile: '+location.pathname+'\n\n'+(items||'(no notes)');
+    const out='## Feedback — '+document.title+'\nFile: '+location.pathname+'\n\n'+(ddItems()||'(no notes)');
     ddWrite(out).then(function(){
       const b=document.getElementById('ddcopybtn');const t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},2000);
     });
   };
   window.ddFinalize=function(){
     if(!confirm('Mark this document as finalized?'))return;
-    const items=notes.map(n=>'- [Note '+n.id+'] '+(n.el.querySelector('textarea').value||'(empty)')).join('\n');
+    const items=ddItems();
     const out='## FINALIZED — '+document.title+'\nFile: '+location.pathname+'\n\n'+(items?'Final notes:\n'+items:'(no notes — approved as-is)');
     ddWrite(out);
     localStorage.setItem(KEY+'__final','1');

@@ -14,6 +14,10 @@
 # Never committed; same convention as jiffy-rewrite-2026.
 /.memsearch/
 
+# Local planish config — machine-specific (dir layout + hostname). The tracked
+# template is .planish.yaml.example; the real file never belongs in the repo.
+/.planish.yaml
+
 # npm — safety net so an accidental install under the repo is never tracked
 node_modules/
 

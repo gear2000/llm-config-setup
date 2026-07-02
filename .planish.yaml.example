@@ -48,12 +48,28 @@
 # An absolute path is used as-is.
 #
 #
+# REMOTE SESSIONS (optional "host")
+# ─────────────────────────────────
+# When you reach this machine by name instead of localhost — Tailscale, LAN,
+# SSH from a laptop — set "host" to that machine name. Every URL the planning
+# flows hand out (the planish pages on port 4390 AND the static grill/plan
+# pages) then uses it instead of localhost, and the planish server binds
+# 0.0.0.0 so those remote connections are accepted. Default: localhost.
+# $PLANISH_HOST overrides it for a single session.
+#
+#   host: your-machine-name
+#
+# "host" works on its own too — a .planish.yaml with only "host" keeps the
+# default /tmp/planish/{date}/{slug} plan directory.
+#
+#
 # COPY AND RENAME TO ACTIVATE
 # ────────────────────────────
 # cp .planish.yaml.example .planish.yaml
 # Then edit the "dir" line below to match your setup.
 
 dir: /absolute/path/to/your/docs/plans/{date}/{slug}
+# host: your-machine-name
 
 # ── Alternative layouts ────────────────────────────────────────────────────────
 

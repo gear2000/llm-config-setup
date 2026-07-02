@@ -1,26 +1,34 @@
 <!-- ═══════════════════════════════════════════════════════════
-     GRILL FORM TOOLKIT  (do not edit this block)
+     GRILL STYLE TOOLKIT  (style-only — do not edit this block)
 
-     Paste this verbatim immediately before </body>.
-     It wires up every .grill-q block already on the page and
-     adds a fixed "Copy Answers" bar.
+     Paste this verbatim into the page (e.g. before </body>).
+     It styles the .grill-q question blocks and the diagram
+     vocabulary. It contains NO interactive controls: answers and
+     feedback happen exclusively through the sticky-note
+     annotation toolkit (annotation-toolkit.html) — + Note on a
+     question → type → Copy Feedback → paste back into the chat.
 
-     Question block shape the page must contain:
+     (Historical name: this block once carried an answer form with
+     its own copy bar. Page-level answer boxes are deliberately
+     removed — Copy Feedback only ever carried the notes, so
+     anything typed into a box was silently lost.)
+
+     Question block shape the page must contain (no answer field —
+     the user drops a sticky note on the block instead):
        <div class="grill-q">
          <div class="grill-q-text">The question?</div>
          <div class="grill-q-note">optional context — bullets, not prose</div>
          <div class="grill-q-rec">Recommended: ...</div>   (optional)
-         <textarea class="grill-a" placeholder="Your answer…"></textarea>
        </div>
 
-     To SHOW a complex question (pick by complexity, never a wall of text):
-       - simple  → a Mermaid block (add its <script> to the page <head> yourself)
-       - medium  → an ASCII tree:
+     To SHOW a complex question (two modes only — NEVER Mermaid,
+     it renders from a CDN and breaks silently):
+       - default → an ASCII tree:
                      <div class="grill-fig"><div class="grill-fig-cap">tree</div>
                        <pre>run
 ├─ build  → vpc
 └─ deploy → app</pre></div>
-       - complex → row-by-row HTML flow (offline-safe, no CDN):
+       - when ASCII can't carry it → row-by-row HTML flow (offline-safe, no CDN):
                      <div class="grill-fig"><div class="grill-fig-cap">flow</div>
                        <div class="flow"><div class="flow-row">
                          <span class="flow-box in">layer<small>input</small></span>
@@ -30,35 +38,20 @@
                          <span class="flow-box out">result<small>output</small></span>
                        </div></div></div>
        flow-box colours: .in green · .sut amber · .out blue; .chip for a legend.
-
-     Copy Answers emits markdown mapping every question to its answer,
-     ready to paste back into the agent session.
      ═══════════════════════════════════════════════════════════ -->
 <style>
-  #grill-bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;
-    padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:9999;
-    font-family:'JetBrains Mono',monospace;font-size:12px;color:#6b7280;}
-  body{padding-bottom:52px!important;}
-  .grbtn{padding:4px 10px;border-radius:4px;border:1px solid #2e3440;background:#0d1017;
-    color:#c8ccd4;cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
-  .grbtn:hover{background:#1e222a;}
-  .grbtn.copy{background:#1a2d4a;border-color:#456a8a;color:#7ab4db;}
-  #grill-cnt{background:#2e3440;color:#c8ccd4;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:2px;}
   .grill-q{border:1px solid #2e3440;border-radius:6px;padding:14px 16px;margin:12px 0;background:#11151c;}
   .grill-q-text{font-size:13px;color:#e6e9ef;margin-bottom:4px;font-weight:500;line-height:1.5;}
   .grill-q-note{font-size:11px;color:#6b7280;margin-bottom:8px;line-height:1.5;}
-  .grill-q-rec{font-size:11px;color:#98c379;margin-bottom:10px;line-height:1.5;}
-  .grill-a{width:100%;min-height:54px;background:#0d1017;border:1px solid #2e3440;border-radius:4px;
-    padding:8px 10px;color:#c8ccd4;font:12px/1.5 'JetBrains Mono',monospace;resize:vertical;box-sizing:border-box;outline:none;}
-  .grill-a:focus{border-color:#456a8a;}
+  .grill-q-rec{font-size:11px;color:#98c379;line-height:1.5;}
   /* bullets/prose inside a question — keep it tight, never a wall of text */
   .grill-q ul,.grill-q ol{margin:4px 0 10px;padding-left:18px;}
   .grill-q li{font-size:12px;color:#c8ccd4;line-height:1.55;margin:2px 0;}
   .grill-q b,.grill-q strong{color:#e6e9ef;}
   .grill-q code{background:#0d1017;border:1px solid #1e222a;border-radius:3px;padding:0 4px;font-size:11px;color:#7ab4db;}
   /* ── diagram vocabulary (offline-safe; the LLM picks by complexity) ──
-     simple → Mermaid (author adds its <script> per-page); medium → ascii;
-     complex → flow rows. All render with no CDN so the file works offline. */
+     default → ascii/tree in <pre>; complex → flow rows in raw HTML.
+     Two modes only — no CDN-rendered diagram libs (they break silently). */
   .grill-fig{margin:8px 0 12px;background:#0b0e14;border:1px solid #1e222a;border-radius:6px;
     padding:12px 14px;overflow-x:auto;}
   .grill-fig-cap{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:8px;}
@@ -78,45 +71,4 @@
   .chip.in{border-color:#7aa87a;color:#98c379;} .chip.sut{border-color:#d19a66;color:#d19a66;}
   .chip.out{border-color:#456a8a;color:#7ab4db;}
 </style>
-<div id="grill-bar">
-  <span style="color:#3e4450;margin-right:4px;">grill</span>
-  <span style="color:#6b7280;"><span id="grill-cnt">0</span> answered</span>
-  <button class="grbtn copy" id="grcopybtn" onclick="grCopy()">Copy Answers</button>
-</div>
-<script>
-(function(){
-  function qs(){return Array.from(document.querySelectorAll('.grill-q'));}
-  function sig(t){var h=0;for(var i=0;i<t.length;i++){h=((h<<5)-h+t.charCodeAt(i))|0;}
-    return 'grill__'+btoa(location.pathname).replace(/[+/=]/g,'')+'_'+h;}
-  function txt(q){var e=q.querySelector('.grill-q-text');return e?e.textContent.trim():'';}
-  function count(){var n=qs().filter(function(q){var a=q.querySelector('.grill-a');return a&&a.value.trim();}).length;
-    var c=document.getElementById('grill-cnt');if(c)c.textContent=n;}
-  qs().forEach(function(q){
-    var a=q.querySelector('.grill-a');if(!a)return;
-    var k=sig(txt(q));
-    var saved=localStorage.getItem(k);if(saved&&!a.value)a.value=saved;
-    a.addEventListener('input',function(){localStorage.setItem(k,a.value);count();});
-  });
-  count();
-  function grFlash(){var b=document.getElementById('grcopybtn');if(!b)return;
-    b.textContent='Copied ✓';setTimeout(function(){b.textContent='Copy Answers';},2000);}
-  function grFallback(text){var ta=document.createElement('textarea');ta.value=text;
-    ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';
-    document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}
-    document.body.removeChild(ta);}
-  window.grCopy=function(){
-    var out='## Answers — '+document.title+'\nFile: '+location.pathname+'\n';
-    qs().forEach(function(q,i){
-      var a=q.querySelector('.grill-a');var v=a?a.value.trim():'';
-      out+='\n### Q'+(i+1)+': '+txt(q)+'\n'+(v||'(skipped)')+'\n';
-    });
-    // navigator.clipboard needs a secure context (https / localhost). It is
-    // absent on file:// and on a bare LAN hostname (no TLS), so fall back to
-    // a hidden-textarea execCommand copy, which works in any context.
-    if(navigator.clipboard&&navigator.clipboard.writeText){
-      navigator.clipboard.writeText(out).then(grFlash,function(){grFallback(out);grFlash();});
-    }else{grFallback(out);grFlash();}
-  };
-})();
-</script>
 <!-- ═══════════════════════════════════════════════════════════ -->

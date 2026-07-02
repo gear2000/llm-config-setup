@@ -4,14 +4,22 @@
  * Planning with planish is always a two-beat flow in the browser (port 4390):
  *
  *   1. GRILL   — planish_grill { questions[] }
- *                Pi asks a batch of questions; the user answers them in a form
- *                and submits. Always grill before writing a plan — it sharpens
- *                the plan and avoids rework. Follow-ups: call planish_grill again.
+ *                Pi asks a batch of questions on an annotatable page. The tool
+ *                serves the page and returns IMMEDIATELY — the agent gives the
+ *                user the URL and ends its turn. The user drops sticky notes on
+ *                the questions, clicks Copy Feedback, and pastes the ## Feedback
+ *                block into the TUI. A question with no note means "go with the
+ *                recommendation". Follow-ups: call planish_grill again.
  *
- *   2. APPROVE — planish_submit_plan { filePath }
- *                Pi writes the plan as plan.html (structured tables, Tailwind CDN)
- *                and submits it. The user approves (optionally with a note) or
- *                requests changes with feedback.
+ *   2. REVIEW  — planish_submit_plan { filePath }
+ *                Pi writes the plan as plan.html (+ plan.md) and serves it for
+ *                review — again returning immediately. The user annotates and
+ *                pastes feedback; a ## FINALIZED block (or explicit approval)
+ *                approves the plan, notes request changes.
+ *
+ * ONE feedback transport, per the Planish HTML Grill Contract: annotate →
+ * Copy Feedback → paste back. No answer boxes, no Submit/Approve buttons, no
+ * browser→agent POST, and no tool call that blocks waiting on the browser.
  *
  * Standalone: no phase forcing beyond grill-then-plan, no execution assumption,
  * no workflow coupling. The approved plan.html is the output — what happens next
@@ -19,13 +27,16 @@
  *
  * Slash cmd: /planish <what to plan>   — START a Pi-native planning session: turns on
  *                planMode so before_agent_start drives the agent through
- *                browser grill → build plan.html → submit-for-review, until approved.
+ *                browser grill → build plan.html → serve-for-review, until approved.
  *            /planish --review <path>  — re-open an existing plan.html for review.
  *
  * Note: standalone markdown skill variants (/do-planish and /cc-planish) are intentionally
  * removed. /planish is the standalone Pi planner; /do-plan-and-grill is the workflow-suite planner.
  *
- * HTTP server: http://localhost:4390 (lazy start, shared across a session)
+ * HTTP server: port 4390 (lazy start, shared across a session). The URL host
+ * comes from `host:` in the nearest .planish.yaml or $PLANISH_HOST (default
+ * localhost) — set it to the machine name remote browsers use (e.g. a
+ * Tailscale name) and the server binds 0.0.0.0 so those connections work.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -42,20 +53,14 @@ const PORT = 4390;
 
 let server: http.Server | null = null;
 let currentHtml = "";
-// One interaction at a time. A plan review resolves { approved, feedback };
-// a grill resolves string[] (answers indexed by question). The matching POST
-// endpoint (/respond vs /grill-respond) resolves with the right shape.
-let pendingResolve: ((r: any) => void) | null = null;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // Returns false when the opener is missing or exits non-zero (headless box,
-// no default browser). Callers MUST surface that — a silent failure here left
-// the user staring at a blocked "working…" spinner with no idea a page was
-// waiting for them at localhost:4390.
+// no default browser). Callers MUST surface that — the user needs the URL.
 function openBrowser(): boolean {
   const cmd = process.platform === "darwin" ? "open" : "xdg-open";
-  const r = spawnSync(cmd, [`http://localhost:${PORT}/`], { detached: true, stdio: "ignore" });
+  const r = spawnSync(cmd, [`http://${resolveHost()}:${PORT}/`], { detached: true, stdio: "ignore" });
   return !r.error && r.status === 0;
 }
 
@@ -174,14 +179,16 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
     baseDir = cwd;
   } else {
     const configPath = findConfigUp(cwd, ".planish.yaml");
-    if (configPath) {
-      const parsed = parseSimpleYaml(fs.readFileSync(configPath, "utf-8"));
-      if (typeof parsed?.dir !== "string" || !parsed.dir.trim()) {
-        throw new Error(`${configPath} has no "dir" string field`);
+    const parsed = configPath ? parseSimpleYaml(fs.readFileSync(configPath, "utf-8")) : null;
+    if (configPath && parsed?.dir !== undefined) {
+      // dir present but unusable is a config typo — fail loud, never fall back.
+      if (typeof parsed.dir !== "string" || !parsed.dir.trim()) {
+        throw new Error(`${configPath} "dir" must be a non-empty string`);
       }
       template = parsed.dir.trim();
-      baseDir = path.dirname(configPath);
+      baseDir = path.dirname(configPath!);
     } else {
+      // no config, or a host-only config — default template.
       template = "/tmp/planish/{date}/{slug}";
       baseDir = cwd;
     }
@@ -197,69 +204,128 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
   return finalDir;
 }
 
-// ─── Plan review: toolbar injection ─────────────────────────────────────────────
+// ─── Serve host ─────────────────────────────────────────────────────────────
 //
-// Appended before </body> (or at end if absent). Inline styles only, so it works
-// regardless of what CSS the plan HTML loads.
+// URLs the tools hand out default to localhost, which breaks remote sessions
+// (Tailscale/SSH): the user's browser is not on this box. `host:` in the
+// nearest .planish.yaml — or $PLANISH_HOST — names this machine as the
+// browser reaches it (e.g. a Tailscale MagicDNS name). With a non-localhost
+// host the server binds 0.0.0.0 so those remote connections are accepted;
+// the default stays 127.0.0.1-only. Resolved once, at first use.
 
-function withToolbar(html: string): string {
-  const bar = `
+let resolvedHost: string | null = null;
+
+function resolveHost(): string {
+  if (resolvedHost) return resolvedHost;
+  let host = "localhost";
+  if (process.env.PLANISH_HOST && process.env.PLANISH_HOST.trim()) {
+    host = process.env.PLANISH_HOST.trim();
+  } else {
+    const configPath = findConfigUp(process.cwd(), ".planish.yaml");
+    if (configPath) {
+      const parsed = parseSimpleYaml(fs.readFileSync(configPath, "utf-8"));
+      if (typeof parsed?.host === "string" && parsed.host.trim()) host = parsed.host.trim();
+    }
+  }
+  resolvedHost = host;
+  return host;
+}
+
+function isLocalOnly(host: string): boolean {
+  return host === "localhost" || host === "127.0.0.1";
+}
+
+// ─── Sticky-note annotation block (the ONLY interactive surface) ───────────────
+//
+// Injected into every page planish serves: the grill page embeds it, and a
+// reviewed plan.html gets it appended unless the file already carries its own
+// annotation controls. Feedback flows one way — the user annotates, clicks
+// Copy Feedback, and pastes the block into the TUI. No answer boxes, no
+// Submit buttons, no POST back to the agent.
+//
+// Every serve gets a fresh nonce baked into the localStorage key, and the page
+// prunes every other planish_notes__ key on load — new round, clean slate
+// (all rounds share the one URL localhost:4390/, so pathname keying would
+// resurrect the previous round's notes).
+let serveNonceCounter = 0;
+
+function nextNonce(): string {
+  return `${Date.now().toString(36)}r${++serveNonceCounter}`;
+}
+
+function annotationBlockHtml(nonce: string): string {
+  return `
 <style>
-  #planish-bar {
-    position: fixed; bottom: 0; left: 0; right: 0;
-    background: #0d1017; border-top: 1px solid #1e222a;
-    padding: 12px 16px; display: flex; gap: 12px; align-items: flex-start;
-    z-index: 9999; box-shadow: 0 -2px 8px rgba(0,0,0,.4);
-    font-family: 'JetBrains Mono', monospace;
-  }
-  body { padding-bottom: 96px !important; }
-  #planish-fb {
-    flex: 1; border: 1px solid #2e3440; border-radius: 6px;
-    padding: 8px 10px; font-size: 12px; resize: none; font-family: inherit;
-    background: #0b0e14; color: #c8ccd4;
-  }
-  #planish-fb.error { border-color: #e06c75; }
-  .pbtn {
-    padding: 7px 16px; border-radius: 6px; font-size: 12px;
-    font-weight: 500; cursor: pointer; border: none; white-space: nowrap;
-    font-family: inherit;
-  }
-  .pbtn-ok  { background: #0f2d17; color: #98c379; border: 1px solid #3a5a2a; }
-  .pbtn-chg { background: #1a1208; color: #d19a66; border: 1px solid #5a4226; }
+  #desdoc-badge{display:none;position:fixed;top:0;left:0;right:0;background:#0f1f14;border-bottom:1px solid #3a5a2a;color:#98c379;text-align:center;padding:5px 16px;font:11px/1.5 'JetBrains Mono',monospace;z-index:10000;}
+  #desdoc-bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:9999;font-family:'JetBrains Mono',monospace;font-size:12px;color:#6b7280;}
+  body{padding-bottom:52px!important;}
+  .ddbtn{padding:5px 11px;border-radius:5px;border:1px solid #2e3440;background:#0d1017;color:#c8ccd4;cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
+  .ddbtn:hover{background:#1e222a;}
+  .ddbtn.copy{background:#1a2d4a;border-color:#456a8a;color:#7ab4db;}
+  .ddbtn.fin{background:#0f1f14;border-color:#3a5a2a;color:#98c379;}
+  #desdoc-cnt{background:#2e3440;color:#c8ccd4;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:2px;}
+  .sticky-note{position:absolute;z-index:9000;min-width:180px;max-width:260px;background:#1c1a10;border:1px solid #8a6a1a;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.4);}
+  .sticky-head{background:#8a6a1a;padding:3px 8px;cursor:move;display:flex;justify-content:space-between;align-items:center;border-radius:4px 4px 0 0;font:11px/20px 'JetBrains Mono',monospace;color:#1a1208;user-select:none;}
+  .sticky-note textarea{width:100%;border:none;background:transparent;padding:6px 8px;font:12px/1.5 'JetBrains Mono',monospace;color:#c8ccd4;resize:vertical;min-height:56px;box-sizing:border-box;outline:none;}
 </style>
-<div id="planish-bar">
-  <textarea id="planish-fb" placeholder="Feedback (optional for approval, required for changes)…" rows="2"></textarea>
-  <div style="display:flex;flex-direction:column;gap:6px;">
-    <button class="pbtn pbtn-ok"  onclick="planishSend('approve')">Approve ✓</button>
-    <button class="pbtn pbtn-chg" onclick="planishSend('changes')">Request Changes</button>
-  </div>
+<div id="desdoc-badge">✓ FINALIZED — summary copied to clipboard</div>
+<div id="desdoc-bar">
+  <span style="color:#3e4450;margin-right:auto;">+ Note on a question → type → Copy Feedback → paste into the chat</span>
+  <button class="ddbtn" onclick="ddAdd()">+ Note</button>
+  <button class="ddbtn" onclick="ddToggle()">Notes <span id="desdoc-cnt">0</span></button>
+  <button class="ddbtn copy" id="ddcopybtn" onclick="ddCopy()">Copy Feedback</button>
+  <button class="ddbtn fin" onclick="ddFinalize()">Finalize ✓</button>
 </div>
 <script>
-async function planishSend(action) {
-  const fb = document.getElementById('planish-fb').value.trim();
-  if (action === 'changes' && !fb) {
-    const el = document.getElementById('planish-fb');
-    el.classList.add('error');
-    el.placeholder = 'Feedback is required when requesting changes.';
-    el.focus();
-    return;
+(function(){
+  function execCopy(text){var ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);}
+  function writeCopy(text){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(text).catch(function(){execCopy(text);});}execCopy(text);return Promise.resolve();}
+  var KEY='planish_notes__${nonce}';var notes=[],ctr=0,vis=true;
+  try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('planish_notes__')===0&&k!==KEY)localStorage.removeItem(k);});}catch(e){}
+  function save(){localStorage.setItem(KEY,JSON.stringify(notes.map(function(n){return {id:n.id,x:parseFloat(n.el.style.left),y:parseFloat(n.el.style.top),text:n.el.querySelector('textarea').value};})));var c=document.getElementById('desdoc-cnt');if(c)c.textContent=notes.length;}
+  function mk(x,y,id,text){id=id||String(++ctr);var el=document.createElement('div');el.className='sticky-note';el.style.left=x+'px';el.style.top=y+'px';el.innerHTML='<div class="sticky-head"><span>Note '+id+'</span><span onclick="ddDel(\\''+id+'\\')" style="cursor:pointer;font-weight:700;padding:0 3px;color:#3a2808;">✕</span></div><textarea placeholder="Add note…">'+(text||'')+'</textarea>';document.body.appendChild(el);el.querySelector('textarea').addEventListener('input',save);var h=el.firstElementChild;h.addEventListener('mousedown',function(e){if(e.target.onclick)return;var ox=e.clientX-el.getBoundingClientRect().left,oy=e.clientY-el.getBoundingClientRect().top;var mv=function(e2){el.style.left=(e2.clientX-ox+scrollX)+'px';el.style.top=(e2.clientY-oy+scrollY)+'px';};var up=function(){save();removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};addEventListener('mousemove',mv);addEventListener('mouseup',up);e.preventDefault();});notes.push({id:id,el:el});save();}
+  // Nearest anchor above the note (question text or heading) — the copied
+  // feedback must say WHAT each note is about, since notes are the only
+  // answer channel.
+  function ddAnchor(noteY){
+    var best=null,bestY=-1;
+    document.querySelectorAll('.grill-q-text,h1,h2,h3').forEach(function(el){
+      var y=el.getBoundingClientRect().top+scrollY;
+      if(y<=noteY+28&&y>bestY){bestY=y;best=el;}
+    });
+    if(!best)return '';
+    var t=best.textContent.trim().replace(/\\s+/g,' ');
+    if(t.length>70)t=t.slice(0,67)+'…';
+    return t?' @ "'+t+'"':'';
   }
-  document.getElementById('planish-bar').innerHTML =
-    '<p style="padding:12px 16px;color:#6b7280;font-size:13px;">Response sent — you can close this tab.</p>';
-  await fetch('/respond', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, feedback: fb }),
-  }).catch(() => {});
-}
+  function ddItems(){return notes.map(function(n){var y=parseFloat(n.el.style.top)||0;return '- [Note '+n.id+ddAnchor(y)+'] '+(n.el.querySelector('textarea').value||'(empty)');}).join('\\n');}
+  window.ddDel=function(id){var i=notes.findIndex(function(n){return n.id===id;});if(i<0)return;notes[i].el.remove();notes.splice(i,1);save();};
+  window.ddAdd=function(){document.body.style.cursor='crosshair';var h=function(e){if(e.target.closest('#desdoc-bar'))return;document.body.style.cursor='';removeEventListener('click',h);mk(e.pageX-90,e.pageY-20,null,'');};addEventListener('click',h);};
+  window.ddToggle=function(){vis=!vis;notes.forEach(function(n){n.el.style.display=vis?'':'none';});};
+  window.ddCopy=function(){writeCopy('## Feedback — '+document.title+'\\n\\n'+(ddItems()||'(no notes)')).then(function(){var b=document.getElementById('ddcopybtn');var t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},1600);});};
+  window.ddFinalize=function(){
+    if(!confirm('Finalize — copy an approval block to paste back into the chat?'))return;
+    var items=ddItems();
+    writeCopy('## FINALIZED — '+document.title+'\\n\\n'+(items?'Final notes:\\n'+items:'(no notes — approved as-is)'));
+    document.getElementById('desdoc-badge').style.display='block';
+  };
+  var saved=JSON.parse(localStorage.getItem(KEY)||'[]');if(saved.length)ctr=saved.reduce(function(m,n){return Math.max(m,parseInt(n.id)||0);},0);saved.forEach(function(n){mk(n.x,n.y,n.id,n.text);});
+})();
 </script>`;
-
-  return html.includes("</body>")
-    ? html.replace("</body>", bar + "\n</body>")
-    : html + bar;
 }
 
-// ─── Grill: self-contained question form ────────────────────────────────────────
+// A reviewed plan.html usually embeds its own annotation controls (the build
+// step requires them). Only inject ours when the file has none — two bars
+// (and two ddAdd definitions) on one page would collide.
+function ensureAnnotable(html: string): string {
+  if (html.includes("desdoc-bar") || html.includes("ddCopy") || html.includes("Copy Feedback")) {
+    return html;
+  }
+  const block = annotationBlockHtml(nextNonce());
+  return html.includes("</body>") ? html.replace("</body>", block + "\n</body>") : html + block;
+}
+
+// ─── Grill: self-contained annotatable question page ───────────────────────────
 
 interface GrillQuestion {
   question: string;
@@ -294,14 +360,7 @@ function renderQuestionVisual(q: GrillQuestion): string {
   return parts.join("\n");
 }
 
-// Every grill round is served at the SAME URL (localhost:4390/), so keying the
-// sticky-note storage by pathname alone made round 2 load round 1's notes.
-// Each rendered page gets a fresh nonce baked into its storage key, and the
-// page prunes every other planish_notes__ key on load — new round, clean slate.
-let grillRoundCounter = 0;
-
-function grillFormHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): string {
-  const roundKey = `${Date.now().toString(36)}r${++grillRoundCounter}`;
+function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): string {
   const payload: GrillPayload = Array.isArray(payloadOrQuestions)
     ? { questions: payloadOrQuestions }
     : payloadOrQuestions;
@@ -318,7 +377,6 @@ function grillFormHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
       ${renderQuestionVisual(q)}
       ${q.note ? `<div class="pq-note grill-q-note">${esc(q.note)}</div>` : ""}
       ${q.recommendation ? `<div class="pq-rec grill-q-rec">Recommended: ${esc(q.recommendation)}</div>` : ""}
-      <textarea class="pq-a grill-a" data-i="${i}" placeholder="Your answer…"></textarea>
     </div>`
     )
     .join("");
@@ -336,10 +394,7 @@ function grillFormHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
   .pq{border:1px solid #2e3440;border-radius:8px;padding:16px 18px;margin:14px 0;background:#11151c;}
   .pq-text{font-size:14px;color:#e6e9ef;font-weight:600;margin-bottom:4px;}
   .pq-note{font-size:12px;color:#6b7280;margin-bottom:8px;}
-  .pq-rec{font-size:12px;color:#98c379;margin-bottom:10px;}
-  .pq-a{width:100%;min-height:60px;background:#0d1017;border:1px solid #2e3440;border-radius:6px;
-    padding:9px 11px;color:#c8ccd4;font:12px/1.5 'JetBrains Mono',monospace;resize:vertical;outline:none;}
-  .pq-a:focus{border-color:#456a8a;}
+  .pq-rec{font-size:12px;color:#98c379;}
   /* bullets/prose inside a question — keep it tight, never a wall of text */
   .pq ul,.pq ol{margin:4px 0 10px;padding-left:18px;}
   .pq li{font-size:12px;color:#c8ccd4;line-height:1.55;margin:2px 0;}
@@ -366,63 +421,13 @@ function grillFormHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
     color:#a0a4ac;margin-right:4px;}
   .chip.in{border-color:#7aa87a;color:#98c379;} .chip.sut{border-color:#d19a66;color:#d19a66;}
   .chip.out{border-color:#456a8a;color:#7ab4db;}
-  #bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;
-    padding:8px 16px;display:flex;gap:8px;align-items:center;justify-content:flex-end;z-index:9999;
-    font-family:'JetBrains Mono',monospace;font-size:12px;color:#6b7280;}
-  .pbtn{padding:5px 11px;border-radius:5px;border:1px solid #2e3440;background:#0d1017;color:#c8ccd4;
-    cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
-  .pbtn.copy{background:#1a2d4a;border-color:#456a8a;color:#7ab4db;}
-  .pbtn.fin{background:#0f1f14;border-color:#3a5a2a;color:#98c379;}
-  #done{display:none;text-align:center;color:#98c379;font-size:13px;padding:40px;}
-  #desdoc-cnt{background:#2e3440;color:#c8ccd4;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:2px;}
-  #desdoc-badge{display:none;position:fixed;top:0;left:0;right:0;background:#0f1f14;border-bottom:1px solid #3a5a2a;color:#98c379;text-align:center;padding:5px 16px;font-size:11px;z-index:10000;}
-  .sticky-note{position:absolute;z-index:9000;min-width:180px;max-width:260px;background:#1c1a10;border:1px solid #8a6a1a;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.4);}
-  .sticky-head{background:#8a6a1a;padding:3px 8px;cursor:move;display:flex;justify-content:space-between;align-items:center;border-radius:4px 4px 0 0;font:11px/20px 'JetBrains Mono',monospace;color:#1a1208;user-select:none;}
-  .sticky-note textarea{width:100%;border:none;background:transparent;padding:6px 8px;font:12px/1.5 'JetBrains Mono',monospace;color:#c8ccd4;resize:vertical;min-height:56px;box-sizing:border-box;outline:none;}
 </style></head>
 <body>
-  <div id="desdoc-badge">✓ FINALIZED — summary copied to clipboard</div>
   <h1>${esc(title)}</h1>
-  <div class="sub">Answer in the page, add sticky notes if useful, then Copy Answers. Blanks are fine — they come back as skipped.</div>
+  <div class="sub">Answer by annotation: <b>+ Note</b> on a question → type → next note → <b>Copy Feedback</b> → paste it back into the Pi chat. No note on a question = the recommendation stands.</div>
   ${contextHtml}
   <div id="form">${blocks}</div>
-  <div id="done">Answers submitted — you can close this tab.</div>
-  <div id="bar">
-    <span style="color:#3e4450;margin-right:auto;">planish grill</span>
-    <button class="pbtn" onclick="ddAdd()">+ Note</button>
-    <button class="pbtn" onclick="ddToggle()">Notes <span id="desdoc-cnt">0</span></button>
-    <button class="pbtn copy" id="copybtn" onclick="planishCopyAnswers()">Copy Answers</button>
-    <button class="pbtn copy" id="fbbtn" onclick="ddCopy()">Copy Feedback</button>
-    <button class="pbtn fin" onclick="ddFinalize()">Finalize ✓</button>
-    <button class="pbtn fin" onclick="planishGrillSend()">Submit Answers</button>
-  </div>
-<script>
-(function(){
-  function execCopy(text){var ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);}
-  function writeCopy(text){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(text).catch(function(){execCopy(text);});}execCopy(text);return Promise.resolve();}
-  window.planishAnswerMarkdown=function(){
-    var out='## Answers — '+document.title+'\\nFile: '+location.pathname+'\\n';
-    document.querySelectorAll('.pq').forEach(function(q,i){var qt=q.querySelector('.pq-text').textContent.trim();var a=q.querySelector('.pq-a');out+='\\n### Q'+(i+1)+': '+qt+'\\n'+((a&&a.value.trim())||'(skipped)')+'\\n';});
-    return out;
-  };
-  window.planishCopyAnswers=function(){writeCopy(window.planishAnswerMarkdown()).then(function(){var b=document.getElementById('copybtn');var t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},1600);});};
-  window.planishGrillSend=async function(){
-    const answers=[];document.querySelectorAll('.pq-a').forEach(function(t){answers[parseInt(t.dataset.i)]=t.value.trim();});
-    document.getElementById('form').style.display='none';document.getElementById('done').style.display='block';
-    await fetch('/grill-respond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answers:answers})}).catch(function(){});
-  };
-  const KEY='planish_notes__${roundKey}';let notes=[],ctr=0,vis=true;
-  try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('planish_notes__')===0&&k!==KEY)localStorage.removeItem(k);});}catch(e){}
-  function save(){localStorage.setItem(KEY,JSON.stringify(notes.map(function(n){return {id:n.id,x:parseFloat(n.el.style.left),y:parseFloat(n.el.style.top),text:n.el.querySelector('textarea').value};})));var c=document.getElementById('desdoc-cnt');if(c)c.textContent=notes.length;}
-  function mk(x,y,id,text){id=id||String(++ctr);var el=document.createElement('div');el.className='sticky-note';el.style.left=x+'px';el.style.top=y+'px';el.innerHTML='<div class="sticky-head"><span>Note '+id+'</span><span onclick="ddDel(\\''+id+'\\')" style="cursor:pointer;font-weight:700;padding:0 3px;color:#3a2808;">✕</span></div><textarea placeholder="Add note…">'+(text||'')+'</textarea>';document.body.appendChild(el);el.querySelector('textarea').addEventListener('input',save);var h=el.firstElementChild;h.addEventListener('mousedown',function(e){if(e.target.onclick)return;var ox=e.clientX-el.getBoundingClientRect().left,oy=e.clientY-el.getBoundingClientRect().top;var mv=function(e2){el.style.left=(e2.clientX-ox+scrollX)+'px';el.style.top=(e2.clientY-oy+scrollY)+'px';};var up=function(){save();removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};addEventListener('mousemove',mv);addEventListener('mouseup',up);e.preventDefault();});notes.push({id:id,el:el});save();}
-  window.ddDel=function(id){var i=notes.findIndex(function(n){return n.id===id;});if(i<0)return;notes[i].el.remove();notes.splice(i,1);save();};
-  window.ddAdd=function(){document.body.style.cursor='crosshair';var h=function(e){if(e.target.closest('#bar'))return;document.body.style.cursor='';removeEventListener('click',h);mk(e.pageX-90,e.pageY-20,null,'');};addEventListener('click',h);};
-  window.ddToggle=function(){vis=!vis;notes.forEach(function(n){n.el.style.display=vis?'':'none';});};
-  window.ddCopy=function(){var items=notes.map(function(n){return '- [Note '+n.id+'] '+(n.el.querySelector('textarea').value||'(empty)');}).join('\\n');writeCopy('## Feedback — '+document.title+'\\nFile: '+location.pathname+'\\n\\n'+(items||'(no notes)')).then(function(){var b=document.getElementById('fbbtn');var t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},1600);});};
-  window.ddFinalize=function(){if(!confirm('Mark this grill round finalized?'))return;document.getElementById('desdoc-badge').style.display='block';window.ddCopy();};
-  var saved=JSON.parse(localStorage.getItem(KEY)||'[]');if(saved.length)ctr=saved.reduce(function(m,n){return Math.max(m,parseInt(n.id)||0);},0);saved.forEach(function(n){mk(n.x,n.y,n.id,n.text);});
-})();
-</script>
+${annotationBlockHtml(nextNonce())}
 </body></html>`;
 }
 
@@ -434,28 +439,6 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     res.end(currentHtml);
     return;
   }
-
-  if (req.method === "POST" && (req.url === "/respond" || req.url === "/grill-respond")) {
-    const isGrill = req.url === "/grill-respond";
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("OK");
-      try {
-        const parsed = JSON.parse(body);
-        if (!pendingResolve) return;
-        if (isGrill) {
-          pendingResolve(Array.isArray(parsed.answers) ? parsed.answers : []);
-        } else {
-          pendingResolve({ approved: parsed.action === "approve", feedback: parsed.feedback ?? "" });
-        }
-        pendingResolve = null;
-      } catch { /* ignore malformed bodies */ }
-    });
-    return;
-  }
-
   res.writeHead(404);
   res.end();
 }
@@ -470,79 +453,47 @@ function ensureServer(): Promise<void> {
       server = null;
       reject(err);
     });
-    s.listen(PORT, "127.0.0.1", () => {
+    // A remote-reachable host is useless if the socket only accepts loopback.
+    const bindAddr = isLocalOnly(resolveHost()) ? "127.0.0.1" : "0.0.0.0";
+    s.listen(PORT, bindAddr, () => {
       server = s;
       resolve();
     });
   });
 }
 
-// ─── Core interactions ─────────────────────────────────────────────────────────
+// ─── Core interactions (serve and return — never block on the browser) ─────────
 
-// Wait for the browser to POST back, OR for the tool call to be aborted from the
-// TUI. Without the abort path, a grill page that never submits (wrong page open,
-// browser failed to launch, user walked away) left the tool call — and the whole
-// Pi session — blocked forever, with pendingResolve wedged so even the next
-// planish call failed with "already in progress". Abort resolves `null`, clears
-// the lock, and the execute() handlers translate that into a clear cancellation
-// message so the agent can fall back to chat.
-function awaitBrowser<T>(signal?: AbortSignal, onStatus?: (text: string) => void): Promise<T | null> {
-  return new Promise((resolve) => {
-    const onAbort = () => {
-      if (pendingResolve === wrapped) pendingResolve = null;
-      resolve(null);
-    };
-    const wrapped = (v: T) => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve(v);
-    };
-    pendingResolve = wrapped as (v: unknown) => void;
-    signal?.addEventListener("abort", onAbort, { once: true });
-    const opened = openBrowser();
-    onStatus?.(
-      (opened ? "" : "Could not open a browser automatically. ") +
-        `Page ready at http://localhost:${PORT}/ — waiting for you in the browser. ` +
-        "If no tab appeared, open that URL yourself. Esc cancels."
-    );
-  });
+async function serve(html: string): Promise<{ url: string; opened: boolean }> {
+  currentHtml = html;
+  await ensureServer();
+  const opened = openBrowser();
+  return { url: `http://${resolveHost()}:${PORT}/`, opened };
 }
 
-async function review(
-  filePath: string,
-  cwd: string,
-  signal?: AbortSignal,
-  onStatus?: (text: string) => void
-): Promise<{ approved: boolean; feedback: string } | null> {
+function serveNote(r: { url: string; opened: boolean }): string {
+  return r.opened
+    ? `Page is live at ${r.url} (a browser tab should have opened).`
+    : `Page is live at ${r.url} — could NOT auto-open a browser; give the user this URL.`;
+}
+
+async function review(filePath: string, cwd: string): Promise<{ url: string; opened: boolean }> {
   const resolved = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath);
   if (!fs.existsSync(resolved)) {
     throw new Error(`plan file not found: ${resolved}`);
   }
-  if (pendingResolve) {
-    throw new Error("a planish interaction is already in progress — wait for it to complete (or abort it from the TUI)");
-  }
-  currentHtml = withToolbar(fs.readFileSync(resolved, "utf-8"));
-  await ensureServer();
-  return awaitBrowser<{ approved: boolean; feedback: string }>(signal, onStatus);
+  return serve(ensureAnnotable(fs.readFileSync(resolved, "utf-8")));
 }
 
-async function grill(
-  payload: GrillPayload,
-  signal?: AbortSignal,
-  onStatus?: (text: string) => void
-): Promise<string[] | null> {
-  if (pendingResolve) {
-    throw new Error("a planish interaction is already in progress — wait for it to complete (or abort it from the TUI)");
-  }
-  currentHtml = grillFormHtml(payload);
-  await ensureServer();
-  return awaitBrowser<string[]>(signal, onStatus);
+async function grill(payload: GrillPayload): Promise<{ url: string; opened: boolean }> {
+  return serve(grillPageHtml(payload));
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
   // /planish sets these; before_agent_start then drives the agent through the
-  // grill → build → review flow until the plan is approved.
+  // grill → build → serve-for-review flow until the plan is approved.
   let planMode = false;
   let planTopic = "";
   let planDir = ""; // absolute dir for plan.md + plan.html; resolved at /planish time
@@ -557,7 +508,7 @@ export default function (pi: ExtensionAPI) {
       systemPrompt:
         event.systemPrompt +
         `\n\n${topic}You are helping the user create a PLAN with planish — produce a plan, not an implementation. Do NOT build or run anything unless the user explicitly asks after the plan is approved.\n\n` +
-        "STEP 1 — GRILL: Call the planish_grill tool with title, contextHtml, and a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each question your recommended answer. Do NOT make a plain Q&A-only grill. Write for the user: open contextHtml with a plain-English explanation of what the plan is trying to do and what you found so far; ask about the mechanism or design choice, never 'these files changed'; define every acronym at first use; file paths/method names/change lists go only in an Appendix section at the BOTTOM of the page. Visuals (two modes only — NEVER Mermaid): default is an ASCII/tree diagram in ascii; when ASCII can't carry it, visualHtml using .grill-fig/.flow/.flow-box drawn row by row. A diagram only when it genuinely helps — never for its own sake. If the answers raise new questions, call planish_grill again.\n\n" +
+        "STEP 1 — GRILL: Call the planish_grill tool with title, contextHtml, and a batch of clarifying questions (scope, constraints, the real choices, unknowns, what already exists). Give each question a concrete recommended answer — the page is annotation-only, and a question with no note means the user accepted your recommendation. The tool serves the page and returns immediately: give the user the URL, END YOUR TURN, and wait for their pasted ## Feedback block. Do NOT make a plain Q&A-only grill. Write for the user: open contextHtml with a plain-English explanation of what the plan is trying to do and what you found so far; ask about the mechanism or design choice, never 'these files changed'; define every acronym at first use; file paths/method names/change lists go only in an Appendix section at the BOTTOM of the page. Visuals (two modes only — NEVER Mermaid): default is an ASCII/tree diagram in ascii; when ASCII can't carry it, visualHtml using .grill-fig/.flow/.flow-box drawn row by row. A diagram only when it genuinely helps — never for its own sake. If the pasted feedback raises new questions, call planish_grill again.\n\n" +
         `STEP 2 — BUILD: Write the plan to TWO files (the directory already exists):\n` +
         // # ref 1 (plan-html-style) — also duplicated in: planish_submit_plan description below, tf-implement.ts STEP 2
         `  • ${planHtml} — the visual plan: a title, a summary of phases, key decisions, and verification steps.\n` +
@@ -583,10 +534,10 @@ export default function (pi: ExtensionAPI) {
         `      .chip{font-size:10px;padding:2px 8px;border-radius:9999px;border:1px solid #2a2e38;background:#13141a;color:#a0a4ac;display:inline-block;margin-left:6px;}\n` +
         `      .chip.green{border-color:#3a5a2a;color:#98c379;} .chip.amber{border-color:#5a4226;color:#d19a66;}\n` +
         `    </style>\n` +
-        `    Structure: page header (h1 + .subtitle), then h2 sections per phase with .card divs (.phase-num, .phase-title, task bullets, a Verification bullet at end). Include annotation controls before </body> (sticky notes + Copy Feedback / finalize) so the saved plan remains annotatable after review.\n` +
+        `    Structure: page header (h1 + .subtitle), then h2 sections per phase with .card divs (.phase-num, .phase-title, task bullets, a Verification bullet at end). Include annotation controls before </body> (sticky notes + Copy Feedback / Finalize) and a unique <meta name="desdoc-key" content="<slug>-plan-v<n>"> in <head> so each plan version starts with a clean note slate. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.\n` +
         `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
-        `Both files hold the same plan content.\n\n` +
-        `STEP 3 — REVIEW: Call planish_submit_plan with the path ${planHtml}. The user approves or requests changes in the browser; on changes, revise both files and submit again. The approved plan is the deliverable.`,
+        `Both files hold the same plan content. NEVER revise the plan in place: every time you build or revise it, ALSO freeze the same content as plan-v<k>.md + plan-v<k>.html in the same directory (v1 on the first build, incrementing each revision; never edit an existing plan-v* file). plan.md/plan.html always hold the latest; the frozen plan-v* files show how the plan evolved.\n\n` +
+        `STEP 3 — REVIEW: Call planish_submit_plan with the path ${planHtml}. It serves the plan in the browser and returns immediately — tell the user the page is ready, then END YOUR TURN. The user annotates and pastes feedback into the chat: a ## FINALIZED block (or an explicit approval message) means the plan is APPROVED; notes requesting changes mean revise BOTH files, freeze the revision as the next plan-v<k> pair, and call planish_submit_plan again. The approved plan is the deliverable.`,
     };
   });
 
@@ -597,9 +548,9 @@ export default function (pi: ExtensionAPI) {
     label: "Grill Before Planning",
     description:
       "Ask the user a VISUAL, annotatable batch of questions in the browser BEFORE writing a plan. " +
-      "ALWAYS grill first when planning with planish. Do not send a plain Q&A-only form unless the user explicitly asked for terminal fallback. " +
+      "ALWAYS grill first when planning with planish. Do not send a plain Q&A-only grill unless the user explicitly asked for terminal fallback. " +
       "Provide title and contextHtml so the page explains, in plain English, what is being decided and what you found — define acronyms at first use, and keep file paths/method names out of questions (Appendix at the bottom only). For each question give question, note, recommendation, and when useful a visual: ascii for a tree/shape (the default), visualHtml for complex .grill-fig/.flow/.flow-box diagrams. Never Mermaid. " +
-      "The browser page includes Copy Answers plus sticky-note annotation/feedback controls. If the answers raise new questions, call planish_grill again. Once everything is resolved, write the plan to .md + .html and call planish_submit_plan.",
+      "The page is annotation-only (sticky notes + Copy Feedback — no answer boxes, no submit): the tool serves it and returns IMMEDIATELY. Give the user the URL, END YOUR TURN, and wait for their pasted ## Feedback block. A question with no note means your recommendation was accepted. If the feedback raises new questions, call planish_grill again. Once everything is resolved, write the plan to .md + .html and call planish_submit_plan.",
     parameters: {
       type: "object",
       properties: {
@@ -619,7 +570,7 @@ export default function (pi: ExtensionAPI) {
             properties: {
               question: { type: "string", description: "The question to ask." },
               note: { type: "string", description: "Optional: why this matters / context." },
-              recommendation: { type: "string", description: "Your recommended answer. Strongly expected for every question." },
+              recommendation: { type: "string", description: "Your recommended answer. Strongly expected for every question — no note on the question means the user accepted it." },
               ascii: { type: "string", description: "ASCII/tree diagram for this question (the default visual mode)." },
               visualHtml: { type: "string", description: "Complex raw HTML visual using .grill-fig / .flow / .flow-box, drawn row by row. Use when ASCII can't carry it. Never Mermaid." },
             },
@@ -633,40 +584,25 @@ export default function (pi: ExtensionAPI) {
     async execute(
       _id: string,
       params: GrillPayload,
-      signal: AbortSignal,
-      onUpdate: any,
+      _signal: AbortSignal,
+      _onUpdate: any,
       _ctx: any
     ) {
       const questions = Array.isArray(params?.questions) ? params!.questions! : [];
       if (questions.length === 0) {
         return { content: [{ type: "text", text: "Error: provide at least one question." }] };
       }
-      // Stream the URL into the TUI the moment the wait starts. This blocking
-      // call used to be completely silent — if the browser tab failed to open,
-      // the user saw "working…" and nothing else, forever.
-      const onStatus = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
       try {
-        const answers = await grill({ title: params?.title, contextHtml: params?.contextHtml, questions }, signal, onStatus);
-        if (answers === null) {
-          return {
-            content: [{
-              type: "text",
-              text:
-                "Grill cancelled from the TUI before Submit Answers was clicked — no answers received. " +
-                "The TUI is unblocked now. Ask the user how to proceed: re-run planish_grill (the page is at http://localhost:4390/ and only its Submit Answers button returns answers), or take answers pasted directly in chat.",
-            }],
-          };
-        }
-        const text = questions
-          .map((q, i) => `Q${i + 1}: ${q.question}\nA: ${answers[i]?.trim() ? answers[i] : "(skipped)"}`)
-          .join("\n\n");
+        const served = await grill({ title: params?.title, contextHtml: params?.contextHtml, questions });
         return {
           content: [{
             type: "text",
             text:
-              `Grill answers:\n\n${text}\n\n` +
-              "Incorporate these. If they raise new questions, call planish_grill again. " +
-              "Otherwise write the plan to a .html file and call planish_submit_plan.",
+              `Grill round served. ${serveNote(served)}\n\n` +
+              "Now tell the user the grill is ready and END YOUR TURN — do not proceed in this turn. " +
+              "The user will annotate the page (+ Note on a question → type → next note), click Copy Feedback, and paste the ## Feedback block here. " +
+              "Each note is tagged with the nearest question/heading; a question with no note means your recommendation was accepted. " +
+              "If the feedback raises new questions, call planish_grill again with the next round; otherwise write the plan (plan.md + plan.html) and call planish_submit_plan.",
           }],
         };
       } catch (err) {
@@ -680,21 +616,21 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── planish_submit_plan — submit the plan for approval ────────────────────
+  // ── planish_submit_plan — serve the plan for review ───────────────────────
 
   (pi as any).registerTool({
     name: "planish_submit_plan",
     label: "Submit Plan for Review",
     description:
-      "Submit a plan HTML file for human review in the browser. " +
+      "Serve a plan HTML file for human review in the browser. " +
       "Grill the user first with planish_grill — do not write the plan until the open questions are answered. " +
       // # dup 1 (plan-html-style)
       "Write your plan to a .html file: a title, a summary of phases, key decisions, and verification steps. " +
       "Use the v3 dark style (NO Tailwind CDN) — body background #0d1017, JetBrains Mono + IBM Plex Sans fonts, " +
-      ".card divs with colored left-border accents for each phase. " +
-      "Then call this tool with the file path. The user sees it in the browser and can approve " +
-      "(optionally with a note) or request changes with feedback. " +
-      "If changes are requested: revise the file in place and call this tool again.",
+      ".card divs with colored left-border accents for each phase, annotation controls before </body>. " +
+      "Then call this tool with the file path. It serves the page and returns IMMEDIATELY — tell the user, then END YOUR TURN. " +
+      "The user annotates and pastes feedback into the chat: a ## FINALIZED block (or explicit approval) means APPROVED; " +
+      "notes requesting changes mean revise the plan (freezing the revision as the next plan-v<k>.md + plan-v<k>.html — never revise in place without a frozen snapshot) and call this tool again.",
     parameters: {
       type: "object",
       properties: {
@@ -709,39 +645,28 @@ export default function (pi: ExtensionAPI) {
     async execute(
       _id: string,
       params: { filePath?: string },
-      signal: AbortSignal,
-      onUpdate: any,
+      _signal: AbortSignal,
+      _onUpdate: any,
       ctx: any
     ) {
       const filePath = (params?.filePath ?? "").trim();
       if (!filePath) {
         return { content: [{ type: "text", text: "Error: filePath is required." }] };
       }
-      const onStatus = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
       try {
-        const result = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()), signal, onStatus);
-        if (result === null) {
-          return {
-            content: [{
-              type: "text",
-              text:
-                "Plan review cancelled from the TUI before the user approved or requested changes. " +
-                "The TUI is unblocked now. Ask the user how to proceed: call planish_submit_plan again to re-open the review page, or take their verdict directly in chat.",
-            }],
-          };
-        }
-        if (result.approved) {
-          planMode = false; // planning session done
-          const note = result.feedback ? ` Human note: ${result.feedback}` : "";
-          return {
-            content: [{ type: "text", text: `Plan approved.${note}` }],
-          };
-        }
-        const fb = result.feedback || "(no feedback provided)";
+        const served = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()));
+        // The drive-the-flow prompt has done its job once the plan is up for
+        // review; the revise-and-resubmit loop is guided by this result text.
+        planMode = false;
         return {
           content: [{
             type: "text",
-            text: `Changes requested: ${fb}\n\nRevise ${filePath} and call planish_submit_plan again with the same path.`,
+            text:
+              `Plan review page served. ${serveNote(served)}\n\n` +
+              "Tell the user the plan is ready for review, then END YOUR TURN — do not proceed in this turn. " +
+              "The user will annotate the page and paste feedback here: a ## FINALIZED block (or an explicit approval message) means the plan is APPROVED and planning is done. " +
+              `Notes requesting changes mean: revise BOTH files (${filePath} and its .md twin), freeze the revision as the next plan-v<k>.md + plan-v<k>.html (never revise in place without the frozen snapshot), and call planish_submit_plan again with the same path. ` +
+              "This is still a PLANNING session — do not start implementing unless the user explicitly asks after approval.",
           }],
         };
       } catch (err) {
@@ -759,11 +684,11 @@ export default function (pi: ExtensionAPI) {
   //
   // Default use: /planish <what you want to plan>. Turns on planMode; the
   // before_agent_start hook then drives the agent: grill → build plan.html →
-  // submit for browser review, iterating until approved.
+  // serve for browser review, iterating on pasted feedback until approved.
   // Escape hatch: /planish --review <path> re-opens an existing plan.html.
 
   (pi as any).registerCommand("planish", {
-    description: "Start a standalone Pi planning session: /planish <what to plan> — grills you in an annotatable browser page, builds a visual HTML plan, iterates until you approve. Re-open an existing plan with: /planish --review <path>.",
+    description: "Start a standalone Pi planning session: /planish <what to plan> — grills you in an annotatable browser page (+ Note → Copy Feedback → paste back), builds a visual HTML plan, iterates until you approve. Re-open an existing plan with: /planish --review <path>.",
     handler: async (args: string, ctx: any) => {
       const trimmed = args.trim();
 
@@ -772,19 +697,12 @@ export default function (pi: ExtensionAPI) {
       if (reviewMatch) {
         const filePath = reviewMatch[1].trim();
         try {
-          ctx.ui.notify(`planish: opening ${filePath} for review…`, "info");
-          const result = await review(filePath, ctx?.cwd ?? process.cwd(), undefined, (text) =>
-            ctx.ui.notify(`planish: ${text}`, "info")
-          );
-          if (result === null) {
-            ctx.ui.notify("planish: review cancelled", "warning");
-            return;
-          }
+          const served = await review(filePath, ctx?.cwd ?? process.cwd());
           ctx.ui.notify(
-            result.approved
-              ? "planish: approved" + (result.feedback ? ` — note: ${result.feedback}` : "")
-              : `planish: changes requested — ${result.feedback || "(no feedback)"}`,
-            result.approved ? "info" : "warning"
+            `planish: ${filePath} is up for review at ${served.url}` +
+              (served.opened ? "" : " (could not auto-open a browser — open the URL yourself)") +
+              " — annotate (+ Note), click Copy Feedback, and paste the block into this chat. Finalize ✓ copies an approval block.",
+            "info"
           );
         } catch (err) {
           ctx.ui.notify(`planish: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -813,8 +731,8 @@ export default function (pi: ExtensionAPI) {
       planTopic = topic;
       ctx.ui.notify(
         topic
-          ? `planish: planning "${topic}" — Pi will grill you in the browser, then build a visual plan in ${planDir} for your review.`
-          : `planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser, then build a visual plan in ${planDir} for review.`,
+          ? `planish: planning "${topic}" — Pi will grill you in the browser (annotate → Copy Feedback → paste back), then build a visual plan in ${planDir} for your review.`
+          : `planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser (annotate → Copy Feedback → paste back), then build a visual plan in ${planDir} for review.`,
         "info"
       );
     },
