@@ -473,35 +473,53 @@ function ensureServer(): Promise<void> {
 
 // ─── Core interactions ─────────────────────────────────────────────────────────
 
+// Wait for the browser to POST back, OR for the tool call to be aborted from the
+// TUI. Without the abort path, a grill page that never submits (wrong page open,
+// browser failed to launch, user walked away) left the tool call — and the whole
+// Pi session — blocked forever, with pendingResolve wedged so even the next
+// planish call failed with "already in progress". Abort resolves `null`, clears
+// the lock, and the execute() handlers translate that into a clear cancellation
+// message so the agent can fall back to chat.
+function awaitBrowser<T>(signal?: AbortSignal): Promise<T | null> {
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      if (pendingResolve === wrapped) pendingResolve = null;
+      resolve(null);
+    };
+    const wrapped = (v: T) => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(v);
+    };
+    pendingResolve = wrapped as (v: unknown) => void;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    openBrowser();
+  });
+}
+
 async function review(
   filePath: string,
-  cwd: string
-): Promise<{ approved: boolean; feedback: string }> {
+  cwd: string,
+  signal?: AbortSignal
+): Promise<{ approved: boolean; feedback: string } | null> {
   const resolved = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath);
   if (!fs.existsSync(resolved)) {
     throw new Error(`plan file not found: ${resolved}`);
   }
   if (pendingResolve) {
-    throw new Error("a planish interaction is already in progress — wait for it to complete");
+    throw new Error("a planish interaction is already in progress — wait for it to complete (or abort it from the TUI)");
   }
   currentHtml = withToolbar(fs.readFileSync(resolved, "utf-8"));
   await ensureServer();
-  return new Promise((resolve) => {
-    pendingResolve = resolve;
-    openBrowser();
-  });
+  return awaitBrowser<{ approved: boolean; feedback: string }>(signal);
 }
 
-async function grill(payload: GrillPayload): Promise<string[]> {
+async function grill(payload: GrillPayload, signal?: AbortSignal): Promise<string[] | null> {
   if (pendingResolve) {
-    throw new Error("a planish interaction is already in progress — wait for it to complete");
+    throw new Error("a planish interaction is already in progress — wait for it to complete (or abort it from the TUI)");
   }
   currentHtml = grillFormHtml(payload);
   await ensureServer();
-  return new Promise((resolve) => {
-    pendingResolve = resolve;
-    openBrowser();
-  });
+  return awaitBrowser<string[]>(signal);
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────
@@ -600,7 +618,7 @@ export default function (pi: ExtensionAPI) {
     async execute(
       _id: string,
       params: GrillPayload,
-      _signal: AbortSignal,
+      signal: AbortSignal,
       _onUpdate: unknown,
       _ctx: any
     ) {
@@ -609,7 +627,17 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Error: provide at least one question." }] };
       }
       try {
-        const answers = await grill({ title: params?.title, contextHtml: params?.contextHtml, questions });
+        const answers = await grill({ title: params?.title, contextHtml: params?.contextHtml, questions }, signal);
+        if (answers === null) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "Grill cancelled from the TUI before Submit Answers was clicked — no answers received. " +
+                "The TUI is unblocked now. Ask the user how to proceed: re-run planish_grill (the page is at http://localhost:4390/ and only its Submit Answers button returns answers), or take answers pasted directly in chat.",
+            }],
+          };
+        }
         const text = questions
           .map((q, i) => `Q${i + 1}: ${q.question}\nA: ${answers[i]?.trim() ? answers[i] : "(skipped)"}`)
           .join("\n\n");
@@ -662,7 +690,7 @@ export default function (pi: ExtensionAPI) {
     async execute(
       _id: string,
       params: { filePath?: string },
-      _signal: AbortSignal,
+      signal: AbortSignal,
       _onUpdate: unknown,
       ctx: any
     ) {
@@ -671,7 +699,17 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Error: filePath is required." }] };
       }
       try {
-        const result = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()));
+        const result = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()), signal);
+        if (result === null) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "Plan review cancelled from the TUI before the user approved or requested changes. " +
+                "The TUI is unblocked now. Ask the user how to proceed: call planish_submit_plan again to re-open the review page, or take their verdict directly in chat.",
+            }],
+          };
+        }
         if (result.approved) {
           planMode = false; // planning session done
           const note = result.feedback ? ` Human note: ${result.feedback}` : "";
@@ -716,6 +754,10 @@ export default function (pi: ExtensionAPI) {
         try {
           ctx.ui.notify(`planish: opening ${filePath} for review…`, "info");
           const result = await review(filePath, ctx?.cwd ?? process.cwd());
+          if (result === null) {
+            ctx.ui.notify("planish: review cancelled", "warning");
+            return;
+          }
           ctx.ui.notify(
             result.approved
               ? "planish: approved" + (result.feedback ? ` — note: ${result.feedback}` : "")

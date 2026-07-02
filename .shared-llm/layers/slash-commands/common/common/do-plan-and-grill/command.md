@@ -190,7 +190,16 @@ You run the grill directly — it's orchestration, not "work." When an answer re
 
 **Never ask questions inline in the terminal in this mode.** A bulleted list of questions in a chat message is NOT the HTML grill — it is the same slow interactive pattern with worse UX. If you find yourself typing questions into the terminal, stop, dispatch the subagent to write `grill_current.html`, and give the user the URL.
 
+**Transport — how answers come back. Pick ONE per session by what's available; never mix:**
+
+- **`planish_grill` tool available (Pi with the planish extension):** run EVERY round through the `planish_grill` tool. Its page (served at `http://localhost:4390/`) carries a **Submit Answers** button that returns the answers directly to the blocked tool call. Do NOT hand-write `grill_current.html`, do NOT point the user at any other page, and do NOT ask the user to paste answers into the terminal — while `planish_grill` is open, the TUI is blocked inside the tool call and pasted text goes nowhere. Only Submit Answers (or the user aborting the tool call) unblocks it.
+- **No `planish_grill` tool (e.g. Claude Code):** use the static-file flow below — write `grill_current.html`, give the user the URL, and process the `## Answers` block they paste back. The page has **Copy Answers** (no Submit button) and that is correct here: your turn ends after giving the URL, so nothing is blocked and paste-back works.
+
+Mixing them is a deadlock: a blocking `planish_grill` call while the user fills a Copy-Answers-only page means nothing ever submits and the session hangs.
+
 This command follows the canonical Planish HTML Grill Contract at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Use terminal questions only with explicit `--interactive` fallback.
+
+**The steps below describe the static-file transport.** With `planish_grill`, the same content (context header, per-question note/recommendation, mermaid/ascii/visualHtml diagrams) goes into the tool's parameters instead — the tool builds and serves the page itself, and returns the answers when the user clicks Submit.
 
 Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
 

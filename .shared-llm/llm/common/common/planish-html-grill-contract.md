@@ -8,6 +8,15 @@ Customized planning must not default to a plain chat list of questions. The defa
 
 Terminal questions are allowed only for an explicit fallback/interactive mode where no browser/static server is available.
 
+## Answer transports — never mix
+
+There are exactly two ways answers travel back, and a session uses ONE:
+
+1. **Tool-return (Pi `planish_grill` / `planish_submit_plan`).** The tool call blocks; the page it serves (localhost:4390) MUST carry a **Submit** button that POSTs back and unblocks the call. While a planish tool call is open, the TUI is blocked — paste-back is impossible, so never direct the user to a Copy-Answers-only page in this mode.
+2. **Paste-back (static file, e.g. Claude Code).** A subagent writes the grill HTML to disk, the assistant turn ENDS after giving the URL, and the user pastes the Copy Answers markdown back into chat. No Submit button needed — nothing is blocked.
+
+A blocking tool call pointed at a page without a Submit button deadlocks the session. Any grill implementation must make the abort path work: cancelling the tool call from the TUI must unblock it cleanly.
+
 ## Required page sections
 
 Every grill round must include:
