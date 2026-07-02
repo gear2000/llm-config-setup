@@ -98,14 +98,14 @@ def test_configure_creates_and_is_idempotent(tmp_path: Path) -> None:
     _patch_home(m, tmp_path / "home")
     dest = tmp_path / "dest"
 
-    args = argparse.Namespace(source=None, dest=str(dest), list="cc,pi", global_list=None)
+    args = argparse.Namespace(source=None, dest=str(dest), list="cc,pi", global_list=None, exclude=None)
     m.cmd_configure(args)
     assert m.CONFIG_PATH.exists()
     cfg1 = yaml.safe_load(m.CONFIG_PATH.read_text())
     assert cfg1["destinations"] == [{"path": str(dest.resolve()), "harnesses": ["cc", "pi"]}]
 
     # Re-running with the same dest updates in place (no duplicate entry).
-    m.cmd_configure(argparse.Namespace(source=None, dest=str(dest), list="cc,pi,codex", global_list=None))
+    m.cmd_configure(argparse.Namespace(source=None, dest=str(dest), list="cc,pi,codex", global_list=None, exclude=None))
     cfg2 = yaml.safe_load(m.CONFIG_PATH.read_text())
     assert len(cfg2["destinations"]) == 1
     assert cfg2["destinations"][0]["harnesses"] == ["cc", "pi", "codex"]
@@ -115,7 +115,7 @@ def test_configure_rejects_unknown_harness(tmp_path: Path) -> None:
     m = _load()
     _patch_home(m, tmp_path / "home")
 
-    args = argparse.Namespace(source=None, dest=str(tmp_path / "dest"), list="cc,bogus", global_list=None)
+    args = argparse.Namespace(source=None, dest=str(tmp_path / "dest"), list="cc,bogus", global_list=None, exclude=None)
     try:
         m.cmd_configure(args)
         assert False, "expected SystemExit on unknown harness"
@@ -400,6 +400,41 @@ def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:
     assert ext.is_symlink()
     # Pi settings scaffolded.
     assert (home / ".pi/agent/settings.json").exists()
+
+
+def test_home_runtime_exclude_by_source_path_skips_install(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    # Baseline: without exclude, hooks + statusline install.
+    base_cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": [], "exclude": []}
+    m.do_home_runtime(base_cfg, _quiet(m))
+    assert (home / ".claude/statusline.sh").exists()
+    hooks_dir = home / ".claude/hooks"
+    assert hooks_dir.is_dir() and any(hooks_dir.iterdir()), "hooks should install without exclude"
+
+    # Now a fresh home WITH hooks excluded by source path.
+    home2 = tmp_path / "home2"
+    _patch_home(m, home2)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": [],
+           "exclude": ["llm/claude/common/hooks"]}
+    m.do_home_runtime(cfg, _quiet(m))
+    # hooks skipped, statusline still installed (not excluded)
+    assert not (home2 / ".claude/hooks").exists() or not any((home2 / ".claude/hooks").iterdir())
+    assert (home2 / ".claude/statusline.sh").exists()
+
+
+def test_home_runtime_exclude_drops_pi_extension(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["pi"], "destinations": [],
+           "exclude": ["llm/pi/common/extensions/planish.ts"]}
+    m.do_home_runtime(cfg, _quiet(m))
+    # planish.ts excluded, but other extensions still linked (dir not empty)
+    ext = home / ".pi/agent/extensions"
+    assert not (ext / "planish.ts").exists(), "excluded extension must not be linked"
+    assert ext.is_dir() and any(ext.iterdir()), "other extensions still install"
 
 
 def test_home_runtime_scaffold_never_clobbers_existing_settings(tmp_path: Path) -> None:

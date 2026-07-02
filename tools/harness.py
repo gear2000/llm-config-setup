@@ -814,7 +814,25 @@ def load_config() -> dict:
     cfg.setdefault("source", str(DEFAULT_SOURCE))
     cfg.setdefault("global", [])
     cfg.setdefault("destinations", [])
+    cfg.setdefault("exclude", [])
     return cfg
+
+
+def _is_excluded(src: Path, shared_root: Path, exclude: list[str]) -> bool:
+    """True if `src` (a path under the .shared-llm source root) is at or under any
+    `exclude` entry. Exclude entries are plain paths written the way they appear
+    under .shared-llm/ (e.g. 'llm/claude/common/hooks'). Pure prefix match — no
+    component-name logic."""
+    try:
+        rel = src.resolve().relative_to(shared_root.resolve())
+    except ValueError:
+        return False
+    rel_str = str(rel)
+    for entry in exclude:
+        entry = str(entry).strip().strip("/")
+        if entry and (rel_str == entry or rel_str.startswith(entry + "/")):
+            return True
+    return False
 
 
 def save_config(cfg: dict) -> None:
@@ -837,6 +855,7 @@ def parse_harnesses(spec: str) -> list[str]:
 def _print_config(cfg: dict) -> None:
     print(f"  source: {cfg['source']}")
     print(f"  global: {', '.join(cfg['global']) or '(none)'}")
+    print(f"  exclude: {', '.join(cfg.get('exclude', [])) or '(none)'}")
     if not cfg["destinations"]:
         print("  destinations: (none)")
     for d in cfg["destinations"]:
@@ -850,6 +869,8 @@ def cmd_configure(args: argparse.Namespace) -> None:
         cfg["source"] = str(Path(args.source).expanduser())
     if args.global_list is not None:
         cfg["global"] = parse_harnesses(args.global_list)
+    if args.exclude is not None:
+        cfg["exclude"] = [p.strip().strip("/") for p in args.exclude.split(",") if p.strip()]
     if args.dest:
         path = str(Path(args.dest).expanduser().resolve())
         harnesses = parse_harnesses(args.list) if args.list else ["cc", "pi"]
@@ -1381,16 +1402,24 @@ def _scaffold_settings(template: Path, target: Path, log: RunLog) -> None:
     log(f"    settings: scaffolded {target}")
 
 
-def _install_claude_runtime(kit_shared: Path, log: RunLog) -> None:
+def _install_claude_runtime(kit_shared: Path, log: RunLog, exclude: list[str]) -> None:
     src = kit_shared / "llm/claude/common"
     claude_home = HOME / ".claude"
+
+    def skip(p: Path) -> bool:
+        if _is_excluded(p, kit_shared, exclude):
+            log(f"    exclude: {p.relative_to(kit_shared)}")
+            return True
+        return False
+
     if (src / "hooks").is_dir():
         for hook in sorted((src / "hooks").iterdir()):
-            if hook.is_file():
+            if hook.is_file() and not skip(hook):
                 _install_file(hook, claude_home / "hooks" / hook.name, log)
-    if (src / "statusline.sh").is_file():
+    if (src / "statusline.sh").is_file() and not skip(src / "statusline.sh"):
         _install_file(src / "statusline.sh", claude_home / "statusline.sh", log)
-    _scaffold_settings(src / "settings.template.json", claude_home / "settings.json", log)
+    if not skip(src / "settings.template.json"):
+        _scaffold_settings(src / "settings.template.json", claude_home / "settings.json", log)
 
 
 def do_home_runtime(cfg: dict, log: RunLog) -> None:
@@ -1400,7 +1429,8 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
     kit = project_root()
     kit_shared = kit / ".shared-llm"
     staging = kit / "examples"
-    log.always(f"home-runtime: {', '.join(wanted)}")
+    exclude = cfg.get("exclude", [])
+    log.always(f"home-runtime: {', '.join(wanted)}" + (f"  (exclude: {', '.join(exclude)})" if exclude else ""))
 
     # 1. Generic agents — compose to staging, copy into the wanted home agent dirs.
     composer = Composer(kit, output_base=staging, shared_root=kit_shared)
@@ -1417,20 +1447,30 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
                 a_sk += r == "skip"
     log.always(f"  agents: {a_ins} copied, {a_up} current, {a_sk} skipped (foreign/divergent)")
 
-    # 2. Claude runtime — hooks + statusline + settings scaffold.
+    # 2. Claude runtime — hooks + statusline + settings scaffold (exclude-aware).
     if "cc" in wanted:
-        _install_claude_runtime(kit_shared, log)
+        _install_claude_runtime(kit_shared, log, exclude)
 
-    # 3. Pi runtime — extension/persona symlinks + settings scaffold.
+    # 3. Pi runtime — extension/persona symlinks + settings scaffold. Drop any
+    #    source under an exclude path from the link plan before reconciling.
     if "pi" in wanted:
-        counts = reconcile(plan_pi_runtime(kit), repo_family(kit),
+        plan = plan_pi_runtime(kit)
+        if exclude:
+            kept = {dst: src for dst, src in plan.desired.items()
+                    if not _is_excluded(src, kit_shared, exclude)}
+            dropped = len(plan.desired) - len(kept)
+            if dropped:
+                log.always(f"  pi runtime: excluded {dropped} source(s) via exclude list")
+            plan = LinkPlan(kept, plan.dest_dirs)
+        counts = reconcile(plan, repo_family(kit),
                            plan_only=False, force=False, repo_root=kit)
         log.always(
             f"  pi runtime: created {counts['create']}, repointed {counts['repoint']}, "
             f"pruned {counts['prune']}, skipped-foreign {counts['skip-foreign']}"
         )
-        _scaffold_settings(kit_shared / "llm/pi/common/settings.template.json",
-                           HOME / ".pi/agent/settings.json", log)
+        if not _is_excluded(kit_shared / "llm/pi/common/settings.template.json", kit_shared, exclude):
+            _scaffold_settings(kit_shared / "llm/pi/common/settings.template.json",
+                               HOME / ".pi/agent/settings.json", log)
 
 
 # --- update (copy -> compose -> link, with a full run log) -----------------
@@ -1559,6 +1599,7 @@ def main() -> None:
     pcfg.add_argument("-d", "--dest", help="Add/update a destination repo path.")
     pcfg.add_argument("-l", "--list", help="Harnesses for -d (comma-separated: cc,pi,codex). Default cc,pi.")
     pcfg.add_argument("-g", "--global-list", help="Set the global harness list (comma-separated).")
+    pcfg.add_argument("-x", "--exclude", help="Set the home-install exclude list: source paths under .shared-llm/ (comma-separated).")
     pcfg.set_defaults(func=cmd_configure)
 
     pcp = sub.add_parser("copy", help="Kit -> hub -> each destination's .shared-llm/ (common only).")
