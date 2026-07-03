@@ -21,32 +21,26 @@ Each invocation writes a new `vN.html` — never overwrites an existing version.
 
 ## Workflow
 
-### Step 0 — Read project config
+### Step 0 — Resolve base_url
 
-Look for config in this order. Stop at the first match.
+design-doc is a separate skill from planish/plan-and-grill, but both ultimately point a browser at a local static file server, so they share ONE hostname setting instead of two. Resolve in this order, stop at the first match:
 
-1. `.shared-llm/llm/claude/common/config/design-doc.json`
-2. `.claude/design-doc.json`
+1. **Explicit override** — `.shared-llm/llm/claude/common/config/design-doc.json` or `.claude/design-doc.json` (checked in that order). If either sets `base_url`, use it verbatim (no trailing slash). Use this only when design-doc needs a *different* server than planish's — a different port, scheme, or docs root.
+   ```json
+   { "base_url": "http://your-machine-name:8088", "docs_dir": "ops/mkdocs/docs" }
+   ```
+   If this file also sets `docs_dir`, it wins in Step 1 too.
+2. **Shared reference** — walk up from cwd for `.planish.yaml` (the same file `/planish` and `/do-plan-and-grill` read). If it has a `host:` field, `base_url = http://{host}:8089` (8089 is this kit's conventional static-docs-server port — see `.planish.yaml.example`).
+3. **Default** — `base_url = http://localhost:8089`. Always usable: `python3 -m http.server 8089 --directory {docs_dir}` from Step 1 serves it.
 
-Config shape:
-```json
-{
-  "base_url": "http://dev101:8088",
-  "docs_dir": "ops/mkdocs/docs"
-}
-```
-
-- `base_url` — the web server root reachable in a browser (any host/port/scheme). No trailing slash.
-- `docs_dir` — the local path that the web server serves, relative to the repo root.
-
-If no config file is found, auto-detect `docs_dir` (see Step 1) and set `base_url` to `null` (report file path only, no URL).
+`base_url` is never null — there is always a URL to report, even with zero config.
 
 ### Step 1 — Determine output directory
 
-Use `{docs_dir}` from config if set. Otherwise check in this order:
+Use `docs_dir` from the config file that supplied `base_url` in Step 0 (case 1), if it set one. Otherwise check in this order:
 1. `ops/mkdocs/docs/` exists → `ops/mkdocs/docs/diagrams/{slug}/`
 2. `docs/diagrams/` exists → `docs/diagrams/{slug}/`
-3. Otherwise → `diagrams/{slug}/` relative to cwd
+3. Otherwise → `/tmp/docs/diagrams/{slug}/`
 
 `{slug}` = topic lowercased, spaces → hyphens, special chars stripped.
 
@@ -189,18 +183,19 @@ After writing the file, report:
 
 ```
 Created: {full path to vN.html}
-URL:     {base_url}/diagrams/{slug}/vN.html      ← if base_url is configured
-         open {full path} in your browser         ← if no base_url
+URL:     {base_url}/diagrams/{slug}/vN.html
 
 Use the sticky-note toolbar at the bottom to annotate.
 When done, click "Copy Feedback" and paste it here to iterate → v{N+1}.
 Click "Finalize" when the design is locked.
 ```
 
-If `base_url` is not configured, add a one-liner suggestion:
+If `base_url` came from Step 0's default (case 3, no config found at all), add a one-liner:
 ```
-Tip: create .shared-llm/llm/claude/common/config/design-doc.json with
-{"base_url":"http://<host>:<port>","docs_dir":"<path>"} to get a clickable URL.
+Tip: this URL assumes a server at localhost:8089 serving /tmp/docs
+(e.g. `python3 -m http.server 8089 --directory /tmp/docs`). Add
+`host: <your-machine-name>` to .planish.yaml to point this at your real
+docs server instead — same file /planish and /do-plan-and-grill use.
 ```
 
 ---

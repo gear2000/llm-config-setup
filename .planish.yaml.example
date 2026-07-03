@@ -63,6 +63,12 @@
 # default /tmp/planish/{date}/{slug} plan directory.
 #
 #
+# ALSO READ BY: the /design-doc skill (skills/design-doc/SKILL.md) reuses
+# "host" for its own base_url (http://{host}:8089) when it has no more
+# specific config of its own — one hostname for every doc/plan URL this kit
+# hands out. See that skill's Step 0 for its own explicit-override option.
+#
+#
 # COPY AND RENAME TO ACTIVATE
 # ────────────────────────────
 # cp .planish.yaml.example .planish.yaml
