@@ -2,6 +2,16 @@
 
 A portable starter kit for assembling `CLAUDE.md`, `AGENTS.md`, skill files, and agent personas from composable markdown layers. One centralized engine reads a small config file, copies the reusable layers into each repo you register, composes the instruction files, and wires up the per-harness skill links — for every repo at once, from one command.
 
+## License
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This project is **free and open source** software, licensed under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
+
+You may use, modify, and redistribute this code freely. If you distribute this software — or a modified version of it — you must also make the corresponding source available under the same GPL terms. That copyleft requirement keeps derivatives open: contributions and changes cannot be turned into proprietary closed-source distributions.
+
+See [LICENSE](LICENSE) for the full legal text.
+
 ## What it does
 
 LLM coding assistants (Claude Code, Codex, Pi, etc.) read instruction files — `CLAUDE.md`, `AGENTS.md`, skill `.md` files, agent persona `.md` files — to understand your project and to pick up specialized roles. Maintaining these by hand gets messy: duplicated prose, inconsistent tone, hard-to-update cross-cutting rules.
