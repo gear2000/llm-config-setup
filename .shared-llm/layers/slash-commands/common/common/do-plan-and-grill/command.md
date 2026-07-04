@@ -48,7 +48,7 @@ Use this flag when the plan will be executed AFK via `/do-loop --afk`. Without s
 2. **Grill step** — termination requires every phase to have all five checks resolved AND every `**Size**:` confirmed. "Maybe big" is not a valid answer — push for a decision.
 3. **Final plan** — every phase in the output `plan.md` starts with a `**Size**:` line.
 4. **Finalization step** — the plan-writer receives an explicit instruction: every phase MUST start with `**Size**: small` or `**Size**: big` directly under its header. A return that omits any size tag is rejected — re-dispatch.
-5. **Last-phase live-deploy gate** — before finalizing, scan the last phase's verification list. At least one entry must match a live-deploy pattern (`sync-to-git.sh`, `curl https://`, `aws lambda invoke`, `aws logs tail`, `terraform apply`, Jenkins triggers, playwright against live URL). If none found, tell the user and re-enter the grill until the gate passes.
+5. **Last-phase live-deploy gate** — before finalizing, scan the last phase's verification list. At least one entry must match a live-deploy pattern (`sync-to-git.sh`, `curl https://`, `task deploy:<svc>`, `aws lambda invoke`, `aws logs tail`, `terraform apply`, playwright against live URL). If none found, tell the user and re-enter the grill until the gate passes.
 6. **decisions.md entry** — uses route-phases format (see Step 6 below).
 7. **Stop message** — tells the user phase counts and suggests `/rphase-create <path>` as the next step.
 
@@ -59,7 +59,7 @@ small if ALL of:
   - ≤4 tasks
   - ≤5 files in files_touched
   - no live-deploy verification commands (sync-to-git.sh, curl https://,
-    aws lambda invoke, terraform apply, Jenkins triggers, playwright
+    task deploy:<svc>, aws lambda invoke, terraform apply, playwright
     against live URL)
   - single role (only backend OR only frontend OR only devops OR only
     database — not a mix)
