@@ -26,7 +26,7 @@ export interface ProxyEvents {
  * the session dir. The transport writes instructions.md, spawns the worker, and watches results.md.
  */
 export interface RunPhaseCommand {
-	/** The plan.md the brain copied into the session dir (the worker reads it via /meta-autorun). */
+	/** The plan.md the brain copied into the session dir (the worker reads it via /meta-auto-run). */
 	planFile: string;
 	/** The brain's free-form phase token, e.g. "0" or "3" — names the phase's iteration dir. */
 	phase: string;
@@ -34,6 +34,8 @@ export interface RunPhaseCommand {
 	instructions: string;
 	/** Where the transport writes the instructions text: phases/<phase>/iteration/<n>/instructions.md. */
 	instructionsPath: string;
+	/** The resolved route profile copied into the session dir; the phase lead reads this for llm_profile + agent routing. */
+	routeFile: string;
 	/** The results.md the worker must write and the transport watches: phases/<phase>/iteration/<n>/results.md. */
 	resultsPath: string;
 	/** The tmux/worker session name, e.g. "<session_name>-p<phase>-<n>". */
@@ -45,8 +47,8 @@ export interface RunPhaseCommand {
 	/** The model id for "pi" (e.g. "openai-codex/gpt-5.5") or "cursor" (e.g. "claude-sonnet-4-6");
 	 *  ignored for "claude". */
 	model: string;
-	/** Claude only: "team" → a TeamCreate team, "subagents" → subagents. Pi and cursor are always single-agent. */
-	mode: "team" | "subagents";
+	/** Claude only: legacy transport field. Synchronized meta execution must resolve to "subagents". */
+	mode: "subagents";
 }
 
 /**

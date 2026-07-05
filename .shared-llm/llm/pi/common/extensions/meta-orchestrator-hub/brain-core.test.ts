@@ -31,18 +31,20 @@ function makeState(): BrainState {
 		sessionName: "sess",
 		sessionDir: "/tmp/meta-orch/sess",
 		planPath: "/tmp/meta-orch/sess/plan.md",
+		routePath: "/tmp/meta-orch/sess/route.yaml",
 		availableAgents: ["code-review", "deployer", "onboarding-agent"],
 		dirs: { logsDir: "/tmp/meta-orch/sess/logs" },
 		runDir: "/tmp/meta-orch/sess",
 		planHash: "deadbeef0000",
 		hubJsonPath: "/home/u/.meta-orch/hub.json",
+		hubStartedByUs: false,
 		running: false,
 		runningPhase: null,
 		iterations: {},
 		maxRetries: 10,
 		workerType: "claude",
 		workerModel: "",
-		workerMode: "team",
+		workerMode: "subagents",
 	};
 }
 

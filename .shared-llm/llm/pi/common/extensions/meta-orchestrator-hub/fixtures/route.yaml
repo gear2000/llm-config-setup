@@ -1,0 +1,62 @@
+llm_profiles:
+  claude-low:
+    harness: claude
+    model: configured-claude-model
+    effort: low
+  pi-default:
+    harness: pi
+    model: configured-default
+
+worktree:
+  branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
+
+finalization_defaults:
+  green_checks:
+    - command: just test-meta-plan
+  log_checks:
+    - source: build, deploy, and runner logs
+      fail_patterns: ERROR,FATAL,Traceback,uncaught
+
+phases:
+  phase-0:
+    merge_back_at: stage-3-integration-acceptance-seams
+    lead:
+      llm_profile: claude-low
+      agent: phase-evaluator
+    stages:
+      stage-1-implementation:
+        llm_profile: claude-low
+        agent: frontend
+      stage-2-adversarial-audit:
+        llm_profile: pi-default
+        agent: adversarial-evaluator
+      stage-3-integration-acceptance-seams:
+        llm_profile: claude-low
+        agent: qa
+      stage-4-upstream-dag-verification:
+        llm_profile: pi-default
+        agent: monorepo-pkgs
+      stage-5-finalization:
+        llm_profile: claude-low
+        agent: qa
+  phase-1:
+    merge_back_at: stage-5-finalization
+    lead:
+      llm_profile: claude-low
+      agent: phase-evaluator
+    stages:
+      stage-1-implementation:
+        llm_profile: claude-low
+        agent: frontend
+      stage-2-adversarial-audit:
+        llm_profile: pi-default
+        agent: adversarial-evaluator
+      stage-3-integration-acceptance-seams:
+        llm_profile: claude-low
+        agent: qa
+      stage-4-upstream-dag-verification:
+        llm_profile: pi-default
+        agent: monorepo-pkgs
+      stage-5-finalization:
+        llm_profile: claude-low
+        agent: qa

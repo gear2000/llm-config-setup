@@ -185,15 +185,22 @@ export function statusFromOutcome(outcomeStatus: string | null | undefined): Pha
 
 /**
  * Append one terminal phase outcome to the ledger (creating the dir + file if needed). Best-effort:
- * a logging failure must never break the run, so we swallow write errors exactly like the run-log.
- * The record is one JSON object per line (JSONL) so a crash mid-write loses at most the last line.
+ * a logging failure must never break the run, so we NEVER throw here. `onError` (optional) lets a
+ * caller surface the fault (e.g. a one-time UI notify/console.error) without changing that contract —
+ * omit it to swallow silently exactly as before. The record is one JSON object per line (JSONL) so a
+ * crash mid-write loses at most the last line.
  */
-export function appendProgress(runDir: string, entry: PhaseProgressEntry): void {
+export function appendProgress(
+	runDir: string,
+	entry: PhaseProgressEntry,
+	onError?: (err: unknown) => void,
+): void {
 	try {
 		fs.mkdirSync(runDir, { recursive: true });
 		fs.appendFileSync(progressPathFor(runDir), JSON.stringify(entry) + "\n");
-	} catch {
-		// best-effort durable ledger; never let persistence break the run.
+	} catch (err) {
+		// best-effort durable ledger; never let persistence break the run — but let the caller know.
+		onError?.(err);
 	}
 }
 

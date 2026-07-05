@@ -2,7 +2,8 @@ type: skill
 name: run_phase
 description: .shared-llm/layers/slash-commands/common/claude/run-phase-file/description.md
 frontmatter:
-  argument-hint: "--plan <plan.md> --phase <instructions.md> --output <results.md> [--team true] — first three required"
+  argument-hint: "--plan <plan.md> --phase <instructions.md> --route <route.yaml> --output <results.md> — all four required"
 inputs:
-- .shared-llm/layers/slash-commands/common/claude/run-phase-file/command.md
+  - .shared-llm/layers/slash-commands/common/common/meta-runner-phase-protocol.md
+  - .shared-llm/layers/slash-commands/common/claude/run-phase-file/command.md
 output: .claude/skills/run_phase/SKILL.md

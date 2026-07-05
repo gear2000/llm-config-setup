@@ -1,122 +1,197 @@
 /**
  * meta-plan.ts — the `meta-plan:check` and `meta-plan:convert` Pi commands.
  *
- * These shape an incoming plan to the format the meta-orchestrator brain expects (see the canonical
- * spec, meta-plan-format.md, which ships next to this module — the single source of truth for both
- * commands and for the Claude-side `/meta-plan:*` skills).
+ * These commands prepare the two files every synchronized meta runner needs before semi-AFK work can
+ * start:
  *
- *   meta-plan:check <plan>            — read-only: report PASS or the specific violations.
- *   meta-plan:convert <plan> <output> — rewrite <plan> into the format and WRITE it to <output>.
+ *   plan.md    — clean canonical work plan (# Plan, Goal, ordered phases, Done, optional Ideal)
+ *   route.yaml — llm_profiles plus per-phase lead/stage llm_profile + agent routing
  *
- * Both are pure LLM text tasks: the handler reads the plan + the spec, then hands the model a prompt
- * and triggers a turn — the model does the reasoning/writing with its own read/write tools. Kept
- * SEPARATE from the brain (index.ts) so they can be used standalone, before any run. Registered
- * alongside the brain via registerMetaPlan(pi) from index.ts's default export.
+ * The schema comes from the 2026-07-04 meta runner synchronization plan-v9. Do not invent a new shape
+ * here. Runners should call the same deterministic check and fail loud before execution.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	convertLoosePlan,
+	formatCheckResult,
+	validateRunnable,
+} from "./meta-plan-schema.ts";
 
-/** The canonical spec doc that ships next to this module. */
 function specPath(): string {
-	return path.join(path.dirname(fileURLToPath(import.meta.url)), "meta-plan-format.md");
+	return path.join(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"meta-plan-format.md",
+	);
 }
 
-/** Read the spec, or fail loud (the commands have no meaning without their format definition). */
 function readSpec(): string {
-	return fs.readFileSync(specPath(), "utf-8"); // throws if missing — fail loud, never check/convert against a guessed format
+	return fs.readFileSync(specPath(), "utf-8");
 }
 
-/** Resolve a possibly-relative path against the session cwd. */
 function resolvePath(ctx: ExtensionContext, p: string): string {
 	return path.isAbsolute(p) ? p : path.resolve(ctx.cwd || process.cwd(), p);
 }
 
-/** Read a plan file, returning its content or an error string (never throws). */
-function readPlan(planPath: string): { content?: string; error?: string } {
+function readText(
+	label: string,
+	filePath: string,
+): { content?: string; error?: string } {
 	try {
-		return { content: fs.readFileSync(planPath, "utf-8") };
+		return { content: fs.readFileSync(filePath, "utf-8") };
 	} catch (err) {
-		const code = err && typeof err === "object" && "code" in err ? (err as NodeJS.ErrnoException).code : undefined;
-		return { error: code === "ENOENT" ? `plan file not found: ${planPath}` : `cannot read plan: ${err instanceof Error ? err.message : String(err)}` };
+		const code =
+			err && typeof err === "object" && "code" in err
+				? String((err as { code?: unknown }).code)
+				: undefined;
+		return {
+			error:
+				code === "ENOENT"
+					? `${label} not found: ${filePath}`
+					: `cannot read ${label}: ${err instanceof Error ? err.message : String(err)}`,
+		};
 	}
 }
 
+function routeOutputFor(planOutputPath: string): string {
+	const parsed = path.parse(planOutputPath);
+	return path.join(parsed.dir, "route.todo.yaml");
+}
+
 export default function registerMetaPlan(pi: ExtensionAPI): void {
-	// ── meta-plan:check <plan> — read-only conformance report ───────────────────────────────────────
+	// ── meta-plan:check <plan> [route] — deterministic runnable-input report ───────────────────────
 	pi.registerCommand("meta-plan:check", {
-		description: "Check a plan against the meta-plan format (read-only): meta-plan:check <plan>",
-		handler: async (args, ctx) => {
-			const planArg = (args || "").trim();
-			if (!planArg) { ctx.ui.notify("Usage: meta-plan:check <plan>", "error"); return; }
-			const planPath = resolvePath(ctx, planArg);
-			const { content, error } = readPlan(planPath);
-			if (error) { ctx.ui.notify(`meta-plan: ${error}`, "error"); return; }
-			let spec: string;
-			try { spec = readSpec(); } catch (err) { ctx.ui.notify(`meta-plan: cannot read the format spec: ${err instanceof Error ? err.message : String(err)}`, "error"); return; }
+		description:
+			"Check canonical meta plan inputs: meta-plan:check <plan.md> [route.yaml]",
+		handler: async (args: string, ctx: ExtensionContext) => {
+			const toks = (args || "").trim().split(/\s+/).filter(Boolean);
+			if (toks.length < 1 || toks.length > 2) {
+				ctx.ui.notify("Usage: meta-plan:check <plan.md> [route.yaml]", "error");
+				return;
+			}
+			const planPath = resolvePath(ctx, toks[0]);
+			const routePath = toks[1] ? resolvePath(ctx, toks[1]) : undefined;
+			const planRead = readText("plan file", planPath);
+			if (planRead.error) {
+				ctx.ui.notify(`meta-plan: ${planRead.error}`, "error");
+				return;
+			}
+			let routeContent: string | undefined;
+			if (routePath) {
+				const routeRead = readText("route file", routePath);
+				if (routeRead.error) {
+					ctx.ui.notify(`meta-plan: ${routeRead.error}`, "error");
+					return;
+				}
+				routeContent = routeRead.content;
+			}
 
-			const prompt = [
-				"You are CHECKING a plan against the meta-orchestrator plan format. This is READ-ONLY — do NOT modify any file.",
+			const result = validateRunnable(planRead.content!, routeContent);
+			// validateRunnable ALSO enforces "a route is required to be runnable", which is irrelevant to
+			// whether the PLAN ITSELF is well-formed when the caller only passed a plan. Reporting that
+			// combined result under the `PLAN_CHECK:` prefix reads as "your plan is broken" when the plan
+			// may be fine and only the route is absent — report the RUNNABLE_CHECK verdict under its own
+			// prefix instead, plus an explicit note when it failed solely for lack of a route.
+			const prefix = routePath ? "PLAN_CHECK" : "RUNNABLE_CHECK";
+			const lines = [
+				formatCheckResult(prefix, result),
 				"",
-				"===== THE FORMAT SPEC (the authority) =====",
-				spec,
-				"===== END SPEC =====",
-				"",
-				`===== THE PLAN UNDER CHECK (${planPath}) =====`,
-				content!,
-				"===== END PLAN =====",
-				"",
-				"Report conformance. Start your reply with exactly `PLAN_CHECK: PASS` or `PLAN_CHECK: FAIL`, then a short bullet list of any issues, worst first:",
-				"- missing `# Plan:` title or `Goal:` line;",
-				"- phases not `## Phase <N> — <title>`, not numbered from 0, or out of order;",
-				"- any phase with NO `Done:` line (this is the one hard requirement — flag a MISSING Done:, but do NOT flag a Done: merely for being modest; the bar is allowed to be 'sufficient', not perfect);",
-				"- leftover per-phase worker/agent/team directives (e.g. `Agents:`/`team:`) — obsolete, the worker is global;",
-				"- anything that ENCODES A SHORTCUT or compromises the non-negotiables (dropping a feature to pass, faking a pass, untested/dead code, swallowing failures).",
-				"Be lenient on bar height; be strict on a missing Done:, on shortcuts, and on the non-negotiables. Do not rewrite the plan — only report.",
-			].join("\n");
-
-			pi.sendMessage({ customType: "meta-plan-check", content: prompt, display: true }, { deliverAs: "followUp", triggerTurn: true });
+				`plan: ${planPath}`,
+				routePath
+					? `route: ${routePath}`
+					: "route: missing (plan-only check is not runnable — the failure above may be solely due to the missing route.yaml, not a defect in the plan itself)",
+			];
+			pi.sendMessage(
+				{
+					customType: "meta-plan-check",
+					content: lines.join("\n"),
+					display: true,
+				},
+				{ deliverAs: "followUp", triggerTurn: false },
+			);
 		},
 	});
 
-	// ── meta-plan:convert <plan> <output> — rewrite into the format, write to <output> ───────────────
+	// ── meta-plan:convert <source> <plan-output> [route-output] — deterministic starter conversion ──
 	pi.registerCommand("meta-plan:convert", {
-		description: "Convert a loose plan into the meta-plan format and write it: meta-plan:convert <plan> <output>",
-		handler: async (args, ctx) => {
+		description:
+			"Convert a loose Markdown plan to plan.md plus route TODO stub: meta-plan:convert <source.md> <plan-output.md> [route-output.yaml]",
+		handler: async (args: string, ctx: ExtensionContext) => {
 			const toks = (args || "").trim().split(/\s+/).filter(Boolean);
-			if (toks.length < 2) { ctx.ui.notify("Usage: meta-plan:convert <plan> <output>", "error"); return; }
-			const planPath = resolvePath(ctx, toks[0]);
-			const outputPath = resolvePath(ctx, toks[1]);
-			const { content, error } = readPlan(planPath);
-			if (error) { ctx.ui.notify(`meta-plan: ${error}`, "error"); return; }
-			let spec: string;
-			try { spec = readSpec(); } catch (err) { ctx.ui.notify(`meta-plan: cannot read the format spec: ${err instanceof Error ? err.message : String(err)}`, "error"); return; }
+			if (toks.length < 2 || toks.length > 3) {
+				ctx.ui.notify(
+					"Usage: meta-plan:convert <source.md> <plan-output.md> [route-output.yaml]",
+					"error",
+				);
+				return;
+			}
+			const sourcePath = resolvePath(ctx, toks[0]);
+			const planOutputPath = resolvePath(ctx, toks[1]);
+			const routeOutputPath = resolvePath(
+				ctx,
+				toks[2] ?? routeOutputFor(planOutputPath),
+			);
+			if (/\.html?$/i.test(sourcePath)) {
+				ctx.ui.notify(
+					"meta-plan: HTML input is not supported; pass the paired Markdown plan file",
+					"error",
+				);
+				return;
+			}
+			const sourceRead = readText("source plan", sourcePath);
+			if (sourceRead.error) {
+				ctx.ui.notify(`meta-plan: ${sourceRead.error}`, "error");
+				return;
+			}
+			try {
+				readSpec();
+			} catch (err) {
+				ctx.ui.notify(
+					`meta-plan: cannot read the format spec: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+				return;
+			}
 
-			const prompt = [
-				"You are CONVERTING a plan into the meta-orchestrator plan format, then WRITING the result.",
-				"",
-				"===== THE FORMAT SPEC (the authority — follow it exactly) =====",
-				spec,
-				"===== END SPEC =====",
-				"",
-				`===== THE SOURCE PLAN (${planPath}) =====`,
-				content!,
-				"===== END SOURCE PLAN =====",
-				"",
-				`Rewrite the source plan into the format above and WRITE it to: ${outputPath} (use your write tool).`,
-				"Rules for the conversion:",
-				"- PRESERVE the author's intent and scope — do NOT drop, weaken, or simplify away any work to make the plan tidy. If the source asks for something hard, the converted plan still asks for it.",
-				"- Number phases from 0, in order. Give EACH phase a sufficient `Done:`. If a phase has no checkable condition and you cannot HONESTLY infer one from its text, write `Done: TODO — needs a checkable condition` — never fabricate a check.",
-				"- Lift any stretch/perfection goal into an optional `Ideal:`.",
-				"- Strip obsolete per-phase worker/agent/team directives (the worker is global).",
-				"- Embed the non-negotiables section from the spec into the converted plan, verbatim, so the plan is self-contained.",
-				"- Hold YOURSELF to those non-negotiables while converting: do not compromise the plan, and do not invent or omit anything to make conversion easier.",
-				"After writing, confirm the output path and give a short summary of what you changed (renumbered phases, added/flagged Done: checks, stripped lines, embedded non-negotiables).",
-			].join("\n");
+			const converted = convertLoosePlan(sourceRead.content!);
+			try {
+				fs.mkdirSync(path.dirname(planOutputPath), { recursive: true });
+				fs.mkdirSync(path.dirname(routeOutputPath), { recursive: true });
+				fs.writeFileSync(planOutputPath, converted.plan, "utf-8");
+				fs.writeFileSync(routeOutputPath, converted.route, "utf-8");
+			} catch (err) {
+				ctx.ui.notify(
+					`meta-plan: cannot write converted outputs: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+				return;
+			}
 
-			pi.sendMessage({ customType: "meta-plan-convert", content: prompt, display: true }, { deliverAs: "followUp", triggerTurn: true });
+			const result = validateRunnable(converted.plan, converted.route);
+			const lines = [
+				"META_PLAN_CONVERT: wrote canonical starter files",
+				`plan: ${planOutputPath}`,
+				`route: ${routeOutputPath}`,
+				"",
+				"The route output intentionally contains TODO values unless the human fills real profiles/agents.",
+				formatCheckResult("RUNNABLE_CHECK", result),
+			];
+			if (converted.notes.length)
+				lines.push("", "Notes:", ...converted.notes.map((note) => `- ${note}`));
+			pi.sendMessage(
+				{
+					customType: "meta-plan-convert",
+					content: lines.join("\n"),
+					display: true,
+				},
+				{ deliverAs: "followUp", triggerTurn: false },
+			);
 		},
 	});
 }

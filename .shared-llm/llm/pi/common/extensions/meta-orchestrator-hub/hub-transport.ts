@@ -5,8 +5,8 @@
  *   1. writing the brain's instructions for this attempt to
  *      `phases/<phase>/iteration/<n>/instructions.md`,
  *   2. spawning an INTERACTIVE Claude Code TUI worker in tmux via
- *      `just worker-up <session> <hub> <plan.md> <instructions.md> <results.md> <team>` — the worker
- *      runs `/meta-autorun`, which connects to the hub, does the phase work, and WRITES
+ *      `just worker-up <session> <hub> <plan.md> <instructions.md> <route.yaml> <results.md> <team>` — the worker
+ *      runs `/meta-auto-run`, which connects to the hub, does the phase work, and WRITES
  *      `phases/<phase>/iteration/<n>/results.md` whose first non-empty line is `PHASE_RESULT: <verdict>`,
  *   3. WATCHING for that results.md — polling until it exists and its first non-empty line matches
  *      `/^PHASE_RESULT:/`. THAT FILE is the completion signal, not any hub message,
@@ -126,11 +126,11 @@ export async function hubRunPhase(input: RunPhaseInput): Promise<PhaseOutcome> {
 	const { phaseId, dirs, events } = input;
 
 	if (!input.runPhaseCommand) {
-		throw new Error("hubRunPhase: runPhaseCommand is required (the file transport runs the /meta-autorun worker path)");
+		throw new Error("hubRunPhase: runPhaseCommand is required (the file transport runs the /meta-auto-run worker path)");
 	}
 	const rpc = input.runPhaseCommand;
-	if (!rpc.instructionsPath || !rpc.resultsPath || !rpc.planFile) {
-		throw new Error("hubRunPhase: runPhaseCommand needs planFile, instructionsPath and resultsPath — the brain-core sets these from the session dir");
+	if (!rpc.instructionsPath || !rpc.routeFile || !rpc.resultsPath || !rpc.planFile) {
+		throw new Error("hubRunPhase: runPhaseCommand needs planFile, instructionsPath, routeFile and resultsPath — the brain-core sets these from the session dir");
 	}
 
 	fs.mkdirSync(dirs.logsDir, { recursive: true });
@@ -148,26 +148,29 @@ export async function hubRunPhase(input: RunPhaseInput): Promise<PhaseOutcome> {
 	const session = rpc.session;
 
 	// Build the worker-launch command for this run's harness.
-	// claude  → `worker-up`        (a Claude TUI that runs /meta-autorun, with team|subagents from `mode`)
+	// claude  → `worker-up`        (a Claude TUI that runs /meta-auto-run, with team|subagents from `mode`)
 	// pi      → `worker-up-pi`     (a single-agent Pi TUI on `model`, no hub, no team)
 	// cursor  → `worker-up-cursor` (a Cursor Agent --print headless worker on `model`, no hub, no team)
 	// All three write results.md, which is what the transport watches.
 	const workerType = rpc.workerType;
-	const teamArg = rpc.mode === "team" ? "true" : "false";
+	// Legacy wire arg kept for worker-up compatibility. Synchronized meta execution never enables
+	// Claude team mode; phase/stage agents are resolved by the route profile.
+	const teamArg = "false";
 	let upArgs: string[];
 	if (workerType === "pi") {
-		upArgs = ["worker-up-pi", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.resultsPath];
+		upArgs = ["worker-up-pi", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.routeFile, rpc.resultsPath];
 	} else if (workerType === "cursor") {
-		upArgs = ["worker-up-cursor", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.resultsPath];
+		upArgs = ["worker-up-cursor", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.routeFile, rpc.resultsPath];
 	} else {
 		// "claude" — the default
-		upArgs = ["worker-up", session, input.hubJsonPath, rpc.planFile, rpc.instructionsPath, rpc.resultsPath, teamArg];
+		upArgs = ["worker-up", session, input.hubJsonPath, rpc.planFile, rpc.instructionsPath, rpc.routeFile, rpc.resultsPath, teamArg];
 	}
 
 	writeLog(`# meta-orchestrator phase ${phaseId} — FILE transport`);
 	writeLog(`# session: ${session}`);
 	writeLog(`# plan: ${rpc.planFile}`);
 	writeLog(`# instructions: ${rpc.instructionsPath}`);
+	writeLog(`# route: ${rpc.routeFile}`);
 	writeLog(`# results (watched): ${rpc.resultsPath}`);
 	if (workerType === "cursor") writeLog(`# worker: cursor (model ${rpc.model})`);
 	else if (workerType === "pi") writeLog(`# worker: pi (model ${rpc.model})`);
@@ -208,7 +211,7 @@ export async function hubRunPhase(input: RunPhaseInput): Promise<PhaseOutcome> {
 
 	try {
 		// 4. Spawn the interactive TUI worker. Its tmux output is irrelevant — completion is the file.
-		events?.onLog?.("meta-orch-log", { event: "worker_up", phaseId, session, workerType: rpc.workerType, model: isPi ? rpc.model : undefined });
+		events?.onLog?.("meta-orch-log", { event: "worker_up", phaseId, session, workerType: rpc.workerType, model: workerType === "pi" ? rpc.model : undefined });
 		const up = await runJust(repoRoot, upArgs);
 		if (up.code !== 0) {
 			throw new Error(`just ${upArgs[0]} ${session} failed (exit=${up.code})${up.stderr ? `: ${up.stderr}` : ""}`);
