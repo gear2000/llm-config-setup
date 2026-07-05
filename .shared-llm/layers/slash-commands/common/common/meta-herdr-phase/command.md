@@ -50,7 +50,9 @@ Create/use the temporary worktree branch named by the route template. Launch the
 
 ### Stage 2 — adversarial audit on the same temp worktree
 
-Launch the configured Stage 2 auditor on the same temporary worktree branch. It reviews Stage 1 changes for signature mismatches, unused/dead code, and goal cheating. Blocking findings go back to a new Stage 1 attempt with the raw audit report. `VERIFICATION_PASSED` advances to Stage 3. Non-blocking notes are recorded but do not fail the phase.
+Launch the configured Stage 2 auditor on the same temporary worktree branch. It reviews Stage 1 changes for signature mismatches, unused/dead code, goal cheating, and **unused intake / accepted-but-ignored inputs**. Blocking findings go back to a new Stage 1 attempt with the raw audit report. `VERIFICATION_PASSED` advances to Stage 3. Non-blocking notes are recorded but do not fail the phase.
+
+For the unused-intake check, the auditor must enumerate newly accepted inputs from the phase diff and reject any function parameter, destructured field, request/schema field, config/env value, command-line option, validation parameter, or fixture value that does not affect validation, control flow, transformation, persistence, or downstream calls. It should use AST-aware inspection where available, then cross-check lint/type/static-analysis signals, directly affected call-sites, and semantic test behavior. Do not accept hardcoding, bypasses, stubs, fake intake, or "intentional unused" markers that hide goal cheating. Each failure report must name the ignored input, where it is accepted, expected behavioral role, evidence, affected public surface/call-site when applicable, and whether to remove the intake or wire it into real behavior.
 
 ### Stage 3 — integration/acceptance seam testing
 

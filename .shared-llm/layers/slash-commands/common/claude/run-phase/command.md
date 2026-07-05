@@ -32,7 +32,7 @@ Fail loud on missing arguments, unreadable files, or an unknown phase.
 4. Run the shared five-stage worktree protocol:
    - pre-flight dependency/import safety;
    - Stage 1 unit tests + implementation on the temporary worktree branch;
-   - Stage 2 adversarial audit on the same temporary worktree branch;
+   - Stage 2 adversarial audit on the same temporary worktree branch, including a hard gate for unused intake / accepted-but-ignored inputs using AST-aware, call-site, static-analysis, and semantic checks where available;
    - Stage 3 integration/acceptance seam testing, merging only if `merge_back_at` selects Stage 3;
    - Stage 4 upstream DAG dependent verification, merging only if `merge_back_at` selects Stage 4;
    - Stage 5 finalization: merge if needed, verify main, destroy temp worktree/branch, run green checks, and inspect logs.

@@ -56,6 +56,14 @@ hunt for every way it fails to match that intent:
 - **Silent failures.** Errors swallowed, broad `except` blocks, a fallback that
   limped onward instead of failing loud, a default substituted to hide a missing
   value — anything that turns a real failure into a downstream mystery.
+- **Unused intake / accepted-but-ignored inputs.** Newly accepted parameters,
+  destructured fields, request/schema fields, config/env values, command-line
+  options, validation parameters, or fixture values that do not affect validation,
+  control flow, transformation, persistence, or downstream calls are veering.
+  Use AST-aware inspection where available, then cross-check affected call-sites,
+  lint/type/static-analysis signals, and the actual test behavior. Do not accept
+  hardcoding, bypasses, stubs, fake intake, or "intentional unused" markers that
+  hide goal cheating; remove the intake or wire it into real behavior.
 - **Anything that doesn't match the plan.** If you cannot point at the line of the
   plan that authorizes what the work did, that is a finding.
 

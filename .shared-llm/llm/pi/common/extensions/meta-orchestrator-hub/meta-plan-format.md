@@ -152,7 +152,7 @@ agent: <real configured agent/persona name>
 Every route phase has the same five stage ids:
 
 1. `stage-1-implementation` — create/use the temporary worktree branch, write unit tests, and write the code.
-2. `stage-2-adversarial-audit` — independent hostile audit of Stage 1 on the same temporary worktree branch.
+2. `stage-2-adversarial-audit` — independent hostile audit of Stage 1 on the same temporary worktree branch, including a hard gate for unused intake / accepted-but-ignored inputs.
 3. `stage-3-integration-acceptance-seams` — integration/acceptance/seam checks; merge here only when `merge_back_at` is this stage.
 4. `stage-4-upstream-dag-verification` — dependent build/deploy/test verification; merge here only when `merge_back_at` is this stage.
 5. `stage-5-finalization` — merge if not already merged, verify main, destroy the temporary worktree/branch, run green checks, inspect logs for hidden failures, and record evidence.

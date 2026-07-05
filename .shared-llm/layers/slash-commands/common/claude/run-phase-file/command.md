@@ -54,7 +54,7 @@ Stage agents and advisors must not create agents, teams, panes, nested harness s
 
 1. **Pre-flight** — dependency/import graph safety. If a circular dependency involving the target and parent/dependent layers is confirmed, write `blocked` and include the required critical-fail message.
 2. **Stage 1** — unit tests + implementation in a TDD loop on the temporary worktree branch.
-3. **Stage 2** — adversarial audit of Stage 1 code on the same temporary worktree branch. Blocking findings loop back to Stage 1; `VERIFICATION_PASSED` advances.
+3. **Stage 2** — adversarial audit of Stage 1 code on the same temporary worktree branch, including unused intake / accepted-but-ignored inputs. Blocking findings loop back to Stage 1; `VERIFICATION_PASSED` advances.
 4. **Stage 3** — integration/acceptance seam testing. Merge here only if `merge_back_at` selects Stage 3; otherwise continue on the temp worktree.
 5. **Stage 4** — upstream DAG dependent build/deploy/test verification. Merge here only if `merge_back_at` selects Stage 4; otherwise use main if already merged or continue on the temp worktree.
 6. **Stage 5** — finalization. Merge if needed, verify main, destroy the temp worktree/branch, run green checks, inspect logs, and record evidence.

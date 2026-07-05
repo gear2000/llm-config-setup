@@ -164,11 +164,24 @@ No hardcoding, bypassing validation, empty stubs, or goal cheating just to pass 
 
 ### Stage 2 — adversarial audit of Stage 1 code on the same temp worktree
 
-Run an independent hostile reviewer against the files modified in Stage 1 on the same temporary worktree branch. It checks signature mismatches, unused/dead code, and goal cheating.
+Run an independent hostile reviewer against the files modified in Stage 1 on the same temporary worktree branch. It checks signature mismatches, unused/dead code, goal cheating, and **unused intake / accepted-but-ignored inputs**.
+
+The Stage 2 auditor must fail hard on any newly accepted input that does not influence real behavior. This includes newly added function parameters, destructured fields, request/schema fields, configuration/env values, command-line options, validation parameters, and fixture values. Every newly accepted input must affect validation, control flow, transformation, persistence, or downstream calls — otherwise the coder either removes the intake or wires it into real behavior. Do not allow hardcoding, bypassing, stubbing, or fake intake just to satisfy tests.
+
+Use a multi-angle audit rather than a single generic unused-variable scan:
+
+- start from the phase diff and enumerate newly accepted inputs;
+- use AST-aware inspection where available to trace identifiers from intake sites to real usage sites;
+- cross-check lint, type, and static-analysis signals for unused variables, unused parameters, unused imports, unreachable branches, and dropped arguments;
+- trace directly affected public interfaces and call-sites for signature expansion where callers pass values that callees ignore;
+- semantically inspect tests and implementation for assertions that pass only because inputs are accepted but not validated, transformed, persisted, or propagated.
+
+Intentional unused inputs are allowed only when explicit and auditable: underscore-prefixed names, framework/interface-mandated parameters, or a short explanatory comment. These markers never excuse goal cheating; if the phase goal requires the input to matter, it must matter.
 
 - `VERIFICATION_PASSED` advances to Stage 3.
 - Blocking findings loop back to a new Stage 1 attempt with the raw findings.
 - Non-blocking notes are reported but do not fail the phase.
+- Each blocking unused-intake finding must name the input, where it is accepted, the expected behavioral role, evidence that it is ignored, any affected call-site/public surface, and the recommended fix.
 
 ### Stage 3 — integration/acceptance seam testing
 

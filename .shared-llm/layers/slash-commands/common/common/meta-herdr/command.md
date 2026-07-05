@@ -55,7 +55,7 @@ The phase Lead Agent runs `/meta-herdr-phase`. It creates exactly one stage agen
 
 1. pre-flight dependency/import safety;
 2. Stage 1 — unit tests + implementation on the temporary worktree branch;
-3. Stage 2 — adversarial audit of Stage 1 code on the same temporary worktree branch;
+3. Stage 2 — adversarial audit of Stage 1 code on the same temporary worktree branch, including unused intake / accepted-but-ignored inputs;
 4. Stage 3 — integration/acceptance seam testing, merging only if `merge_back_at` selects Stage 3;
 5. Stage 4 — upstream DAG dependent build/deploy/test verification, merging only if `merge_back_at` selects Stage 4;
 6. Stage 5 — finalization: merge if needed, verify main, destroy temp worktree/branch, run green checks, and inspect logs.
