@@ -1,0 +1,9 @@
+type: skill
+name: meta-cc
+description: .shared-llm/layers/slash-commands/common/claude/meta-cc/description.md
+frontmatter:
+  argument-hint: "--plan <plan.md> --route <route.yaml> --output-dir <dir> [--start-phase <N>] [--max-phases <N>]"
+inputs:
+  - .shared-llm/layers/slash-commands/common/common/meta-runner-phase-protocol.md
+  - .shared-llm/layers/slash-commands/common/claude/meta-cc/command.md
+output: .claude/skills/meta-cc/SKILL.md

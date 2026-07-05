@@ -3,7 +3,7 @@
  *
  * The brain decides the phase + WRITES the instructions for the attempt, then calls ONE tool
  * (run_phase). The TS transport writes the instructions file, spawns an interactive Claude TUI worker
- * (`just worker-up`) that runs /meta-autorun, WATCHES for the worker's results.md (the file whose
+ * (`just worker-up`) that runs /meta-auto-run, WATCHES for the worker's results.md (the file whose
  * first line is `PHASE_RESULT: <verdict>` — the completion signal), reads it, judges it via
  * judgePhaseStatus, tears the worker down, and pushes the verdict back to the brain as a follow-up.
  * A not-passed phase is the brain's cue to rerun (a new iteration) or backtrack.
@@ -37,15 +37,32 @@ export function recordPhaseProgress(
 	outcomeStatus: string | null | undefined,
 	report: string | undefined,
 	planHash: string | undefined,
+	log?: LogFn,
 ): void {
-	appendProgress(runDir, {
-		phase,
-		status: judgePhaseStatus({ outcomeStatus, report }),
-		timestamp: new Date().toISOString(),
-		phaseId,
-		summary: report ? report.slice(0, 1000) : undefined,
-		planHash,
-	});
+	appendProgress(
+		runDir,
+		{
+			phase,
+			status: judgePhaseStatus({ outcomeStatus, report }),
+			timestamp: new Date().toISOString(),
+			phaseId,
+			summary: report ? report.slice(0, 1000) : undefined,
+			planHash,
+		},
+		// appendProgress never throws (best-effort ledger), but a silently-lost entry breaks resume
+		// (a re-run would redo an already-passed phase, or a human reading the ledger would see a gap
+		// with no clue why) — surface it once via the caller's log channel instead of swallowing.
+		log
+			? (err) =>
+					log({
+						event: "progress_append_failed",
+						runDir,
+						phase,
+						phaseId,
+						error: err instanceof Error ? err.message : String(err),
+					})
+			: undefined,
+	);
 }
 
 /**
@@ -59,8 +76,10 @@ export interface BrainState {
 	sessionName: string;
 	/** The session dir: `<META_ORCH_FILE_DIR>/<sessionName>/` — holds plan.md + phases/. */
 	sessionDir: string;
-	/** The copied plan: `<sessionDir>/plan.md` — the worker reads it via /meta-autorun. */
+	/** The copied plan: `<sessionDir>/plan.md` — the worker reads it via /meta-auto-run. */
 	planPath: string;
+	/** The copied route profile: `<sessionDir>/route.yaml` — the phase lead resolves llm_profile + agent routing from it. */
+	routePath: string;
 	availableAgents: string[];
 	/** The transport's logs dir (under sessionDir). */
 	dirs: BrainDirs;
@@ -87,12 +106,12 @@ export interface BrainState {
 	/** The worker harness for the WHOLE run (from --worker-type, default "claude"). "claude" → a Claude
 	 *  TUI worker; "pi" → a single-agent Pi worker. Set once at launch — not per phase. */
 	workerType: "claude" | "pi";
-	/** The Pi model id when workerType==="pi" (from --model, default "openai-codex/gpt-5.5"); the Claude
+	/** The Pi model id when workerType==="pi" (from --model or configured default); the Claude
 	 *  worker takes no model (it runs the user's Claude). */
 	workerModel: string;
-	/** Claude only: "team" → TeamCreate team, "subagents" → subagents (from --mode, default "team").
-	 *  Replaces the old per-phase team decision — it is global for the run. Ignored for Pi. */
-	workerMode: "team" | "subagents";
+	/** Claude only: synchronized meta execution resolves to subagent-style stage workers.
+	 *  Kept for transport compatibility; route profiles choose the phase lead and stage agents. */
+	workerMode: "subagents";
 }
 
 /** Best-effort structured logging — index.ts injects pi.appendEntry; tests inject a recorder. */
@@ -204,7 +223,7 @@ export function iterationDir(sessionDir: string, phase: string, iteration: numbe
  * Instead we fire-and-return and let hubRunPhase()'s .then/.catch push the outcome — keeping the
  * brain free while a phase runs.
  *
- * The transport writes instructions.md, spawns the tmux /meta-autorun worker, watches results.md,
+ * The transport writes instructions.md, spawns the tmux /meta-auto-run worker, watches results.md,
  * and reads it as the report. It judges nothing — the brain reasons; judgePhaseStatus reads the
  * `PHASE_RESULT:` verdict out of the report.
  */
@@ -226,7 +245,7 @@ export function startPhaseInBackground(
 		const recorded = judgePhaseStatus({ outcomeStatus: outcome?.status ?? null, report });
 		log({ event: "phase_done", phaseId, phase, iteration, status: recorded, processStatus: outcome?.status ?? "errored" });
 		// Persist this terminal outcome to the durable ledger so a restart of the same plan RESUMES.
-		recordPhaseProgress(state.runDir, phase, phaseId, outcome?.status ?? null, report, state.planHash);
+		recordPhaseProgress(state.runDir, phase, phaseId, outcome?.status ?? null, report, state.planHash, log);
 
 		if (errText) {
 			pushFollowUp(
@@ -262,7 +281,7 @@ export function startPhaseInBackground(
 	log({ event: "phase_start", phaseId, phase, iteration, session, workerType: state.workerType, model: state.workerModel, mode: state.workerMode });
 	hubRunPhase({
 		phaseId,
-		runPhaseCommand: { planFile: state.planPath, phase, instructions, instructionsPath, resultsPath, session, workerType: state.workerType, model: state.workerModel, mode: state.workerMode },
+		runPhaseCommand: { planFile: state.planPath, phase, instructions, instructionsPath, routeFile: state.routePath, resultsPath, session, workerType: state.workerType, model: state.workerModel, mode: state.workerMode },
 		dirs: state.dirs,
 		hubJsonPath: state.hubJsonPath,
 		events,

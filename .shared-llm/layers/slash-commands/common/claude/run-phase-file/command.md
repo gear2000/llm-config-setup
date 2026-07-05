@@ -1,164 +1,88 @@
 # /run_phase
 
-Run **ONE phase** of a plan **from files** — the file-based worker playbook the meta-orchestrator
-**brain** launches per phase. A Pi brain spawns a fresh Claude Code TUI session and sends it ONE
-command. The phase's data does NOT travel over the hub — it travels as **files on disk**. This
-command reads the plan file and the phase's instructions file, does the work by dispatching an
-agent **team** (or subagents), runs the mandatory adversarial gate, and **writes the phase result
-to a file**. That results file is the source of truth the brain reads to judge the phase.
-
-This is the file-based sibling of the older `/run-phase` (which took `plan=…/phase=N/agents=…` and
-got its work over the hub). Here the work, the instructions, and the verdict all live in files; the
-hub is only used elsewhere for the join + a done-ping. **This command itself is HUB-AGNOSTIC — it
-touches no hub, only files.**
+Run **one phase** of a canonical meta plan from files. This is the file-based phase Lead Agent playbook launched by Meta-ORCH / Meta-CC. The hub is not involved here; this command reads files and writes a result file.
 
 ## Invocation
 
+```text
+/run_phase --plan <plan.md> --phase <instructions.md> --route <route.yaml> --output <results.md>
 ```
-/run_phase --plan <plan.md> --phase <instructions.md> --output <results.md> [--team true]
+
+Required:
+
+- `--plan <plan.md>` — canonical meta plan.
+- `--phase <instructions.md>` — phase instructions for this attempt.
+- `--route <route.yaml>` — resolved route profile with `llm_profiles` and inline `agent` names.
+- `--output <results.md>` — result file to write.
+
+Fail loud on any missing or unreadable required input. Do not guess defaults.
+
+## File contract
+
+The result file at `--output` is the deliverable and source of truth. Its first line must be exactly:
+
+```text
+PHASE_RESULT: passed|partial|blocked|failed
 ```
 
-- `--plan <plan.md>` — absolute path to the full plan markdown the brain already wrote.
-- `--phase <instructions.md>` — absolute path to the brain's instructions for THIS attempt
-  (`phases/<phase>/iteration/<n>/instructions.md`). This file states the phase's goal + done-check.
-- `--output <results.md>` — absolute path you WRITE the result to
-  (`phases/<phase>/iteration/<n>/results.md`). The brain reads this file to judge the phase.
-- `--team true` — optional. When present, do the work with a **TeamCreate** team (named teammates
-  in their own tmux windows — the interactive-TUI team feature). When absent, dispatch **subagents**
-  via the Task/Agent tool.
-
-These are `--flag value` tokens in `$ARGUMENTS`; they may appear in any order.
-
-## The file contract (read this — it is the whole job)
-
-Everything reads and writes files under the session dir `/tmp/meta-orch/<session_name>/`:
-
-- `plan.md` — the full plan (the brain already wrote it). You READ it.
-- `phases/<phase>/iteration/<n>/instructions.md` — the brain's instructions for this attempt (the
-  brain already wrote it). You READ it: it carries the phase's goal and its done-check.
-- `phases/<phase>/iteration/<n>/results.md` — **you WRITE this.** It MUST begin with a single line:
-
-  ```
-  PHASE_RESULT: passed|partial|blocked|failed
-  ```
-
-  then a `----- REPORT -----` section below it with what was done + the evaluator outcome. **The
-  brain reads this file to judge the phase — it is the source of truth, so writing it correctly is
-  the whole job.** A run that does the work but never writes `results.md` (or writes it without the
-  leading `PHASE_RESULT:` line) is a failed run — the brain cannot certify it.
+Then include evidence for the phase lead, stages, advisor status, dependency graph source, commands/logs, and cleanup or rollback actions.
 
 ## Execution
 
-### Step 1 — Parse `$ARGUMENTS` (fail loud on any missing or unreadable)
+### Step 1 — Parse and validate inputs
 
-Parse `--plan`, `--phase`, `--output` (and the optional `--team`). **Do not guess a default for any
-of the three required paths.**
+Read the whole plan, the phase instructions file, and the route profile. Run the same gate as `/meta-plan-check <plan.md> <route.yaml>` first. Validate:
 
-- **Any of `--plan` / `--phase` / `--output` missing** → print and STOP:
+- canonical plan shape;
+- no runner/stage routing in the plan body;
+- the selected phase exists;
+- the phase has `lead.llm_profile` and `lead.agent` in the route profile;
+- all five stages have `llm_profile` and `agent`;
+- the phase has `merge_back_at` set to Stage 3, Stage 4, or Stage 5;
+- worktree branch template, green checks, and log checks are configured;
+- referenced profiles exist;
+- named agents resolve in the appropriate Claude/project or harness context;
+- Stage 2 is independent from Stage 1.
 
-  ```
-  Usage: /run_phase --plan <plan.md> --phase <instructions.md> --output <results.md> [--team true]
-  All three paths are required: the plan file, the phase instructions file, and the output results file.
-  ```
+### Step 2 — Act as phase Lead Agent
 
-- **`--plan` unreadable** → STOP: `ERROR: plan file not found / unreadable: <plan>`.
-- **`--phase` unreadable** → STOP: `ERROR: phase instructions file not found / unreadable: <phase>`.
-- **`--output` directory does not exist / is not writable** → STOP:
-  `ERROR: results output path not writable: <output>`. (The brain creates the iteration dir; if it
-  is missing, the launch is broken — fail loud, do not silently `mkdir` somewhere else.)
+You are the phase Lead Agent. You orchestrate one phase; you do not do domain work directly. Create exactly one non-delegating stage agent at a time according to the route profile.
 
-### Step 2 — Read the plan AND the phase instructions; understand the goal + done-check
+Stage agents and advisors must not create agents, teams, panes, nested harness sessions, or advisors. If they need help, they return `BLOCKED` and you decide or escalate.
 
-1. **Read the WHOLE plan file** at `--plan` for context — the plan's goal, the phases, their order.
-2. **Read the phase instructions file** at `--phase`. THIS is the work for this attempt: its goal,
-   its steps, and its **done-check** (how you know the phase is finished). The instructions file is
-   the contract; the plan is the surrounding context. Execute the instructions' work, judged against
-   the instructions' done-check.
+### Step 3 — Run the shared five-stage worktree protocol
 
-If the instructions file has no discernible goal or done-check, that is a broken launch — STOP and
-write a `blocked` results.md (Step 5) naming the gap. Do not invent a goal.
+1. **Pre-flight** — dependency/import graph safety. If a circular dependency involving the target and parent/dependent layers is confirmed, write `blocked` and include the required critical-fail message.
+2. **Stage 1** — unit tests + implementation in a TDD loop on the temporary worktree branch.
+3. **Stage 2** — adversarial audit of Stage 1 code on the same temporary worktree branch. Blocking findings loop back to Stage 1; `VERIFICATION_PASSED` advances.
+4. **Stage 3** — integration/acceptance seam testing. Merge here only if `merge_back_at` selects Stage 3; otherwise continue on the temp worktree.
+5. **Stage 4** — upstream DAG dependent build/deploy/test verification. Merge here only if `merge_back_at` selects Stage 4; otherwise use main if already merged or continue on the temp worktree.
+6. **Stage 5** — finalization. Merge if needed, verify main, destroy the temp worktree/branch, run green checks, inspect logs, and record evidence.
 
-### Step 3 — Do the work by DISPATCHING A TEAM (or subagents)
+### Step 4 — Write `results.md`
 
-You are the orchestrating lead. You do not do the domain work yourself — you dispatch, read each
-return, check it against the instructions' goal + done-check, and iterate.
+Write `--output` with the `PHASE_RESULT:` first line and a report containing:
 
-- **`--team true`** → use **TeamCreate**: stand up named teammates in their own tmux windows
-  (and a watchdog if the phase needs one). This is the interactive-TUI team feature — the spawned
-  Claude session is a real TUI, so a team with lateral SendMessage + tmux visibility is available.
-  Scope each teammate to one slice of the phase's work.
-- **no `--team`** → dispatch **subagents** via the Task/Agent tool — a fresh context window per unit
-  of work, no `team_name`. Right when the phase is a tidy set of independent units that report back.
+- phase id;
+- phase lead `llm_profile` and `agent`;
+- `merge_back_at` and actual merge stage;
+- temp worktree branch/path and cleanup result;
+- every stage id, `llm_profile`, and `agent`;
+- advisor status;
+- dependency graph source;
+- stage evidence;
+- upstream verification;
+- Stage 5 green-check and log-review evidence;
+- rollback/cleanup actions.
 
-Either way: read each return, check it against the instructions' done-check, re-dispatch to correct
-drift or finish a half-done piece, and iterate **dynamically toward the phase goal** — not a rigid
-fixed-step loop.
-
-### Step 4 — Mandatory end-of-phase adversarial gate (always, exactly like /run-phase)
-
-After the work agents finish and your first-line checking says the phase goal looks met, you
-**ALWAYS** dispatch ONE more agent before the phase can pass: the **`adversarial-evaluator`** (Opus
-4.8, max effort). This is a **built-in mandatory gate**, not part of the team roster — it runs on
-**every** phase, you never skip it, and you never substitute a work agent for it.
-
-Dispatch it (`Agent(subagent_type="adversarial-evaluator", …)`) with: the phase's goal + work (from
-the instructions file — the contract it judges against) and everything that was done (the agents'
-returns, files touched, commands run + their output, the diff, any evidence you collected). It
-returns a verdict:
-
-- **CLEARED** → the phase work is cleared. Proceed to Step 5 and write `passed` (only if the work is
-  also fully done against the done-check).
-- **VEERED** → the phase does **NOT** pass. Read its findings (each cites a file:line or the exact
-  claim that veers), re-work the flagged piece (re-dispatch the relevant agent), and **re-run a
-  fresh gate**. Loop until CLEARED. A VEERED you cannot clear is a `blocked`/`partial` phase — write
-  that honestly in Step 5; **never write `passed` over a standing VEERED.**
-
-(If `adversarial-evaluator` does not resolve to a known agent, that is a broken setup — FAIL LOUD,
-do not skip the gate.)
-
-### Step 5 — WRITE `results.md` (the `--output` path) — this is the deliverable
-
-Write the file at `--output`. Its **FIRST line** is **exactly** the verdict line, nothing before it:
-
-```
-PHASE_RESULT: <passed|partial|blocked|failed>
-```
-
-then a report section:
-
-```
------ REPORT -----
-<what the team/subagents did, file:line evidence, commands run + outcomes>
-<the adversarial-evaluator outcome: CLEARED, or VEERED with the findings>
-```
-
-Choose the verdict **honestly from what actually happened**, never to make the process look clean:
-
-| Verdict   | Write it when…                                                                                   |
-|-----------|--------------------------------------------------------------------------------------------------|
-| `passed`  | the phase's work is **fully done** against the instructions' done-check **AND** the adversarial-evaluator returned **CLEARED**. Both. |
-| `partial` | real work landed but the done-check is not fully met. |
-| `blocked` | you could not proceed — a VEERED you could not clear, a hard blocker, or a broken launch. |
-| `failed`  | the phase hit an error it could not get past. |
-
-**Never write `PHASE_RESULT: passed` when the evaluator VEERED, when any done-check is unmet, or
-when the work is otherwise incomplete.** Fabricating `passed` corrupts the brain's judgment of the
-whole plan — the results file is the source of truth.
-
-After writing the file, also print the same `PHASE_RESULT:` line to your output as the last line, so
-a human watching the TUI sees the verdict too.
+Write `passed` only when all five stages completed and Stage 5 cleanup, green checks, and log review passed. Otherwise write `partial`, `blocked`, or `failed` honestly.
 
 ## Hard rules
 
-1. **All three paths required → FAIL LOUD on any missing or unreadable** (Step 1). Never default a
-   path, never silently relocate the output.
-2. **Read BOTH files** (Step 2): the plan for context, the instructions for the work + done-check.
-3. **Dispatch a team (`--team true`) or subagents (default); you orchestrate, you do not do the
-   domain work yourself** (Step 3).
-4. **The end-of-phase `adversarial-evaluator` gate is MANDATORY on every phase** (Step 4). Pass only
-   on CLEARED; never over a standing VEERED.
-5. **WRITE `results.md` with the leading `PHASE_RESULT:` line, honestly** (Step 5). This file is the
-   source of truth the brain judges the phase by. A run that does the work but never writes a correct
-   results.md is a failed run.
-6. **HUB-AGNOSTIC.** This command touches no hub — only files. Registering on the hub and pinging the
-   brain are other commands' jobs (`/hub-connect`, `/response`), chained by `/meta-auto-run`.
+1. Canonical plan body stays clean; route profile owns execution routing.
+2. Do not auto-convert at phase execution time; invalid inputs fail before semi-AFK work.
+3. Every phase lead and stage requires explicit `llm_profile` and `agent`.
+4. No Claude team mode for synchronized meta execution.
+5. Stage agents and advisors are non-delegating.
+6. The result file is the source of truth.
+7. This command is hub-agnostic.

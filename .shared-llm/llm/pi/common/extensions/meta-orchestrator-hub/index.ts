@@ -14,7 +14,7 @@
  *   - The brain copies the plan to a session dir, then per phase does exactly TWO things: decide the
  *     phase + WRITE its instructions, and call ONE tool — `run_phase({phase, instructions, team})`.
  *   - `run_phase` (TS, the whole transport) writes `phases/<phase>/iteration/<n>/instructions.md`,
- *     spawns an interactive Claude TUI worker (`just worker-up`) that runs `/meta-autorun`, WATCHES
+ *     spawns an interactive Claude TUI worker (`just worker-up`) that runs `/meta-auto-run`, WATCHES
  *     for the worker's `phases/<phase>/iteration/<n>/results.md` (first line `PHASE_RESULT: <verdict>`),
  *     reads it, judges it via judgePhaseStatus, tears the worker down, and pushes the verdict back to
  *     the brain. The FILE is the completion signal — not any hub message.
@@ -31,14 +31,23 @@
  * wiring that needs the Pi runtime. It also registers the `/hub` command (registerHub from hub.ts).
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import registerHub, { expandHome, ensureHubStarted, checkHubUp, stopHub } from "./hub.ts";
+import registerHub, {
+	expandHome,
+	ensureHubStarted,
+	checkHubUp,
+	stopHub,
+} from "./hub.ts";
 import registerMetaPlan from "./meta-plan.ts";
-import { type ProxyEvents } from "./types.ts";
+import { formatCheckResult, validateRunnable } from "./meta-plan-schema.ts";
+import type { ProxyEvents } from "./types.ts";
 import { buildSystemPrompt, loadAvailableAgents } from "./brain-prompt.ts";
 import {
 	type BrainState,
@@ -48,7 +57,12 @@ import {
 	abortRunningPhase,
 } from "./brain-core.ts";
 import { sanitizeIdPart } from "./phase-id.ts";
-import { readProgress, buildPriorProgressBlock, archiveProgress, planContentHash } from "./progress.ts";
+import {
+	readProgress,
+	buildPriorProgressBlock,
+	archiveProgress,
+	planContentHash,
+} from "./progress.ts";
 
 const STATUS_KEY = "meta-orch-hub";
 const DEFAULT_JSON = path.join(os.homedir(), ".meta-orch", "hub.json");
@@ -71,7 +85,8 @@ export default function (pi: ExtensionAPI) {
 	// Ignore (and archive) any saved progress for this session and start from the top. Without it,
 	// meta-server:autorun auto-RESUMES from the durable progress ledger when one exists.
 	pi.registerFlag("fresh", {
-		description: "ignore saved progress for this session and start from the top (archives the prior ledger)",
+		description:
+			"ignore saved progress for this session and start from the top (archives the prior ledger)",
 		type: "boolean",
 		default: false,
 	});
@@ -82,24 +97,45 @@ export default function (pi: ExtensionAPI) {
 	function setStatus(): void {
 		if (!currentCtx?.hasUI) return;
 		try {
-			if (!state) currentCtx.ui.setStatus(STATUS_KEY, undefined);
-			else currentCtx.ui.setStatus(STATUS_KEY, `${state.sessionName}${state.running ? " (phase running)" : " (idle)"}`);
-		} catch { /* non-fatal */ }
+			if (!state) currentCtx.ui.setStatus?.(STATUS_KEY, undefined);
+			else
+				currentCtx.ui.setStatus?.(
+					STATUS_KEY,
+					`${state.sessionName}${state.running ? " (phase running)" : " (idle)"}`,
+				);
+		} catch {
+			/* non-fatal */
+		}
 	}
 
 	const log = (data: Record<string, unknown>): void => {
-		try { pi.appendEntry(LOG_CHANNEL, data); } catch { /* best-effort */ }
+		try {
+			pi.appendEntry?.(LOG_CHANNEL, data);
+		} catch {
+			/* best-effort */
+		}
 	};
 
 	const proxyEvents: ProxyEvents = {
 		onProgress: (phaseId, line) => {
 			if (currentCtx?.hasUI) {
-				try { currentCtx.ui.setStatus(STATUS_KEY, `${state?.sessionName ?? ""} · ${phaseId} · ${line.slice(0, 48)}`); } catch { /* ignore */ }
+				try {
+					currentCtx.ui.setStatus?.(
+						STATUS_KEY,
+						`${state?.sessionName ?? ""} · ${phaseId} · ${line.slice(0, 48)}`,
+					);
+				} catch {
+					/* ignore */
+				}
 			}
 		},
 		onNotify: (phaseId, message, level) => {
 			if (currentCtx?.hasUI) {
-				try { currentCtx.ui.notify(`[${phaseId}] ${message}`, level); } catch { /* ignore */ }
+				try {
+					currentCtx.ui.notify(`[${phaseId}] ${message}`, level);
+				} catch {
+					/* ignore */
+				}
 			}
 			log({ event: "notify", phaseId, level, message });
 		},
@@ -117,43 +153,82 @@ export default function (pi: ExtensionAPI) {
 				{ deliverAs: "followUp", triggerTurn: true },
 			);
 		} catch (err) {
-			log({ event: "push_follow_up_error", error: err instanceof Error ? err.message : String(err) });
+			log({
+				event: "push_follow_up_error",
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
 	};
 
 	/** Split the command's raw arg STRING into the positionals (session_name, plan_location) and the
-	 *  optional global flags `--hub-json <path>` / `--max-retries <n>` / `--worker-type claude|pi` /
-	 *  `--model <id>` / `--mode team|subagents`. Pi parses `registerFlag` flags only at LAUNCH, NOT
+	 *  optional global flags `--route <route.yaml>` / `--hub-json <path>` / `--max-retries <n>` /
+	 *  `--worker-type claude|pi` / `--model <id>`. Pi parses `registerFlag` flags only at LAUNCH, NOT
 	 *  inside a slash command typed in the TUI — there, everything after the command name arrives as one
-	 *  raw string. So we parse these ourselves; the remaining tokens are the positionals. */
+	 *  raw string. So we parse these ourselves; the remaining tokens are the positionals. A legacy
+	 *  `--mode` token is accepted for compatibility but synchronized meta execution resolves to
+	 *  subagent-style stage workers. */
 	function parseArgs(args: string): {
 		positionals: string[];
+		routeOverride?: string;
 		hubJsonOverride?: string;
 		maxRetriesOverride?: number;
+		/** Set when `--max-retries` was given but was not an integer >= 1 — the caller must fail loud
+		 *  with this message rather than silently falling back to the default budget. */
+		maxRetriesError?: string;
 		workerTypeOverride?: string;
 		modelOverride?: string;
 		modeOverride?: string;
 	} {
 		const toks = (args || "").trim().split(/\s+/).filter(Boolean);
+		let routeOverride: string | undefined;
 		let hubJsonOverride: string | undefined;
 		let maxRetriesOverride: number | undefined;
+		let maxRetriesError: string | undefined;
 		let workerTypeOverride: string | undefined;
 		let modelOverride: string | undefined;
 		let modeOverride: string | undefined;
 		const takesValue: Record<string, (v: string) => void> = {
-			"--hub-json": (v) => { hubJsonOverride = v; },
-			"--max-retries": (v) => { const n = Number(v); if (Number.isInteger(n) && n >= 1) maxRetriesOverride = n; },
-			"--worker-type": (v) => { workerTypeOverride = v; },
-			"--model": (v) => { modelOverride = v; },
-			"--mode": (v) => { modeOverride = v; },
+			"--route": (v) => {
+				routeOverride = v;
+			},
+			"--hub-json": (v) => {
+				hubJsonOverride = v;
+			},
+			"--max-retries": (v) => {
+				const n = Number(v);
+				if (Number.isInteger(n) && n >= 1) maxRetriesOverride = n;
+				else maxRetriesError = `--max-retries must be a whole number >= 1, got "${v}"`;
+			},
+			"--worker-type": (v) => {
+				workerTypeOverride = v;
+			},
+			"--model": (v) => {
+				modelOverride = v;
+			},
+			"--mode": (v) => {
+				modeOverride = v;
+			},
 		};
 		const positionals: string[] = [];
 		for (let i = 0; i < toks.length; i++) {
 			const setter = takesValue[toks[i]];
-			if (setter && i + 1 < toks.length) { setter(toks[i + 1]); i++; continue; }
+			if (setter && i + 1 < toks.length) {
+				setter(toks[i + 1]);
+				i++;
+				continue;
+			}
 			positionals.push(toks[i]);
 		}
-		return { positionals, hubJsonOverride, maxRetriesOverride, workerTypeOverride, modelOverride, modeOverride };
+		return {
+			positionals,
+			routeOverride,
+			hubJsonOverride,
+			maxRetriesOverride,
+			maxRetriesError,
+			workerTypeOverride,
+			modelOverride,
+			modeOverride,
+		};
 	}
 
 	/** The per-phase retry budget: in-command `--max-retries` if valid (integer ≥ 1), else the default 2. */
@@ -162,20 +237,49 @@ export default function (pi: ExtensionAPI) {
 		return override && override >= 1 ? override : DEFAULT_MAX_RETRIES;
 	}
 
-	/** The default Pi worker model when --worker-type pi is chosen without --model. */
-	const DEFAULT_PI_MODEL = "openai-codex/gpt-5.5";
-	/** Resolve the run's worker config from the flags. worker-type defaults to "claude"; an unknown
-	 *  value falls back to "claude" (fail safe to the proven path). For pi, the model defaults to
-	 *  DEFAULT_PI_MODEL; for claude the model is unused (it runs the user's Claude). mode (claude only)
-	 *  defaults to "team"; an unknown value falls back to "team". */
+	/** The default Pi worker model when --worker-type pi is chosen without --model.
+	 *  Keep this configurable rather than hard-coding a future model alias as supported. */
+	const DEFAULT_PI_MODEL =
+		process.env.META_ORCH_DEFAULT_PI_MODEL || "configured-default";
+	/** Resolve the run's worker config from the flags. worker-type defaults to "claude" when omitted;
+	 *  an EXPLICIT but unrecognized value is a usage fault — fail loud rather than silently falling
+	 *  back to "claude" and running the wrong worker without telling the human. `cursor` is the
+	 *  meta-cc-client CLI's worker type, not this Pi transport's (hub-transport.ts / brain-core.ts
+	 *  only know "claude" | "pi" here) — reject it with a message saying so. For pi, the model defaults
+	 *  to DEFAULT_PI_MODEL; for claude the model is unused (it runs the user's Claude). Synchronized
+	 *  meta execution does not use Claude team mode, so the worker mode resolves to subagents. */
 	function resolveWorkerConfig(
 		typeOverride?: string,
 		modelOverride?: string,
 		modeOverride?: string,
-	): { workerType: "claude" | "pi"; workerModel: string; workerMode: "team" | "subagents" } {
+	): {
+		workerType: "claude" | "pi";
+		workerModel: string;
+		workerMode: "subagents";
+	} {
+		if (
+			typeOverride !== undefined &&
+			typeOverride !== "claude" &&
+			typeOverride !== "pi"
+		) {
+			if (typeOverride === "cursor") {
+				throw new Error(
+					`--worker-type cursor is only supported by the meta-cc-client CLI, not this Pi extension — use "claude" or "pi" here.`,
+				);
+			}
+			throw new Error(
+				`--worker-type must be "claude" or "pi", got "${typeOverride}"`,
+			);
+		}
 		const workerType: "claude" | "pi" = typeOverride === "pi" ? "pi" : "claude";
-		const workerModel = workerType === "pi" ? (modelOverride && modelOverride.length > 0 ? modelOverride : DEFAULT_PI_MODEL) : (modelOverride ?? "");
-		const workerMode: "team" | "subagents" = modeOverride === "subagents" ? "subagents" : "team";
+		const workerModel =
+			workerType === "pi"
+				? modelOverride && modelOverride.length > 0
+					? modelOverride
+					: DEFAULT_PI_MODEL
+				: (modelOverride ?? "");
+		void modeOverride;
+		const workerMode: "subagents" = "subagents";
 		return { workerType, workerModel, workerMode };
 	}
 
@@ -197,29 +301,107 @@ export default function (pi: ExtensionAPI) {
 	//      · ownHub=false (run)     → require a human-started hub to already be UP; NEVER tear it down.
 	//    Everything else — parse args, read the plan, build the roster, make the session dir, resume
 	//    from the ledger, set state, kick off the first turn — is identical, so it lives here once.
-	async function startBrain(args: string, ctx: ExtensionContext, ownHub: boolean): Promise<void> {
+	async function startBrain(
+		args: string,
+		ctx: ExtensionContext,
+		ownHub: boolean,
+	): Promise<void> {
 		currentCtx = ctx;
 		const cmd = ownHub ? "meta-server:autorun" : "meta-server:run";
-		const { positionals, hubJsonOverride, maxRetriesOverride, workerTypeOverride, modelOverride, modeOverride } = parseArgs(args);
-		if (positionals.length < 2) {
-			ctx.ui.notify(`Usage: ${cmd} <session_name> <plan_location> [--hub-json <path>] [--max-retries <n>] [--worker-type claude|pi] [--model <id>] [--mode team|subagents]`, "error");
+		// Re-entrancy guard: a second start while a run is already active must NOT silently replace
+		// `state` out from under the phase that is mid-flight (its transport promise still references
+		// the old state object, and abortRunningPhase on shutdown would then race a stale handle).
+		// Fail loud and tell the human to wait or abort first — never auto-abort behind their back.
+		if (state?.running) {
+			ctx.ui.notify(
+				`meta-orch-hub: a run is already active (session "${state.sessionName}", phase running) — wait for it to finish, or stop the phase before starting a new one.`,
+				"error",
+			);
+			return;
+		}
+		const {
+			positionals,
+			routeOverride,
+			hubJsonOverride,
+			maxRetriesOverride,
+			maxRetriesError,
+			workerTypeOverride,
+			modelOverride,
+			modeOverride,
+		} = parseArgs(args);
+		if (positionals.length < 2 || !routeOverride) {
+			ctx.ui.notify(
+				`Usage: ${cmd} <session_name> <plan_location> --route <route.yaml> [--hub-json <path>] [--max-retries <n>] [--worker-type claude|pi] [--model <id>]`,
+				"error",
+			);
+			return;
+		}
+		if (maxRetriesError) {
+			ctx.ui.notify(`meta-orch-hub: ${maxRetriesError}`, "error");
 			return;
 		}
 		const maxRetries = resolveMaxRetries(maxRetriesOverride);
-		const { workerType, workerModel, workerMode } = resolveWorkerConfig(workerTypeOverride, modelOverride, modeOverride);
+		let workerConfig: { workerType: "claude" | "pi"; workerModel: string; workerMode: "subagents" };
+		try {
+			workerConfig = resolveWorkerConfig(workerTypeOverride, modelOverride, modeOverride);
+		} catch (err) {
+			ctx.ui.notify(
+				`meta-orch-hub: ${err instanceof Error ? err.message : String(err)}`,
+				"error",
+			);
+			return;
+		}
+		const { workerType, workerModel, workerMode } = workerConfig;
 		{
 			const sessionNameRaw = positionals[0];
 			const planArg = positionals.slice(1).join(" ");
 			const sessionName = sanitizeIdPart(sessionNameRaw);
-			const planSrc = path.isAbsolute(planArg) ? planArg : path.resolve(ctx.cwd || process.cwd(), planArg);
+			const planSrc = path.isAbsolute(planArg)
+				? planArg
+				: path.resolve(ctx.cwd || process.cwd(), planArg);
+			const routeSrc = path.isAbsolute(routeOverride)
+				? routeOverride
+				: path.resolve(ctx.cwd || process.cwd(), routeOverride);
 
-			// Fail loud if the plan file is missing — the plan IS the work; never half-run on a guess.
+			// Fail loud if the plan or route file is missing — together they define the run.
 			let planContent: string;
+			let routeContent: string;
 			try {
 				planContent = fs.readFileSync(planSrc, "utf-8");
 			} catch (err) {
-				const code = err && typeof err === "object" && "code" in err ? (err as NodeJS.ErrnoException).code : undefined;
-				ctx.ui.notify(code === "ENOENT" ? `meta-orch-hub: plan file not found: ${planSrc}` : `meta-orch-hub: cannot read plan: ${err instanceof Error ? err.message : String(err)}`, "error");
+				const code =
+					err && typeof err === "object" && "code" in err
+						? (err as NodeJS.ErrnoException).code
+						: undefined;
+				ctx.ui.notify(
+					code === "ENOENT"
+						? `meta-orch-hub: plan file not found: ${planSrc}`
+						: `meta-orch-hub: cannot read plan: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+				return;
+			}
+			try {
+				routeContent = fs.readFileSync(routeSrc, "utf-8");
+			} catch (err) {
+				const code =
+					err && typeof err === "object" && "code" in err
+						? (err as NodeJS.ErrnoException).code
+						: undefined;
+				ctx.ui.notify(
+					code === "ENOENT"
+						? `meta-orch-hub: route profile not found: ${routeSrc}`
+						: `meta-orch-hub: cannot read route profile: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+				return;
+			}
+			const runnableCheck = validateRunnable(planContent, routeContent);
+			if (!runnableCheck.ok) {
+				ctx.ui.notify(
+					`meta-orch-hub: runnable input check failed; run meta-plan:check <plan.md> <route.yaml> before starting.\n${formatCheckResult("RUNNABLE_CHECK", runnableCheck)}`,
+					"error",
+				);
 				return;
 			}
 
@@ -231,15 +413,20 @@ export default function (pi: ExtensionAPI) {
 			// error — the file contract is the whole transport, so we must not proceed on a half-made dir.
 			const sessionDir = path.join(fileBaseDir(), sessionName);
 			const planPath = path.join(sessionDir, "plan.md");
+			const routePath = path.join(sessionDir, "route.yaml");
 			const logsDir = path.join(sessionDir, "logs");
 			try {
 				fs.mkdirSync(path.join(sessionDir, "phases"), { recursive: true });
 				fs.mkdirSync(logsDir, { recursive: true });
 				fs.writeFileSync(planPath, planContent, "utf-8");
+				fs.writeFileSync(routePath, routeContent, "utf-8");
 				availableAgents = loadAvailableAgents();
 				systemPrompt = buildSystemPrompt(planPath, availableAgents);
 			} catch (err) {
-				ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
+				ctx.ui.notify(
+					err instanceof Error ? err.message : String(err),
+					"error",
+				);
 				return;
 			}
 
@@ -258,8 +445,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				hubStartedByUs = true;
 				try {
-					ctx.ui.notify(`hub started at ${hubResult.url} (pid ${hubResult.pid}) — the brain owns it and will tear it down on exit`, "info");
-				} catch { /* hasUI may be false */ }
+					ctx.ui.notify(
+						`hub started at ${hubResult.url} (pid ${hubResult.pid}) — the brain owns it and will tear it down on exit`,
+						"info",
+					);
+				} catch {
+					/* hasUI may be false */
+				}
 			} else {
 				const hubResult = await checkHubUp(hubJsonPath);
 				if (!hubResult.ok) {
@@ -268,8 +460,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				hubStartedByUs = false;
 				try {
-					ctx.ui.notify(`joined hub at ${hubResult.url} — you started it, so the brain will NOT tear it down`, "info");
-				} catch { /* hasUI may be false */ }
+					ctx.ui.notify(
+						`joined hub at ${hubResult.url} — you started it, so the brain will NOT tear it down`,
+						"info",
+					);
+				} catch {
+					/* hasUI may be false */
+				}
 			}
 
 			// RESUME-FROM-PROGRESS: read the durable ledger for THIS session dir. `--fresh` archives it and
@@ -281,12 +478,15 @@ export default function (pi: ExtensionAPI) {
 				archiveProgress(sessionDir);
 				log({ event: "fresh_start", sessionName });
 			}
-			const priorProgress = fresh ? null : buildPriorProgressBlock(readProgress(sessionDir), planHash);
+			const priorProgress = fresh
+				? null
+				: buildPriorProgressBlock(readProgress(sessionDir), planHash);
 
 			state = {
 				sessionName,
 				sessionDir,
 				planPath,
+				routePath,
 				availableAgents,
 				dirs: { logsDir },
 				runDir: sessionDir,
@@ -302,20 +502,33 @@ export default function (pi: ExtensionAPI) {
 				workerMode,
 			};
 			setStatus();
-			log({ event: "brain_start", sessionName, sessionDir, planPath, agents: availableAgents.length, hubJsonPath, resuming: priorProgress !== null });
+			log({
+				event: "brain_start",
+				sessionName,
+				sessionDir,
+				planPath,
+				routePath,
+				agents: availableAgents.length,
+				hubJsonPath,
+				resuming: priorProgress !== null,
+			});
 
 			// Hand the brain its operating instructions (the filled brain-prompt) WITHOUT a turn, then
 			// deliver the plan content + the kick-off and trigger the first turn.
 			pi.sendMessage(
-				{ customType: "meta-orch-hub-brain-prompt", content: systemPrompt, display: false },
+				{
+					customType: "meta-orch-hub-brain-prompt",
+					content: systemPrompt,
+					display: false,
+				},
 				{ deliverAs: "followUp", triggerTurn: false },
 			);
 			const kickoff: string[] = [
 				`🧠 **You are now the brain (file-based hub model)** — session ${sessionName}`,
-				`Plan copied to ${planPath}; session dir ${sessionDir}.`,
+				`Plan copied to ${planPath}; route profile copied to ${routePath}; session dir ${sessionDir}.`,
 				`${availableAgents.length} agents available; the hub is up at ${hubJsonPath} (${ownHub ? "the brain created it and will tear it down on exit" : "you started it; the brain will not tear it down"}).`,
 				`You run each phase by writing its instructions and calling the \`run_phase\` tool. You NEVER run a command or touch a file yourself.`,
-				`Worker for this run: ${workerType === "pi" ? `a single-agent Pi worker on ${workerModel} (no team — one agent does each phase)` : `a Claude worker using ${workerMode}`}. This is fixed for the whole run; you do not choose it per phase.`,
+				`Worker for this run: ${workerType === "pi" ? `a Pi worker on ${workerModel}` : `a Claude phase worker using ${workerMode}`}. Phase/stage agents come from the external route profile, not the plan body.`,
 				`Retry budget: each phase may be attempted at most ${maxRetries} time${maxRetries === 1 ? "" : "s"}. When a phase uses up its budget and still hasn't passed, STOP and ask me — don't keep retrying. I can raise it live with \`meta-server:retries <n>\`.`,
 				"",
 				`Here is the plan to execute (also at ${planPath}):`,
@@ -337,7 +550,11 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 			pi.sendMessage(
-				{ customType: "meta-orch-hub", content: kickoff.join("\n"), display: true },
+				{
+					customType: "meta-orch-hub",
+					content: kickoff.join("\n"),
+					display: true,
+				},
 				{ deliverAs: "followUp", triggerTurn: true },
 			);
 		}
@@ -345,14 +562,20 @@ export default function (pi: ExtensionAPI) {
 
 	// ── meta-server:autorun <session> <plan> — brain CREATES the hub, runs the plan, tears it down ──
 	pi.registerCommand("meta-server:autorun", {
-		description: "Become the brain: create the hub, run a markdown phase-plan, tear the hub down on exit: meta-server:autorun <session_name> <plan_location> [--hub-json <path>]",
-		handler: async (args, ctx) => { await startBrain(args, ctx, true); },
+		description:
+			"Become the brain: create the hub, run a canonical meta plan plus route profile, tear the hub down on exit: meta-server:autorun <session_name> <plan_location> --route <route.yaml> [--hub-json <path>]",
+		handler: async (args, ctx) => {
+			await startBrain(args, ctx, true);
+		},
 	});
 
 	// ── meta-server:run <session> <plan> — brain JOINS a human-started hub; never touches its life ──
 	pi.registerCommand("meta-server:run", {
-		description: "Become the brain against an ALREADY-RUNNING hub (started with meta-server:hub start); never creates or tears down the hub: meta-server:run <session_name> <plan_location> [--hub-json <path>]",
-		handler: async (args, ctx) => { await startBrain(args, ctx, false); },
+		description:
+			"Become the brain against an ALREADY-RUNNING hub; run a canonical meta plan plus route profile: meta-server:run <session_name> <plan_location> --route <route.yaml> [--hub-json <path>]",
+		handler: async (args, ctx) => {
+			await startBrain(args, ctx, false);
+		},
 	});
 
 	// ── run_phase — the brain picks the phase + writes instructions; fire the file transport ────────
@@ -362,39 +585,73 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Run ONE phase. You pass the phase number (Phase 0 is valid) and the instructions text you " +
 			"wrote for this attempt (the goal + the steps + a done-check). The system writes your " +
-			"instructions to a file, spawns the run's worker (set globally at launch — a Claude team/subagents " +
-			"worker, or a single-agent Pi worker; you do NOT choose it per phase), does the work, then watches " +
-			"for the worker's results file and returns the PHASE_RESULT verdict (passed | partial | blocked | " +
-			"failed). You never run a command or touch a file yourself — this tool is how a phase runs. Do NOT " +
-			"add a reviewer/evaluator. The phase runs in the background; its completion arrives as a follow-up " +
-			"message — do not call run_phase again until it does. You may BACKTRACK: re-run an earlier phase (a " +
-			"new iteration) when a later failure's real cause is upstream.",
+			"instructions to a file, spawns the run's phase worker, and that worker resolves the phase lead " +
+			"and stage agents from the external route profile. It then watches for the worker's results file " +
+			"and returns the PHASE_RESULT verdict (passed | partial | blocked | failed). You never run a " +
+			"command or touch a file yourself — this tool is how a phase runs. Do NOT add a reviewer/evaluator. " +
+			"The phase runs in the background; its completion arrives as a follow-up message — do not call " +
+			"run_phase again until it does. You may BACKTRACK: re-run an earlier phase (a new iteration) when " +
+			"a later failure's real cause is upstream.",
 		parameters: Type.Object({
 			phase: Type.String({ description: 'The phase to run, e.g. "0" or "3".' }),
-			instructions: Type.String({ description: "The work this attempt should do: goal, steps, and a clear done-check. The worker acts on this text." }),
+			instructions: Type.String({
+				description:
+					"The work this attempt should do: goal, steps, and a clear done-check. The worker acts on this text.",
+			}),
 		}),
-		async execute(_id, params) {
+		async execute(
+			_id: string,
+			params: { phase: string; instructions: string },
+		) {
 			if (!state) {
-				return { content: [{ type: "text" as const, text: "No plan loaded — run `meta-server:autorun` or `meta-server:run` <session_name> <plan_location> first." }] };
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: "No plan loaded — run `meta-server:autorun` or `meta-server:run` <session_name> <plan_location> first.",
+						},
+					],
+				};
 			}
 			const result = handleRunPhase(
 				state,
 				{ phase: params.phase, instructions: params.instructions },
-				{ events: proxyEvents, pushFollowUp, log, startPhase: startPhaseInBackground },
+				{
+					events: proxyEvents,
+					pushFollowUp,
+					log,
+					startPhase: startPhaseInBackground,
+				},
 			);
 			setStatus();
-			return { content: [{ type: "text" as const, text: result.text }], details: { started: result.started, phase: params.phase } };
+			return {
+				content: [{ type: "text" as const, text: result.text }],
+				details: { started: result.started, phase: params.phase },
+			};
 		},
 	});
 
 	// ── meta-server:status — where the run is (shared by autorun + run) ─────────────────────────────
 	pi.registerCommand("meta-server:status", {
-		description: "Show the brain's current session, running phase, and hub path",
+		description:
+			"Show the brain's current session, running phase, and hub path",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
-			if (!state) { ctx.ui.notify("No plan loaded — run `meta-server:autorun` or `meta-server:run` <session_name> <plan_location> first", "info"); return; }
-			const iters = Object.entries(state.iterations).map(([p, n]) => `p${p}×${n}`).join(", ") || "(none yet)";
-			const workerDesc = state.workerType === "pi" ? `pi (${state.workerModel}, single agent)` : `claude (${state.workerMode})`;
+			if (!state) {
+				ctx.ui.notify(
+					"No plan loaded — run `meta-server:autorun` or `meta-server:run` <session_name> <plan_location> first",
+					"info",
+				);
+				return;
+			}
+			const iters =
+				Object.entries(state.iterations)
+					.map(([p, n]) => `p${p}×${n}`)
+					.join(", ") || "(none yet)";
+			const workerDesc =
+				state.workerType === "pi"
+					? `pi (${state.workerModel})`
+					: `claude (${state.workerMode})`;
 			const lines = [
 				`**${state.sessionName}** — ${state.running ? "a phase is running" : "idle"}; iterations: ${iters}.`,
 				`Worker: ${workerDesc}.`,
@@ -403,29 +660,54 @@ export default function (pi: ExtensionAPI) {
 				`Plan: ${state.planPath}`,
 				`Hub: ${state.hubJsonPath}`,
 			];
-			pi.sendMessage({ customType: "meta-orch-hub", content: lines.join("\n"), display: true }, { deliverAs: "followUp", triggerTurn: false });
+			pi.sendMessage(
+				{
+					customType: "meta-orch-hub",
+					content: lines.join("\n"),
+					display: true,
+				},
+				{ deliverAs: "followUp", triggerTurn: false },
+			);
 		},
 	});
 
 	// ── meta-server:retries <n> — raise/lower the per-phase retry budget LIVE (human-in-the-loop) ────
 	pi.registerCommand("meta-server:retries", {
-		description: "Set the per-phase retry budget live: meta-server:retries <n> (n ≥ 1). Use it after a phase maxed out to let the brain try again, then tell it to continue.",
+		description:
+			"Set the per-phase retry budget live: meta-server:retries <n> (n ≥ 1). Use it after a phase maxed out to let the brain try again, then tell it to continue.",
 		handler: async (args, ctx) => {
 			currentCtx = ctx;
-			if (!state) { ctx.ui.notify("No plan loaded — start a run first with `meta-server:autorun` or `meta-server:run`", "info"); return; }
+			if (!state) {
+				ctx.ui.notify(
+					"No plan loaded — start a run first with `meta-server:autorun` or `meta-server:run`",
+					"info",
+				);
+				return;
+			}
 			const n = Number((args || "").trim());
-			if (!Number.isInteger(n) || n < 1) { ctx.ui.notify(`Usage: meta-server:retries <n> (a whole number ≥ 1) — current budget is ${state.maxRetries}`, "error"); return; }
+			if (!Number.isInteger(n) || n < 1) {
+				ctx.ui.notify(
+					`Usage: meta-server:retries <n> (a whole number ≥ 1) — current budget is ${state.maxRetries}`,
+					"error",
+				);
+				return;
+			}
 			const prev = state.maxRetries;
 			state.maxRetries = n;
 			pi.sendMessage(
-				{ customType: "meta-orch-hub", content: `Retry budget changed from ${prev} to ${n} attempts per phase. If a phase was waiting on its budget, you may call run_phase for it again now.`, display: true },
+				{
+					customType: "meta-orch-hub",
+					content: `Retry budget changed from ${prev} to ${n} attempts per phase. If a phase was waiting on its budget, you may call run_phase for it again now.`,
+					display: true,
+				},
 				{ deliverAs: "followUp", triggerTurn: false },
 			);
 		},
 	});
 
 	// ── lifecycle ────────────────────────────────────────────────────────────────────────────────
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (_event: unknown, ctx?: ExtensionContext) => {
+		if (!ctx) return;
 		currentCtx = ctx;
 		setStatus();
 	});
@@ -439,7 +721,12 @@ export default function (pi: ExtensionAPI) {
 		// (create on launch, destroy on shutdown) lives in the brain, so nothing is run by hand.
 		if (state?.hubStartedByUs) {
 			const r = stopHub(state.hubJsonPath);
-			log({ event: "hub_stopped_on_shutdown", ok: r.ok, pid: r.pid, error: r.error });
+			log({
+				event: "hub_stopped_on_shutdown",
+				ok: r.ok,
+				pid: r.pid,
+				error: r.error,
+			});
 		}
 	});
 }
