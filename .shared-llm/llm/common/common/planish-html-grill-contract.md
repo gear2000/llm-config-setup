@@ -23,6 +23,15 @@ Hard bans, everywhere:
 
 The convention that makes this fast: **a question with no note means "go with the recommendation."** Every question block carries a concrete recommendation, so the user only annotates what they want to change or answer differently. **Finalize ✓** copies a `## FINALIZED` block (with any final notes); pasting it back signals approval.
 
+## Canonical annotation toolkit — one implementation, zero forks
+
+There is exactly ONE implementation of the sticky-note annotation controls, and it lives at `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` — a harness-neutral common-layer path, so `cc-*`, `do-*`, and the Pi extension all reference the same file (the companion style-only `form-toolkit.html` sits beside it). Every consumer uses that one file — never a fork or an inlined copy:
+
+- **Skills** (`/cc-plan-and-grill`, `/do-plan-and-grill`, the `*-oneshot` / `*-research` variants, `/design-doc`, and any future planner) paste its contents verbatim immediately before `</body>`.
+- **The Pi planish extension** reads it at serve time (an `import.meta.url`-relative sibling-read of that same file) and injects it verbatim, plus a per-serve `<meta name="desdoc-key">` in `<head>` — so the browser bar is byte-identical to what the skills paste.
+
+The toolkit copies with a `document.execCommand` fallback (so Copy Feedback / Finalize work on `file://` and plain HTTP) and keys notes off `<meta name="desdoc-key">` when present (see "Fresh annotations every round"). A second, divergent copy of this bar anywhere is a regression.
+
 ## Deliver the page two ways — URL and downloadable file
 
 1. **URL** — always. The host is NOT hardcoded `localhost`: use the `host:` field of the nearest `.planish.yaml` when set (the machine name the user's browser reaches — e.g. a Tailscale name for remote sessions), else `localhost`. The Pi planish server reads the same field and binds `0.0.0.0` for a non-localhost host so remote connections actually work.

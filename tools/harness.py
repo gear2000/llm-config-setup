@@ -775,6 +775,7 @@ COMMON_ROOTS = (
     "layers/skills/common",
     "layers/slash-commands/common",
     "llm/claude/common",
+    "llm/common/common",
     "llm/pi/common",
 )
 

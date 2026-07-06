@@ -43,6 +43,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -235,83 +236,44 @@ function isLocalOnly(host: string): boolean {
   return host === "localhost" || host === "127.0.0.1";
 }
 
-// ─── Sticky-note annotation block (the ONLY interactive surface) ───────────────
+// ─── Canonical annotation toolkit (runtime-read — the ONLY interactive surface) ─
+//
+// The sticky-note bar is NOT inlined here. It has exactly ONE canonical
+// implementation in the kit, at
+// .shared-llm/llm/common/common/toolkits/annotation-toolkit.html — skills paste
+// it verbatim, and this extension READS that same file at serve time, so the two
+// can never drift. The path is resolved relative to THIS module's directory via
+// import.meta.url; Node ESM resolves import.meta.url to the module's realpath,
+// so the read works identically whether the extension is loaded from the repo
+// or through its ~/.pi/agent/extensions/ symlink.
 //
 // Injected into every page planish serves: the grill page embeds it, and a
 // reviewed plan.html gets it appended unless the file already carries its own
 // annotation controls. Feedback flows one way — the user annotates, clicks
 // Copy Feedback, and pastes the block into the TUI. No answer boxes, no
 // Submit buttons, no POST back to the agent.
-//
-// Every serve gets a fresh nonce baked into the localStorage key, and the page
-// prunes every other planish_notes__ key on load — new round, clean slate
-// (all rounds share the one URL localhost:4390/, so pathname keying would
-// resurrect the previous round's notes).
+const CANONICAL_TOOLKIT_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../common/common/toolkits/annotation-toolkit.html",
+);
+
+function annotationToolkitHtml(): string {
+  return fs.readFileSync(CANONICAL_TOOLKIT_PATH, "utf-8");
+}
+
+// The canonical toolkit keys notes off <meta name="desdoc-key"> and, when that
+// meta is present, prunes every OTHER desdoc_r__ key on load. planish serves
+// every round from the one URL (localhost:4390/), so each serve injects that
+// meta with a fresh per-serve nonce — new round, clean slate (pathname keying
+// would otherwise resurrect the previous round's notes).
 let serveNonceCounter = 0;
 
 function nextNonce(): string {
   return `${Date.now().toString(36)}r${++serveNonceCounter}`;
 }
 
-function annotationBlockHtml(nonce: string): string {
-  return `
-<style>
-  #desdoc-badge{display:none;position:fixed;top:0;left:0;right:0;background:#0f1f14;border-bottom:1px solid #3a5a2a;color:#98c379;text-align:center;padding:5px 16px;font:11px/1.5 'JetBrains Mono',monospace;z-index:10000;}
-  #desdoc-bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:9999;font-family:'JetBrains Mono',monospace;font-size:12px;color:#6b7280;}
-  body{padding-bottom:52px!important;}
-  .ddbtn{padding:5px 11px;border-radius:5px;border:1px solid #2e3440;background:#0d1017;color:#c8ccd4;cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
-  .ddbtn:hover{background:#1e222a;}
-  .ddbtn.copy{background:#1a2d4a;border-color:#456a8a;color:#7ab4db;}
-  .ddbtn.fin{background:#0f1f14;border-color:#3a5a2a;color:#98c379;}
-  #desdoc-cnt{background:#2e3440;color:#c8ccd4;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:2px;}
-  .sticky-note{position:absolute;z-index:9000;min-width:180px;max-width:260px;background:#1c1a10;border:1px solid #8a6a1a;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.4);}
-  .sticky-head{background:#8a6a1a;padding:3px 8px;cursor:move;display:flex;justify-content:space-between;align-items:center;border-radius:4px 4px 0 0;font:11px/20px 'JetBrains Mono',monospace;color:#1a1208;user-select:none;}
-  .sticky-note textarea{width:100%;border:none;background:transparent;padding:6px 8px;font:12px/1.5 'JetBrains Mono',monospace;color:#c8ccd4;resize:vertical;min-height:56px;box-sizing:border-box;outline:none;}
-</style>
-<div id="desdoc-badge">✓ FINALIZED — summary copied to clipboard</div>
-<div id="desdoc-bar">
-  <span style="color:#3e4450;margin-right:auto;">+ Note on a question → type → Copy Feedback → paste into the chat</span>
-  <button class="ddbtn" onclick="ddAdd()">+ Note</button>
-  <button class="ddbtn" onclick="ddToggle()">Notes <span id="desdoc-cnt">0</span></button>
-  <button class="ddbtn copy" id="ddcopybtn" onclick="ddCopy()">Copy Feedback</button>
-  <button class="ddbtn fin" onclick="ddFinalize()">Finalize ✓</button>
-</div>
-<script>
-(function(){
-  function execCopy(text){var ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);}
-  function writeCopy(text){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(text).catch(function(){execCopy(text);});}execCopy(text);return Promise.resolve();}
-  var KEY='planish_notes__${nonce}';var notes=[],ctr=0,vis=true;
-  try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('planish_notes__')===0&&k!==KEY)localStorage.removeItem(k);});}catch(e){}
-  function save(){localStorage.setItem(KEY,JSON.stringify(notes.map(function(n){return {id:n.id,x:parseFloat(n.el.style.left),y:parseFloat(n.el.style.top),text:n.el.querySelector('textarea').value};})));var c=document.getElementById('desdoc-cnt');if(c)c.textContent=notes.length;}
-  function mk(x,y,id,text){id=id||String(++ctr);var el=document.createElement('div');el.className='sticky-note';el.style.left=x+'px';el.style.top=y+'px';el.innerHTML='<div class="sticky-head"><span>Note '+id+'</span><span onclick="ddDel(\\''+id+'\\')" style="cursor:pointer;font-weight:700;padding:0 3px;color:#3a2808;">✕</span></div><textarea placeholder="Add note…">'+(text||'')+'</textarea>';document.body.appendChild(el);el.querySelector('textarea').addEventListener('input',save);var h=el.firstElementChild;h.addEventListener('mousedown',function(e){if(e.target.onclick)return;var ox=e.clientX-el.getBoundingClientRect().left,oy=e.clientY-el.getBoundingClientRect().top;var mv=function(e2){el.style.left=(e2.clientX-ox+scrollX)+'px';el.style.top=(e2.clientY-oy+scrollY)+'px';};var up=function(){save();removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};addEventListener('mousemove',mv);addEventListener('mouseup',up);e.preventDefault();});notes.push({id:id,el:el});save();}
-  // Nearest anchor above the note (question text or heading) — the copied
-  // feedback must say WHAT each note is about, since notes are the only
-  // answer channel.
-  function ddAnchor(noteY){
-    var best=null,bestY=-1;
-    document.querySelectorAll('.grill-q-text,h1,h2,h3').forEach(function(el){
-      var y=el.getBoundingClientRect().top+scrollY;
-      if(y<=noteY+28&&y>bestY){bestY=y;best=el;}
-    });
-    if(!best)return '';
-    var t=best.textContent.trim().replace(/\\s+/g,' ');
-    if(t.length>70)t=t.slice(0,67)+'…';
-    return t?' @ "'+t+'"':'';
-  }
-  function ddItems(){return notes.map(function(n){var y=parseFloat(n.el.style.top)||0;return '- [Note '+n.id+ddAnchor(y)+'] '+(n.el.querySelector('textarea').value||'(empty)');}).join('\\n');}
-  window.ddDel=function(id){var i=notes.findIndex(function(n){return n.id===id;});if(i<0)return;notes[i].el.remove();notes.splice(i,1);save();};
-  window.ddAdd=function(){document.body.style.cursor='crosshair';var h=function(e){if(e.target.closest('#desdoc-bar'))return;document.body.style.cursor='';removeEventListener('click',h);mk(e.pageX-90,e.pageY-20,null,'');};addEventListener('click',h);};
-  window.ddToggle=function(){vis=!vis;notes.forEach(function(n){n.el.style.display=vis?'':'none';});};
-  window.ddCopy=function(){writeCopy('## Feedback — '+document.title+'\\n\\n'+(ddItems()||'(no notes)')).then(function(){var b=document.getElementById('ddcopybtn');var t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},1600);});};
-  window.ddFinalize=function(){
-    if(!confirm('Finalize — copy an approval block to paste back into the chat?'))return;
-    var items=ddItems();
-    writeCopy('## FINALIZED — '+document.title+'\\n\\n'+(items?'Final notes:\\n'+items:'(no notes — approved as-is)'));
-    document.getElementById('desdoc-badge').style.display='block';
-  };
-  var saved=JSON.parse(localStorage.getItem(KEY)||'[]');if(saved.length)ctr=saved.reduce(function(m,n){return Math.max(m,parseInt(n.id)||0);},0);saved.forEach(function(n){mk(n.x,n.y,n.id,n.text);});
-})();
-</script>`;
+function desdocKeyMeta(nonce: string): string {
+  return `<meta name="desdoc-key" content="${nonce}">`;
 }
 
 // A reviewed plan.html usually embeds its own annotation controls (the build
@@ -321,8 +283,16 @@ function ensureAnnotable(html: string): string {
   if (html.includes("desdoc-bar") || html.includes("ddCopy") || html.includes("Copy Feedback")) {
     return html;
   }
-  const block = annotationBlockHtml(nextNonce());
-  return html.includes("</body>") ? html.replace("</body>", block + "\n</body>") : html + block;
+  // Give the injected canonical toolkit a unique per-serve key so notes don't
+  // carry over from a previous serve (all rounds share the one URL).
+  const meta = desdocKeyMeta(nextNonce());
+  const withMeta = html.includes("</head>")
+    ? html.replace("</head>", `${meta}\n</head>`)
+    : `${meta}\n${html}`;
+  const block = "\n" + annotationToolkitHtml();
+  return withMeta.includes("</body>")
+    ? withMeta.replace("</body>", block + "\n</body>")
+    : withMeta + block;
 }
 
 // ─── Grill: self-contained annotatable question page ───────────────────────────
@@ -366,6 +336,7 @@ function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
     : payloadOrQuestions;
   const questions = payload.questions ?? [];
   const title = payload.title?.trim() || "A few questions before the plan";
+  const nonce = nextNonce();
   const contextHtml = payload.contextHtml?.trim()
     ? `<section class="context card">${payload.contextHtml}</section>`
     : "";
@@ -384,6 +355,7 @@ function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+${desdocKeyMeta(nonce)}
 <title>${esc(title)} — grill</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
@@ -427,7 +399,7 @@ function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
   <div class="sub">Answer by annotation: <b>+ Note</b> on a question → type → next note → <b>Copy Feedback</b> → paste it back into the Pi chat. No note on a question = the recommendation stands.</div>
   ${contextHtml}
   <div id="form">${blocks}</div>
-${annotationBlockHtml(nextNonce())}
+${annotationToolkitHtml()}
 </body></html>`;
 }
 

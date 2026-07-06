@@ -64,7 +64,7 @@ Write `{dir}/v{N}.html` with:
 
 1. The CSS (from v3.html if found, or the default block below)
 2. Design content appropriate to the topic — use the visual vocabulary below
-3. The annotation toolkit block (always — copy verbatim from the block at the end of this file)
+3. The canonical annotation toolkit (always — paste the contents of `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` verbatim before `</body>`; see "Annotation Toolkit" below)
 
 **Default CSS** (use when v3.html is not present):
 
@@ -172,7 +172,7 @@ body{font-family:'JetBrains Mono',monospace;background:#0d1017;color:#c8ccd4;pad
   </div>
 </div>
 
-<!-- ANNOTATION TOOLKIT — always paste before </body> -->
+<!-- Canonical annotation toolkit (.shared-llm/llm/common/common/toolkits/annotation-toolkit.html) — paste verbatim before </body> -->
 </body>
 </html>
 ```
@@ -214,100 +214,8 @@ When the user pastes output that starts with `## Feedback —` or `## FINALIZED 
 
 ## Annotation Toolkit
 
-**Always paste this block verbatim immediately before `</body>` in every design doc.**
+Every design doc carries the sticky-note annotation layer — the ONLY interactive control on the page (no answer boxes, no submit buttons: the user drops notes, clicks **Copy Feedback**, and pastes the `## Feedback` block back into the chat, then iterates to v{N+1}).
 
-```html
-<!-- ═══════════════════════════════════════════════════════════
-     DESIGN-DOC ANNOTATION LAYER  (do not edit this block)
-     ═══════════════════════════════════════════════════════════ -->
-<style>
-  #desdoc-bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;
-    padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:9999;
-    font-family:'JetBrains Mono',monospace;font-size:12px;color:#6b7280;}
-  body{padding-bottom:48px!important;}
-  .ddbtn{padding:4px 10px;border-radius:4px;border:1px solid #2e3440;background:#0d1017;
-    color:#c8ccd4;cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
-  .ddbtn:hover{background:#1e222a;}
-  .ddbtn.copy{background:#1a2d4a;border-color:#456a8a;color:#7ab4db;}
-  .ddbtn.fin{background:#0f1f14;border-color:#3a5a2a;color:#98c379;}
-  #desdoc-cnt{background:#2e3440;color:#c8ccd4;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:2px;}
-  #desdoc-badge{display:none;position:fixed;top:0;left:0;right:0;background:#0f1f14;
-    border-bottom:1px solid #3a5a2a;color:#98c379;text-align:center;
-    padding:5px 16px;font-family:'JetBrains Mono',monospace;font-size:11px;z-index:10000;}
-</style>
-<div id="desdoc-badge">✓ FINALIZED — summary copied to clipboard</div>
-<div id="desdoc-bar">
-  <span style="color:#3e4450;margin-right:4px;">design-doc</span>
-  <button class="ddbtn" onclick="ddAdd()">+ Note</button>
-  <button class="ddbtn" onclick="ddToggle()">Notes <span id="desdoc-cnt">0</span></button>
-  <button class="ddbtn copy" id="ddcopybtn" onclick="ddCopy()">Copy Feedback</button>
-  <button class="ddbtn fin" onclick="ddFinalize()">Finalize ✓</button>
-</div>
-<script>
-(function(){
-  const KEY='desdoc__'+btoa(location.pathname).replace(/[+/=]/g,'');
-  let notes=[],ctr=0,vis=true;
-  function save(){
-    localStorage.setItem(KEY,JSON.stringify(
-      notes.map(n=>({id:n.id,x:parseFloat(n.el.style.left),y:parseFloat(n.el.style.top),
-        text:n.el.querySelector('textarea').value}))));
-    document.getElementById('desdoc-cnt').textContent=notes.length;
-  }
-  function mk(x,y,id,text){
-    id=id||String(++ctr);
-    const el=document.createElement('div');
-    el.style.cssText='position:absolute;left:'+x+'px;top:'+y+'px;z-index:9000;min-width:180px;max-width:260px;'
-      +'background:#1c1a10;border:1px solid #8a6a1a;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.4);';
-    el.innerHTML='<div style="background:#8a6a1a;padding:3px 8px;cursor:move;display:flex;justify-content:space-between;'
-      +'align-items:center;border-radius:4px 4px 0 0;font:11px/20px \'JetBrains Mono\',monospace;color:#1a1208;user-select:none;">'
-      +'<span>Note '+id+'</span>'
-      +'<span onclick="ddDel(\''+id+'\')" style="cursor:pointer;font-weight:700;padding:0 3px;color:#3a2808;">✕</span></div>'
-      +'<textarea placeholder="Add note…" style="width:100%;border:none;background:transparent;padding:6px 8px;'
-      +'font:12px/1.5 \'JetBrains Mono\',monospace;color:#c8ccd4;resize:vertical;min-height:56px;box-sizing:border-box;outline:none;">'+(text||'')+'</textarea>';
-    document.body.appendChild(el);
-    el.querySelector('textarea').addEventListener('input',save);
-    const h=el.firstElementChild;
-    h.addEventListener('mousedown',function(e){
-      if(e.target.onclick)return;
-      const ox=e.clientX-el.getBoundingClientRect().left,oy=e.clientY-el.getBoundingClientRect().top;
-      const mv=function(e2){el.style.left=(e2.clientX-ox+scrollX)+'px';el.style.top=(e2.clientY-oy+scrollY)+'px';};
-      const up=function(){save();removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
-      addEventListener('mousemove',mv);addEventListener('mouseup',up);e.preventDefault();
-    });
-    notes.push({id,el});save();
-  }
-  window.ddDel=function(id){const i=notes.findIndex(n=>n.id===id);if(i<0)return;notes[i].el.remove();notes.splice(i,1);save();};
-  window.ddAdd=function(){
-    document.body.style.cursor='crosshair';
-    const h=function(e){if(e.target.closest('#desdoc-bar'))return;
-      document.body.style.cursor='';removeEventListener('click',h);mk(e.pageX-90,e.pageY-20,null,'');};
-    addEventListener('click',h);
-  };
-  window.ddToggle=function(){vis=!vis;notes.forEach(n=>n.el.style.display=vis?'':'none');};
-  window.ddCopy=function(){
-    const items=notes.map(n=>'- [Note '+n.id+'] '+(n.el.querySelector('textarea').value||'(empty)')).join('\n');
-    const out='## Feedback — '+document.title+'\nFile: '+location.pathname+'\n\n'+(items||'(no notes)');
-    navigator.clipboard.writeText(out).then(function(){
-      const b=document.getElementById('ddcopybtn');const t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},2000);
-    });
-  };
-  window.ddFinalize=function(){
-    if(!confirm('Mark this design doc as finalized?'))return;
-    const items=notes.map(n=>'- [Note '+n.id+'] '+(n.el.querySelector('textarea').value||'(empty)')).join('\n');
-    const out='## FINALIZED — '+document.title+'\nFile: '+location.pathname+'\n\n'+(items?'Final notes:\n'+items:'(no notes — approved as-is)');
-    navigator.clipboard.writeText(out);
-    localStorage.setItem(KEY+'__final','1');
-    document.getElementById('desdoc-badge').style.display='block';
-    document.body.style.paddingTop='32px';
-  };
-  var saved=JSON.parse(localStorage.getItem(KEY)||'[]');
-  if(saved.length)ctr=saved.reduce(function(m,n){return Math.max(m,parseInt(n.id)||0);},0);
-  saved.forEach(function(n){mk(n.x,n.y,n.id,n.text);});
-  if(localStorage.getItem(KEY+'__final')==='1'){
-    document.getElementById('desdoc-badge').style.display='block';
-    document.body.style.paddingTop='32px';
-  }
-})();
-</script>
-<!-- ═══════════════════════════════════════════════════════════ -->
-```
+There is exactly ONE canonical implementation, shared by every planning surface in this kit (`/plan-and-grill`, `/oneshot`, `/research`, and the Pi planish extension). **Do not fork or inline a copy here.** Paste the contents of `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>` in every design doc.
+
+The canonical toolkit copies feedback with a resilient `document.execCommand` fallback, so **Copy Feedback** and **Finalize ✓** work on `file://` and plain-HTTP pages too — the old inline fork relied on the secure-context-only async clipboard API and failed silently in those contexts. Design docs write a fresh `vN.html` each version, so the toolkit's default per-pathname note key already isolates versions; no `<meta name="desdoc-key">` is required (that meta is only for pages that reuse one path across rounds, such as a served grill page).

@@ -270,10 +270,10 @@ def test_grill_feedback_is_annotation_only() -> None:
 
     # Toolkits: the form toolkit is style-only; the annotation toolkit is the
     # single interactive surface, with anchor-tagged Copy Feedback.
-    form = (REPO_ROOT / ".shared-llm/llm/claude/common/toolkits/form-toolkit.html").read_text()
+    form = (REPO_ROOT / ".shared-llm/llm/common/common/toolkits/form-toolkit.html").read_text()
     for banned in ("<script", "<button", "textarea", "Copy Answers"):
         assert banned not in form, f"form-toolkit.html must not contain {banned!r}"
-    ann = (REPO_ROOT / ".shared-llm/llm/claude/common/toolkits/annotation-toolkit.html").read_text()
+    ann = (REPO_ROOT / ".shared-llm/llm/common/common/toolkits/annotation-toolkit.html").read_text()
     for token in ("+ Note", "Copy Feedback", "desdoc-key", "ddAnchor"):
         assert token in ann, f"annotation-toolkit.html must contain {token!r}"
 
