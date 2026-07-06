@@ -1,7 +1,7 @@
 /**
- * planish — visual HTML plan review for Pi, grill-first
+ * do-planish — visual HTML plan review for Pi, grill-first
  *
- * Planning with planish is always a two-beat flow in the browser (port 4390):
+ * Planning with do-planish is always a two-beat flow in the browser (port 4390):
  *
  *   1. GRILL   — planish_grill { questions[] }
  *                Pi asks a batch of questions on an annotatable page. The tool
@@ -25,13 +25,14 @@
  * no workflow coupling. The approved plan.html is the output — what happens next
  * is up to the caller.
  *
- * Slash cmd: /planish <what to plan>   — START a Pi-native planning session: turns on
+ * Slash cmd: /do-planish <what to plan>   — START a Pi-native planning session: turns on
  *                planMode so before_agent_start drives the agent through
  *                browser grill → build plan.html → serve-for-review, until approved.
- *            /planish --review <path>  — re-open an existing plan.html for review.
+ *            /do-planish --review <path>  — re-open an existing plan.html for review.
  *
- * Note: standalone markdown skill variants (/do-planish and /cc-planish) are intentionally
- * removed. /planish is the standalone Pi planner; /do-plan-and-grill is the workflow-suite planner.
+ * Note: /do-planish (this extension) is the standalone Pi planner; /cc-planish is the
+ * standalone Claude Code port of the same flow (same .planish.yaml contract).
+ * /do-plan-and-grill and /cc-plan-and-grill are the workflow-suite planners.
  *
  * HTTP server: port 4390 (lazy start, shared across a session). The URL host
  * comes from `host:` in the nearest .planish.yaml or $PLANISH_HOST (default
@@ -43,6 +44,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ function esc(s: string): string {
 // planish writes plan.md + plan.html into a RESOLVED directory, never the cwd
 // (writing into the cwd pollutes whatever repo you happen to be planning in).
 // Precedence for the directory:
-//   1. --dir <path> passed to /planish
+//   1. --dir <path> passed to /do-planish
 //   2. $PLANISH_DIR
 //   3. nearest .planish.yaml walking UP from cwd — its "dir" template
 //   4. fallback: /tmp/planish/{date}/{slug}
@@ -235,83 +237,44 @@ function isLocalOnly(host: string): boolean {
   return host === "localhost" || host === "127.0.0.1";
 }
 
-// ─── Sticky-note annotation block (the ONLY interactive surface) ───────────────
+// ─── Canonical annotation toolkit (runtime-read — the ONLY interactive surface) ─
+//
+// The sticky-note bar is NOT inlined here. It has exactly ONE canonical
+// implementation in the kit, at
+// .shared-llm/llm/common/common/toolkits/annotation-toolkit.html — skills paste
+// it verbatim, and this extension READS that same file at serve time, so the two
+// can never drift. The path is resolved relative to THIS module's directory via
+// import.meta.url; Node ESM resolves import.meta.url to the module's realpath,
+// so the read works identically whether the extension is loaded from the repo
+// or through its ~/.pi/agent/extensions/ symlink.
 //
 // Injected into every page planish serves: the grill page embeds it, and a
 // reviewed plan.html gets it appended unless the file already carries its own
 // annotation controls. Feedback flows one way — the user annotates, clicks
 // Copy Feedback, and pastes the block into the TUI. No answer boxes, no
 // Submit buttons, no POST back to the agent.
-//
-// Every serve gets a fresh nonce baked into the localStorage key, and the page
-// prunes every other planish_notes__ key on load — new round, clean slate
-// (all rounds share the one URL localhost:4390/, so pathname keying would
-// resurrect the previous round's notes).
+const CANONICAL_TOOLKIT_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../common/common/toolkits/annotation-toolkit.html",
+);
+
+function annotationToolkitHtml(): string {
+  return fs.readFileSync(CANONICAL_TOOLKIT_PATH, "utf-8");
+}
+
+// The canonical toolkit keys notes off <meta name="desdoc-key"> and, when that
+// meta is present, prunes every OTHER desdoc_r__ key on load. planish serves
+// every round from the one URL (localhost:4390/), so each serve injects that
+// meta with a fresh per-serve nonce — new round, clean slate (pathname keying
+// would otherwise resurrect the previous round's notes).
 let serveNonceCounter = 0;
 
 function nextNonce(): string {
   return `${Date.now().toString(36)}r${++serveNonceCounter}`;
 }
 
-function annotationBlockHtml(nonce: string): string {
-  return `
-<style>
-  #desdoc-badge{display:none;position:fixed;top:0;left:0;right:0;background:#0f1f14;border-bottom:1px solid #3a5a2a;color:#98c379;text-align:center;padding:5px 16px;font:11px/1.5 'JetBrains Mono',monospace;z-index:10000;}
-  #desdoc-bar{position:fixed;bottom:0;left:0;right:0;background:#0d1017;border-top:1px solid #1e222a;padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:9999;font-family:'JetBrains Mono',monospace;font-size:12px;color:#6b7280;}
-  body{padding-bottom:52px!important;}
-  .ddbtn{padding:5px 11px;border-radius:5px;border:1px solid #2e3440;background:#0d1017;color:#c8ccd4;cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
-  .ddbtn:hover{background:#1e222a;}
-  .ddbtn.copy{background:#1a2d4a;border-color:#456a8a;color:#7ab4db;}
-  .ddbtn.fin{background:#0f1f14;border-color:#3a5a2a;color:#98c379;}
-  #desdoc-cnt{background:#2e3440;color:#c8ccd4;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:2px;}
-  .sticky-note{position:absolute;z-index:9000;min-width:180px;max-width:260px;background:#1c1a10;border:1px solid #8a6a1a;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.4);}
-  .sticky-head{background:#8a6a1a;padding:3px 8px;cursor:move;display:flex;justify-content:space-between;align-items:center;border-radius:4px 4px 0 0;font:11px/20px 'JetBrains Mono',monospace;color:#1a1208;user-select:none;}
-  .sticky-note textarea{width:100%;border:none;background:transparent;padding:6px 8px;font:12px/1.5 'JetBrains Mono',monospace;color:#c8ccd4;resize:vertical;min-height:56px;box-sizing:border-box;outline:none;}
-</style>
-<div id="desdoc-badge">✓ FINALIZED — summary copied to clipboard</div>
-<div id="desdoc-bar">
-  <span style="color:#3e4450;margin-right:auto;">+ Note on a question → type → Copy Feedback → paste into the chat</span>
-  <button class="ddbtn" onclick="ddAdd()">+ Note</button>
-  <button class="ddbtn" onclick="ddToggle()">Notes <span id="desdoc-cnt">0</span></button>
-  <button class="ddbtn copy" id="ddcopybtn" onclick="ddCopy()">Copy Feedback</button>
-  <button class="ddbtn fin" onclick="ddFinalize()">Finalize ✓</button>
-</div>
-<script>
-(function(){
-  function execCopy(text){var ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);}
-  function writeCopy(text){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(text).catch(function(){execCopy(text);});}execCopy(text);return Promise.resolve();}
-  var KEY='planish_notes__${nonce}';var notes=[],ctr=0,vis=true;
-  try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('planish_notes__')===0&&k!==KEY)localStorage.removeItem(k);});}catch(e){}
-  function save(){localStorage.setItem(KEY,JSON.stringify(notes.map(function(n){return {id:n.id,x:parseFloat(n.el.style.left),y:parseFloat(n.el.style.top),text:n.el.querySelector('textarea').value};})));var c=document.getElementById('desdoc-cnt');if(c)c.textContent=notes.length;}
-  function mk(x,y,id,text){id=id||String(++ctr);var el=document.createElement('div');el.className='sticky-note';el.style.left=x+'px';el.style.top=y+'px';el.innerHTML='<div class="sticky-head"><span>Note '+id+'</span><span onclick="ddDel(\\''+id+'\\')" style="cursor:pointer;font-weight:700;padding:0 3px;color:#3a2808;">✕</span></div><textarea placeholder="Add note…">'+(text||'')+'</textarea>';document.body.appendChild(el);el.querySelector('textarea').addEventListener('input',save);var h=el.firstElementChild;h.addEventListener('mousedown',function(e){if(e.target.onclick)return;var ox=e.clientX-el.getBoundingClientRect().left,oy=e.clientY-el.getBoundingClientRect().top;var mv=function(e2){el.style.left=(e2.clientX-ox+scrollX)+'px';el.style.top=(e2.clientY-oy+scrollY)+'px';};var up=function(){save();removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};addEventListener('mousemove',mv);addEventListener('mouseup',up);e.preventDefault();});notes.push({id:id,el:el});save();}
-  // Nearest anchor above the note (question text or heading) — the copied
-  // feedback must say WHAT each note is about, since notes are the only
-  // answer channel.
-  function ddAnchor(noteY){
-    var best=null,bestY=-1;
-    document.querySelectorAll('.grill-q-text,h1,h2,h3').forEach(function(el){
-      var y=el.getBoundingClientRect().top+scrollY;
-      if(y<=noteY+28&&y>bestY){bestY=y;best=el;}
-    });
-    if(!best)return '';
-    var t=best.textContent.trim().replace(/\\s+/g,' ');
-    if(t.length>70)t=t.slice(0,67)+'…';
-    return t?' @ "'+t+'"':'';
-  }
-  function ddItems(){return notes.map(function(n){var y=parseFloat(n.el.style.top)||0;return '- [Note '+n.id+ddAnchor(y)+'] '+(n.el.querySelector('textarea').value||'(empty)');}).join('\\n');}
-  window.ddDel=function(id){var i=notes.findIndex(function(n){return n.id===id;});if(i<0)return;notes[i].el.remove();notes.splice(i,1);save();};
-  window.ddAdd=function(){document.body.style.cursor='crosshair';var h=function(e){if(e.target.closest('#desdoc-bar'))return;document.body.style.cursor='';removeEventListener('click',h);mk(e.pageX-90,e.pageY-20,null,'');};addEventListener('click',h);};
-  window.ddToggle=function(){vis=!vis;notes.forEach(function(n){n.el.style.display=vis?'':'none';});};
-  window.ddCopy=function(){writeCopy('## Feedback — '+document.title+'\\n\\n'+(ddItems()||'(no notes)')).then(function(){var b=document.getElementById('ddcopybtn');var t=b.textContent;b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},1600);});};
-  window.ddFinalize=function(){
-    if(!confirm('Finalize — copy an approval block to paste back into the chat?'))return;
-    var items=ddItems();
-    writeCopy('## FINALIZED — '+document.title+'\\n\\n'+(items?'Final notes:\\n'+items:'(no notes — approved as-is)'));
-    document.getElementById('desdoc-badge').style.display='block';
-  };
-  var saved=JSON.parse(localStorage.getItem(KEY)||'[]');if(saved.length)ctr=saved.reduce(function(m,n){return Math.max(m,parseInt(n.id)||0);},0);saved.forEach(function(n){mk(n.x,n.y,n.id,n.text);});
-})();
-</script>`;
+function desdocKeyMeta(nonce: string): string {
+  return `<meta name="desdoc-key" content="${nonce}">`;
 }
 
 // A reviewed plan.html usually embeds its own annotation controls (the build
@@ -321,8 +284,75 @@ function ensureAnnotable(html: string): string {
   if (html.includes("desdoc-bar") || html.includes("ddCopy") || html.includes("Copy Feedback")) {
     return html;
   }
-  const block = annotationBlockHtml(nextNonce());
-  return html.includes("</body>") ? html.replace("</body>", block + "\n</body>") : html + block;
+  // Give the injected canonical toolkit a unique per-serve key so notes don't
+  // carry over from a previous serve (all rounds share the one URL).
+  const meta = desdocKeyMeta(nextNonce());
+  const withMeta = html.includes("</head>")
+    ? html.replace("</head>", `${meta}\n</head>`)
+    : `${meta}\n${html}`;
+  const block = "\n" + annotationToolkitHtml();
+  return withMeta.includes("</body>")
+    ? withMeta.replace("</body>", block + "\n</body>")
+    : withMeta + block;
+}
+
+// ─── Auto-freeze: plan-v<k> versioning enforced by the tool, not the prompt ─────
+//
+// Versioning is tool-enforced: before serving a plan for review, planish_submit_plan
+// compares plan.html / plan.md against the newest frozen plan-v<k> pair in the same
+// directory and, when they differ (or no frozen pair exists yet), writes the next
+// plan-v<k+1>.{html,md} pair FIRST, then serves. The frozen files are immutable
+// history; plan.html / plan.md are the always-latest working copy. Prompt prose that
+// told the agent to freeze by hand demonstrably failed — the discipline lives here.
+
+interface FreezeResult {
+  froze: boolean;
+  version: number; // the plan-v<version> written (froze) or the newest existing (no-op)
+}
+
+// Highest k for which <stem>-v<k>.html exists in dir (0 when none).
+function newestFrozenVersion(dir: string, stem: string): number {
+  const prefix = `${stem}-v`;
+  const suffix = ".html";
+  let maxK = 0;
+  if (!fs.existsSync(dir)) return 0;
+  for (const entry of fs.readdirSync(dir)) {
+    if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) continue;
+    const mid = entry.slice(prefix.length, entry.length - suffix.length);
+    if (/^\d+$/.test(mid)) maxK = Math.max(maxK, parseInt(mid, 10));
+  }
+  return maxK;
+}
+
+function readFileOrNull(p: string): string | null {
+  return fs.existsSync(p) ? fs.readFileSync(p, "utf-8") : null;
+}
+
+// Freeze the current plan.{html,md} as the next plan-v<k> pair unless it already
+// matches the newest frozen pair byte-for-byte. htmlPath is the resolved plan.html.
+function autoFreezePlan(htmlPath: string): FreezeResult {
+  const dir = path.dirname(htmlPath);
+  const ext = path.extname(htmlPath); // ".html"
+  const stem = path.basename(htmlPath, ext); // "plan"
+  const mdPath = path.join(dir, `${stem}.md`);
+
+  const curHtml = readFileOrNull(htmlPath);
+  // Nothing on disk to freeze — review() surfaces the missing-file error.
+  if (curHtml === null) return { froze: false, version: newestFrozenVersion(dir, stem) };
+  const curMd = readFileOrNull(mdPath);
+
+  const newest = newestFrozenVersion(dir, stem);
+  if (newest > 0) {
+    const frozenHtml = readFileOrNull(path.join(dir, `${stem}-v${newest}.html`));
+    const frozenMd = readFileOrNull(path.join(dir, `${stem}-v${newest}.md`));
+    // Unchanged since the last snapshot — do not write a duplicate version.
+    if (frozenHtml === curHtml && frozenMd === curMd) return { froze: false, version: newest };
+  }
+
+  const next = newest + 1;
+  fs.writeFileSync(path.join(dir, `${stem}-v${next}.html`), curHtml);
+  if (curMd !== null) fs.writeFileSync(path.join(dir, `${stem}-v${next}.md`), curMd);
+  return { froze: true, version: next };
 }
 
 // ─── Grill: self-contained annotatable question page ───────────────────────────
@@ -366,6 +396,7 @@ function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
     : payloadOrQuestions;
   const questions = payload.questions ?? [];
   const title = payload.title?.trim() || "A few questions before the plan";
+  const nonce = nextNonce();
   const contextHtml = payload.contextHtml?.trim()
     ? `<section class="context card">${payload.contextHtml}</section>`
     : "";
@@ -384,6 +415,7 @@ function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+${desdocKeyMeta(nonce)}
 <title>${esc(title)} — grill</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
@@ -427,7 +459,7 @@ function grillPageHtml(payloadOrQuestions: GrillPayload | GrillQuestion[]): stri
   <div class="sub">Answer by annotation: <b>+ Note</b> on a question → type → next note → <b>Copy Feedback</b> → paste it back into the Pi chat. No note on a question = the recommendation stands.</div>
   ${contextHtml}
   <div id="form">${blocks}</div>
-${annotationBlockHtml(nextNonce())}
+${annotationToolkitHtml()}
 </body></html>`;
 }
 
@@ -492,11 +524,11 @@ async function grill(payload: GrillPayload): Promise<{ url: string; opened: bool
 // ─── Extension entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // /planish sets these; before_agent_start then drives the agent through the
+  // /do-planish sets these; before_agent_start then drives the agent through the
   // grill → build → serve-for-review flow until the plan is approved.
   let planMode = false;
   let planTopic = "";
-  let planDir = ""; // absolute dir for plan.md + plan.html; resolved at /planish time
+  let planDir = ""; // absolute dir for plan.md + plan.html; resolved at /do-planish time
 
   pi.on("before_agent_start", async (event: any) => {
     if (!planMode) return;
@@ -536,8 +568,8 @@ export default function (pi: ExtensionAPI) {
         `    </style>\n` +
         `    Structure: page header (h1 + .subtitle), then h2 sections per phase with .card divs (.phase-num, .phase-title, task bullets, a Verification bullet at end). Include annotation controls before </body> (sticky notes + Copy Feedback / Finalize) and a unique <meta name="desdoc-key" content="<slug>-plan-v<n>"> in <head> so each plan version starts with a clean note slate. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.\n` +
         `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
-        `Both files hold the same plan content. NEVER revise the plan in place: every time you build or revise it, ALSO freeze the same content as plan-v<k>.md + plan-v<k>.html in the same directory (v1 on the first build, incrementing each revision; never edit an existing plan-v* file). plan.md/plan.html always hold the latest; the frozen plan-v* files show how the plan evolved.\n\n` +
-        `STEP 3 — REVIEW: Call planish_submit_plan with the path ${planHtml}. It serves the plan in the browser and returns immediately — tell the user the page is ready, then END YOUR TURN. The user annotates and pastes feedback into the chat: a ## FINALIZED block (or an explicit approval message) means the plan is APPROVED; notes requesting changes mean revise BOTH files, freeze the revision as the next plan-v<k> pair, and call planish_submit_plan again. The approved plan is the deliverable.`,
+        `Both files hold the same plan content, and plan.md/plan.html always hold the latest. You do NOT freeze versions by hand: planish_submit_plan freezes the next plan-v<k>.md + plan-v<k>.html pair for you automatically whenever the submitted plan differs from the newest frozen pair (v1 on the first submit, incrementing on each changed revision). NEVER edit a frozen plan-v* file; the frozen plan-v* files show how the plan evolved.\n\n` +
+        `STEP 3 — REVIEW: Call planish_submit_plan with the path ${planHtml}. It serves the plan in the browser and returns immediately — tell the user the page is ready, then END YOUR TURN. The user annotates and pastes feedback into the chat: a ## FINALIZED block (or an explicit approval message) means the plan is APPROVED; notes requesting changes mean revise BOTH files and call planish_submit_plan again (it auto-freezes the next plan-v<k> pair before serving). The approved plan is the deliverable.`,
     };
   });
 
@@ -629,8 +661,9 @@ export default function (pi: ExtensionAPI) {
       "Use the v3 dark style (NO Tailwind CDN) — body background #0d1017, JetBrains Mono + IBM Plex Sans fonts, " +
       ".card divs with colored left-border accents for each phase, annotation controls before </body>. " +
       "Then call this tool with the file path. It serves the page and returns IMMEDIATELY — tell the user, then END YOUR TURN. " +
+      "This tool auto-freezes plan versions for you: before serving, it snapshots the current plan.html/plan.md as the next plan-v<k>.md + plan-v<k>.html pair whenever they differ from the newest frozen pair (never edit a frozen plan-v* file yourself). " +
       "The user annotates and pastes feedback into the chat: a ## FINALIZED block (or explicit approval) means APPROVED; " +
-      "notes requesting changes mean revise the plan (freezing the revision as the next plan-v<k>.md + plan-v<k>.html — never revise in place without a frozen snapshot) and call this tool again.",
+      "notes requesting changes mean revise the plan and call this tool again.",
     parameters: {
       type: "object",
       properties: {
@@ -654,18 +687,26 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Error: filePath is required." }] };
       }
       try {
-        const served = await review(filePath, planDir || (ctx?.cwd ?? process.cwd()));
+        const base = planDir || (ctx?.cwd ?? process.cwd());
+        // Tool-enforced versioning: freeze the current plan as the next plan-v<k>
+        // pair (only when it changed) BEFORE serving. The agent never freezes by hand.
+        const resolvedPlan = path.isAbsolute(filePath) ? filePath : path.join(base, filePath);
+        const freeze = fs.existsSync(resolvedPlan) ? autoFreezePlan(resolvedPlan) : null;
+        const served = await review(filePath, base);
         // The drive-the-flow prompt has done its job once the plan is up for
         // review; the revise-and-resubmit loop is guided by this result text.
         planMode = false;
+        const freezeNote = freeze?.froze
+          ? `Froze plan-v${freeze.version} (immutable snapshot) before serving. `
+          : "";
         return {
           content: [{
             type: "text",
             text:
-              `Plan review page served. ${serveNote(served)}\n\n` +
+              `Plan review page served. ${freezeNote}${serveNote(served)}\n\n` +
               "Tell the user the plan is ready for review, then END YOUR TURN — do not proceed in this turn. " +
               "The user will annotate the page and paste feedback here: a ## FINALIZED block (or an explicit approval message) means the plan is APPROVED and planning is done. " +
-              `Notes requesting changes mean: revise BOTH files (${filePath} and its .md twin), freeze the revision as the next plan-v<k>.md + plan-v<k>.html (never revise in place without the frozen snapshot), and call planish_submit_plan again with the same path. ` +
+              `Notes requesting changes mean: revise BOTH files (${filePath} and its .md twin) and call planish_submit_plan again with the same path — it auto-freezes the next plan-v<k>.md + plan-v<k>.html pair for you before serving (never edit a frozen plan-v* file). ` +
               "This is still a PLANNING session — do not start implementing unless the user explicitly asks after approval.",
           }],
         };
@@ -680,15 +721,15 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── /planish [description] — START a planning session ─────────────────────
+  // ── /do-planish [description] — START a planning session ──────────────────
   //
-  // Default use: /planish <what you want to plan>. Turns on planMode; the
+  // Default use: /do-planish <what you want to plan>. Turns on planMode; the
   // before_agent_start hook then drives the agent: grill → build plan.html →
   // serve for browser review, iterating on pasted feedback until approved.
-  // Escape hatch: /planish --review <path> re-opens an existing plan.html.
+  // Escape hatch: /do-planish --review <path> re-opens an existing plan.html.
 
-  (pi as any).registerCommand("planish", {
-    description: "Start a standalone Pi planning session: /planish <what to plan> — grills you in an annotatable browser page (+ Note → Copy Feedback → paste back), builds a visual HTML plan, iterates until you approve. Re-open an existing plan with: /planish --review <path>.",
+  (pi as any).registerCommand("do-planish", {
+    description: "Start a standalone Pi planning session: /do-planish <what to plan> — grills you in an annotatable browser page (+ Note → Copy Feedback → paste back), builds a visual HTML plan, iterates until you approve. Re-open an existing plan with: /do-planish --review <path>.",
     handler: async (args: string, ctx: any) => {
       const trimmed = args.trim();
 
@@ -699,13 +740,13 @@ export default function (pi: ExtensionAPI) {
         try {
           const served = await review(filePath, ctx?.cwd ?? process.cwd());
           ctx.ui.notify(
-            `planish: ${filePath} is up for review at ${served.url}` +
+            `do-planish: ${filePath} is up for review at ${served.url}` +
               (served.opened ? "" : " (could not auto-open a browser — open the URL yourself)") +
               " — annotate (+ Note), click Copy Feedback, and paste the block into this chat. Finalize ✓ copies an approval block.",
             "info"
           );
         } catch (err) {
-          ctx.ui.notify(`planish: ${err instanceof Error ? err.message : String(err)}`, "error");
+          ctx.ui.notify(`do-planish: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
         return;
       }
@@ -724,15 +765,15 @@ export default function (pi: ExtensionAPI) {
       try {
         planDir = resolvePlanDir(ctx?.cwd ?? process.cwd(), topic, dirFlag);
       } catch (err) {
-        ctx.ui.notify(`planish: ${err instanceof Error ? err.message : String(err)}`, "error");
+        ctx.ui.notify(`do-planish: ${err instanceof Error ? err.message : String(err)}`, "error");
         return;
       }
       planMode = true;
       planTopic = topic;
       ctx.ui.notify(
         topic
-          ? `planish: planning "${topic}" — Pi will grill you in the browser (annotate → Copy Feedback → paste back), then build a visual plan in ${planDir} for your review.`
-          : `planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser (annotate → Copy Feedback → paste back), then build a visual plan in ${planDir} for review.`,
+          ? `do-planish: planning "${topic}" — Pi will grill you in the browser (annotate → Copy Feedback → paste back), then build a visual plan in ${planDir} for your review.`
+          : `do-planish: planning mode on — tell Pi what you want to plan. It will grill you in the browser (annotate → Copy Feedback → paste back), then build a visual plan in ${planDir} for review.`,
         "info"
       );
     },

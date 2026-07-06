@@ -239,22 +239,25 @@ def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields
         assert "planish-html-grill-contract.md" in text
         assert "plain chat list of questions" in text
 
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
     for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "+ Note", "Copy Feedback"):
         assert token in planish_ts
 
+    # do-planish stays an extension-only command (no compose recipe). cc-planish is
+    # revived as a standalone Claude Code skill (its recipe + layer must exist).
     assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/common/do-planish.yaml").exists()
-    assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
+    assert (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
+    assert (REPO_ROOT / ".shared-llm/layers/slash-commands/common/claude/cc-planish/command.md").exists()
 
 
 def test_grill_feedback_is_annotation_only() -> None:
     """One feedback transport everywhere: sticky notes -> Copy Feedback -> paste back.
     No page-level answer boxes, no Submit/Approve buttons, no browser->agent POST."""
     # Pi runtime serves its pages and returns immediately — no blocking POST plumbing.
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
     for banned in ("Copy Answers", "Submit Answers", "grill-respond", "/respond",
                    "Request Changes", "pendingResolve", "grill-a"):
-        assert banned not in planish_ts, f"planish.ts must not contain {banned!r}"
+        assert banned not in planish_ts, f"do-planish.ts must not contain {banned!r}"
 
     # Grill-authoring commands: notes are the only answer channel.
     for rel in (
@@ -270,10 +273,10 @@ def test_grill_feedback_is_annotation_only() -> None:
 
     # Toolkits: the form toolkit is style-only; the annotation toolkit is the
     # single interactive surface, with anchor-tagged Copy Feedback.
-    form = (REPO_ROOT / ".shared-llm/llm/claude/common/toolkits/form-toolkit.html").read_text()
+    form = (REPO_ROOT / ".shared-llm/llm/common/common/toolkits/form-toolkit.html").read_text()
     for banned in ("<script", "<button", "textarea", "Copy Answers"):
         assert banned not in form, f"form-toolkit.html must not contain {banned!r}"
-    ann = (REPO_ROOT / ".shared-llm/llm/claude/common/toolkits/annotation-toolkit.html").read_text()
+    ann = (REPO_ROOT / ".shared-llm/llm/common/common/toolkits/annotation-toolkit.html").read_text()
     for token in ("+ Note", "Copy Feedback", "desdoc-key", "ddAnchor"):
         assert token in ann, f"annotation-toolkit.html must contain {token!r}"
 
@@ -287,10 +290,15 @@ def test_plan_versioning_downloadable_and_host() -> None:
     """Plans freeze plan-v<k> history (never revised in place), pages are also
     offered as downloadable files where the harness can send them, and URLs
     honor the .planish.yaml host: field for remote (Tailscale) sessions."""
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
     for token in ("plan-v<k>", "resolveHost", "PLANISH_HOST", "0.0.0.0"):
-        assert token in planish_ts, f"planish.ts must contain {token!r}"
+        assert token in planish_ts, f"do-planish.ts must contain {token!r}"
     assert "listen(PORT, \"127.0.0.1\"" not in planish_ts  # bind follows the host
+
+    # plan-v<k> freezing is tool-enforced (auto-freeze in planish_submit_plan), not
+    # left to prompt prose: the submit tool snapshots the next frozen pair itself.
+    for token in ("autoFreezePlan", "newestFrozenVersion", "planish_submit_plan"):
+        assert token in planish_ts, f"do-planish.ts must wire auto-freeze via {token!r}"
 
     # tf-implement's duplicated resolver must stay in sync: same config file.
     tf_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/tf-implement.ts").read_text()
@@ -320,6 +328,52 @@ def test_plan_versioning_downloadable_and_host() -> None:
     contract = (REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md").read_text()
     for token in ("Versioned history", "downloadable", "host:"):
         assert token in contract, f"contract must contain {token!r}"
+
+
+def _agent_fixture(tmp_path: Path, name: str, *, model: str | None) -> tuple[Path, Path, str]:
+    """Build a .shared-llm fixture with one agent recipe; include `model:` only when given."""
+    shared = tmp_path / ".shared-llm"
+    layer_dir = shared / "layers/agents/common" / name
+    _write(layer_dir / "body.md", f"# {name}\n\nAgent body.\n")
+    _write(layer_dir / "description.md", "A test agent.\n")
+
+    recipe: dict = {
+        "type": "agent",
+        "name": name,
+        "color": "red",
+        "description": f".shared-llm/layers/agents/common/{name}/description.md",
+    }
+    if model is not None:
+        recipe["model"] = model
+    recipe["inputs"] = [f".shared-llm/layers/agents/common/{name}/body.md"]
+    recipe["output"] = f".claude/agents/{name}.md"
+
+    recipe_rel = f".shared-llm/compose/agents/{name}.yaml"
+    _write(shared.parent / recipe_rel, yaml.safe_dump(recipe, sort_keys=False, allow_unicode=True))
+    return shared, tmp_path, recipe_rel
+
+
+def test_agent_recipe_without_model_omits_model_frontmatter(tmp_path: Path) -> None:
+    """An agent recipe with no `model:` composes cleanly and emits no `model:` line —
+    so the agent's LLM is chosen per run (e.g. by a route profile), never hardwired.
+    This guards the ClaudeAgent optional-`model:` branch (adversarial-evaluator)."""
+    shared, target, recipe = _agent_fixture(tmp_path, "no-model-agent", model=None)
+    _compose(shared, target, recipe)
+    text = (target / ".claude/agents/no-model-agent.md").read_text()
+    fm, _ = _split(text)
+    assert "model" not in fm, f"unexpected model in frontmatter: {fm}"
+    assert not any(line.startswith("model:") for line in text.splitlines())
+    # color still passes through when the recipe declares it
+    assert fm["color"] == "red"
+
+
+def test_agent_recipe_with_model_emits_model_frontmatter(tmp_path: Path) -> None:
+    """The other direction: a recipe that declares `model:` still emits it verbatim."""
+    shared, target, recipe = _agent_fixture(tmp_path, "pinned-agent", model="opus")
+    _compose(shared, target, recipe)
+    fm, _ = _split((target / ".claude/agents/pinned-agent.md").read_text())
+    assert fm["model"] == "opus"
+    assert fm["color"] == "red"
 
 
 def test_settings_deep_merge(tmp_path: Path) -> None:

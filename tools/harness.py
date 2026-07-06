@@ -14,7 +14,7 @@ Two roots are decoupled:
 
 Compose YAML types:
     type: skill      — YAML frontmatter with name + description (default if no type)
-    type: agent      — YAML frontmatter with name + description + model
+    type: agent      — YAML frontmatter with name + description (+ optional model/color)
     type: claude-md  — plain concatenated markdown, no frontmatter (CLAUDE.md)
     type: agents-md  — plain concatenated markdown, no frontmatter (AGENTS.md)
     type: prompt     — plain concatenated markdown, no frontmatter; a whole
@@ -211,20 +211,26 @@ class ClaudeSkill:
 
 
 class ClaudeAgent:
-    """Produces an agent .md file with name + description + model frontmatter.
+    """Produces an agent .md file with name + description frontmatter.
 
-    An optional `color:` field is emitted only when the recipe declares one.
+    Optional `model:` and `color:` fields are emitted only when the recipe
+    declares them. An agent with no `model:` pin inherits the dispatching
+    session's model, and a call-time model override always wins — so a recipe
+    omits `model:` when the agent's LLM is chosen per run (e.g. by a route
+    profile) rather than hardwired.
     """
 
-    def build_frontmatter(self, name: str, description: str, model: str, color: str | None) -> str:
-        fm: dict[str, Any] = {"name": name, "description": description, "model": model}
+    def build_frontmatter(self, name: str, description: str, model: str | None, color: str | None) -> str:
+        fm: dict[str, Any] = {"name": name, "description": description}
+        if model is not None:
+            fm["model"] = model
         if color is not None:
             fm["color"] = color
         return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True, width=2**31)
 
     def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
-        model = data["model"]
+        model = data.get("model")
         color = data.get("color")
         frontmatter = self.build_frontmatter(data["name"], description, model, color)
         content = f"---\n{frontmatter}---\n\n{body}"
@@ -775,6 +781,7 @@ COMMON_ROOTS = (
     "layers/skills/common",
     "layers/slash-commands/common",
     "llm/claude/common",
+    "llm/common/common",
     "llm/pi/common",
 )
 
@@ -1218,9 +1225,11 @@ GLOBAL_CONVENTION_SKILLS = {
     "golang": "compose/global/golang.yaml",
 }
 
-# Removed standalone planner skills — pruned from home dirs when found (matched by
-# their SKILL.md `name:` so we never delete a foreign dir of the same name).
-DEPRECATED_GLOBAL_SKILLS = ("do-planish", "cc-planish")
+# Home-dir skill names to prune when found (matched by their SKILL.md `name:` so we
+# never delete a foreign dir of the same name). Currently empty: cc-planish is a live
+# skill again, and do-planish is the Pi extension command /do-planish, not a global
+# skill (extensions are symlinked into ~/.pi/, never composed as skills).
+DEPRECATED_GLOBAL_SKILLS: tuple[str, ...] = ()
 
 
 def _global_home_dirs() -> dict[str, Path]:

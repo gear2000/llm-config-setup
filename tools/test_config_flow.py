@@ -395,8 +395,8 @@ def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:
 
     # Claude settings scaffolded from template.
     assert (home / ".claude/settings.json").exists()
-    # Pi extensions symlinked into ~/.pi/agent/extensions (planish.ts is bundled).
-    ext = home / ".pi/agent/extensions/planish.ts"
+    # Pi extensions symlinked into ~/.pi/agent/extensions (do-planish.ts is bundled).
+    ext = home / ".pi/agent/extensions/do-planish.ts"
     assert ext.is_symlink()
     # Pi settings scaffolded.
     assert (home / ".pi/agent/settings.json").exists()
@@ -429,11 +429,11 @@ def test_home_runtime_exclude_drops_pi_extension(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _patch_home(m, home)
     cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["pi"], "destinations": [],
-           "exclude": ["llm/pi/common/extensions/planish.ts"]}
+           "exclude": ["llm/pi/common/extensions/do-planish.ts"]}
     m.do_home_runtime(cfg, _quiet(m))
-    # planish.ts excluded, but other extensions still linked (dir not empty)
+    # do-planish.ts excluded, but other extensions still linked (dir not empty)
     ext = home / ".pi/agent/extensions"
-    assert not (ext / "planish.ts").exists(), "excluded extension must not be linked"
+    assert not (ext / "do-planish.ts").exists(), "excluded extension must not be linked"
     assert ext.is_dir() and any(ext.iterdir()), "other extensions still install"
 
 

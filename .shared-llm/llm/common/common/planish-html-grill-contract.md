@@ -1,6 +1,6 @@
 # Planish HTML Grill Contract
 
-This is the shared contract for customized planning flows. It applies to the Pi `/planish` extension and to the suite planners (`/do-plan-and-grill`, `/cc-plan-and-grill`). Standalone skill variants `/do-planish` and `/cc-planish` are intentionally removed to avoid overlapping meanings.
+This is the shared contract for customized planning flows. It applies to the Pi `/do-planish` extension (the Pi command is now `/do-planish`), the standalone `/cc-planish` Claude Code skill, and the suite planners (`/do-plan-and-grill`, `/cc-plan-and-grill`).
 
 ## Non-negotiable
 
@@ -22,6 +22,15 @@ Hard bans, everywhere:
 - **No direct browser→assistant feedback.** No Submit / Approve / Request-Changes buttons, no POST back to the assistant, and no tool call that blocks waiting on the browser. A planish tool serves its page and returns immediately; the assistant gives the user the URL and ENDS ITS TURN. Feedback arrives as the user's next pasted message.
 
 The convention that makes this fast: **a question with no note means "go with the recommendation."** Every question block carries a concrete recommendation, so the user only annotates what they want to change or answer differently. **Finalize ✓** copies a `## FINALIZED` block (with any final notes); pasting it back signals approval.
+
+## Canonical annotation toolkit — one implementation, zero forks
+
+There is exactly ONE implementation of the sticky-note annotation controls, and it lives at `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` — a harness-neutral common-layer path, so `cc-*`, `do-*`, and the Pi extension all reference the same file (the companion style-only `form-toolkit.html` sits beside it). Every consumer uses that one file — never a fork or an inlined copy:
+
+- **Skills** (`/cc-plan-and-grill`, `/do-plan-and-grill`, the `*-oneshot` / `*-research` variants, `/design-doc`, and any future planner) paste its contents verbatim immediately before `</body>`.
+- **The Pi planish extension** reads it at serve time (an `import.meta.url`-relative sibling-read of that same file) and injects it verbatim, plus a per-serve `<meta name="desdoc-key">` in `<head>` — so the browser bar is byte-identical to what the skills paste.
+
+The toolkit copies with a `document.execCommand` fallback (so Copy Feedback / Finalize work on `file://` and plain HTTP) and keys notes off `<meta name="desdoc-key">` when present (see "Fresh annotations every round"). A second, divergent copy of this bar anywhere is a regression.
 
 ## Deliver the page two ways — URL and downloadable file
 
@@ -52,11 +61,24 @@ The grill is an interview about the design, not a changelog. Hard rules:
 
 Rounds often reuse one URL/path (`grill_current.html`, a localhost server), and note storage is keyed per page — so every generated round page must carry a unique key: `<meta name="desdoc-key" content="<date>-<slug>-r<round>">` in `<head>` (the annotation toolkit uses it and clears the previous round's notes). Server-rendered grills (Pi `planish_grill`) do this automatically. Notes are the ONLY answer channel, so a round that shows the previous round's sticky notes is a bug.
 
+## Unanswered-first rounds — carry only open questions forward
+
+A grill converges by shrinking, not by re-listing settled ground. What a round shows depends on the round number:
+
+- **Round 1** — the full context header (see "Required page sections") plus every question. This is the only round that opens with the complete header and the complete question set.
+- **Round > 1** — ONLY the still-open questions: those left unanswered from prior rounds plus anything the latest feedback newly surfaced, ordered **open-longest-standing first** (questions that have waited the most rounds sit at the top). A question the user has resolved — annotated, or accepted by leaving it un-noted — is never re-rendered as full question text.
+
+**Resolved questions collapse to one line.** Instead of repeating settled questions, a round > 1 stands them in with a single summary line — e.g. `<N> resolved — recommendations accepted` — never their full text. The user can still reopen any decision by annotating, but the page does not re-list closed questions.
+
+**Slim header on rounds > 1.** The full plain-English context header is a round-1 cost paid once. Rounds > 1 open with a slim header only: the round number, a one-line what-changed-since-the-last-round, and the open/resolved counts. Nothing more — the reader already has the context from round 1.
+
+The Pi planish extension already behaves this way — each grill call is a fresh batch of only the new/open questions — so this is the behavioral reference, not a new mechanism. Everything else about a round is unchanged: `grill_current.html` + a frozen `grill-v<round>.html`, a fresh `desdoc-key` per round, no answer boxes, un-noted = accepted.
+
 ## Required page sections
 
 Every grill round must include:
 
-1. **Context header** — what is being planned, current draft/plan shape, and decisions already locked — ending with the one-line how-to: _"Answer by annotation: + Note on a question → type → Copy Feedback → paste it back into the chat. No note on a question = the recommendation stands."_
+1. **Context header** — what is being planned, current draft/plan shape, and decisions already locked — ending with the one-line how-to: _"Answer by annotation: + Note on a question → type → Copy Feedback → paste it back into the chat. No note on a question = the recommendation stands."_ (This full header is round 1 only; rounds > 1 use the slim header — see "Unanswered-first rounds".)
 2. **Visual framing** — one or more diagrams that make the user's choice understandable.
 3. **Question blocks** — each question has text, optional note, and a concrete recommendation. No input fields.
 4. **Annotation controls** — the sticky-note bar (`+ Note` / `Notes` / `Copy Feedback` / `Finalize ✓`) pasted before `</body>`. This is the page's only interactive surface.

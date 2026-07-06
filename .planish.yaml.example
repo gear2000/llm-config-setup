@@ -2,7 +2,7 @@
 #
 # HOW IT WORKS
 # ─────────────
-# Pi's /planish command writes two files — plan.md and plan.html — into
+# Pi's /do-planish command writes two files — plan.md and plan.html — into
 # a directory you control. You then open the HTML file in a browser to
 # read and annotate it.
 #
@@ -41,7 +41,7 @@
 # TOKENS
 # ──────
 #   {date}  →  YYYY-MM-DD  (today)
-#   {slug}  →  your /planish topic, lowercased and hyphenated
+#   {slug}  →  your /do-planish topic, lowercased and hyphenated
 #   {n}     →  next version integer, auto-incremented by scanning siblings
 #
 # A relative "dir" path resolves from the directory holding THIS file.
