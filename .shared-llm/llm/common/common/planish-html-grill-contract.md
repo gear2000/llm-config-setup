@@ -1,6 +1,6 @@
 # Planish HTML Grill Contract
 
-This is the shared contract for customized planning flows. It applies to the Pi `/planish` extension, the standalone `/cc-planish` Claude Code skill, and the suite planners (`/do-plan-and-grill`, `/cc-plan-and-grill`). The standalone `/do-planish` variant is not provided.
+This is the shared contract for customized planning flows. It applies to the Pi `/do-planish` extension (the Pi command is now `/do-planish`), the standalone `/cc-planish` Claude Code skill, and the suite planners (`/do-plan-and-grill`, `/cc-plan-and-grill`).
 
 ## Non-negotiable
 

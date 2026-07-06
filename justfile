@@ -92,7 +92,7 @@ pi-clean:
 
 # ─── Terraform Workflow ───────────────────────────────
 # Extensions (auto-loaded from ~/.pi/agent/extensions/): tf-implement.ts,
-#   tf-approve.ts, iac-guard.ts, planish.ts
+#   tf-approve.ts, iac-guard.ts, do-planish.ts
 # Agent:      ~/.pi/agents/tf-reviewer.md
 
 # Load a plan and run the implement loop (write reviewed terraform until approved).

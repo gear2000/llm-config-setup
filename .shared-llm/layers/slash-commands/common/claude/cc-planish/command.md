@@ -1,6 +1,6 @@
 # cc-planish — Standalone plan → grill → finalize (Claude Code)
 
-The lightweight standalone planner: grill the user on an annotatable HTML page, build a versioned `plan.md` + `plan.html`, iterate until approved. This is the Claude Code port of the Pi `/planish` extension — the same flow, the same `.planish.yaml` contract, the same annotation-only feedback — expressed as a file-based skill instead of an in-memory HTTP server.
+The lightweight standalone planner: grill the user on an annotatable HTML page, build a versioned `plan.md` + `plan.html`, iterate until approved. This is the Claude Code port of the Pi `/do-planish` extension — the same flow, the same `.planish.yaml` contract, the same annotation-only feedback — expressed as a file-based skill instead of an in-memory HTTP server.
 
 It is deliberately smaller than `/cc-plan-and-grill`: **no research subagents, no `## Team` section, no phase routing, no size tags.** Just grill → build → review. If you find you need research, a roster, or phased execution, you have outgrown `/cc-planish` — use `/cc-plan-and-grill` instead.
 
@@ -8,7 +8,7 @@ This command follows the canonical **Planish HTML Grill Contract** at `.shared-l
 
 ## When to use this vs the other planners
 
-- **`/planish`** (Pi) — the same standalone flow, served from Pi's in-memory HTTP server.
+- **`/do-planish`** (Pi) — the same standalone flow, served from Pi's in-memory HTTP server.
 - **`/cc-planish`** (here) — the same standalone flow on Claude Code, file-based. ← **you are here**
 - **`/cc-plan-and-grill`** — research + a full plan + iterative grill + a roster. Reach for it when the work needs exploration or phased execution.
 
@@ -24,9 +24,9 @@ This command follows the canonical **Planish HTML Grill Contract** at `.shared-l
 - **`--review <path>`** — Skip the grill/build; re-open an existing `plan.html` (or `plan.md`) for another review round.
 - **`--dir <path>`** — Optional. Override where `plan.md` + `plan.html` are written for this run (highest precedence — see below).
 
-## Shared config — the SAME `.planish.yaml` as `/planish` (hard requirement)
+## Shared config — the SAME `.planish.yaml` as `/do-planish` (hard requirement)
 
-`/cc-planish` and `/planish` **must** read the identical config. There is NO cc-specific config file — the filename stays `.planish.yaml` and the env names stay `PLANISH_DIR` / `PLANISH_HOST`. One config drives both variants. Resolve exactly as the Pi extension does (`planish.ts` `resolvePlanDir` / `resolveHost`):
+`/cc-planish` and `/do-planish` **must** read the identical config. There is NO cc-specific config file — the filename stays `.planish.yaml` and the env names stay `PLANISH_DIR` / `PLANISH_HOST`. One config drives both variants. Resolve exactly as the Pi extension does (`do-planish.ts` `resolvePlanDir` / `resolveHost`):
 
 **Plan directory** — first match wins:
 
@@ -86,7 +86,7 @@ Write the plan to TWO files in the plan dir:
 - **`plan.md`** — the canonical, token-lean plan: title, the phases/steps, key decisions, and verification. This is the file downstream tooling reads.
 - **`plan.html`** — the same plan in the dark visual style (the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the `/design-doc` default style), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` and a unique `<meta name="desdoc-key" content="<slug>-plan-v<k>">` in `<head>` so each plan version starts with a clean note slate. `<title>` = `<Topic> — plan v<k>`. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.
 
-**HARD RULE — freeze `plan-v<k>` before every write (this is the same discipline `/planish` enforces in its tool):**
+**HARD RULE — freeze `plan-v<k>` before every write (this is the same discipline `/do-planish` enforces in its tool):**
 
 - On the FIRST build, freeze the content as `plan-v1.md` + `plan-v1.html`, then write `plan.md` + `plan.html`.
 - On EVERY later revision, FIRST freeze the next `plan-v<k>.md` + `plan-v<k>.html` pair (v2, v3, …), THEN overwrite `plan.md` + `plan.html` with the new content.

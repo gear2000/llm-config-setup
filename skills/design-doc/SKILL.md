@@ -30,7 +30,7 @@ design-doc is a separate skill from planish/plan-and-grill, but both ultimately 
    { "base_url": "http://your-machine-name:8088", "docs_dir": "ops/mkdocs/docs" }
    ```
    If this file also sets `docs_dir`, it wins in Step 1 too.
-2. **Shared reference** — walk up from cwd for `.planish.yaml` (the same file `/planish` and `/do-plan-and-grill` read). If it has a `host:` field, `base_url = http://{host}:8089` (8089 is this kit's conventional static-docs-server port — see `.planish.yaml.example`).
+2. **Shared reference** — walk up from cwd for `.planish.yaml` (the same file `/do-planish` and `/do-plan-and-grill` read). If it has a `host:` field, `base_url = http://{host}:8089` (8089 is this kit's conventional static-docs-server port — see `.planish.yaml.example`).
 3. **Default** — `base_url = http://localhost:8089`. Always usable: `python3 -m http.server 8089 --directory {docs_dir}` from Step 1 serves it.
 
 `base_url` is never null — there is always a URL to report, even with zero config.
@@ -195,7 +195,7 @@ If `base_url` came from Step 0's default (case 3, no config found at all), add a
 Tip: this URL assumes a server at localhost:8089 serving /tmp/docs
 (e.g. `python3 -m http.server 8089 --directory /tmp/docs`). Add
 `host: <your-machine-name>` to .planish.yaml to point this at your real
-docs server instead — same file /planish and /do-plan-and-grill use.
+docs server instead — same file /do-planish and /do-plan-and-grill use.
 ```
 
 ---

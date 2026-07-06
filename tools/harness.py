@@ -1225,9 +1225,11 @@ GLOBAL_CONVENTION_SKILLS = {
     "golang": "compose/global/golang.yaml",
 }
 
-# Removed standalone planner skills — pruned from home dirs when found (matched by
-# their SKILL.md `name:` so we never delete a foreign dir of the same name).
-DEPRECATED_GLOBAL_SKILLS = ("do-planish",)
+# Home-dir skill names to prune when found (matched by their SKILL.md `name:` so we
+# never delete a foreign dir of the same name). Currently empty: cc-planish is a live
+# skill again, and do-planish is the Pi extension command /do-planish, not a global
+# skill (extensions are symlinked into ~/.pi/, never composed as skills).
+DEPRECATED_GLOBAL_SKILLS: tuple[str, ...] = ()
 
 
 def _global_home_dirs() -> dict[str, Path]:

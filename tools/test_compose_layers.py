@@ -239,7 +239,7 @@ def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields
         assert "planish-html-grill-contract.md" in text
         assert "plain chat list of questions" in text
 
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
     for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "+ Note", "Copy Feedback"):
         assert token in planish_ts
 
@@ -254,10 +254,10 @@ def test_grill_feedback_is_annotation_only() -> None:
     """One feedback transport everywhere: sticky notes -> Copy Feedback -> paste back.
     No page-level answer boxes, no Submit/Approve buttons, no browser->agent POST."""
     # Pi runtime serves its pages and returns immediately — no blocking POST plumbing.
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
     for banned in ("Copy Answers", "Submit Answers", "grill-respond", "/respond",
                    "Request Changes", "pendingResolve", "grill-a"):
-        assert banned not in planish_ts, f"planish.ts must not contain {banned!r}"
+        assert banned not in planish_ts, f"do-planish.ts must not contain {banned!r}"
 
     # Grill-authoring commands: notes are the only answer channel.
     for rel in (
@@ -290,10 +290,15 @@ def test_plan_versioning_downloadable_and_host() -> None:
     """Plans freeze plan-v<k> history (never revised in place), pages are also
     offered as downloadable files where the harness can send them, and URLs
     honor the .planish.yaml host: field for remote (Tailscale) sessions."""
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
     for token in ("plan-v<k>", "resolveHost", "PLANISH_HOST", "0.0.0.0"):
-        assert token in planish_ts, f"planish.ts must contain {token!r}"
+        assert token in planish_ts, f"do-planish.ts must contain {token!r}"
     assert "listen(PORT, \"127.0.0.1\"" not in planish_ts  # bind follows the host
+
+    # plan-v<k> freezing is tool-enforced (auto-freeze in planish_submit_plan), not
+    # left to prompt prose: the submit tool snapshots the next frozen pair itself.
+    for token in ("autoFreezePlan", "newestFrozenVersion", "planish_submit_plan"):
+        assert token in planish_ts, f"do-planish.ts must wire auto-freeze via {token!r}"
 
     # tf-implement's duplicated resolver must stay in sync: same config file.
     tf_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/tf-implement.ts").read_text()

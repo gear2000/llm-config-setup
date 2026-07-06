@@ -118,7 +118,7 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 // at 1). A relative template from .planish.yaml resolves against the directory
 // holding that file; a relative --dir / $PLANISH_DIR resolves against cwd.
 //
-// NOTE: this resolver is intentionally DUPLICATED (not shared) in planish.ts.
+// NOTE: this resolver is intentionally DUPLICATED (not shared) in do-planish.ts.
 // Keep the two copies in sync.
 
 // Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
@@ -392,7 +392,7 @@ export default function (pi: ExtensionAPI) {
         ? `The reviewer found these issues with your previous iteration. Fix them before signalling ready:\n\n${pendingIssues.join("\n")}\n\n`
         : "";
 
-    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in planish.ts. Keep in sync with the Planish HTML Grill Contract.
+    // NOTE: planish grill->build->review prompt is intentionally DUPLICATED (not shared) in do-planish.ts. Keep in sync with the Planish HTML Grill Contract.
     if (planishMode) {
       const planHtml = path.join(planDir, "plan.html");
       const planMd = path.join(planDir, "plan.md");
@@ -404,13 +404,13 @@ export default function (pi: ExtensionAPI) {
             ? "Fix the issues above in your .tf files. When all issues are resolved, run:\n  echo TF_REVIEW_READY\n\nDo NOT reopen the planning phase."
             : "STEP 1 — GRILL: Before writing anything, call the planish_grill tool with title, contextHtml, and a batch of clarifying infrastructure questions (regions, sizing, naming, dependencies, what already exists, ordering constraints). Give each question a concrete recommended answer — the page is annotation-only, and a question with no note means the user accepted your recommendation. The tool serves the page and returns immediately: give the user the URL, END YOUR TURN, and wait for their pasted ## Feedback block. Do NOT make a plain Q&A-only grill. Visuals (two modes only — NEVER Mermaid): default → ascii tree/shape, complex → visualHtml with .grill-fig/.flow/.flow-box drawn row by row. A diagram only when it genuinely helps — never for its own sake. Use the feedback to inform the plan. Ask follow-ups by calling planish_grill again if needed.\n\n" +
               `STEP 2 — PLAN: Write a Terraform implementation plan to TWO files (the directory already exists):\n` +
-              // # dup 1 (plan-html-style) — canonical in planish.ts STEP 2 BUILD
+              // # dup 1 (plan-html-style) — canonical in do-planish.ts STEP 2 BUILD
               `  • ${planHtml} — the visual plan: a title, a summary table of resources to create (columns: resource type, name, action, key parameters), the file/module structure, and key variables/outputs.\n` +
               `    Use the v3 dark style (NO Tailwind CDN). Include in <head>:\n` +
               `    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">\n` +
               `    <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'JetBrains Mono',monospace;background:#0d1017;color:#c8ccd4;padding:40px;max-width:1040px;line-height:1.5;}h1{font-family:'IBM Plex Sans',sans-serif;font-size:22px;font-weight:600;color:#e6e9ef;letter-spacing:-0.3px;margin-bottom:6px;}.subtitle{font-size:11px;color:#545862;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid #1e222a;}h2{font-family:'IBM Plex Sans',sans-serif;font-size:14px;font-weight:500;color:#e6e9ef;margin:32px 0 14px;padding-bottom:8px;border-bottom:1px solid #1e222a;}table{width:100%;border-collapse:collapse;margin-bottom:16px;}th{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#545862;padding:8px 12px;border-bottom:1px solid #1e222a;text-align:left;}td{font-size:11px;color:#a0a4ac;padding:7px 12px;border-bottom:1px solid #1e222a;}tr:last-child td{border-bottom:none;}.card{border:1px solid #1e222a;border-radius:10px;padding:18px 22px;background:#0f1219;margin-bottom:16px;}.card.amber{border-left:3px solid #d19a66;background:#15120d;}code{background:#1a1f29;color:#7ab4db;border-radius:3px;padding:1px 5px;font-size:11px;}</style>\n` +
               `  • ${planMd} — the same plan as token-lean Markdown (the .md is the lean agent record, the .html is the visual/annotatable copy).\n` +
-              `Both files hold the same plan content; give the .html annotation controls before </body> and a unique <meta name="desdoc-key"> — no answer boxes, no submit buttons. NEVER revise the plan in place: freeze every build/revision as plan-v<k>.md + plan-v<k>.html alongside (v1 first, incrementing; never edit an existing plan-v* file). Then serve it for user review by calling the planish_submit_plan tool with the path ${planHtml}; it returns immediately — tell the user, END YOUR TURN, and wait for their pasted feedback (## FINALIZED or explicit approval = approved; notes = revise both files, freeze the next plan-v<k> pair, and resubmit).\n\n` +
+              `Both files hold the same plan content; give the .html annotation controls before </body> and a unique <meta name="desdoc-key"> — no answer boxes, no submit buttons. plan.md/plan.html always hold the latest; you do NOT freeze versions by hand. Then serve it for user review by calling the planish_submit_plan tool with the path ${planHtml}; that tool auto-freezes the next plan-v<k>.md + plan-v<k>.html pair for you (whenever the plan changed) before serving, and returns immediately — tell the user, END YOUR TURN, and wait for their pasted feedback (## FINALIZED or explicit approval = approved; notes = revise both files and resubmit; never edit a frozen plan-v* file).\n\n` +
               "STEP 3 — IMPLEMENT: Once the user pastes their approval, write all .tf files in the current working directory to implement it exactly. Follow the approved plan.\n\n" +
               "STEP 4 — SIGNAL: When all .tf files are written and ready for review, run:\n  echo TF_REVIEW_READY\n\nDo NOT run terraform init, plan, apply, or destroy — only write .tf files."),
       };
