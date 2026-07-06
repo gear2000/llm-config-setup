@@ -73,9 +73,17 @@ Fail if:
 
 - `plan.md` does not have one `# Plan:` heading;
 - `plan.md` does not have one `Goal:` line;
-- phases are not `## Phase <N> — <title>`, starting at 0 with no gaps;
+- phases are not `## Phase <N> — <title>`, starting at 0 with no gaps (em dash ` — ` or hyphen
+  ` - ` as separator — an en dash `–` fails);
 - any phase is missing `Done:`;
+- any non-phase `##` heading is present — supporting/reference sections must be `###` (H3) and
+  sit BEFORE `## Phase 0`, never after the last phase (trailing content is scanned as part of
+  that phase's `Done:` block);
+- the `Goal:` line or any `Done:` block contains `todo`, a lowercase `<angle-placeholder>`
+  (e.g. `<id>`, `<sha>`), or `{{...}}`;
 - `plan.md` contains model, harness, agent, team, worker, or stage routing;
+- `plan.md` mentions the route file by name, LLM profiles, worktrees, or merge-back timing
+  anywhere in its body (even a pointer sentence fails);
 - `route.yaml` is missing when checking runnable input;
 - `route.yaml` lacks `llm_profiles:`, `worktree:`, `finalization_defaults:`, or `phases:`;
 - `worktree.branch_template` is missing, TODO, or lacks `{date}`, `{repo}`, `{phase}`, and `{run_id}`;

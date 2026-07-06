@@ -10,7 +10,10 @@ runnable-meta-job/
 └── route.yaml    # who runs it, when it merges, and how finalization proves green
 ```
 
-The runner only starts when both files pass validation.
+The runner only starts when both files pass validation. There is only ever ONE route file:
+`route.todo.yaml` is not a second file — it is the same route file, named `.todo` while required
+values are still TODO placeholders so the runnable check fails loudly. Fill the TODOs and rename
+it to `route.yaml`; the runner consumes exactly `plan.md` + `route.yaml`.
 
 ```text
 plain Markdown plan
@@ -62,6 +65,32 @@ plan.md
 ```
 
 No model names, harness names, agents, teams, worker rosters, stage routing, branch names, merge timing, or CI/CD checks go in `plan.md`.
+
+### Strict body rules (enforced by the runtime validator)
+
+The runtime validator (`meta-plan-schema.ts` — the same `validateRunnable` check
+`meta-cc-client run-phase` runs before launching any worker) is the authority, and it is stricter
+than the shape sketch above:
+
+- `##` (H2) headings are for phases ONLY — `## Phase <N> — <title>`, separated by an em dash
+  (`—`) or a hyphen (`-`), never an en dash (`–`). Any other `##` heading fails the check.
+- Supporting/reference material (context, non-negotiables, acceptance gates, tables, handoff
+  notes) goes in `###` (H3) sections placed BEFORE `## Phase 0` — never after the last phase: the
+  last phase's block runs to end-of-file, so trailing content gets scanned as part of that
+  phase's `Done:` block.
+- Exactly one `Goal:` line. No body line may start with a routing key such as `model:`,
+  `agent:`/`agents:`, `team:`, `worker:`, `harness:`, `ci:`, `lead:`, `stages:`, `llm_profiles:`,
+  `merge_back_at:`, `worktree:`, `branch_template:`, `green_checks:`, `log_checks:`,
+  `finalization:`, `phases:`, or `runner_adapters:`.
+- The body must not mention the route file by name, LLM profiles, worktrees, or merge-back timing
+  at all — even a pointer sentence fails the heuristic; route information lives only in the route
+  file.
+- The `Goal:` line and every `Done:` block must be free of unresolved placeholders: the word
+  "todo", a lowercase `<angle-placeholder>` (e.g. `<id>`, `<sha>`), or `{{...}}` all fail. Write
+  real values or plain prose (`resource remove … destroy=True`, not `id=<id>`). Placeholders in
+  other body prose are tolerated by the validator, but avoid them. (A deliberate
+  `Done: - TODO — needs a checkable condition` from conversion is SUPPOSED to fail the check
+  until a human resolves it.)
 
 ## `route.yaml` schema
 

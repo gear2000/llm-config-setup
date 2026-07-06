@@ -51,6 +51,16 @@ converted-meta-job/
   ```
 
 - Move model, harness, agent, worker, team, stage-routing notes, merge timing, worktree details, and CI/CD checks out of `plan.md`.
+- Keep supporting/reference material you preserve from the source (context, non-negotiables,
+  acceptance gates, tables, handoff notes) as `###` (H3) sections placed BEFORE `## Phase 0`.
+  Only `## Phase <N> — <title>` may be an H2, and nothing may trail after the last phase — the
+  runtime validator scans trailing content as part of that phase's `Done:` block.
+- Scrub `todo`, lowercase `<angle-placeholder>` tokens (e.g. `<id>`, `<sha>`), and `{{...}}` out
+  of the `Goal:` line and every `Done:` block — write real values or plain prose. (The deliberate
+  `Done: - TODO — needs a checkable condition` marker is the one exception: it is SUPPOSED to
+  fail the check until a human resolves it.)
+- Never mention the route file by name, LLM profiles, worktrees, or merge timing in the plan
+  body — not even a pointer sentence; the check fails on the words alone.
 - If this is an interactive conversion, ask the user for each phase: merge back at Stage 3, Stage 4, or Stage 5. If the conversion is non-interactive, set `merge_back_at: stage-3-integration-acceptance-seams` for safety.
 - Write a route profile using this shape:
 
