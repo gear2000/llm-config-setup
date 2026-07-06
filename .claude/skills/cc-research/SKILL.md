@@ -78,7 +78,7 @@ links:
 **`research.html` requirements (give these to the synthesizer verbatim):**
 - Use the dark style from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` (`<style>` block) if it exists; otherwise the default style block from the `/design-doc` skill.
 - Render the same findings as the markdown — structured with headings, tables, and the flow/box visual vocabulary where a diagram helps. Not a wall of text.
-- Paste the contents of `.shared-llm/llm/claude/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>`.
+- Paste the contents of `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>`.
 - `<title>` = `<Title> — research v<N>`.
 
 The synthesizer must also keep verbose dumps (raw transcripts, full scan output, full curl bodies) in an `evidence/` sibling directory — NOT inlined in either output. See `mkdocs/docs/work-log/README.md` for the full contract.
