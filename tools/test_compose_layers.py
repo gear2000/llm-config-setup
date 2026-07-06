@@ -243,8 +243,11 @@ def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields
     for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "+ Note", "Copy Feedback"):
         assert token in planish_ts
 
+    # do-planish stays an extension-only command (no compose recipe). cc-planish is
+    # revived as a standalone Claude Code skill (its recipe + layer must exist).
     assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/common/do-planish.yaml").exists()
-    assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
+    assert (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
+    assert (REPO_ROOT / ".shared-llm/layers/slash-commands/common/claude/cc-planish/command.md").exists()
 
 
 def test_grill_feedback_is_annotation_only() -> None:

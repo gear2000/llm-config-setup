@@ -30,8 +30,9 @@
  *                browser grill → build plan.html → serve-for-review, until approved.
  *            /planish --review <path>  — re-open an existing plan.html for review.
  *
- * Note: standalone markdown skill variants (/do-planish and /cc-planish) are intentionally
- * removed. /planish is the standalone Pi planner; /do-plan-and-grill is the workflow-suite planner.
+ * Note: /cc-planish is the standalone Claude Code port of this planner (same .planish.yaml
+ * contract). The /do-planish standalone markdown variant is not provided. /planish is the
+ * standalone Pi planner; /do-plan-and-grill is the workflow-suite planner.
  *
  * HTTP server: port 4390 (lazy start, shared across a session). The URL host
  * comes from `host:` in the nearest .planish.yaml or $PLANISH_HOST (default

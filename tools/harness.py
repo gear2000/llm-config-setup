@@ -1227,7 +1227,7 @@ GLOBAL_CONVENTION_SKILLS = {
 
 # Removed standalone planner skills — pruned from home dirs when found (matched by
 # their SKILL.md `name:` so we never delete a foreign dir of the same name).
-DEPRECATED_GLOBAL_SKILLS = ("do-planish", "cc-planish")
+DEPRECATED_GLOBAL_SKILLS = ("do-planish",)
 
 
 def _global_home_dirs() -> dict[str, Path]:
