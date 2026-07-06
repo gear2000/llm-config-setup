@@ -1,6 +1,5 @@
 type: agent
 name: adversarial-evaluator
-model: opus
 color: red
 description: .shared-llm/layers/agents/common/adversarial-evaluator.description.md
 inputs:

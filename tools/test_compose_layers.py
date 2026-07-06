@@ -322,6 +322,52 @@ def test_plan_versioning_downloadable_and_host() -> None:
         assert token in contract, f"contract must contain {token!r}"
 
 
+def _agent_fixture(tmp_path: Path, name: str, *, model: str | None) -> tuple[Path, Path, str]:
+    """Build a .shared-llm fixture with one agent recipe; include `model:` only when given."""
+    shared = tmp_path / ".shared-llm"
+    layer_dir = shared / "layers/agents/common" / name
+    _write(layer_dir / "body.md", f"# {name}\n\nAgent body.\n")
+    _write(layer_dir / "description.md", "A test agent.\n")
+
+    recipe: dict = {
+        "type": "agent",
+        "name": name,
+        "color": "red",
+        "description": f".shared-llm/layers/agents/common/{name}/description.md",
+    }
+    if model is not None:
+        recipe["model"] = model
+    recipe["inputs"] = [f".shared-llm/layers/agents/common/{name}/body.md"]
+    recipe["output"] = f".claude/agents/{name}.md"
+
+    recipe_rel = f".shared-llm/compose/agents/{name}.yaml"
+    _write(shared.parent / recipe_rel, yaml.safe_dump(recipe, sort_keys=False, allow_unicode=True))
+    return shared, tmp_path, recipe_rel
+
+
+def test_agent_recipe_without_model_omits_model_frontmatter(tmp_path: Path) -> None:
+    """An agent recipe with no `model:` composes cleanly and emits no `model:` line —
+    so the agent's LLM is chosen per run (e.g. by a route profile), never hardwired.
+    This guards the ClaudeAgent optional-`model:` branch (adversarial-evaluator)."""
+    shared, target, recipe = _agent_fixture(tmp_path, "no-model-agent", model=None)
+    _compose(shared, target, recipe)
+    text = (target / ".claude/agents/no-model-agent.md").read_text()
+    fm, _ = _split(text)
+    assert "model" not in fm, f"unexpected model in frontmatter: {fm}"
+    assert not any(line.startswith("model:") for line in text.splitlines())
+    # color still passes through when the recipe declares it
+    assert fm["color"] == "red"
+
+
+def test_agent_recipe_with_model_emits_model_frontmatter(tmp_path: Path) -> None:
+    """The other direction: a recipe that declares `model:` still emits it verbatim."""
+    shared, target, recipe = _agent_fixture(tmp_path, "pinned-agent", model="opus")
+    _compose(shared, target, recipe)
+    fm, _ = _split((target / ".claude/agents/pinned-agent.md").read_text())
+    assert fm["model"] == "opus"
+    assert fm["color"] == "red"
+
+
 def test_settings_deep_merge(tmp_path: Path) -> None:
     shared = tmp_path / ".shared-llm"
     base = {
