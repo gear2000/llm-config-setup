@@ -34,7 +34,7 @@
     "superpowers@claude-plugins-official": true
   },
   "alwaysThinkingEnabled": true,
-  "effortLevel": "max",
+  "effortLevel": "high",
   "preferences": {
     "tmuxSplitPanes": true
   }

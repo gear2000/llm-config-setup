@@ -4,10 +4,10 @@ Pi extensions in this kit come in **two kinds**, installed by **two different pa
 
 | Kind | Lives in | Wired by | Mechanism |
 |------|----------|----------|-----------|
-| **OWN** (authored here) | `.shared-llm/llm/pi/common/extensions/*.ts` | `tools/harness.py sync` | **Symlinked** into `~/.pi/` — copied/layered, never installed from a registry |
+| **OWN** (authored here) | `.shared-llm/llm/pi/common/extensions/*.ts` | `llm-config-setup`'s `harness.py link` | **Symlinked** into `~/.pi/` — copied/layered, never installed from a registry |
 | **THIRD-PARTY** | a registry (npm/git) | `tools/install-pi-extensions.sh` | **Installed from source** via `pi install` — never copied/vendored into this repo |
 
-This page is about the **third-party** set. For the own extensions, see `tools/harness.py sync` and the README's "Pi harness runtime config" section.
+This page is about the **third-party** set. For the own extensions, see `llm-config-setup`'s `harness.py link` and the README's "Pi harness runtime config" section.
 
 ## The rule
 
@@ -33,7 +33,7 @@ tools/install-pi-extensions.sh --dry-run  # show what would run, change nothing
 
 The script reads `third-party-extensions.txt`, skips anything already in `pi list` (matched by name), runs `pi install` for the rest, and **fails loud** (non-zero exit) if any install fails or a peer-dep / Pi-version requirement is unmet — never masked with `|| true`. Verify after: `pi list`.
 
-`task setup:pi` runs `tools/harness.py sync` to wire the own extensions (symlinks, reconciled — create / re-point / prune); run `task setup:pi:extensions` to install the third-party set.
+`llm-config-setup`'s `harness.py link` (run via `just update` there) wires the own extensions (symlinks, reconciled — create / re-point / prune); run `tools/install-pi-extensions.sh` here to install the third-party set.
 
 ## The set (pinned)
 

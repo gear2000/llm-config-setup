@@ -158,12 +158,12 @@ export async function hubRunPhase(input: RunPhaseInput): Promise<PhaseOutcome> {
 	const teamArg = "false";
 	let upArgs: string[];
 	if (workerType === "pi") {
-		upArgs = ["worker-up-pi", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.routeFile, rpc.resultsPath];
+		upArgs = ["worker-up-pi", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.resultsPath];
 	} else if (workerType === "cursor") {
-		upArgs = ["worker-up-cursor", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.routeFile, rpc.resultsPath];
+		upArgs = ["worker-up-cursor", session, rpc.model, rpc.planFile, rpc.instructionsPath, rpc.resultsPath];
 	} else {
 		// "claude" — the default
-		upArgs = ["worker-up", session, input.hubJsonPath, rpc.planFile, rpc.instructionsPath, rpc.routeFile, rpc.resultsPath, teamArg];
+		upArgs = ["worker-up", session, input.hubJsonPath, rpc.planFile, rpc.instructionsPath, rpc.resultsPath, teamArg];
 	}
 
 	writeLog(`# meta-orchestrator phase ${phaseId} — FILE transport`);
