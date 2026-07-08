@@ -1,0 +1,21 @@
+# Pi launch group module (hub + builder; requires tmux) — imported by the root justfile.
+
+# Start the codex/iac-verifier socket hub detached in tmux (idempotent).
+hub:
+    tmux has-session -t pi-hub 2>/dev/null || tmux new-session -d -s pi-hub 'pi -e ~/.pi/extensions/codex-reviewer-hub.ts'
+    @echo "pi-hub up — tmux attach -t pi-hub to watch"
+
+# Launch a builder Pi (iac-guard auto-loads; the hub must be up for gray-zone verdicts).
+builder:
+    pi
+
+# Show hub + socket state.
+pi-status:
+    @tmux has-session -t pi-hub 2>/dev/null && echo "hub: up" || echo "hub: down"
+    @test -S ~/.pi/codex-reviewer.sock && echo "socket: present" || echo "socket: absent"
+
+# Stop the hub and remove stale sockets.
+pi-clean:
+    tmux kill-session -t pi-hub 2>/dev/null || true
+    rm -f ~/.pi/codex-reviewer.sock
+    @echo "clean: hub stopped, sockets removed"

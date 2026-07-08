@@ -1,0 +1,34 @@
+# agents.yaml — roster for `just specialist-hub` (hub.py in this directory)
+#
+# One long-lived hub of idle specialist agents, each in its own tmux window.
+# No discovery magic: this file IS the roster. Each entry gives the agent a
+# name, points at its definition file, and states the FULL command to run it —
+# so agents can mix harnesses (Pi, Claude Code, anything that runs in tmux).
+#
+# Copy this whole directory into your repo (same relative path), then save this
+# file as agents.yaml next to hub.py and edit. Override the path with
+# $SPECIALIST_HUB_CONFIG.
+#
+#   just specialist-hub up                 # hub + every agent below
+#   just specialist-hub up --agents a,b    # hub + just those
+#   just specialist-hub status
+#   just specialist-hub down               # kills ONLY this hub, never a per-plan hub
+
+# Where runtime files land (hub.json discovery + index.json roster).
+runtime_dir: /tmp/.meta-orch/specialist
+
+agents:
+  - name: my-resources-specialist
+    location: .claude/agents/my-resources-specialist.md   # relative = from this file
+    cmd: "pi --agent my-resources-specialist"
+
+  - name: my-api-specialist
+    location: .claude/agents/my-api-specialist.md
+    cmd: "claude --agent my-api-specialist"
+
+  # description is normally read from the definition file's frontmatter;
+  # set it here to override.
+  - name: curator
+    location: .claude/agents/curator.md
+    description: "Routes 'who handles X?' to the right specialist by the index."
+    cmd: "pi --agent curator"

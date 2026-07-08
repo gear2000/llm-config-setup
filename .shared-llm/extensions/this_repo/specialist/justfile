@@ -1,0 +1,8 @@
+# Specialist hub module — imported by the root justfile:
+#   import '.shared-llm/extensions/this_repo/specialist/justfile'
+# Copy this whole directory to the same relative path in a destination repo
+# and add the same import line there. Roster: agents.yaml (next to hub.py).
+
+# Long-lived pool of idle specialist agents: up [--agents a,b] | down | status | reindex
+specialist-hub *ARGS:
+    ${PYTHON_BIN:-python3} hub.py {{ARGS}}

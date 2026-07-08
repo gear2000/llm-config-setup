@@ -7,6 +7,15 @@ default:
 # link/global operation centrally against the destination paths listed there.
 # The command surface is small on purpose: init once, configure once per repo,
 # update whenever layers change.
+#
+# Optional tool modules live under .shared-llm/extensions/this_repo/<module>/
+# (each a self-contained directory: script + config + its own justfile) and are
+# imported below. To adopt one in a destination repo: copy the WHOLE module
+# directory to the same relative path and add the same import line.
+
+import '.shared-llm/extensions/this_repo/specialist/justfile'
+import '.shared-llm/extensions/this_repo/pi-hub/justfile'
+import '.shared-llm/extensions/this_repo/tf/justfile'
 
 # One-time OS prerequisite check (python3 + just). e.g. `just init -o mac`.
 init *args:
@@ -68,72 +77,3 @@ test-memsearch:
 
 test-meta-plan:
     node --experimental-strip-types .shared-llm/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-schema.test.ts
-
-# ─── Pi launch group (hub + builder; requires tmux) ───
-# Start the codex/iac-verifier socket hub detached in tmux (idempotent).
-hub:
-    tmux has-session -t pi-hub 2>/dev/null || tmux new-session -d -s pi-hub 'pi -e ~/.pi/extensions/codex-reviewer-hub.ts'
-    @echo "pi-hub up — tmux attach -t pi-hub to watch"
-
-# Launch a builder Pi (iac-guard auto-loads; the hub must be up for gray-zone verdicts).
-builder:
-    pi
-
-# Show hub + socket state.
-pi-status:
-    @tmux has-session -t pi-hub 2>/dev/null && echo "hub: up" || echo "hub: down"
-    @test -S ~/.pi/codex-reviewer.sock && echo "socket: present" || echo "socket: absent"
-
-# Stop the hub and remove stale sockets.
-pi-clean:
-    tmux kill-session -t pi-hub 2>/dev/null || true
-    rm -f ~/.pi/codex-reviewer.sock
-    @echo "clean: hub stopped, sockets removed"
-
-# ─── Terraform Workflow ───────────────────────────────
-# Extensions (auto-loaded from ~/.pi/agent/extensions/): tf-implement.ts,
-#   tf-approve.ts, iac-guard.ts, do-planish.ts
-# Agent:      ~/.pi/agents/tf-reviewer.md
-
-# Load a plan and run the implement loop (write reviewed terraform until approved).
-tf-implement plan:
-    TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts
-
-# Human-gated terraform apply/destroy with agent-distilled plan table
-tf-approve:
-    pi -e ~/.pi/agent/extensions/iac-guard.ts -e ~/.pi/agent/extensions/tf-approve.ts
-
-# Full workflow: plan + implement reviewed code, then human-gated apply
-tf-auto plan:
-    TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts && \
-    pi -e ~/.pi/agent/extensions/iac-guard.ts -e ~/.pi/agent/extensions/tf-approve.ts
-
-# Start the terraform reviewer (Claude Code) — run before tf-implement or tf-approve
-tf-reviewer-cc:
-    tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'claude'
-    for i in $(seq 1 60); do \
-        tmux capture-pane -p -t tf-reviewer 2>/dev/null | grep -qi 'bypass permissions' && break; \
-        [ "$i" = "60" ] && { echo "tf-reviewer-cc: TUI never showed ready footer in 60s" >&2; exit 1; }; \
-        sleep 1; \
-    done
-    tmux send-keys -t tf-reviewer 'Read ~/.pi/agents/tf-reviewer.md and follow its instructions.'
-    sleep 1
-    tmux send-keys -t tf-reviewer Enter
-
-# Start the terraform reviewer (Pi) — run before tf-implement or tf-approve
-tf-reviewer-pi model="openai-codex/gpt-5.5":
-    tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'pi --model {{model}} --thinking high -a --no-session'
-    for i in $(seq 1 60); do \
-        pane=$(tmux capture-pane -p -t tf-reviewer 2>/dev/null); \
-        echo "$$pane" | grep -q 'Press any key to continue' && tmux send-keys -t tf-reviewer Enter; \
-        echo "$$pane" | grep -qE '^ *> *$$' && break; \
-        [ "$$i" = "60" ] && { echo "tf-reviewer-pi: pi never showed ready prompt in 60s" >&2; exit 1; }; \
-        sleep 1; \
-    done
-    tmux send-keys -t tf-reviewer 'Read ~/.pi/agents/tf-reviewer.md and follow its instructions.'
-    sleep 1
-    tmux send-keys -t tf-reviewer Enter
-
-# Stop the terraform reviewer
-tf-reviewer-down:
-    tmux kill-session -t tf-reviewer 2>/dev/null || true

@@ -38,3 +38,4 @@ build/
 *.swo
 .idea/
 .vscode/
+.shared-llm/llm/pi/common/extensions/meta-orchestrator-hub/hub/hub
