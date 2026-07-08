@@ -771,10 +771,11 @@ CONFIG_PATH = HOME / ".shared-llm.yaml"
 DEFAULT_SOURCE = HOME / ".shared-llm"
 VALID_HARNESSES = ("cc", "pi", "codex")
 
-# The ONLY trees `copy` propagates: pure common layer + runtime content. It never
-# touches a destination's this_repo/ overlays or its compose/ recipes — those are
-# destination-owned and wire the private overlays (resolved decision #6). Paths
-# are relative to a `.shared-llm/` dir.
+# The ONLY trees `copy` propagates wholesale: pure common layer + runtime
+# content. It never touches a destination's this_repo/ overlays, and existing
+# compose/ recipes are destination-owned (resolved decision #6) — though brand-
+# NEW kit recipes are seeded additively via _seed_new_recipes. Paths are
+# relative to a `.shared-llm/` dir.
 COMMON_ROOTS = (
     "layers/agents/common",
     "layers/llm/common",
@@ -947,6 +948,74 @@ def _copy_common(src_shared: Path, dst_shared: Path, log: RunLog) -> collections
     return counts
 
 
+# Consumer recipe groups seeded to destinations (mirrors CONSUMER_RECIPE_GROUPS;
+# never global/ or example-*). Additive-only: a recipe already present at the
+# destination is destination-owned and never overwritten or pruned.
+SEEDED_RECIPE_GROUPS = (
+    "compose/skills",
+    "compose/agents",
+    "compose/slash-commands",
+    "compose/settings",
+    "compose/hooks",
+    "compose/statusline",
+)
+
+
+def _recipe_input_paths(recipe: Path) -> list[str] | None:
+    """Return the .shared-llm-relative file paths a recipe consumes, or None if
+    the YAML is unreadable (seeding skips it rather than aborting the copy)."""
+    try:
+        data = yaml.safe_load(recipe.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    refs = list(data.get("inputs") or [])
+    desc = data.get("description")
+    if isinstance(desc, str) and desc.startswith(".shared-llm/"):
+        refs.append(desc)
+    return [r for r in refs if isinstance(r, str) and r.startswith(".shared-llm/")]
+
+
+def _seed_new_recipes(kit_shared: Path, dest: Path, log: RunLog) -> collections.Counter:
+    """Seed NEW kit compose recipes into a destination's .shared-llm/compose/.
+
+    Additive-only: existing destination recipes are never touched (they are
+    destination-owned and may be customized); drift from the kit version is
+    logged, not resolved. A new recipe is copied only when every layer file it
+    references exists at the destination — otherwise composing it would fail.
+    """
+    counts: collections.Counter = collections.Counter()
+    dest_shared = dest / ".shared-llm"
+    for group in SEEDED_RECIPE_GROUPS:
+        base = kit_shared / group
+        if not base.is_dir():
+            continue
+        for src in sorted(list(base.rglob("*.yaml")) + list(base.rglob("*.yml"))):
+            rel = src.relative_to(kit_shared)
+            dst = dest_shared / rel
+            if dst.exists():
+                if src.read_bytes() != dst.read_bytes():
+                    counts["drift"] += 1
+                    log(f"    ~ recipe drift (kept destination copy): {rel}")
+                continue
+            refs = _recipe_input_paths(src)
+            if refs is None:
+                counts["skipped"] += 1
+                log(f"    ! recipe unreadable, skipped: {rel}")
+                continue
+            missing = [r for r in refs if not (dest / r).is_file()]
+            if missing:
+                counts["skipped"] += 1
+                log(f"    ! recipe skipped (missing inputs at destination): {rel} -> {', '.join(missing)}")
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            counts["new"] += 1
+            log(f"    + new recipe: {rel}")
+    return counts
+
+
 def do_copy(cfg: dict, log: RunLog) -> None:
     kit_shared = project_root() / ".shared-llm"
     hub = Path(cfg["source"]).expanduser()
@@ -954,10 +1023,17 @@ def do_copy(cfg: dict, log: RunLog) -> None:
     c = _copy_common(kit_shared, hub, log)
     log.always(f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
     for d in cfg["destinations"]:
-        dest_shared = Path(d["path"]).expanduser() / ".shared-llm"
+        dest = Path(d["path"]).expanduser()
+        dest_shared = dest / ".shared-llm"
         log.always(f"copy: hub -> {d['path']}/.shared-llm")
         c = _copy_common(hub, dest_shared, log)
         log.always(f"  {Path(d['path']).name}: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
+        r = _seed_new_recipes(kit_shared, dest, log)
+        if r["new"] or r["drift"] or r["skipped"]:
+            log.always(
+                f"  {Path(d['path']).name} recipes: {r['new']} seeded, "
+                f"{r['drift']} drifted (kept), {r['skipped']} skipped"
+            )
 
 
 # --- compose (config-driven, per destination) ------------------------------

@@ -149,6 +149,44 @@ def test_copy_propagates_new_and_flags_changed(tmp_path: Path) -> None:
     assert (dest / ".shared-llm/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
 
 
+def test_copy_seeds_new_recipes_additively(tmp_path: Path) -> None:
+    """copy seeds brand-new kit compose recipes into destinations, but never
+    overwrites an existing (destination-owned) recipe and skips a recipe whose
+    layer inputs are missing at the destination."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    cfg = _cfg(m, dest, ["cc", "pi"])
+
+    # Fake KIT with three recipes: one new+composable, one drifted from the
+    # destination's copy, one referencing a layer the destination lacks.
+    kit = tmp_path / "kit"
+    kshared = kit / ".shared-llm"
+    _write(kshared / "compose/skills/newskill.yaml", yaml.safe_dump({
+        "type": "skill", "name": "newskill",
+        "inputs": [".shared-llm/layers/skills/common/demo/practices.md"],
+        "output": ".claude/skills/newskill/SKILL.md",
+    }))
+    _write(kshared / "compose/skills/demo.yaml", "type: skill\nname: demo-KIT-DRIFTED\ninputs: []\noutput: x\n")
+    _write(kshared / "compose/skills/orphan.yaml", yaml.safe_dump({
+        "type": "skill", "name": "orphan",
+        "inputs": [".shared-llm/layers/skills/common/nope/missing.md"],
+        "output": ".claude/skills/orphan/SKILL.md",
+    }))
+    m.project_root = lambda: kit
+    dest_demo_before = (dest / ".shared-llm/compose/skills/demo.yaml").read_text()
+
+    m.do_copy(cfg, _quiet(m))
+
+    # New recipe with satisfiable inputs was seeded.
+    assert (dest / ".shared-llm/compose/skills/newskill.yaml").exists()
+    # Drifted recipe kept the DESTINATION copy untouched.
+    assert (dest / ".shared-llm/compose/skills/demo.yaml").read_text() == dest_demo_before
+    # Recipe with missing inputs was NOT seeded.
+    assert not (dest / ".shared-llm/compose/skills/orphan.yaml").exists()
+
+
 # --- compose ---------------------------------------------------------------
 
 def test_compose_reads_destination_shared_llm_and_merges_overlay(tmp_path: Path) -> None:
