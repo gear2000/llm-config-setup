@@ -795,6 +795,23 @@ def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool,
 # CLI
 # ---------------------------------------------------------------------------
 
+def _parse_placeholder_args(items: list[str] | None) -> dict[str, str]:
+    """Parse repeated `--placeholder NAME=VALUE` CLI args into a fill map.
+
+    Used only by the low-level `compose` CLI so the kit can fill a kit-synced
+    layer's {{TOKEN}} when composing ITSELF (e.g. `OPS_REPO=your-repo-ops` when
+    regenerating the kit's own tracked slash-command skills). The config-driven
+    per-destination flow fills tokens from each destination's `placeholders:`
+    map, not from here."""
+    out: dict[str, str] = {}
+    for it in items or []:
+        if "=" not in it:
+            sys.exit(f"error: --placeholder must be NAME=VALUE, got: {it!r}")
+        name, value = it.split("=", 1)
+        out[name] = value
+    return out
+
+
 def cmd_compose(args: argparse.Namespace) -> None:
     shared_root = find_shared_llm(args.shared_llm)
     # Inputs resolve against the repo that owns the .shared-llm we found (its
@@ -804,7 +821,9 @@ def cmd_compose(args: argparse.Namespace) -> None:
     # against the real repo root.
     repo_root = shared_root.parent
     output_base = Path(args.target).expanduser().resolve() if args.target else repo_root
-    composer = Composer(repo_root, output_base=output_base, shared_root=shared_root)
+    placeholders = _parse_placeholder_args(getattr(args, "placeholder", None))
+    composer = Composer(repo_root, output_base=output_base, shared_root=shared_root,
+                        placeholders=placeholders)
 
     print(f"shared-llm source: {shared_root}")
     print(f"repo root: {repo_root}")
@@ -1665,6 +1684,16 @@ def _prune_deprecated_global(home_dirs: dict[str, Path], log: RunLog) -> int:
     return removed
 
 
+# Generic placeholder fills for the kit's OWN self-compose (the home skills built
+# by do_global here, and the tracked slash-command skills rebuilt by `just
+# selfcompose`). A kit-synced common layer ships {{OPS_REPO}} as a placeholder that
+# a REAL destination fills from its ~/.shared-llm.yaml `placeholders:` map; when the
+# kit composes ITSELF it fills the same token with the generic default so its home /
+# tracked outputs stay generic (byte-identical to what they were before the token was
+# introduced) and never trip the unfilled-placeholder fail-loud check.
+KIT_SELF_PLACEHOLDERS = {"OPS_REPO": "your-repo-ops"}
+
+
 def do_global(cfg: dict, log: RunLog) -> None:
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
     if not wanted:
@@ -1675,7 +1704,8 @@ def do_global(cfg: dict, log: RunLog) -> None:
     home_dirs = {tok: d for tok, d in _global_home_dirs().items() if tok in wanted}
     log.always(f"global: routing home skills to {', '.join(wanted)}")
 
-    composer = Composer(kit, output_base=staging, shared_root=kit_shared)
+    composer = Composer(kit, output_base=staging, shared_root=kit_shared,
+                        placeholders=KIT_SELF_PLACEHOLDERS)
     # Family A — convention skills (staged under examples/global-staging/skills/).
     for recipe in GLOBAL_CONVENTION_SKILLS.values():
         composer.compose_one(kit_shared / recipe)
@@ -1946,6 +1976,17 @@ def main() -> None:
     )
     pc.add_argument("--shared-llm", help="Path to the .shared-llm source root.")
     pc.add_argument("--target", help="Output base dir where 'output:' paths land (default: cwd).")
+    pc.add_argument(
+        "--placeholder",
+        action="append",
+        metavar="NAME=VALUE",
+        help=(
+            "Fill a {{NAME}} token in composed output (repeatable). For the kit's "
+            "OWN self-compose only (e.g. --placeholder OPS_REPO=your-repo-ops when "
+            "regenerating the kit's tracked slash-command skills). Per-destination "
+            "fills come from ~/.shared-llm.yaml `placeholders:`, not this flag."
+        ),
+    )
     pc.set_defaults(func=cmd_compose)
 
     # --- config-driven, centralized surface (the user-facing flow) ---

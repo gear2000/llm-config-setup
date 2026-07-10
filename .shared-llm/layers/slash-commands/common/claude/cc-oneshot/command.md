@@ -33,7 +33,7 @@ If you find yourself wanting to revisit decisions or re-run with different scope
 
 ### Step 1: Brief Research (delegate to Explore)
 
-Slugify the title, determine version by globbing `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v*/`.
+Slugify the title, determine version by globbing `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v*/`.
 <!-- <YYYY-MM-DD> is the ISO date the work was started (NOT modified). Use the date at the time of the first invocation of this skill in this work-log. -->
 
 Dispatch **1 Explore subagent** (or named team member with `--team`) with a focused question covering: what the change touches, current behavior, constraints, prior incidents in git history if relevant. Tell it to return a brief summary — no need to write a full research.md unless the work later turns out to warrant one.
@@ -47,8 +47,8 @@ If the scope is unclear, dispatch a second Explore agent for a different angle.
 Even a one-shot resolves its open questions before it runs — but lightly: usually ONE quick HTML grill round, not the full plan-and-grill grind. Skip the grill only if the Explore returns left genuinely nothing to decide.
 
 1. From the Explore returns, work out the handful of questions worth asking — scope edges, the real choices, anything the change hinges on.
-2. Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
-3. **Dispatch a subagent** to write a fresh `grill-v<round>.html` (kept for history) plus `grill_current.html` (same content — the tab you keep open) into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/`:
+2. Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/{{OPS_REPO}}/tools/serve-worklog.sh up`
+3. **Dispatch a subagent** to write a fresh `grill-v<round>.html` (kept for history) plus `grill_current.html` (same content — the tab you keep open) into `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/`:
    - A short context header (what's being changed; the shape so far from the Explore summary).
    - Keep every question tight — bullets, never a sentence over two lines, plain English. When a question is complex, SHOW it with a diagram — two modes only, NEVER Mermaid (CDN-rendered, breaks silently on any syntax slip): default → an ASCII tree in a `<pre>`; when ASCII can't carry it → the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`, styled by the grill style toolkit). A diagram only when it genuinely helps — never for its own sake.
    - `<meta name="desdoc-key" content="<date>-<slug>-oneshot-r<round>">` in `<head>` — unique per round, so the annotation toolkit starts each round with a clean slate (`grill_current.html` reuses one path across rounds).
@@ -63,10 +63,10 @@ Then present the resolved sketch and get the go-ahead:
 - What "done" looks like (verification criteria)
 - Whether this needs `deployer` for live verification
 
-Once confirmed, **dispatch a writer subagent** to persist the sketch as a dual `plan.md` + `plan.html` in `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/`:
+Once confirmed, **dispatch a writer subagent** to persist the sketch as a dual `plan.md` + `plan.html` in `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/`:
 
 - `plan.md` — the canonical sketch, written lightweight: the 1–3 bullets of what you'll do, the agent(s), the "done" criteria, and whether `deployer` is needed. No plan-and-grill ceremony — no required Executive Summary, no Team section, no `**Size**:` tags.
-- `plan.html` — the same sketch in the project dark style (the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the default style block from the `/design-doc` skill), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim immediately before `</body>`. `<title>` = `<Title> — plan v<N>`.
+- `plan.html` — the same sketch in the project dark style (the `<style>` block from `~/project/repos/{{OPS_REPO}}/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the default style block from the `/design-doc` skill), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim immediately before `</body>`. `<title>` = `<Title> — plan v<N>`.
 
 The persisted plan is a record of intent, not a gate — write it, then move straight to implementing. Do not re-grill.
 
@@ -142,7 +142,7 @@ Logs must be clean. If not, dispatch the worker to fix and re-run the deployer.
 
 ### Step 6: Write Results + Decisions + Clean Up
 
-1. **Dispatch a writer subagent** to compose **two outputs** in `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/` — `results.md` (canonical) and `results.html` (the visual, annotatable surface you read in the browser). Same content; markdown is the agent/tooling surface, HTML is the human surface. `results.md` has the required frontmatter:
+1. **Dispatch a writer subagent** to compose **two outputs** in `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/oneshot/v<N>/` — `results.md` (canonical) and `results.html` (the visual, annotatable surface you read in the browser). Same content; markdown is the agent/tooling surface, HTML is the human surface. `results.md` has the required frontmatter:
 
    ```markdown
    ---
@@ -173,7 +173,7 @@ Logs must be clean. If not, dispatch the worker to fix and re-run the deployer.
    - `None needed` (single line, no other text)
    - One or more `[label](../../../followup/<YYYY-MM-DD>/<slug>/<name>.md)` links
 
-   Use "None needed" when the work is complete and nothing remains. Use a link list when one or more follow-up items exist — each link points to a separate file in `~/project/repos/your-repo-ops/mkdocs/docs/followup/<YYYY-MM-DD>/<slug>/<name>.md` that the writer should ALSO create with its content.
+   Use "None needed" when the work is complete and nothing remains. Use a link list when one or more follow-up items exist — each link points to a separate file in `~/project/repos/{{OPS_REPO}}/mkdocs/docs/followup/<YYYY-MM-DD>/<slug>/<name>.md` that the writer should ALSO create with its content.
 
    When creating a followup/<date>/<slug>/<name>.md file, use frontmatter:
    ```yaml
@@ -184,11 +184,11 @@ Logs must be clean. If not, dispatch the worker to fix and re-run the deployer.
    ---
    ```
 
-   **`results.html`** — the same content as `results.md`, rendered in the project dark style (the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the default style block from the `/design-doc` skill), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim immediately before `</body>`. `<title>` = `<Title> — results v<N>`. The frontmatter and `## Follow-up` discipline above govern `results.md`; the HTML twin just mirrors the rendered findings for reading and annotation.
+   **`results.html`** — the same content as `results.md`, rendered in the project dark style (the `<style>` block from `~/project/repos/{{OPS_REPO}}/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the default style block from the `/design-doc` skill), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim immediately before `</body>`. `<title>` = `<Title> — results v<N>`. The frontmatter and `## Follow-up` discipline above govern `results.md`; the HTML twin just mirrors the rendered findings for reading and annotation.
 
    Always dispatch a writer subagent for this — do not write the files yourself.
 
-2. **Append decisions** from the worker's `decisions_made` to `<work-log-root>/decisions.md` (path: `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/decisions.md`). Create the file if it doesn't exist. Format:
+2. **Append decisions** from the worker's `decisions_made` to `<work-log-root>/decisions.md` (path: `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/decisions.md`). Create the file if it doesn't exist. Format:
 
    ```markdown
    ## <ISO-8601 timestamp> [SCOPE|ARCH|CODE|...] <decision title>
@@ -197,7 +197,7 @@ Logs must be clean. If not, dispatch the worker to fix and re-run the deployer.
    Refs: oneshot/v<N>/results.md
    ```
 
-3. **Dispatch nav-sync** to update `~/project/repos/your-repo-ops/mkdocs/mkdocs.yml`.
+3. **Dispatch nav-sync** to update `~/project/repos/{{OPS_REPO}}/mkdocs/mkdocs.yml`.
 4. **Send `STOP_WATCHDOG`** to plan-watchdog (from Step 3).
 5. **If `--team`:** SendMessage `STOP_PULSE` to team-pulse.
 6. Report the summary to the user.

@@ -84,7 +84,7 @@ When the user pastes their `## Feedback —` block: process every note, treat un
 Write the plan to TWO files in the plan dir:
 
 - **`plan.md`** — the canonical, token-lean plan: title, the phases/steps, key decisions, and verification. This is the file downstream tooling reads.
-- **`plan.html`** — the same plan in the dark visual style (the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the `/design-doc` default style), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` and a unique `<meta name="desdoc-key" content="<slug>-plan-v<k>">` in `<head>` so each plan version starts with a clean note slate. `<title>` = `<Topic> — plan v<k>`. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.
+- **`plan.html`** — the same plan in the dark visual style (the `<style>` block from `~/project/repos/{{OPS_REPO}}/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the `/design-doc` default style), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` and a unique `<meta name="desdoc-key" content="<slug>-plan-v<k>">` in `<head>` so each plan version starts with a clean note slate. `<title>` = `<Topic> — plan v<k>`. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.
 
 **HARD RULE — freeze `plan-v<k>` before every write (this is the same discipline `/do-planish` enforces in its tool):**
 

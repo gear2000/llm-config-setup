@@ -142,7 +142,7 @@ links:
 ### Step 1: Setup
 
 1. Call `EnterPlanMode`.
-2. Slugify title, determine version by globbing `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v*/`.
+2. Slugify title, determine version by globbing `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v*/`.
    <!-- <YYYY-MM-DD> is the ISO date the work was started (NOT modified). Use the date at the time of the first invocation of this skill in this work-log. -->
 3. **Domain-capture decision (ask first, unless `--docs` or `--interactive`-AFK).**
    - If `--docs` was passed → capture is ON, do not ask.
@@ -153,7 +153,7 @@ links:
 
 ### Step 2: Research (delegate)
 
-Dispatch Explore subagents (or named team members with `--team`) covering the relevant aspects, each writing to a section file. Then dispatch a synthesizer subagent to consolidate into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/research.md`. Same pattern as `/do-research` — see that skill for details.
+Dispatch Explore subagents (or named team members with `--team`) covering the relevant aspects, each writing to a section file. Then dispatch a synthesizer subagent to consolidate into `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/plan/v<N>/research.md`. Same pattern as `/do-research` — see that skill for details.
 
 ### Step 3: Draft Plan (delegate)
 
@@ -213,7 +213,7 @@ This command follows the canonical Planish HTML Grill Contract at `.shared-llm/l
 
 **The steps below describe the static-file flow.** With `planish_grill`, the same content (context header, per-question note/recommendation, ascii/visualHtml diagrams) goes into the tool's parameters instead — the tool builds and serves the page itself and returns at once; the user's pasted `## Feedback` block is the round's result.
 
-Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
+Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/{{OPS_REPO}}/tools/serve-worklog.sh up`
 
 Each round:
 
@@ -290,7 +290,7 @@ Only `plan.md` is the source of truth for execution. If the user later annotates
 
 ### Step 6: Append decisions.md entry
 
-**Append a decision entry** to `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/decisions.md` (create if missing).
+**Append a decision entry** to `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/decisions.md` (create if missing).
 
 Without `--route-phases`:
 
@@ -321,7 +321,7 @@ Append; do NOT overwrite. See `mkdocs/docs/work-log/README.md` for the full form
 
 ### Step 7: Persist and Stop
 
-1. **Dispatch a nav-sync subagent** to update `~/project/repos/your-repo-ops/mkdocs/mkdocs.yml` under `- Logs:`.
+1. **Dispatch a nav-sync subagent** to update `~/project/repos/{{OPS_REPO}}/mkdocs/mkdocs.yml` under `- Logs:`.
 2. If `--team`: SendMessage `STOP_PULSE` to team-pulse if it was running.
 3. Call `ExitPlanMode`.
 4. Without `--route-phases`: Tell the user: _"Plan finalized at `<path>`. Run `/do-implement <path>/plan.md` when ready."_

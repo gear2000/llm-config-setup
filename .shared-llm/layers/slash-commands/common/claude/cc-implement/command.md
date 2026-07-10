@@ -197,7 +197,7 @@ For EACH phase as it completes (not at the end — per-phase):
    - `None needed` (single line, no other text)
    - One or more `[label](../../../followup/<YYYY-MM-DD>/<slug>/<name>.md)` links
 
-   Use "None needed" when the work is complete and nothing remains. Use a link list when one or more follow-up items exist — each link points to a separate file in `~/project/repos/your-repo-ops/mkdocs/docs/followup/<YYYY-MM-DD>/<slug>/<name>.md` that the writer should ALSO create with its content.
+   Use "None needed" when the work is complete and nothing remains. Use a link list when one or more follow-up items exist — each link points to a separate file in `~/project/repos/{{OPS_REPO}}/mkdocs/docs/followup/<YYYY-MM-DD>/<slug>/<name>.md` that the writer should ALSO create with its content.
 
    When creating a followup/<date>/<slug>/<name>.md file, use frontmatter:
    ```yaml
@@ -220,7 +220,7 @@ For EACH phase as it completes (not at the end — per-phase):
 Once Step 4 (deploy gate) is satisfied AND every phase has its own results.md:
 
 1. **Dispatch a writer subagent** to compose a top-level `<plan-dir>/results.md` summary that links to each phase's results.md. Path: same directory as plan.md. Always dispatch a writer subagent for this — do not write the file yourself.
-2. **Dispatch a general-purpose subagent** to update `~/project/repos/your-repo-ops/mkdocs/mkdocs.yml` nav.
+2. **Dispatch a general-purpose subagent** to update `~/project/repos/{{OPS_REPO}}/mkdocs/mkdocs.yml` nav.
 3. **Send `STOP_WATCHDOG`** to plan-watchdog (from Step 1).
 4. **If `--team`:** SendMessage `STOP_PULSE` to team-pulse.
 5. Remove marker: `rm -f .state/claude/cc-implement-active`.

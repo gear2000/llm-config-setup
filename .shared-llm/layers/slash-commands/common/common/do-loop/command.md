@@ -310,7 +310,7 @@ The results.md MUST end with a `## Follow-up` section containing EXACTLY one of:
 - `None needed` (single line, no other text)
 - One or more `[label](../../../followup/<YYYY-MM-DD>/<slug>/<name>.md)` links
 
-Use "None needed" when the work is complete. Use a link list when follow-up items exist — each link points to a file at `~/project/repos/your-repo-ops/mkdocs/docs/followup/<YYYY-MM-DD>/<slug>/<name>.md` that the writer ALSO creates.
+Use "None needed" when the work is complete. Use a link list when follow-up items exist — each link points to a file at `~/project/repos/{{OPS_REPO}}/mkdocs/docs/followup/<YYYY-MM-DD>/<slug>/<name>.md` that the writer ALSO creates.
 
 When creating a followup file, use frontmatter:
 ```yaml

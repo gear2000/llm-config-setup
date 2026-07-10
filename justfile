@@ -63,6 +63,20 @@ pi-extensions:
     @command -v pi >/dev/null || { echo "pi not found — skipping"; exit 0; }
     bash tools/install-pi-extensions.sh
 
+# ─── Kit self-hosting ─────────────────────────────────
+# The kit tracks its OWN composed slash-command skills under .claude/skills/{cc,do}-*
+# (it self-hosts the workflow suite). Regenerate them after editing a slash-command
+# layer. The common layers ship {{OPS_REPO}} as a placeholder (a real destination
+# fills it from ~/.shared-llm.yaml `placeholders:`); here we fill it with the generic
+# 'your-repo-ops' so the kit's tracked outputs stay byte-identical. Stages into the
+# gitignored examples/ dir, then copies back ONLY the skills the kit already tracks —
+# it never adds untracked composed skills to .claude/skills/.
+selfcompose:
+    rm -rf examples/self
+    ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/compose/slash-commands --target examples/self --placeholder OPS_REPO=your-repo-ops
+    for d in .claude/skills/*/; do n=$(basename "$d"); cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md"; done
+    @echo "selfcompose: regenerated the kit's tracked slash-command skills (.claude/skills/{cc,do}-*)"
+
 # ─── Tests ────────────────────────────────────────────
 # Python composer/flow tests, plus the zero-dep Node type-stripping unit tests.
 test:

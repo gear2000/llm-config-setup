@@ -23,7 +23,7 @@ Why: leader context fills up fast when it does work. Subagents have fresh contex
 
 ### Step 1: Setup
 
-1. Slugify the title. Determine version by globbing `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/research/v*/`.
+1. Slugify the title. Determine version by globbing `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/research/v*/`.
    <!-- <YYYY-MM-DD> is the ISO date the work was started (NOT modified). Use the date at the time of the first invocation of this skill in this work-log. -->
 2. Ask brief clarifying questions about scope (1–2 max — the Explore agents will surface details).
 3. Decide the research aspects to cover. For a small task, one Explore agent is enough. For a broader question, dispatch multiple Explore agents in parallel covering different angles (data flow, callers, tests, prior incidents in git history, etc.).
@@ -31,7 +31,7 @@ Why: leader context fills up fast when it does work. Subagents have fresh contex
 ### Step 2: Dispatch Exploration
 
 **Default (no `--team`):**
-- For each aspect, spawn an `Explore` subagent with a focused question, instructed to write its findings to `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/research/v<N>/sections/<aspect>.md` and return a one-paragraph summary.
+- For each aspect, spawn an `Explore` subagent with a focused question, instructed to write its findings to `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/research/v<N>/sections/<aspect>.md` and return a one-paragraph summary.
 - If you can run them in parallel (independent aspects), dispatch multiple `Agent` calls in a single message.
 
 **With `--team`:**
@@ -49,7 +49,7 @@ git history if relevant. Return a one-paragraph summary to the leader.
 
 ### Step 3: Synthesize (dual output — Markdown + HTML)
 
-When all Explore agents have returned, **dispatch a synthesizer subagent** with the section-file paths. The synthesizer reads each section file and writes **two consolidated outputs** into `~/project/repos/your-repo-ops/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/research/v<N>/`:
+When all Explore agents have returned, **dispatch a synthesizer subagent** with the section-file paths. The synthesizer reads each section file and writes **two consolidated outputs** into `~/project/repos/{{OPS_REPO}}/mkdocs/docs/work-log/<YYYY-MM-DD>/<slug>/research/v<N>/`:
 
 1. **`research.md`** — the canonical, token-lean record. This is what an agent reads back as context when producing the next version, and what gets archived. Markdown.
 2. **`research.html`** — the visual, annotatable surface **you** read in the browser. Same content as the markdown, rendered in the project's dark style with the sticky-note annotation toolkit baked in.
@@ -71,7 +71,7 @@ links:
 ```
 
 **`research.html` requirements (give these to the synthesizer verbatim):**
-- Use the dark style from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` (`<style>` block) if it exists; otherwise the default style block from the `/design-doc` skill.
+- Use the dark style from `~/project/repos/{{OPS_REPO}}/mkdocs/docs/diagrams/architecture/v3.html` (`<style>` block) if it exists; otherwise the default style block from the `/design-doc` skill.
 - Render the same findings as the markdown — structured with headings, tables, and the flow/box visual vocabulary where a diagram helps. Not a wall of text.
 - Paste the contents of `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>`.
 - `<title>` = `<Title> — research v<N>`.
@@ -82,9 +82,9 @@ Do NOT read the section files yourself or write the outputs yourself — always 
 
 ### Step 4: Persist and Stop
 
-1. **Dispatch a nav-sync subagent** to update `~/project/repos/your-repo-ops/mkdocs/mkdocs.yml` under `- Logs:`.
+1. **Dispatch a nav-sync subagent** to update `~/project/repos/{{OPS_REPO}}/mkdocs/mkdocs.yml` under `- Logs:`.
 2. If `--team`: SendMessage `STOP_PULSE` to team-pulse if it was running.
-3. Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/your-repo-ops/tools/serve-worklog.sh up`
+3. Ensure the work-log static server is up (idempotent — no-op if already running): `bash ~/project/repos/{{OPS_REPO}}/tools/serve-worklog.sh up`
 4. Tell the user:
    ```
    Research saved.
