@@ -1,0 +1,8 @@
+type: skill
+name: meta-run
+description: .shared-llm/layers/slash-commands/common/claude/meta-run/description.md
+frontmatter:
+  argument-hint: "--plan <plan.md> --phase <instructions.md> --output <results.md> [--team true] — first three required"
+inputs:
+- .shared-llm/layers/slash-commands/common/claude/meta-run/command.md
+output: .claude/skills/meta-run/SKILL.md
