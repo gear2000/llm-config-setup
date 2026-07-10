@@ -131,8 +131,8 @@ async function main() {
 	// ── case 6: buildPriorProgressBlock reflects passed vs not-passed + lists summaries ──
 	{
 		const dir = freshRunDir("block"); dirs.push(dir);
-		recordPhaseProgress(dir, "0", "orch-plan-p0-1", "completed", "offboarded the williaumwu tenant clean\nPHASE_RESULT: passed", "hash-bbbb");
-		recordPhaseProgress(dir, "1", "orch-plan-p1-2", "completed", "fixed the cli-zip layer; committed\nPHASE_RESULT: passed", "hash-bbbb");
+		recordPhaseProgress(dir, "0", "orch-plan-p0-1", "completed", "offboarded the sample tenant clean\nPHASE_RESULT: passed", "hash-bbbb");
+		recordPhaseProgress(dir, "1", "orch-plan-p1-2", "completed", "fixed the sample-service layer; committed\nPHASE_RESULT: passed", "hash-bbbb");
 		recordPhaseProgress(dir, "2", "orch-plan-p2-3", "completed", "onboarded fresh from main\nPHASE_RESULT: passed", "hash-bbbb");
 		recordPhaseProgress(dir, "3", "orch-plan-p3-4", "completed", "verified some\nPHASE_RESULT: passed", "hash-bbbb");
 		recordPhaseProgress(dir, "4A", "orch-plan-p4a-5", "failed", "GET /resources returned vpc_id=null", "hash-bbbb");
@@ -144,7 +144,7 @@ async function main() {
 		check("block has a PRIOR PROGRESS header", b.includes("PRIOR PROGRESS"));
 		check("block lists passed phase 0", b.includes("phase 0: passed"));
 		check("block lists passed phase 3", b.includes("phase 3: passed"));
-		check("block carries a passed summary", b.includes("cli-zip layer"));
+		check("block carries a passed summary", b.includes("sample-service layer"));
 		check("block lists the failed phase 4A", b.includes("phase 4A: failed"));
 		check("block carries the failure summary", b.includes("vpc_id=null"));
 		check("block tells the brain to resume from the first not-yet-passed", b.toLowerCase().includes("resume from the first"));
