@@ -1,6 +1,8 @@
 # Onboarding Checklist
 
-This walks you from a clean machine to generated `CLAUDE.md` / `AGENTS.md` / skill files for your project. The model: **one centralized engine in the kit** (`tools/harness.py`, driven by `just`) reads `~/.shared-llm.yaml` and builds every repo you register. You copy the layer tree into your repo once, fill the TEMPLATE stubs (groups A–H below), register the repo, then run `just update`.
+This walks you from a clean machine to generated `CLAUDE.md` / `AGENTS.md` / skill files for your project. The model: **one centralized engine in the kit** (`tools/harness.py`, driven by `just`) reads `~/.shared-llm.yaml` and builds every repo you register. You seed your repo-owned `this_repo/` tree once, fill the TEMPLATE stubs (groups A–H below), register the repo, then run `just update`.
+
+> **The destination split.** A registered destination's `.shared-llm/` has two trees (see the README's *destination split* section): **`public/`** — kit-synced, rebuilt by the engine on every `just update`, never hand-edited; and **`this_repo/`** — repo-owned, where your fillable stubs and recipes live. **This checklist is about `this_repo/`.** Read every `.shared-llm/layers/.../this_repo/...` path below as **`.shared-llm/this_repo/layers/.../this_repo/...`**, and every repo-owned recipe path `.shared-llm/compose/...` as **`.shared-llm/this_repo/compose/...`**. The kit-synced `common` layers a recipe references live under `.shared-llm/public/layers/...` — you never edit those. You do **not** create `public/`; the engine builds it in step 2 below.
 
 ---
 
@@ -24,21 +26,22 @@ The engine lives **only** in the kit and is never copied into your repo. You dri
    The **global** step (run as part of `just update` when `-g` is set) installs the general home skills (`python`, `nextjs`, `backend`, `golang`) plus routed slash-command skills into `~/.claude/skills`, `~/.pi/agent/skills`, and `~/.agents/skills`. Pi standalone planning is `/do-planish` from the TypeScript extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, `/do-oneshot`, `/do-implement`, `/do-loop`, and `/do-full`; Claude Code gets the matching `cc-*` commands, including the standalone `/cc-planish` planner (the port of `/do-planish`). The global step also installs the 18 generic agents into `~/.claude/agents` and `~/.pi/agents`, the Pi runtime into `~/.pi`, and the Claude hooks/statusline/settings into `~/.claude`. It is idempotent and non-clobbering. Third-party Pi extensions are a separate step: `just pi-extensions`.
 
 2. **Set up your target repo (per repo):**
-   - Copy the kit's `.shared-llm/` tree into the repo. The `this_repo/` layers arrive as fillable `TEMPLATE.*` stubs.
+   - Seed the repo-owned tree: copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and any repo-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. Leave `public/` alone — the engine creates it.
    - Fill the stubs (groups A–H below), renaming each to drop the `TEMPLATE.` prefix.
    - Register the repo and build it:
      ```bash
      just configure -d /path/to/your/repo -l cc,pi
      just update
      ```
+     (If a kit-synced `public/` layer carries a `{{TOKEN}}`, add a `placeholders:` map to this repo's entry in `~/.shared-llm.yaml` — see group B below and the README's *Placeholder convention*.)
 
-The rest of this checklist happens **inside your target repo** — that is where the `.shared-llm/` tree now lives. `just update` copies the common layers into it (never touching your `this_repo/` overlays), composes its output files, and wires the per-harness skill links.
+The rest of this checklist happens **inside your target repo** — that is where the `.shared-llm/` tree now lives. `just update` (re)builds the `public/` tree from the kit (never touching your `this_repo/` tree), composes its output files, and wires the per-harness skill links.
 
 **See what still needs you:** `find . -name 'TEMPLATE.*'` lists every unfilled stub. For each: fill it in (the groups below map every token to its file), **delete the `<!-- TEMPLATE … -->` banner**, then **rename it to drop the `TEMPLATE.` prefix** (e.g. `TEMPLATE.general.md` → `general.md`).
 
 When you finish, both of these must return nothing:
 ```bash
-grep -rn '{{\|TODO(project)' .shared-llm/layers/
+grep -rn '{{\|TODO(project)' .shared-llm/this_repo/
 find . -name 'TEMPLATE.*'
 ```
 Then run `just update` to (re)generate every registered destination's output files.
@@ -64,6 +67,8 @@ Then run `just update` to (re)generate every registered destination's output fil
 ## B — Credentials and cloud
 
 **Warning: never commit real secrets.** These files are tracked by git. Fill in the shape (paths, env var names, account IDs) — never actual token values.
+
+> **Two fill paths.** The tokens in this group live in *your* `this_repo/` layers, so you fill them **by hand** here. If instead a **kit-synced `public/` layer** (a shared layer you do not own) carries a `{{TOKEN}}`, do not edit it — the engine fills it at build time from the destination's `placeholders:` map in `~/.shared-llm.yaml` (see the README's *Placeholder convention*), and stops the build if the value is missing. Either way, real values live only in your home config / secrets, never in a committed layer.
 
 4. **Credential root path** — replace `{{CRED_ROOT}}` with the path to your secrets directory (e.g. `~/project/secrets/`). File: `.shared-llm/layers/llm/this_repo/common/general.md`, `## Credentials` section.
 
@@ -136,7 +141,7 @@ Then run `just update` to (re)generate every registered destination's output fil
 
 25. **Leak check** — run:
     ```bash
-    grep -rn '{{\|TODO(project)' .shared-llm/layers/
+    grep -rn '{{\|TODO(project)' .shared-llm/this_repo/
     ```
     Must return nothing. Fix any remaining placeholders.
 

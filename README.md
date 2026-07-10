@@ -52,6 +52,8 @@ global: [cc, pi]                 # home / all-projects harnesses to set up (omit
 destinations:
   - path: ~/project/repo/foo
     harnesses: [cc, pi]
+    placeholders:                # optional: build-time fill for {{TOKEN}}s in kit-synced public/ layers
+      PROJECT_NAME: Foo
   - path: ~/project/repo/bar
     harnesses: [cc, pi, codex]
 ```
@@ -62,10 +64,15 @@ destinations:
 
 ## The three operations
 
+Every destination's `.shared-llm/` is split into two trees with an explicit ownership boundary (see [The destination split](#the-destination-split-public-vs-this_repo) below):
+
+- **`public/`** — kit-synced. The engine sweeps it wholesale on every update.
+- **`this_repo/`** — repo-owned. The engine never writes or prunes it.
+
 `just update` is three operations (plus an optional fourth):
 
-1. **copy** — kit → hub (`~/.shared-llm`) → each destination's own `.shared-llm/`. It copies the **common** layers and recipes only; it **never** touches a destination's `this_repo/` overlays or its `compose/` recipes. It overwrites, and flags (does not block) when it overwrites a diverged local edit. There is no auto-prune — a removed common file is left in place.
-2. **compose** — each destination composes from its **own** `.shared-llm/`, merging the freshly-copied common layers with that repo's `this_repo/` overlays. Outputs land at the destination's root (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`).
+1. **copy** — kit → hub (`~/.shared-llm`) → each destination's **`public/`** tree. It copies the **common** layers and runtime, and syncs the kit's **compose recipes** into `public/compose/` (translating their layer paths into split form). It **never** touches a destination's `this_repo/` tree. `public/layers/` and `public/compose/` are **swept wholesale** — a file the kit no longer ships is pruned; `public/llm/` runtime is copy-overwrite (it keeps build artifacts like `node_modules`). Build artifacts the kit `.gitignore`s (e.g. a compiled hub binary) never propagate.
+2. **compose** — each destination composes from **both** trees: `public/compose/` (kit recipes) first, then `this_repo/compose/` (repo-owned recipes). A recipe references layers across both trees by explicit path (`.shared-llm/public/...`, `.shared-llm/this_repo/...`). Composing public first lets a `this_repo/compose/` recipe **override** a kit recipe at the same output path (last writer wins). Any `{{TOKEN}}` in a `public/` layer is filled at build time from the destination's `placeholders:` map (see [Placeholder convention](#placeholder-convention)); an unfilled token stops the build. Outputs land at the destination's root (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`).
 3. **link** — routes skills per harness **by name prefix**, then symlinks into each harness's **global** skill dir:
    - `do-*` → **Pi only**. During compose, `do-*` skills are moved out of `.claude/skills` (which Claude Code reads) into a Pi-only `<repo>/.pi-skills/` dir, so Claude never sees them; `link` then symlinks them into `~/.pi/agent/skills/`.
    - `cc-*` → **Claude Code only** (stays in `<repo>/.claude/skills/`, never linked to Pi/Codex).
@@ -76,9 +83,33 @@ destinations:
 
 ### Recipe path resolution — one rule
 
-Every path in a compose recipe YAML — both `.shared-llm/...` inputs and any repo-relative path like `ops/...` — resolves against the **repo root**. There is no prefix-stripping and no dual-mode resolution: one rule, everywhere.
+Every path in a compose recipe YAML — both `.shared-llm/...` inputs and any repo-relative path like `ops/...` — resolves against the **repo root**. There is no prefix-stripping and no dual-mode resolution: one rule, everywhere. The `public/` vs `this_repo/` split (below) is expressed **in the path itself** (`.shared-llm/public/...` or `.shared-llm/this_repo/...`), not by a forking resolver.
+
+### The destination split — `public/` vs `this_repo/`
+
+A registered destination's `.shared-llm/` is split into two trees with an explicit ownership boundary:
+
+```
+<dest>/.shared-llm/
+  public/                 — KIT-SYNCED. Rebuilt from the kit on every `just update`.
+    layers/               — the common layers (copied from the kit)
+    compose/              — the kit's recipes (paths translated to split form)
+    llm/{claude,common,pi}/common/  — the runtime trees (copy-overwrite, not pruned)
+  this_repo/              — REPO-OWNED. The engine never writes or prunes here.
+    layers/               — this_repo layer overlays (your filled-in stubs)
+    compose/              — your own recipes (+ any kit recipe you override)
+    llm/                  — this_repo runtime overlays (e.g. a settings overlay)
+    prompts/  skills/  extensions/  — repo-owned prompts, standalone skills, tool modules
+```
+
+- **`public/` is disposable.** Never hand-edit it — the next `just update` overwrites it (and prunes anything the kit dropped). To change a kit-synced layer, edit it in the kit and re-run.
+- **`this_repo/` is yours.** The engine reads it during compose but never writes it. Put project-specific layers, recipes, prompts, and skills here.
+- **Overriding a kit recipe.** Drop a recipe at the *same relative path* under `this_repo/compose/` (e.g. `this_repo/compose/agents/backend.yaml`). Compose runs `public/` first, then `this_repo/`, so your copy wins at the shared output path. Its inputs may pull layers from **either** tree by explicit path.
+- **Kit recipes keep flat source paths.** The kit's own `.shared-llm/` stays flat; the engine translates a kit recipe's `.shared-llm/layers/...` paths into `.shared-llm/public/...` (or `.shared-llm/this_repo/...` for a `this_repo` layer) as it copies the recipe into `public/compose/`.
 
 ## The `.shared-llm/` layout
+
+The layout below is the **kit's own source tree**, which stays flat (`layers/`, `compose/`, `llm/`). A *registered destination's* `.shared-llm/` is reorganized into the `public/` + `this_repo/` split described in [The destination split](#the-destination-split-public-vs-this_repo) — the engine copies the flat kit content into a destination's `public/` and keeps the repo's own content under `this_repo/`.
 
 The repo splits into the **source tree** (`.shared-llm/`) and the **engine + config machinery** (`tools/`, `justfile`).
 
@@ -135,12 +166,12 @@ ONBOARDING.md                     — token-by-token checklist for filling the T
 
 There is no scaffolding command — a destination is set up by hand once, then driven by `just update` forever after:
 
-1. **Copy the kit's `.shared-llm/` into the repo.** The `this_repo/` layers arrive as fillable `TEMPLATE.*` stubs.
+1. **Seed the repo-owned tree.** Copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and any repo-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. You do **not** create `public/` — the engine builds it in step 4.
 2. **Fill the `TEMPLATE.*` stubs** (see `ONBOARDING.md`), deleting the `TEMPLATE.` prefix from each as you finish it.
-3. **Register it:** `just configure -d /path/to/repo -l cc,pi`.
-4. **Build it:** `just update`.
+3. **Register it:** `just configure -d /path/to/repo -l cc,pi` (add a `placeholders:` map to its entry in `~/.shared-llm.yaml` if any kit-synced layer carries a `{{TOKEN}}` — see [Placeholder convention](#placeholder-convention)).
+4. **Build it:** `just update` — this creates the `public/` tree from the kit and composes the outputs.
 
-From then on, `just update` keeps every registered destination in sync: it re-copies the common layers (step 1's `this_repo/` overlays are never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
+From then on, `just update` keeps every registered destination in sync: it rebuilds `public/` from the kit (your `this_repo/` tree is never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
 
 ## Where compose outputs land
 
@@ -229,14 +260,23 @@ just update
 The `this_repo` stubs use two marker styles:
 
 - **Block-level guidance** — HTML comment: `<!-- TODO(project): explain what goes here -->`
-- **Inline fill-in values** — double-brace token: `{{PROJECT_NAME}}`, `{{CRED_ROOT}}`, etc.
+- **Inline fill-in values** — double-brace token: `{{PROJECT_NAME}}`, `{{CRED_ROOT}}`, etc. The token shape is `{{UPPERCASE_UNDERSCORE}}` (all-caps letters, digits, underscores) — a lowercase or spaced `{{ ... }}` in an example code fence is left alone.
 
-When onboarding is done, both of these return nothing:
+There are **two** ways a `{{TOKEN}}` gets its value:
 
-```bash
-grep -rn '{{\|TODO(project)' .shared-llm/layers/
-find . -name 'TEMPLATE.*'
-```
+1. **You fill the `this_repo` stub by hand** (the classic path). Replace the token in the layer prose, drop the `TEMPLATE.` prefix. This is for tokens that belong to layers *you* own under `this_repo/`. When done, `grep -rn '{{\|TODO(project)' .shared-llm/this_repo/` and `find . -name 'TEMPLATE.*'` both return nothing.
+2. **The engine fills it at build time** from a per-destination `placeholders:` map — for tokens carried by a **kit-synced `public/` layer** (a shared layer that needs a per-repo value). Add the map to the destination's entry in `~/.shared-llm.yaml`:
+
+   ```yaml
+   destinations:
+     - path: ~/project/repo/foo
+       harnesses: [cc, pi]
+       placeholders:
+         PROJECT_NAME: Foo
+         CRED_ROOT: ~/project/foo/secrets
+   ```
+
+   During compose, each `{{TOKEN}}` in a composed output is replaced from this map. **Any unfilled `{{TOKEN}}` in composed output stops the build** with a clear error naming the token and the file — kit-synced layers can therefore safely ship a placeholder, because a destination that forgets to supply the value fails loud instead of shipping a literal `{{TOKEN}}`. A recipe that pulls a `TEMPLATE.*` stub is exempt (a stub is deliberately unfilled). Placeholder **values live only in `~/.shared-llm.yaml`** (your home config), never in a committed layer.
 
 See `ONBOARDING.md` for the ordered, token-by-token fill checklist.
 

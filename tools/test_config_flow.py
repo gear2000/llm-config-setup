@@ -48,33 +48,36 @@ def _write(path: Path, text: str) -> None:
 
 
 def _scaffold_dest(dest: Path) -> None:
-    """A minimal, self-contained destination .shared-llm/ with one common-routed
-    skill recipe that pulls a common layer AND a this_repo overlay."""
+    """A minimal destination in the SPLIT layout: a common layer under public/, a
+    this_repo overlay under this_repo/, and one repo-owned skill recipe (in
+    this_repo/compose/) that pulls a layer from EACH tree by explicit path."""
     s = dest / ".shared-llm"
-    _write(s / "layers/skills/common/demo/description.md", "A demo skill.\n")
-    _write(s / "layers/skills/common/demo/practices.md", "COMMON practices body.\n")
-    _write(s / "layers/skills/this_repo/demo.md", "THIS_REPO overlay body.\n")
-    _write(s / "compose/skills/demo.yaml", yaml.safe_dump({
+    _write(s / "public/layers/skills/common/demo/description.md", "A demo skill.\n")
+    _write(s / "public/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
+    _write(s / "this_repo/layers/skills/this_repo/demo.md", "THIS_REPO overlay body.\n")
+    _write(s / "this_repo/compose/skills/demo.yaml", yaml.safe_dump({
         "type": "skill",
         "name": "demo",
-        "description": ".shared-llm/layers/skills/common/demo/description.md",
+        "description": ".shared-llm/public/layers/skills/common/demo/description.md",
         "inputs": [
-            ".shared-llm/layers/skills/common/demo/practices.md",
-            ".shared-llm/layers/skills/this_repo/demo.md",
+            ".shared-llm/public/layers/skills/common/demo/practices.md",
+            ".shared-llm/this_repo/layers/skills/this_repo/demo.md",
         ],
         "output": ".claude/skills/demo/SKILL.md",
     }, sort_keys=False))
 
 
 def _add_slash_skill(dest: Path, name: str, scope: str) -> None:
-    """Add a slash-command skill recipe at compose/slash-commands/common/<scope>/<name>.yaml."""
+    """Add a repo-owned slash-command skill recipe under this_repo/compose/
+    (scope is the innermost dir, so harness_of resolves it)."""
     s = dest / ".shared-llm"
-    _write(s / f"layers/slash-commands/common/{scope}/{name}/command.md", f"{name} body\n")
-    _write(s / f"layers/slash-commands/common/{scope}/{name}/description.md", f"{name} desc\n")
-    _write(s / f"compose/slash-commands/common/{scope}/{name}.yaml", yaml.safe_dump({
+    base = f"this_repo/layers/slash-commands/this_repo/{scope}/{name}"
+    _write(s / f"{base}/command.md", f"{name} body\n")
+    _write(s / f"{base}/description.md", f"{name} desc\n")
+    _write(s / f"this_repo/compose/slash-commands/this_repo/{scope}/{name}.yaml", yaml.safe_dump({
         "type": "skill", "name": name,
-        "description": f".shared-llm/layers/slash-commands/common/{scope}/{name}/description.md",
-        "inputs": [f".shared-llm/layers/slash-commands/common/{scope}/{name}/command.md"],
+        "description": f".shared-llm/{base}/description.md",
+        "inputs": [f".shared-llm/{base}/command.md"],
         "output": f".claude/skills/{name}/SKILL.md",
     }, sort_keys=False))
 
@@ -133,58 +136,75 @@ def test_copy_propagates_new_and_flags_changed(tmp_path: Path) -> None:
     _scaffold_dest(dest)
     cfg = _cfg(m, dest, ["cc", "pi"])
 
-    # Seed the HUB with a common file the dest doesn't have yet, plus one it does
-    # have but with different content (a local edit that copy must overwrite+flag).
+    # Seed the HUB (flat kit mirror) with a common file the dest doesn't have yet,
+    # plus one it does (under public/) but with different content — a stale copy
+    # that the wholesale public sweep must overwrite.
     hub = m.DEFAULT_SOURCE
     _write(hub / "layers/skills/common/demo/practices.md", "HUB practices v2.\n")
     _write(hub / "layers/llm/common/new-common.md", "brand new common file.\n")
 
     m.do_copy(cfg, _quiet(m))
 
-    # New common file propagated into the destination's .shared-llm/.
-    assert (dest / ".shared-llm/layers/llm/common/new-common.md").read_text() == "brand new common file.\n"
-    # The pre-existing common file was overwritten with the hub version.
-    assert (dest / ".shared-llm/layers/skills/common/demo/practices.md").read_text() == "HUB practices v2.\n"
+    # New common file propagated into the destination's public/ tree.
+    assert (dest / ".shared-llm/public/layers/llm/common/new-common.md").read_text() == "brand new common file.\n"
+    # The pre-existing common file (public/) was overwritten with the hub version.
+    assert (dest / ".shared-llm/public/layers/skills/common/demo/practices.md").read_text() == "HUB practices v2.\n"
     # The this_repo overlay was NEVER touched by copy.
-    assert (dest / ".shared-llm/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
+    assert (dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
 
 
-def test_copy_seeds_new_recipes_additively(tmp_path: Path) -> None:
-    """copy seeds brand-new kit compose recipes into destinations, but never
-    overwrites an existing (destination-owned) recipe and skips a recipe whose
-    layer inputs are missing at the destination."""
+def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path) -> None:
+    """copy syncs the kit's recipes into public/compose/ (translating flat paths to
+    split), prunes a public recipe the kit no longer ships, and never touches a
+    this_repo/compose/ recipe."""
     m = _load()
     _patch_home(m, tmp_path / "home")
     dest = tmp_path / "dest"
     _scaffold_dest(dest)
     cfg = _cfg(m, dest, ["cc", "pi"])
 
-    # Fake KIT with three recipes: one new+composable, one drifted from the
-    # destination's copy, one referencing a layer the destination lacks.
+    # Fake KIT with one recipe that references BOTH a common layer and a this_repo
+    # overlay via flat paths (the copy step must translate them).
     kit = tmp_path / "kit"
     kshared = kit / ".shared-llm"
-    _write(kshared / "compose/skills/newskill.yaml", yaml.safe_dump({
-        "type": "skill", "name": "newskill",
-        "inputs": [".shared-llm/layers/skills/common/demo/practices.md"],
-        "output": ".claude/skills/newskill/SKILL.md",
-    }))
-    _write(kshared / "compose/skills/demo.yaml", "type: skill\nname: demo-KIT-DRIFTED\ninputs: []\noutput: x\n")
-    _write(kshared / "compose/skills/orphan.yaml", yaml.safe_dump({
-        "type": "skill", "name": "orphan",
-        "inputs": [".shared-llm/layers/skills/common/nope/missing.md"],
-        "output": ".claude/skills/orphan/SKILL.md",
-    }))
+    _write(kshared / "compose/agents/backend.yaml", yaml.safe_dump({
+        "type": "agent", "name": "backend", "model": "sonnet",
+        "description": ".shared-llm/layers/agents/common/backend.description.md",
+        "inputs": [
+            ".shared-llm/layers/agents/common/backend.md",
+            ".shared-llm/layers/agents/this_repo/backend.md",
+        ],
+        "output": ".claude/agents/backend.md",
+    }, sort_keys=False))
     m.project_root = lambda: kit
-    dest_demo_before = (dest / ".shared-llm/compose/skills/demo.yaml").read_text()
+    # The recipe's layers must exist at the destination (the sync gates on this).
+    # Common layers ride in via the hub (so the public sweep keeps them); the
+    # overlay is repo-owned under this_repo/.
+    hub = m.DEFAULT_SOURCE
+    _write(hub / "layers/agents/common/backend.description.md", "A backend agent.\n")
+    _write(hub / "layers/agents/common/backend.md", "common backend body\n")
+    _write(dest / ".shared-llm/this_repo/layers/agents/this_repo/backend.md", "repo backend overlay\n")
+
+    # A STALE public recipe the kit no longer ships → must be pruned.
+    _write(dest / ".shared-llm/public/compose/agents/gone.yaml", "type: agent\nname: gone\ninputs: []\noutput: x\n")
+    # A repo-owned recipe under this_repo/compose/ → must be preserved verbatim.
+    this_repo_recipe = dest / ".shared-llm/this_repo/compose/skills/demo.yaml"
+    demo_before = this_repo_recipe.read_text()
 
     m.do_copy(cfg, _quiet(m))
 
-    # New recipe with satisfiable inputs was seeded.
-    assert (dest / ".shared-llm/compose/skills/newskill.yaml").exists()
-    # Drifted recipe kept the DESTINATION copy untouched.
-    assert (dest / ".shared-llm/compose/skills/demo.yaml").read_text() == dest_demo_before
-    # Recipe with missing inputs was NOT seeded.
-    assert not (dest / ".shared-llm/compose/skills/orphan.yaml").exists()
+    synced = dest / ".shared-llm/public/compose/agents/backend.yaml"
+    assert synced.exists(), "kit recipe not synced into public/compose/"
+    text = synced.read_text()
+    # Flat kit paths were translated to split form: common -> public, overlay -> this_repo.
+    assert ".shared-llm/public/layers/agents/common/backend.md" in text
+    assert ".shared-llm/this_repo/layers/agents/this_repo/backend.md" in text
+    assert ".shared-llm/layers/agents/common/backend.md" not in text  # no lingering flat path
+    # output is NOT translated (lands at the repo root).
+    assert "output: .claude/agents/backend.md" in text
+    # Stale public recipe pruned; this_repo recipe untouched.
+    assert not (dest / ".shared-llm/public/compose/agents/gone.yaml").exists()
+    assert this_repo_recipe.read_text() == demo_before
 
 
 # --- compose ---------------------------------------------------------------
@@ -276,6 +296,12 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     _patch_home(m, home)
     dest = tmp_path / "dest"
     _scaffold_dest(dest)
+    # A minimal kit that ships the demo's common layers, so the public sweep keeps
+    # them (a real destination's public/ layers are always kit-provided).
+    kit = tmp_path / "kit"
+    _write(kit / ".shared-llm/layers/skills/common/demo/description.md", "A demo skill.\n")
+    _write(kit / ".shared-llm/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
+    m.project_root = lambda: kit
     # Seed the hub so copy has something to propagate.
     _write(m.DEFAULT_SOURCE / "layers/llm/common/x.md", "hub common.\n")
 
@@ -484,6 +510,104 @@ def test_home_runtime_scaffold_never_clobbers_existing_settings(tmp_path: Path) 
     m.do_home_runtime(cfg, _quiet(m))
     # Existing settings preserved verbatim.
     assert (home / ".claude/settings.json").read_text() == '{"mine": true}\n'
+
+
+# --- public sweep / this_repo isolation ------------------------------------
+
+def test_public_layers_swept_and_this_repo_untouched(tmp_path: Path) -> None:
+    """copy sweeps public/layers/ wholesale (a layer the hub no longer ships is
+    pruned) and never prunes anything under this_repo/."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    # Empty kit so the recipe sync is a no-op — isolate the layer sweep.
+    empty_kit = tmp_path / "emptykit"
+    (empty_kit / ".shared-llm").mkdir(parents=True)
+    m.project_root = lambda: empty_kit
+    cfg = _cfg(m, dest, ["cc"])
+
+    hub = m.DEFAULT_SOURCE
+    _write(hub / "layers/skills/common/demo/practices.md", "hub practices\n")
+    # A stale public layer the hub does NOT ship → must be swept.
+    _write(dest / ".shared-llm/public/layers/skills/common/stale/old.md", "STALE\n")
+
+    m.do_copy(cfg, _quiet(m))
+
+    assert not (dest / ".shared-llm/public/layers/skills/common/stale/old.md").exists(), "stale public layer not swept"
+    # this_repo layer untouched by the sweep.
+    assert (dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
+
+
+# --- build-time placeholder fill -------------------------------------------
+
+def _scaffold_placeholder_dest(dest: Path, *, template: bool = False) -> None:
+    """A destination whose composed skill pulls a public/ layer carrying a
+    {{PROJECT_NAME}} placeholder. With `template`, the body layer is a TEMPLATE.*
+    stub under this_repo/ (exempt from the unfilled check)."""
+    s = dest / ".shared-llm"
+    _write(s / "public/layers/skills/common/tok/description.md", "desc for {{PROJECT_NAME}}\n")
+    if template:
+        body = ".shared-llm/this_repo/layers/skills/this_repo/TEMPLATE.tok.md"
+        _write(s / "this_repo/layers/skills/this_repo/TEMPLATE.tok.md", "Fill {{PROJECT_NAME}} here.\n")
+    else:
+        body = ".shared-llm/public/layers/skills/common/tok/practices.md"
+        _write(s / "public/layers/skills/common/tok/practices.md", "Build {{PROJECT_NAME}} the right way.\n")
+    _write(s / "this_repo/compose/skills/tok.yaml", yaml.safe_dump({
+        "type": "skill", "name": "tok",
+        "description": ".shared-llm/public/layers/skills/common/tok/description.md",
+        "inputs": [body],
+        "output": ".claude/skills/tok/SKILL.md",
+    }, sort_keys=False))
+
+
+def test_placeholder_filled_from_config(tmp_path: Path) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_placeholder_dest(dest)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [],
+           "destinations": [{"path": str(dest), "harnesses": ["cc"],
+                             "placeholders": {"PROJECT_NAME": "Acme"}}]}
+    m.do_compose(cfg, _quiet(m))
+    out = (dest / ".claude/skills/tok/SKILL.md").read_text()
+    assert "Build Acme the right way." in out          # body filled
+    assert "description: desc for Acme" in out          # frontmatter description filled
+    assert "{{PROJECT_NAME}}" not in out
+
+
+def test_unfilled_placeholder_fails_loud(tmp_path: Path, capsys) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_placeholder_dest(dest)
+    # No placeholders map → {{PROJECT_NAME}} cannot be filled.
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [],
+           "destinations": [{"path": str(dest), "harnesses": ["cc"]}]}
+    try:
+        m.do_compose(cfg, _quiet(m))
+        assert False, "expected SystemExit on unfilled placeholder"
+    except SystemExit as e:
+        assert e.code not in (0, None)
+    err = capsys.readouterr().err
+    assert "PROJECT_NAME" in err
+    assert "tok/SKILL.md" in err
+    # No partial/garbage output written for the failing recipe.
+    assert not (dest / ".claude/skills/tok/SKILL.md").exists()
+
+
+def test_template_input_exempt_from_placeholder_check(tmp_path: Path) -> None:
+    """A recipe pulling a TEMPLATE.* stub is exempt — it composes without failing,
+    leaving the placeholder in place (the kit's deliberately-unfilled convention)."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_placeholder_dest(dest, template=True)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [],
+           "destinations": [{"path": str(dest), "harnesses": ["cc"]}]}
+    m.do_compose(cfg, _quiet(m))  # must NOT raise
+    out = (dest / ".claude/skills/tok/SKILL.md").read_text()
+    assert "{{PROJECT_NAME}}" in out  # left unfilled, exempt
 
 
 if __name__ == "__main__":

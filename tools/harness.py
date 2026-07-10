@@ -57,7 +57,9 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -129,6 +131,12 @@ PLAIN_TYPES = ("claude-md", "agents-md", "prompt")
 #              (dicts merge recursively, lists concatenate, scalars overlay-win).
 #              For settings.json = a common base + a this_repo overlay.
 STRUCTURED_TYPES = ("copy", "settings")
+
+# Build-time placeholder token: the kit's inline fill-in convention is
+# {{UPPERCASE_UNDERSCORE}} (e.g. {{PROJECT_NAME}}, {{CRED_ROOT}}). Deliberately
+# NOT matching lowercase/dotted/spaced braces, so a `{{ user.name }}` inside an
+# example code fence never trips the fail-loud check.
+PLACEHOLDER_RE = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 
 
 def load_compose_yaml(path: Path) -> dict[str, Any]:
@@ -354,10 +362,15 @@ class Composer:
     """
 
     def __init__(self, repo_root: Path, output_base: Path | None = None,
-                 shared_root: Path | None = None) -> None:
+                 shared_root: Path | None = None,
+                 placeholders: dict[str, str] | None = None) -> None:
         self.repo_root = repo_root
         self.output = output_base if output_base is not None else repo_root
         self.shared = shared_root if shared_root is not None else repo_root / ".shared-llm"
+        # Per-destination build-time fill values for kit-synced layers that carry
+        # {{TOKEN}} placeholders. Empty for the low-level compose CLI and the
+        # kit's own self-compose (whose layers carry no placeholders).
+        self.placeholders = placeholders or {}
         self.skill_handler = ClaudeSkill()
         self.agent_handler = ClaudeAgent()
         self.claude_md_handler = ClaudeMd()
@@ -378,6 +391,45 @@ class Composer:
     def resolve_output(self, relative: str) -> Path:
         """Resolve an output path against the output base (defaults to repo root)."""
         return self.output / relative
+
+    def _fill_placeholders(self, text: str) -> str:
+        """Replace each {{TOKEN}} for which this destination has a value; leave
+        unknown tokens untouched (the fail-loud check catches those)."""
+        if not text:
+            return text
+        return PLACEHOLDER_RE.sub(
+            lambda m: self.placeholders.get(m.group(1), m.group(0)), text
+        )
+
+    @staticmethod
+    def _pulls_template(data: dict[str, Any]) -> bool:
+        """True if a recipe pulls a TEMPLATE.* stub as an input/description. Such
+        a recipe is composing a deliberately-unfilled stub (the kit placeholder
+        convention), so it is exempt from the unfilled-placeholder fail-loud."""
+        refs = [r for r in (data.get("inputs") or []) if isinstance(r, str)]
+        for key in RECIPE_PATH_FIELDS:
+            v = data.get(key)
+            if isinstance(v, str):
+                refs.append(v)
+        return any(Path(r).name.startswith("TEMPLATE.") for r in refs)
+
+    def _assert_filled(self, text: str, output_path: Path, yaml_path: Path,
+                       exempt: bool) -> None:
+        """Fail loud (non-zero exit) if composed output still holds a {{TOKEN}}
+        that no placeholder filled — naming the token(s), the output, and the
+        recipe. Exempt when the recipe pulls a TEMPLATE.* stub."""
+        if exempt:
+            return
+        unfilled = sorted(set(PLACEHOLDER_RE.findall(text)))
+        if unfilled:
+            tokens = ", ".join("{{" + t + "}}" for t in unfilled)
+            print(
+                f"error: unfilled placeholder(s) {tokens} in composed output "
+                f"{output_path} (recipe {yaml_path}). Add them to this "
+                f"destination's `placeholders:` map in ~/.shared-llm.yaml.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     def discover(self, root: Path | None = None) -> list[Path]:
         """Find all recipe YAML files under a directory (default <shared>/compose/).
@@ -427,7 +479,7 @@ class Composer:
 
         if compose_type not in PLAIN_TYPES:
             desc_path = self.resolve_input(data["description"])
-            data["_description_content"] = read_file(desc_path).strip()
+            data["_description_content"] = self._fill_placeholders(read_file(desc_path).strip())
 
         parts: list[str] = []
         # Inject shared catalog partial FIRST when declared (single-source pattern).
@@ -440,9 +492,16 @@ class Composer:
             parts.append(read_file(input_path).rstrip())
 
         separator = "\n\n---\n\n" if compose_type in PLAIN_TYPES else "\n"
-        body = separator.join(parts) + "\n"
+        body = self._fill_placeholders(separator.join(parts) + "\n")
         output_path = self.resolve_output(data["output"])
         label = data.get("name", output_path.name)
+
+        # Fail loud on any {{TOKEN}} left unfilled by the destination's
+        # placeholders map (build-time fill for kit-synced layers).
+        exempt = self._pulls_template(data)
+        self._assert_filled(body, output_path, yaml_path, exempt)
+        if compose_type not in PLAIN_TYPES:
+            self._assert_filled(data["_description_content"], output_path, yaml_path, exempt)
 
         print(f"  {compose_type}: {label} -> {output_path}")
 
@@ -474,16 +533,21 @@ class Composer:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(item, dest)
 
-    def copy_standalone_skills(self) -> None:
+    def copy_standalone_skills(self, skills_src: Path | None = None) -> None:
         """Copy whole standalone skills verbatim into .claude/skills/.
 
-        Skills under <source>/skills/ are complete, multi-file skills (SKILL.md +
-        README + agents/ + references/) — nothing to stitch. Unlike the recipe-driven
-        skills, they are copied in their entirety: whole dir in, whole dir out. The
-        repo's .codex-plugin points Codex at the same .claude/skills/ dir, so both
-        harnesses pick them up from one copy. Stale dest dirs are cleared first.
+        Skills under the source skills dir are complete, multi-file skills
+        (SKILL.md + README + agents/ + references/) — nothing to stitch. Unlike
+        the recipe-driven skills, they are copied in their entirety: whole dir in,
+        whole dir out. The repo's .codex-plugin points Codex at the same
+        .claude/skills/ dir, so both harnesses pick them up from one copy. Stale
+        dest dirs are cleared first.
+
+        `skills_src` defaults to <shared>/skills; the split destination flow points
+        it at <shared>/this_repo/skills (standalone skills are repo-owned).
         """
-        skills_src = self.shared / "skills"
+        if skills_src is None:
+            skills_src = self.shared / "skills"
         if not skills_src.is_dir():
             return
         for skill_dir in sorted(skills_src.iterdir()):
@@ -576,14 +640,25 @@ def harness_of(root: Path, name: str) -> str:
     """Harness a skill belongs to, derived from where its recipe lives:
       compose/slash-commands/<scope>/<harness>/<name>.yaml -> <harness>
       compose/skills/<name>.yaml (convention skill)        -> common
-    else 'unknown'. Mirrors the bash harness_of."""
-    slash = root / ".shared-llm/compose/slash-commands"
-    if slash.is_dir():
-        hits = list(slash.rglob(f"{name}.yaml"))
-        if hits:
-            return hits[0].parent.name
-    if (root / ".shared-llm/compose/skills" / f"{name}.yaml").exists():
-        return "common"
+    else 'unknown'. Mirrors the bash harness_of.
+
+    Searches the flat kit layout AND both split-destination trees
+    (public/compose, this_repo/compose), so it works for the kit's own
+    self-compose (flat) and a configured destination (split) alike."""
+    compose_bases = [
+        root / ".shared-llm/compose",
+        root / ".shared-llm" / PUBLIC_DIR / "compose",
+        root / ".shared-llm" / THIS_REPO_DIR / "compose",
+    ]
+    for base in compose_bases:
+        slash = base / "slash-commands"
+        if slash.is_dir():
+            hits = list(slash.rglob(f"{name}.yaml"))
+            if hits:
+                return hits[0].parent.name
+    for base in compose_bases:
+        if (base / "skills" / f"{name}.yaml").exists():
+            return "common"
     return "unknown"
 
 
@@ -772,10 +847,9 @@ DEFAULT_SOURCE = HOME / ".shared-llm"
 VALID_HARNESSES = ("cc", "pi", "codex")
 
 # The ONLY trees `copy` propagates wholesale: pure common layer + runtime
-# content. It never touches a destination's this_repo/ overlays, and existing
-# compose/ recipes are destination-owned (resolved decision #6) — though brand-
-# NEW kit recipes are seeded additively via _seed_new_recipes. Paths are
-# relative to a `.shared-llm/` dir.
+# content. It never touches a destination's this_repo/ overlays. In the split
+# destination layout (see below) these land under <dest>/.shared-llm/public/.
+# Paths are relative to a `.shared-llm/` dir.
 COMMON_ROOTS = (
     "layers/agents/common",
     "layers/llm/common",
@@ -785,6 +859,88 @@ COMMON_ROOTS = (
     "llm/common/common",
     "llm/pi/common",
 )
+
+# ---------------------------------------------------------------------------
+# Destination ownership split (public/ vs this_repo/)
+# ---------------------------------------------------------------------------
+#
+# A configured destination's `.shared-llm/` is split into two trees with an
+# explicit ownership boundary:
+#
+#   public/     — KIT-SYNCED. The kit's common layers, its runtime trees
+#                 (llm/{claude,common,pi}/common), and its compose recipes are
+#                 copied here on every `just update`. The engine sweeps and
+#                 (for layers + recipes) PRUNES it wholesale — a destination must
+#                 never hand-edit it, because the next update overwrites it.
+#   this_repo/  — REPO-OWNED. The repo's this_repo layer overlays, its own
+#                 compose recipes, prompts, standalone skills, and extensions
+#                 live here. The engine NEVER writes or prunes anything under it.
+#
+# Recipes reference layers across both trees BY EXPLICIT PATH — a recipe under
+# public/compose/ may pull a this_repo overlay via `.shared-llm/this_repo/...`,
+# and a repo recipe may pull a common layer via `.shared-llm/public/...`. The
+# input resolver stays the one repo-root-relative rule (Composer.resolve_input);
+# the split is expressed in the path itself, not in a forking resolver.
+#
+# The KIT's own source tree stays flat (`.shared-llm/layers/...`). Kit recipes
+# are authored flat and TRANSLATED into split paths as they are copied into a
+# destination's public/compose/ (translate_shared_path / _translate_recipe_text).
+PUBLIC_DIR = "public"
+THIS_REPO_DIR = "this_repo"
+SHARED_PREFIX = ".shared-llm/"
+
+# Which public/ subtrees the wholesale copy also PRUNES (removes dest files the
+# source no longer ships). Layers are pure source, safe to prune. The runtime
+# trees (llm/) are copy-overwrite only — they accrue build artifacts
+# (node_modules, compiled hub binaries) that are not kit-provided and must not be
+# nuked. Recipes under public/compose/ are pruned by _sync_public_recipes.
+PRUNABLE_PUBLIC_LAYER_PREFIX = "layers"
+
+
+def _split_scope(rel_under_shared: str) -> str:
+    """`this_repo` or `public` for a path written relative to a `.shared-llm/`
+    dir. A path that contains a `this_repo` component is repo-owned; everything
+    else is kit-synced (public)."""
+    return THIS_REPO_DIR if "this_repo" in Path(rel_under_shared).parts else PUBLIC_DIR
+
+
+def translate_shared_path(path: str) -> str:
+    """Translate a flat kit path (`.shared-llm/<rel>`) into its split-layout form
+    (`.shared-llm/<public|this_repo>/<rel>`). A non-`.shared-llm/` path (repo
+    content like `ops/...`), and a path already under public/ or this_repo/, pass
+    through unchanged."""
+    if not path.startswith(SHARED_PREFIX):
+        return path
+    rest = path[len(SHARED_PREFIX):]
+    first = rest.split("/", 1)[0]
+    if first in (PUBLIC_DIR, THIS_REPO_DIR):
+        return path  # already split
+    return f"{SHARED_PREFIX}{_split_scope(rest)}/{rest}"
+
+
+# A kit recipe's INPUT-side path fields. `output`/`name`/frontmatter are NOT
+# translated (outputs land at the repo root; names/frontmatter carry no paths).
+RECIPE_PATH_FIELDS = ("description", "catalog", "resources")
+
+
+def _translate_recipe_text(text: str, data: dict) -> str:
+    """Rewrite a kit recipe's input-side path fields from flat to split form,
+    preserving the file's original formatting (targeted string replacement, not a
+    YAML round-trip). Paths are replaced longest-first so a shorter path can never
+    corrupt a longer one that contains it as a prefix."""
+    paths: set[str] = set()
+    for rel in (data.get("inputs") or []):
+        if isinstance(rel, str):
+            paths.add(rel)
+    for key in RECIPE_PATH_FIELDS:
+        v = data.get(key)
+        if isinstance(v, str):
+            paths.add(v)
+    for p in sorted(paths, key=len, reverse=True):
+        t = translate_shared_path(p)
+        if t != p:
+            text = text.replace(p, t)
+    return text
 
 
 class RunLog:
@@ -912,28 +1068,71 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 # --- copy ------------------------------------------------------------------
 
-def _iter_common_rels(shared: Path):
-    """Yield each common file's path relative to a `.shared-llm/` dir.
-    Skips anything under a this_repo/ segment (defense in depth)."""
+# Build-artifact directory names never propagated by the common copy (a fresh
+# machine builds its own). node_modules can be huge; a compiled binary can be a
+# running process (copying over it fails EBUSY / "Text file busy").
+ARTIFACT_DIR_NAMES = frozenset({"node_modules"})
+
+
+def _git_ignored_common_rels(kit_shared: Path) -> frozenset[str]:
+    """Relative paths (under a `.shared-llm/` dir) that git ignores in the KIT —
+    build artifacts (e.g. a compiled hub binary the kit .gitignore lists) that
+    must never propagate to the hub or a destination. Computed from the kit (the
+    ultimate source and a git repo); empty if git is unavailable."""
+    repo = kit_shared.parent
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--others", "--ignored",
+             "--exclude-standard", "-z", "--", str(kit_shared)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return frozenset()
+    prefix = kit_shared.name + "/"  # ".shared-llm/"
+    return frozenset(
+        p[len(prefix):] for p in out.split("\0")
+        if p.startswith(prefix)
+    )
+
+
+def _iter_common_rels(shared: Path, exclude_rels: frozenset[str] = frozenset()):
+    """Yield each common file's path relative to a `.shared-llm/` dir. Skips
+    anything under a this_repo/ segment (defense in depth), any build-artifact
+    directory (node_modules), and any path in `exclude_rels` (git-ignored kit
+    artifacts)."""
     for root in COMMON_ROOTS:
         base = shared / root
         if not base.is_dir():
             continue
         for p in sorted(base.rglob("*")):
-            if p.is_file() and "this_repo" not in p.relative_to(shared).parts:
-                yield p.relative_to(shared)
+            if not p.is_file():
+                continue
+            parts = p.relative_to(shared).parts
+            if "this_repo" in parts or ARTIFACT_DIR_NAMES.intersection(parts):
+                continue
+            rel = p.relative_to(shared)
+            if str(rel) in exclude_rels:
+                continue
+            yield rel
 
 
-def _copy_common(src_shared: Path, dst_shared: Path, log: RunLog) -> collections.Counter:
+def _copy_common(src_shared: Path, dst_shared: Path, log: RunLog,
+                 dst_subdir: str = "",
+                 exclude_rels: frozenset[str] = frozenset()) -> collections.Counter:
     """Copy every common file from one `.shared-llm/` dir to another. Overwrites;
     FLAGS (does not block) when an existing dest file's content differs before it
-    is overwritten (resolved decision #6). Never touches this_repo/ or compose/
-    recipes. No auto-prune — a removed common file is left in place (matches the
-    no-uninstall philosophy; drop it by hand if needed)."""
+    is overwritten. Never touches this_repo/. `exclude_rels` (git-ignored kit
+    artifacts) and build-artifact dirs are skipped.
+
+    `dst_subdir` prefixes the destination side — the split destination flow passes
+    `public` so kit content lands under `<dest>/.shared-llm/public/`. It is empty
+    for the flat kit -> hub mirror. Pruning of stale files is handled separately
+    by `_prune_public_layers` (layers only; runtime trees keep build artifacts)."""
     counts: collections.Counter = collections.Counter()
-    for rel in _iter_common_rels(src_shared):
+    prefix = Path(dst_subdir) if dst_subdir else Path()
+    for rel in _iter_common_rels(src_shared, exclude_rels):
         src = src_shared / rel
-        dst = dst_shared / rel
+        dst = dst_shared / prefix / rel
         if dst.exists():
             if src.read_bytes() == dst.read_bytes():
                 counts["same"] += 1
@@ -948,92 +1147,159 @@ def _copy_common(src_shared: Path, dst_shared: Path, log: RunLog) -> collections
     return counts
 
 
-# Consumer recipe groups seeded to destinations (mirrors CONSUMER_RECIPE_GROUPS;
-# never global/ or example-*). Additive-only: a recipe already present at the
-# destination is destination-owned and never overwritten or pruned.
-SEEDED_RECIPE_GROUPS = (
-    "compose/skills",
+def _prune_empty_dirs(root: Path) -> None:
+    """Remove now-empty directories under `root` (bottom-up), leaving `root`."""
+    if not root.is_dir():
+        return
+    for d in sorted((p for p in root.rglob("*") if p.is_dir()),
+                    key=lambda p: len(p.parts), reverse=True):
+        try:
+            d.rmdir()
+        except OSError:
+            pass  # not empty — keep
+
+
+def _prune_public_layers(src_shared: Path, dst_shared: Path, log: RunLog) -> int:
+    """Sweep the destination's public/layers/ wholesale: delete any file there
+    that the source (hub) no longer ships. Scoped to layers/ — pure source that
+    is safe to prune. The runtime trees under public/llm/ are copy-overwrite only
+    (they accrue build artifacts that are not kit-provided)."""
+    pub_layers = dst_shared / PUBLIC_DIR / PRUNABLE_PUBLIC_LAYER_PREFIX
+    if not pub_layers.is_dir():
+        return 0
+    wanted = {
+        rel for rel in _iter_common_rels(src_shared)
+        if rel.parts and rel.parts[0] == PRUNABLE_PUBLIC_LAYER_PREFIX
+    }
+    if not wanted:
+        # The source ships no layers at all — never interpret that as "prune
+        # everything" (a mis-set hub would nuke a destination's public/). Refuse.
+        return 0
+    removed = 0
+    for f in sorted(pub_layers.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(dst_shared / PUBLIC_DIR)
+        if rel not in wanted:
+            f.unlink()
+            removed += 1
+            log(f"    - pruned stale public layer: {rel}")
+    if removed:
+        _prune_empty_dirs(pub_layers)
+    return removed
+
+
+# Kit compose groups synced wholesale into a destination's public/compose/.
+# (global/ is home-only — it never goes to a destination.) A recipe that lives
+# under one of these groups in the KIT is kit-owned: it is copied (translated to
+# split paths) into public/compose/, and a public/compose/ recipe the kit no
+# longer ships is pruned. A destination's OWN recipes live in this_repo/compose/
+# and are never touched here — a repo overrides a kit recipe by placing one at the
+# same relative path under this_repo/compose/ (compose composes public first, then
+# this_repo, so the repo copy wins).
+PUBLIC_RECIPE_GROUPS = (
     "compose/agents",
+    "compose/agents-md",
+    "compose/claude-md",
+    "compose/skills",
     "compose/slash-commands",
-    "compose/settings",
-    "compose/hooks",
-    "compose/statusline",
 )
 
 
-def _recipe_input_paths(recipe: Path) -> list[str] | None:
-    """Return the .shared-llm-relative file paths a recipe consumes, or None if
-    the YAML is unreadable (seeding skips it rather than aborting the copy)."""
-    try:
-        data = yaml.safe_load(recipe.read_text())
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    refs = list(data.get("inputs") or [])
-    desc = data.get("description")
-    if isinstance(desc, str) and desc.startswith(".shared-llm/"):
-        refs.append(desc)
-    return [r for r in refs if isinstance(r, str) and r.startswith(".shared-llm/")]
+def _recipe_layer_refs(data: dict) -> list[str]:
+    """The `.shared-llm/...` layer files a recipe reads (inputs + description +
+    catalog). Used to gate syncing a recipe whose layers are not all present."""
+    refs = [r for r in (data.get("inputs") or []) if isinstance(r, str)]
+    for key in ("description", "catalog"):
+        v = data.get(key)
+        if isinstance(v, str):
+            refs.append(v)
+    return [r for r in refs if r.startswith(SHARED_PREFIX)]
 
 
-def _seed_new_recipes(kit_shared: Path, dest: Path, log: RunLog) -> collections.Counter:
-    """Seed NEW kit compose recipes into a destination's .shared-llm/compose/.
+def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog) -> collections.Counter:
+    """Wholesale-sync the kit's recipes into a destination's public/compose/,
+    translating each recipe's input-side paths from flat to split form, and prune
+    any public/compose/ recipe the kit no longer ships. this_repo/compose/ is
+    never read or written here.
 
-    Additive-only: existing destination recipes are never touched (they are
-    destination-owned and may be customized); drift from the kit version is
-    logged, not resolved. A new recipe is copied only when every layer file it
-    references exists at the destination — otherwise composing it would fail.
-    """
+    A kit recipe is synced only when every layer it references (translated to
+    split form) already exists at the destination — a recipe that pulls a
+    this_repo overlay the repo has not filled in is skipped, so composing it can
+    never fail on a missing input (this preserves the additive-seeding guard from
+    the pre-split copy)."""
     counts: collections.Counter = collections.Counter()
-    dest_shared = dest / ".shared-llm"
-    for group in SEEDED_RECIPE_GROUPS:
+    dest_root = dest_shared.parent
+    pub_compose = dest_shared / PUBLIC_DIR / "compose"
+    wanted: set[Path] = set()
+    for group in PUBLIC_RECIPE_GROUPS:
         base = kit_shared / group
         if not base.is_dir():
             continue
         for src in sorted(list(base.rglob("*.yaml")) + list(base.rglob("*.yml"))):
-            rel = src.relative_to(kit_shared)
-            dst = dest_shared / rel
-            if dst.exists():
-                if src.read_bytes() != dst.read_bytes():
-                    counts["drift"] += 1
-                    log(f"    ~ recipe drift (kept destination copy): {rel}")
-                continue
-            refs = _recipe_input_paths(src)
-            if refs is None:
+            rel = src.relative_to(kit_shared)  # e.g. compose/agents/backend.yaml
+            dst = dest_shared / PUBLIC_DIR / rel
+            text = src.read_text()
+            try:
+                data = yaml.safe_load(text)
+            except yaml.YAMLError:
                 counts["skipped"] += 1
                 log(f"    ! recipe unreadable, skipped: {rel}")
                 continue
-            missing = [r for r in refs if not (dest / r).is_file()]
+            if not isinstance(data, dict):
+                counts["skipped"] += 1
+                continue
+            missing = [translate_shared_path(r) for r in _recipe_layer_refs(data)
+                       if not (dest_root / translate_shared_path(r)).is_file()]
             if missing:
                 counts["skipped"] += 1
                 log(f"    ! recipe skipped (missing inputs at destination): {rel} -> {', '.join(missing)}")
                 continue
+            wanted.add(dst)
+            translated = _translate_recipe_text(text, data)
+            if dst.exists() and dst.read_text() == translated:
+                counts["same"] += 1
+                continue
+            counts["changed" if dst.exists() else "new"] += 1
+            log(f"    {'~ updated' if dst.exists() else '+ new'} public recipe: {rel}")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            counts["new"] += 1
-            log(f"    + new recipe: {rel}")
+            dst.write_text(translated)
+    if pub_compose.is_dir():
+        for f in sorted(pub_compose.rglob("*")):
+            if f.is_file() and f not in wanted:
+                f.unlink()
+                counts["pruned"] += 1
+                log(f"    - pruned stale public recipe: {f.relative_to(dest_shared)}")
+        _prune_empty_dirs(pub_compose)
     return counts
 
 
 def do_copy(cfg: dict, log: RunLog) -> None:
     kit_shared = project_root() / ".shared-llm"
     hub = Path(cfg["source"]).expanduser()
+    # Build artifacts the kit .gitignore lists (e.g. a compiled hub binary) must
+    # never propagate — a fresh machine builds its own, and a running binary can't
+    # be overwritten ("Text file busy").
+    ignored = _git_ignored_common_rels(kit_shared)
     log.always(f"copy: kit {kit_shared} -> hub {hub}")
-    c = _copy_common(kit_shared, hub, log)
+    c = _copy_common(kit_shared, hub, log, exclude_rels=ignored)
     log.always(f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
     for d in cfg["destinations"]:
         dest = Path(d["path"]).expanduser()
         dest_shared = dest / ".shared-llm"
-        log.always(f"copy: hub -> {d['path']}/.shared-llm")
-        c = _copy_common(hub, dest_shared, log)
-        log.always(f"  {Path(d['path']).name}: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
-        r = _seed_new_recipes(kit_shared, dest, log)
-        if r["new"] or r["drift"] or r["skipped"]:
-            log.always(
-                f"  {Path(d['path']).name} recipes: {r['new']} seeded, "
-                f"{r['drift']} drifted (kept), {r['skipped']} skipped"
-            )
+        name = Path(d["path"]).name
+        log.always(f"copy: hub -> {d['path']}/.shared-llm/{PUBLIC_DIR}")
+        c = _copy_common(hub, dest_shared, log, dst_subdir=PUBLIC_DIR, exclude_rels=ignored)
+        pruned_layers = _prune_public_layers(hub, dest_shared, log)
+        log.always(
+            f"  {name}: {c['new']} new, {c['changed']} changed, "
+            f"{c['same']} unchanged, {pruned_layers} pruned"
+        )
+        r = _sync_public_recipes(kit_shared, dest_shared, log)
+        log.always(
+            f"  {name} public recipes: {r['new']} new, {r['changed']} updated, "
+            f"{r['same']} unchanged, {r['pruned']} pruned, {r['skipped']} skipped"
+        )
 
 
 # --- compose (config-driven, per destination) ------------------------------
@@ -1081,22 +1347,28 @@ def _route_do_skills(dest: Path, log: RunLog) -> int:
     return moved
 
 
-def _compose_destination(dest: Path, log: RunLog) -> None:
+def _compose_destination(dest: Path, log: RunLog,
+                         placeholders: dict[str, str] | None = None) -> None:
     shared = dest / ".shared-llm"
     if not shared.is_dir():
         log.always(f"compose: skip {dest} — no .shared-llm/ (run copy/configure first)")
         return
-    composer = Composer(dest, shared_root=shared)
+    composer = Composer(dest, shared_root=shared, placeholders=placeholders)
     log.always(f"compose: {dest}")
     for group in CONSUMER_RECIPE_GROUPS:
-        # group is like "compose/skills" (a dir) or "compose/claude-md/root.yaml" (a file)
-        path = shared / Path(group)
-        if path.is_dir():
-            for yp in composer.discover(path):
-                composer.compose_one(yp)
-        elif path.is_file():
-            composer.compose_one(path)
-    composer.copy_standalone_skills()
+        # group is "compose/skills" (a dir) or "compose/claude-md/root.yaml" (a file).
+        # Compose the public/ (kit) tree FIRST, then the this_repo/ (repo-owned)
+        # tree — same-output recipes let the this_repo copy win, so a repo can
+        # override a kit recipe by name. A group absent from a tree is skipped.
+        rel = group[len("compose/"):]
+        for tree in (PUBLIC_DIR, THIS_REPO_DIR):
+            path = shared / tree / "compose" / rel
+            if path.is_dir():
+                for yp in composer.discover(path):
+                    composer.compose_one(yp)
+            elif path.is_file():
+                composer.compose_one(path)
+    composer.copy_standalone_skills(shared / THIS_REPO_DIR / "skills")
     moved = _route_do_skills(dest, log)
     if moved:
         log.always(f"  routed {moved} do-* skill(s) to {PI_ONLY_SKILLS_DIR}/ (Pi-only, out of Claude's .claude/skills)")
@@ -1104,7 +1376,8 @@ def _compose_destination(dest: Path, log: RunLog) -> None:
 
 def do_compose(cfg: dict, log: RunLog) -> None:
     for d in cfg["destinations"]:
-        _compose_destination(Path(d["path"]).expanduser(), log)
+        _compose_destination(Path(d["path"]).expanduser(), log,
+                             placeholders=d.get("placeholders") or {})
 
 
 # --- link (GLOBAL per-harness skill dirs) ----------------------------------
