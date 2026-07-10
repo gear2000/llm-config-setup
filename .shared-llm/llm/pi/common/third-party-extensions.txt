@@ -54,6 +54,14 @@ npm:pi-simplify@0.2.2
 #   resume, worktree isolation, and a /workflows TUI.
 npm:@quintinshaw/pi-dynamic-workflows@2.10.0
 
+# pi-intercom — direct 1:1 messaging between Pi sessions on the same machine
+#   (Alt+M / /intercom): send context, findings, or requests from one session
+#   to another.
+npm:pi-intercom@0.6.0
+
+# @ayulab/pi-rewind — /rewind checkpoint navigation.
+npm:@ayulab/pi-rewind@0.4.2
+
 # --- Opt-in: not enabled in this release (this project doesn't use Cursor) ---
 # pi-cursor-sdk — use Cursor's models inside Pi.
 #   To enable in a project that uses Cursor: uncomment the line below and run
