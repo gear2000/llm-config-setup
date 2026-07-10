@@ -24,11 +24,31 @@ export function brainPromptPath(): string {
 	return path.join(path.dirname(fileURLToPath(import.meta.url)), "brain-execute-plan-prompt.md");
 }
 
+/** Walk up from `startDir` to the nearest ancestor containing `.git` (the repo root). Mirrors
+ *  do-planish.ts's findConfigUp. `.git` may be a directory (a normal checkout) or a file (a
+ *  worktree's gitlink) — `fs.existsSync` is satisfied either way. If no `.git` is found before
+ *  hitting the filesystem root, return `startDir` unchanged: let the caller's readdir fail loud
+ *  rather than guess at a repo root that isn't there. */
+function findRepoRoot(startDir: string): string {
+	let dir = path.resolve(startDir);
+	while (true) {
+		if (fs.existsSync(path.join(dir, ".git"))) return dir;
+		const parent = path.dirname(dir);
+		if (parent === dir) return startDir;
+		dir = parent;
+	}
+}
+
 /** Default location of the agent roster the brain may pick from. The brain reads the NAMES (the
- *  `.claude/agents/*.md` filenames, minus the `_archived-` ones — those are retired). The path
- *  walks up from this module to the repo root's `.claude/agents`. */
-export function defaultAgentsDir(): string {
-	return process.env.META_ORCH_AGENTS_DIR || path.resolve(fileURLToPath(import.meta.url), "../../../../../../../.claude/agents");
+ *  `.claude/agents/*.md` filenames, minus the `_archived-` ones — those are retired). CWD-anchored
+ *  (defaults to `process.cwd()`, overridable by the caller) like every other path in the brain
+ *  (planPath, worker spawn) — it walks UP from the given cwd to the nearest `.git` ancestor (the
+ *  repo whose plan is running) and reads `.claude/agents` there. Deliberately NOT anchored on this
+ *  module's own install location: that would resolve to wherever the extension's source happens to
+ *  be checked out (the kit, a symlink target, a deeper `.shared-llm/public/...` path) rather than
+ *  the repo actually being orchestrated. */
+export function defaultAgentsDir(cwd: string = process.cwd()): string {
+	return process.env.META_ORCH_AGENTS_DIR || path.join(findRepoRoot(cwd), ".claude", "agents");
 }
 
 /** A short slug for the run, derived from the plan filename — namespaces this run's sockets / logs /

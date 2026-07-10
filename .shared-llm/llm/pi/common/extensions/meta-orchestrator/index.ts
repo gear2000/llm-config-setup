@@ -46,7 +46,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { type AskEnvelope } from "./envelope.ts";
 import { type ProxyEvents } from "./claude-proxy.ts";
-import { buildSystemPrompt, loadAvailableAgents, planSlug } from "./brain-prompt.ts";
+import { buildSystemPrompt, defaultAgentsDir, loadAvailableAgents, planSlug } from "./brain-prompt.ts";
 import {
 	type BrainState,
 	LOG_CHANNEL,
@@ -191,7 +191,7 @@ export default function (pi: ExtensionAPI) {
 			let availableAgents: string[];
 			let systemPrompt: string;
 			try {
-				availableAgents = loadAvailableAgents();
+				availableAgents = loadAvailableAgents(defaultAgentsDir(ctx.cwd || process.cwd()));
 				systemPrompt = buildSystemPrompt(planPath, availableAgents);
 			} catch (err) {
 				ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
