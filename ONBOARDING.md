@@ -23,7 +23,7 @@ The engine lives **only** in the kit and is never copied into your repo. You dri
    just configure -s ~/.shared-llm
    just configure -g cc,pi
    ```
-   The **global** step (run as part of `just update` when `-g` is set) installs the general home skills (`python`, `nextjs`, `backend`, `golang`) plus routed slash-command skills into `~/.claude/skills`, `~/.pi/agent/skills`, and `~/.agents/skills`. Pi standalone planning is `/do-planish` from the TypeScript extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, `/do-oneshot`, `/do-implement`, `/do-loop`, and `/do-full`; Claude Code gets the matching `cc-*` commands, including the standalone `/cc-planish` planner (the port of `/do-planish`). The global step also installs the 18 generic agents into `~/.claude/agents` and `~/.pi/agents`, the Pi runtime into `~/.pi`, and the Claude hooks/statusline/settings into `~/.claude`. It is idempotent and non-clobbering. Third-party Pi extensions are a separate step: `just pi-extensions`.
+   The **global** step (run as part of `just update` when `-g` is set) installs the general home skills (`python`, `nextjs`, `backend`, `golang`) plus routed slash-command skills into `~/.claude/skills`, `~/.pi/agent/skills`, and `~/.agents/skills`. Pi standalone planning is `/do-planish` from the TypeScript extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, `/do-oneshot`, `/do-implement`, `/do-loop`, and `/do-full`; Claude Code gets the matching `cc-*` commands, including the standalone `/cc-planish` planner (the port of `/do-planish`). The global step also installs the generic agents (see the Inventory section in README) into `~/.claude/agents` and `~/.pi/agents`, the Pi runtime into `~/.pi`, and the Claude hooks/statusline/settings into `~/.claude`. It is idempotent and non-clobbering. Third-party Pi extensions are a separate step: `just pi-extensions`.
 
 2. **Set up your target repo (per repo):**
    - Seed the repo-owned tree: copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and any repo-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. Leave `public/` alone — the engine creates it.
@@ -155,7 +155,7 @@ Then run `just update` to (re)generate every registered destination's output fil
 
     - `CLAUDE.md` and `AGENTS.md` at the repo **root**
     - the per-repo Python skill at `.claude/skills/python/SKILL.md`
-    - the 18 generic agent personas at `.claude/agents/<name>.md`
+    - the generic agent personas at `.claude/agents/<name>.md` (full roster: README → Inventory)
 
     `just update` composes only the **consumer-relevant** recipe groups for a destination — root `CLAUDE.md`/`AGENTS.md`, the skills, the agents, and the slash commands. It deliberately does **not** compose:
 

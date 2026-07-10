@@ -79,7 +79,7 @@ Every destination's `.shared-llm/` is split into two trees with an explicit owne
    - everything else (**common**) → all harnesses (`.claude/skills` for Claude; symlinked into `~/.pi/agent/skills/` and `~/.agents/skills/` for Pi/Codex).
 
    Global dirs are used (not Pi's project-local `.pi/skills/`) because project-local skills load **only after a project is "trusted"** — that silently hid them. All destinations reconcile into each global dir together, so one never prunes another's links; a same-name collision across destinations warns (last wins). **Claude Code needs no link** — it reads `<repo>/.claude/` directly.
-4. **global** (only when `global:` is set) — installs the home / all-projects pieces: the general home skills, the 18 generic agents, and the Pi + Claude runtime. See "The global step" below.
+4. **global** (only when `global:` is set) — installs the home / all-projects pieces: the general home skills, the generic agents (roster in the Inventory section below), and the Pi + Claude runtime. See "The global step" below.
 
 ### Recipe path resolution — one rule
 
@@ -134,7 +134,7 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
       common/backend/            — ready as-is
       this_repo/TEMPLATE.python.md — project-specific Python skill layer (stub)
     agents/                       — layers for agent personas
-      common/<name>.md            — the 18 generic agent bodies (ready as-is, brand-free)
+      common/<name>.md            — the generic agent bodies (ready as-is, brand-free; see Inventory)
       common/<name>.description.md — one-line description for each agent's frontmatter
   compose/                        — RECIPES: which layers to combine, and where to write
     claude-md/root.yaml           — recipe: root CLAUDE.md
@@ -146,7 +146,7 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
     global/nextjs.yaml            — recipe: general nextjs skill (global step)
     global/backend.yaml           — recipe: general backend skill (global step)
     slash-commands/               — recipes: the routed slash-command skills
-    agents/<name>.yaml            — recipe: one generic agent persona (18 of them)
+    agents/<name>.yaml            — recipe: one generic agent persona (roster count in Inventory)
   llm/pi/common/                  — Pi harness runtime config (NOT a compose input; see below)
   llm/claude/common/              — Claude harness runtime config (NOT a compose input; see below)
 tools/
@@ -186,7 +186,7 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
 1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, then copies each into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills/` (Codex). Pi standalone planning is `/do-planish` from the extension; the workflow-suite commands are `/do-*` on Pi and the matching `cc-*` on Claude Code — including the standalone `/cc-planish` planner (the Claude Code port of `/do-planish`).
-2. **The 18 generic agents** — composes the `agents/` recipes and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
+2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section) and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent (never clobbers per-machine tweaks).
 
