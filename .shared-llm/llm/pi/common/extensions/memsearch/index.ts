@@ -26,8 +26,9 @@
  *       in the daily md) and the next session_start re-index catches it up. Non-lock
  *       errors fail loud immediately. Nothing is lost — the markdown was already written.
  *
- * OWN extension: authored here, symlinked into ~/.pi/agent/extensions/ by setup-pi.sh
- * (auto-loaded). NOT a `pi install` third-party — never in third-party-extensions.txt.
+ * OWN extension: authored here, symlinked into ~/.pi/agent/extensions/ by the global step
+ * of `just update` (tools/harness.py) (auto-loaded). NOT a `pi install` third-party — never
+ * in third-party-extensions.txt.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

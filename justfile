@@ -39,6 +39,12 @@ update *args:
 check:
     ${PYTHON_BIN:-python3} tools/harness.py check
 
+# Regenerate the derived inventory block in README.md (skill/agent/slash-command
+# counts + tables) from the compose recipes. Run after adding, removing, or
+# renaming a recipe. Idempotent — a second run is a zero diff.
+inventory:
+    ${PYTHON_BIN:-python3} tools/gen_inventory.py
+
 # ── Hidden building blocks (run independently; `just update` runs them in order)
 [private]
 copy:
