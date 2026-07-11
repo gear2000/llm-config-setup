@@ -1098,7 +1098,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 # Build-artifact directory names never propagated by the common copy (a fresh
 # machine builds its own). node_modules can be huge; a compiled binary can be a
 # running process (copying over it fails EBUSY / "Text file busy").
-ARTIFACT_DIR_NAMES = frozenset({"node_modules"})
+ARTIFACT_DIR_NAMES = frozenset({"node_modules", "__pycache__"})
 
 
 def _git_ignored_common_rels(kit_shared: Path) -> frozenset[str]:

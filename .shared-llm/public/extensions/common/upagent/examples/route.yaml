@@ -1,0 +1,69 @@
+llm_profiles:
+  claude-mid:
+    harness: claude
+    model: configured-claude-model
+  codex-adv:
+    harness: codex
+    model: configured-codex-model
+
+worktree:
+  branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
+
+finalization_defaults:
+  advisor_profile: claude-mid
+  phase_pass_budget: 3
+  stage_try_budget: 3
+  green_checks:
+    - command: just test
+  log_checks:
+    - source: build and runner logs
+      fail_patterns: ERROR,FATAL,Traceback
+
+phases:
+  phase-0:
+    accuracy: medium
+    merge_back_at: stage-3-integration-acceptance-seams
+    lead:
+      llm_profile: claude-mid
+      agent: phase-evaluator
+    stages:
+      stage-1-implementation:
+        llm_profile: claude-mid
+        agent: backend
+      stage-2-adversarial-audit:
+        llm_profile: codex-adv
+        agent: adversarial-evaluator
+      stage-3-integration-acceptance-seams:
+        llm_profile: claude-mid
+        agent: qa
+      stage-4-upstream-dag-verification:
+        llm_profile: codex-adv
+        agent: monorepo-pkgs
+      stage-5-finalization:
+        llm_profile: claude-mid
+        agent: qa
+  phase-1:
+    accuracy: high
+    merge_back_at: stage-5-finalization
+    lead:
+      llm_profile: claude-mid
+      agent: phase-evaluator
+    stages:
+      stage-0-alignment:
+        llm_profile: codex-adv
+        agent: aligner
+      stage-1-implementation:
+        llm_profile: claude-mid
+        agent: backend
+      stage-2-adversarial-audit:
+        llm_profile: codex-adv
+        agent: adversarial-evaluator
+      stage-3-integration-acceptance-seams:
+        llm_profile: claude-mid
+        agent: qa
+      stage-4-upstream-dag-verification:
+        llm_profile: codex-adv
+        agent: monorepo-pkgs
+      stage-5-finalization:
+        llm_profile: claude-mid
+        agent: qa

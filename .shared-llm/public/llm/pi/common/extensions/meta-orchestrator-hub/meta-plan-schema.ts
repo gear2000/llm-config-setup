@@ -32,6 +32,8 @@ export interface ConversionResult {
 	notes: string[];
 }
 
+// The five base stages, ALWAYS required for every phase. `buildRouteTodo` emits exactly
+// these (a medium-accuracy stub). Also the required-stage list in `validateRoute`.
 const STAGE_IDS = [
 	"stage-1-implementation",
 	"stage-2-adversarial-audit",
@@ -39,6 +41,18 @@ const STAGE_IDS = [
 	"stage-4-upstream-dag-verification",
 	"stage-5-finalization",
 ] as const;
+
+// The optional pre-code alignment stage, required ONLY when a phase sets `accuracy: high`
+// and forbidden otherwise.
+const STAGE_0_ID = "stage-0-alignment";
+
+// Every stage id the route parser will accept under `stages:`. The base five plus the
+// optional stage-0. Unknown-stage rejection checks against THIS set; the required-stage
+// loop checks against STAGE_IDS (+ stage-0 when high) — the two lists are deliberately
+// distinct so stage-0 is recognized-but-conditional rather than always-required.
+const RECOGNIZED_STAGE_IDS = [STAGE_0_ID, ...STAGE_IDS] as const;
+
+const ACCURACY_LEVELS = ["medium", "high"] as const;
 
 const MERGE_BACK_STAGE_IDS = [
 	"stage-3-integration-acceptance-seams",
@@ -398,6 +412,33 @@ export function validateRoute(
 		}
 	}
 
+	// Optional escalation config. advisor_profile (absent ⇒ budget→human) must reference a
+	// known profile when set. Budgets (absent ⇒ engine default) must be positive integers.
+	const advisorProfile = valueIn(
+		finalizationDefaultsBlock,
+		2,
+		"advisor_profile",
+	);
+	if (advisorProfile !== undefined && !hasTodo(advisorProfile)) {
+		if (!profiles.includes(advisorProfile)) {
+			issues.push(
+				issue(
+					`finalization_defaults.advisor_profile references unknown profile ${advisorProfile}`,
+				),
+			);
+		}
+	}
+	for (const budgetKey of ["phase_pass_budget", "stage_try_budget"]) {
+		const raw = valueIn(finalizationDefaultsBlock, 2, budgetKey);
+		if (raw !== undefined && !hasTodo(raw) && !/^[1-9]\d*$/.test(raw)) {
+			issues.push(
+				issue(
+					`finalization_defaults.${budgetKey} must be a positive integer (got ${raw})`,
+				),
+			);
+		}
+	}
+
 	const allPhaseChildKeys = childKeys(phasesBlock, 2);
 	const routePhases = allPhaseChildKeys.filter((p) => /^phase-\d+$/.test(p));
 	for (const key of allPhaseChildKeys) {
@@ -493,23 +534,51 @@ export function validateRoute(
 		if (hasTodo(leadAgent))
 			issues.push(issue(`${phase}.lead.agent is missing or unresolved`));
 
+		// Per-phase accuracy. Absent ⇒ medium (today's five-stage behavior, unchanged).
+		// high ⇒ stage-0-alignment is additionally required. Any other value is an error.
+		const accuracyRaw = valueIn(phaseBlock, 4, "accuracy");
+		const accuracySet = accuracyRaw !== undefined && !hasTodo(accuracyRaw);
+		const accuracy = accuracySet ? accuracyRaw! : "medium";
+		if (accuracySet && !ACCURACY_LEVELS.some((level) => level === accuracy)) {
+			issues.push(
+				issue(
+					`${phase}.accuracy must be one of ${ACCURACY_LEVELS.join(", ")} (got ${accuracy})`,
+				),
+			);
+		}
+		const isHighAccuracy = accuracy === "high";
+
 		const stagesBlock = indentedBlock(phaseBlock ?? "", 4, "stages");
 		if (!stagesBlock) issues.push(issue(`${phase}.stages is required`));
 		for (const dup of duplicateKeysAtIndent(stagesBlock ?? "", 6)) {
 			issues.push(issue(`${phase}.stages has a duplicate entry: ${dup}:`));
 		}
-		for (const stage of childKeys(stagesBlock, 6)) {
-			if (!STAGE_IDS.some((requiredStage) => requiredStage === stage)) {
+		const stageChildren = childKeys(stagesBlock, 6);
+		for (const stage of stageChildren) {
+			if (!RECOGNIZED_STAGE_IDS.some((known) => known === stage)) {
 				issues.push(
-					issue(`${phase}.${stage} is not a recognized five-stage route entry`),
+					issue(`${phase}.${stage} is not a recognized stage route entry`),
 				);
 			}
 		}
+		// stage-0-alignment is allowed ONLY under accuracy: high.
+		if (!isHighAccuracy && stageChildren.includes(STAGE_0_ID)) {
+			issues.push(
+				issue(
+					`${phase}.${STAGE_0_ID} is only allowed when accuracy: high`,
+				),
+			);
+		}
+		const requiredStages = isHighAccuracy
+			? [STAGE_0_ID, ...STAGE_IDS]
+			: [...STAGE_IDS];
+		let stage0Profile = "";
+		let stage0Agent = "";
 		let stage1Profile = "";
 		let stage1Agent = "";
 		let stage2Profile = "";
 		let stage2Agent = "";
-		for (const stage of STAGE_IDS) {
+		for (const stage of requiredStages) {
 			const stageBlock = indentedBlock(stagesBlock ?? "", 6, stage);
 			if (!stageBlock) {
 				issues.push(issue(`${phase}.${stage} is required`));
@@ -529,6 +598,10 @@ export function validateRoute(
 				);
 			if (hasTodo(stageAgent))
 				issues.push(issue(`${phase}.${stage}.agent is missing or unresolved`));
+			if (stage === STAGE_0_ID) {
+				stage0Profile = stageProfile ?? "";
+				stage0Agent = stageAgent ?? "";
+			}
 			if (stage === "stage-1-implementation") {
 				stage1Profile = stageProfile ?? "";
 				stage1Agent = stageAgent ?? "";
@@ -543,20 +616,34 @@ export function validateRoute(
 			const block = indentedBlock(profileBlock, 2, profileName);
 			return `${valueIn(block, 4, "harness") ?? ""}::${valueIn(block, 4, "model") ?? ""}`;
 		};
-		const sameHarnessModel =
-			stage1Profile &&
-			stage2Profile &&
-			resolveHarnessModel(stage1Profile) !== undefined &&
-			resolveHarnessModel(stage1Profile) === resolveHarnessModel(stage2Profile);
-		if (
-			stage1Agent &&
-			stage2Agent &&
-			stage1Agent === stage2Agent &&
-			((stage1Profile && stage1Profile === stage2Profile) || sameHarnessModel)
-		) {
+		// Two stages are "the same reviewer" when they share the agent AND either the same
+		// profile or the same resolved harness+model — the check the independence rules use.
+		const notIndependent = (
+			aProfile: string,
+			aAgent: string,
+			bProfile: string,
+			bAgent: string,
+		): boolean => {
+			if (!aAgent || !bAgent || aAgent !== bAgent) return false;
+			if (aProfile && aProfile === bProfile) return true;
+			const aHM = resolveHarnessModel(aProfile);
+			return aHM !== undefined && aHM === resolveHarnessModel(bProfile);
+		};
+		if (notIndependent(stage1Profile, stage1Agent, stage2Profile, stage2Agent)) {
 			issues.push(
 				issue(
 					`${phase}.stage-2-adversarial-audit must be independent from stage-1-implementation`,
+				),
+			);
+		}
+		// stage-0's mini-plan audit must not be the same reviewer as the implementer.
+		if (
+			isHighAccuracy &&
+			notIndependent(stage1Profile, stage1Agent, stage0Profile, stage0Agent)
+		) {
+			issues.push(
+				issue(
+					`${phase}.${STAGE_0_ID} must be independent from stage-1-implementation`,
 				),
 			);
 		}

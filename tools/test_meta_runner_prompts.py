@@ -113,9 +113,9 @@ def test_adversarial_evaluator_artifact_in_sync_with_source() -> None:
 def test_handoff_protocol_states_the_contract() -> None:
     text = HANDOFF_PROTOCOL.read_text()
 
-    assert ".meta/handoffs/<phase-id>/<role>-vN.md" in text
-    assert "writes a short handoff before it returns" in text
-    assert "Lead Agent reads the relevant handoffs" in text
+    assert "phases/<phase-id>/handoffs/<role>-vN.md" in text
+    assert "writes a short handoff before its pane closes" in text
+    assert "phase leader reads the relevant handoffs" in text
 
 
 def test_handoff_protocol_wired_wherever_phase_protocol_is() -> None:
