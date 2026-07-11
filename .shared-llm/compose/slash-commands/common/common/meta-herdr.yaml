@@ -5,5 +5,6 @@ frontmatter:
   argument-hint: "--plan <plan.md> --route <route.yaml> --output-dir <dir> [--start-phase <N>] [--max-phases <N>]"
 inputs:
   - .shared-llm/layers/slash-commands/common/common/meta-runner-phase-protocol.md
+  - .shared-llm/layers/slash-commands/common/common/meta-runner-handoff-protocol.md
   - .shared-llm/layers/slash-commands/common/common/meta-herdr/command.md
 output: .claude/skills/meta-herdr/SKILL.md
