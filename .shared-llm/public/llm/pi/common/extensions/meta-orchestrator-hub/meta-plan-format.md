@@ -114,14 +114,26 @@ finalization_defaults:
   log_checks:
     - source: build, deploy, and runner logs
       fail_patterns: ERROR,FATAL,Traceback,uncaught
+  # OPTIONAL escalation config (all three may be omitted):
+  advisor_profile: claude-low   # a stronger profile the controller consults when a
+                                # budget is exhausted. Absent ⇒ escalation goes straight
+                                # to the human.
+  phase_pass_budget: 3          # phase re-runs (passes) before escalating. Absent ⇒ 3.
+  stage_try_budget: 3           # stage retries (tries) before escalating. Absent ⇒ 3.
 
 phases:
   phase-0:
+    accuracy: medium            # OPTIONAL. medium (default) = stages 1–5.
+                                # high = add stage-0-alignment before stage-1 (see below).
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
       agent: phase-evaluator
     stages:
+      # stage-0-alignment goes here ONLY when accuracy: high — e.g.:
+      #   stage-0-alignment:
+      #     llm_profile: pi-default        # must be independent from stage-1
+      #     agent: aligner
       stage-1-implementation:
         llm_profile: claude-low
         agent: backend
@@ -152,14 +164,19 @@ route.yaml
 │   └── branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
 ├── finalization_defaults
 │   ├── green_checks
-│   └── log_checks
+│   ├── log_checks
+│   ├── advisor_profile        (optional; absent ⇒ escalation → human)
+│   ├── phase_pass_budget      (optional; absent ⇒ 3)
+│   └── stage_try_budget       (optional; absent ⇒ 3)
 └── phases
     └── phase-N
+        ├── accuracy: medium | high            (optional; absent ⇒ medium)
         ├── merge_back_at: stage-3-integration-acceptance-seams | stage-4-upstream-dag-verification | stage-5-finalization
         ├── lead
         │   ├── llm_profile
         │   └── agent
         └── stages
+            ├── stage-0-alignment              (required iff accuracy: high; forbidden otherwise)
             ├── stage-1-implementation
             ├── stage-2-adversarial-audit
             ├── stage-3-integration-acceptance-seams
@@ -176,9 +193,9 @@ agent: <real configured agent/persona name>
 
 `runner_adapters` are optional launch hints. They are not part of the required MVP runnable schema.
 
-## Five fixed stages and deterministic merge timing
+## Stages: five (medium) or six (high) per phase
 
-Every route phase has the same five stage ids:
+Every route phase has the same five base stage ids:
 
 1. `stage-1-implementation` — create/use the temporary worktree branch, write unit tests, and write the code.
 2. `stage-2-adversarial-audit` — independent hostile audit of Stage 1 on the same temporary worktree branch, including a hard gate for unused intake / accepted-but-ignored inputs.
@@ -186,7 +203,19 @@ Every route phase has the same five stage ids:
 4. `stage-4-upstream-dag-verification` — dependent build/deploy/test verification; merge here only when `merge_back_at` is this stage.
 5. `stage-5-finalization` — merge if not already merged, verify main, destroy the temporary worktree/branch, run green checks, inspect logs for hidden failures, and record evidence.
 
+### Accuracy: `medium` (default) vs `high`
+
+Each phase optionally sets `accuracy:`. Absent or `medium` runs the five base stages above — unchanged behavior. `high` additionally requires a pre-code alignment stage that runs **before** stage-1:
+
+0. `stage-0-alignment` — a fresh worker does mini-research for this phase against the original research, drafts a mini-plan against the original plan, then an **independent** audit checks the mini-plan against the big plan. Misaligned ⇒ redo the mini-plan; unreconcilable ⇒ `BLOCKED` (escalates). It is versioned, never overwritten.
+
+`stage-0-alignment` is **required iff** `accuracy: high` and **forbidden** otherwise. Its audit reviewer must be independent from `stage-1-implementation` (same rule as Stage 2 — by profile, agent, harness, model family, or persona).
+
 Stage 2 must be independent from Stage 1 by profile, agent, harness, model family, or persona.
+
+### Escalation budgets (optional)
+
+`finalization_defaults.phase_pass_budget` / `stage_try_budget` bound how many times a phase re-runs (a **pass**, controller = the run loop) or a stage retries (a **try**, controller = the phase lead) before escalating. On budget exhaustion the controller consults `advisor_profile` when set; the advisor rules continue / keep-looping / stop-and-ask-human. With no `advisor_profile`, exhaustion escalates straight to the human. Absent budgets default to 3.
 
 `merge_back_at` is required for every phase and must be one of:
 

@@ -194,7 +194,137 @@ async function main() {
 		"unknown extra stage-6 entry fails",
 		!unknownStageEntry.ok &&
 			unknownStageEntry.issues.some((i) =>
-				i.message.includes("not a recognized five-stage route entry"),
+				i.message.includes("not a recognized stage route entry"),
+			),
+	);
+
+	// --- accuracy / stage-0-alignment (medium vs high) ---
+	const withHighStage0 = (route: string, stage0Body: string): string =>
+		route
+			.replace(
+				"  phase-0:\n    merge_back_at:",
+				"  phase-0:\n    accuracy: high\n    merge_back_at:",
+			)
+			.replace(
+				"    stages:\n      stage-1-implementation:",
+				`    stages:\n${stage0Body}      stage-1-implementation:`,
+			);
+	const independentStage0 =
+		"      stage-0-alignment:\n        llm_profile: pi-default\n        agent: aligner\n";
+
+	const highOk = validateRunnable(
+		canonicalPlan,
+		withHighStage0(validRoute, independentStage0),
+	);
+	check(
+		"accuracy: high with an independent stage-0-alignment passes",
+		highOk.ok,
+		highOk.issues.map((i) => i.message).join("; "),
+	);
+
+	const highNoStage0 = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  phase-0:\n    merge_back_at:",
+			"  phase-0:\n    accuracy: high\n    merge_back_at:",
+		),
+	);
+	check(
+		"accuracy: high without stage-0-alignment fails",
+		!highNoStage0.ok &&
+			highNoStage0.issues.some(
+				(i) =>
+					i.message.includes("stage-0-alignment") &&
+					i.message.includes("required"),
+			),
+	);
+
+	const mediumWithStage0 = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"    stages:\n      stage-1-implementation:",
+			`    stages:\n${independentStage0}      stage-1-implementation:`,
+		),
+	);
+	check(
+		"medium (default) phase with a stage-0-alignment entry fails",
+		!mediumWithStage0.ok &&
+			mediumWithStage0.issues.some((i) =>
+				i.message.includes("only allowed when accuracy: high"),
+			),
+	);
+
+	const badAccuracy = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  phase-0:\n    merge_back_at:",
+			"  phase-0:\n    accuracy: ultra\n    merge_back_at:",
+		),
+	);
+	check(
+		"unknown accuracy value fails",
+		!badAccuracy.ok &&
+			badAccuracy.issues.some((i) => i.message.includes("accuracy must be one of")),
+	);
+
+	const stage0NotIndependent = validateRunnable(
+		canonicalPlan,
+		withHighStage0(
+			validRoute,
+			"      stage-0-alignment:\n        llm_profile: claude-low\n        agent: frontend\n",
+		),
+	);
+	check(
+		"stage-0-alignment sharing stage-1's profile+agent fails independence",
+		!stage0NotIndependent.ok &&
+			stage0NotIndependent.issues.some(
+				(i) =>
+					i.message.includes("stage-0-alignment") &&
+					i.message.includes("must be independent"),
+			),
+	);
+
+	// --- optional finalization_defaults: advisor_profile + budgets ---
+	const withAdvisorAndBudgets = validRoute.replace(
+		"finalization_defaults:\n",
+		"finalization_defaults:\n  advisor_profile: claude-low\n  phase_pass_budget: 5\n  stage_try_budget: 2\n",
+	);
+	const advisorOk = validateRunnable(canonicalPlan, withAdvisorAndBudgets);
+	check(
+		"optional advisor_profile + budgets parse and pass",
+		advisorOk.ok,
+		advisorOk.issues.map((i) => i.message).join("; "),
+	);
+
+	const advisorUnknown = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"finalization_defaults:\n",
+			"finalization_defaults:\n  advisor_profile: nonexistent\n",
+		),
+	);
+	check(
+		"advisor_profile referencing an unknown profile fails",
+		!advisorUnknown.ok &&
+			advisorUnknown.issues.some(
+				(i) =>
+					i.message.includes("advisor_profile") &&
+					i.message.includes("unknown profile"),
+			),
+	);
+
+	const badBudget = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"finalization_defaults:\n",
+			"finalization_defaults:\n  stage_try_budget: 0\n",
+		),
+	);
+	check(
+		"non-positive budget fails",
+		!badBudget.ok &&
+			badBudget.issues.some((i) =>
+				i.message.includes("must be a positive integer"),
 			),
 	);
 

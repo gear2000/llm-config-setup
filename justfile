@@ -86,7 +86,7 @@ selfcompose:
 # ─── Tests ────────────────────────────────────────────
 # Python composer/flow tests, plus the zero-dep Node type-stripping unit tests.
 test:
-    ${PYTHON_BIN:-python3} -m pytest tools/ -q
+    ${PYTHON_BIN:-python3} -m pytest tools/ .shared-llm/public/extensions/common/ -q
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-schema.test.ts
 
 test-iac-guard:

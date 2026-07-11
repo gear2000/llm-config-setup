@@ -1,0 +1,45 @@
+# UpAgent Recruiter launch templates — PUBLIC TEMPLATE.
+#
+# Copy to `upagent.yaml` (next to recruiter.py) in the destination and adapt. In a split
+# destination the FILLED roster is repo-owned: it lives under `.shared-llm/this_repo/` and
+# is never overwritten by `just update` (this .example ships from the kit as the starting
+# point).
+#
+# The roster is keyed by HARNESS, not by worker type or persona. route.yaml is authoritative
+# for which harness/model/agent runs each stage; the Recruiter only knows HOW to launch each
+# harness as a Herdr pane. It never decides the agent.
+#
+# Each template is a Python str.format() string. Available placeholders:
+#   {model}             resolved model id from the route llm_profile (may be empty for claude)
+#   {agent}             the persona/agent name from the route stage entry
+#   {cwd}               the phase worktree (also set as the pane's --cwd)
+#   {instructions_path} absolute path to the stage brief the worker must read
+#   {result_path}       absolute path the worker MUST write result.json to
+#
+# IMPORTANT: because templates are str.format() strings, any LITERAL brace must be DOUBLED —
+# write `${{VAR}}` for a shell variable and `{{a,b}}` for a literal brace group. A single
+# unescaped `{...}` that is not one of the placeholders above is a template authoring error.
+#
+# Every worker's job is the same shape: read the instructions, do the one stage, and write a
+# valid result.json (verdict + revisit + full_log pointer) before finishing — the Recruiter
+# blocks on the pane reaching agent-status `done` and then reads that file.
+
+harnesses:
+  claude: >-
+    claude --dangerously-skip-permissions --agent {agent}
+    "Read {instructions_path} and do exactly that one stage in {cwd}.
+    When finished, write your result.json to {result_path} (verdict: passed|failed|blocked,
+    a revisit list of stage-ids on failure, and a full_log pointer to your session transcript)."
+
+  codex: >-
+    codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+    "Read {instructions_path} and do exactly that one stage in {cwd}.
+    Write result.json to {result_path} (verdict + revisit + full_log)."
+
+  pi: >-
+    pi --model {model} --agent {agent}
+    "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}."
+
+  cursor: >-
+    cursor-agent --print --model {model}
+    "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}."
