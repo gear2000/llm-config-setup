@@ -1,0 +1,6 @@
+type: skill
+name: qa
+description: .shared-llm/public/layers/slash-commands/common/common/qa/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/qa/command.md
+output: .claude/skills/qa/SKILL.md

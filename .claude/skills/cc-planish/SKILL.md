@@ -10,7 +10,7 @@ The lightweight standalone planner: grill the user on an annotatable HTML page, 
 
 It is deliberately smaller than `/cc-plan-and-grill`: **no research subagents, no `## Team` section, no phase routing, no size tags.** Just grill → build → review. If you find you need research, a roster, or phased execution, you have outgrown `/cc-planish` — use `/cc-plan-and-grill` instead.
 
-This command follows the canonical **Planish HTML Grill Contract** at `.shared-llm/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Read that contract; the rules below defer to it.
+This command follows the canonical **Planish HTML Grill Contract** at `.shared-llm/public/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Read that contract; the rules below defer to it.
 
 ## When to use this vs the other planners
 
@@ -79,7 +79,7 @@ Each round, write a fresh `grill-v<round>.html` (kept forever as history) and ov
 - **Context header (round 1)** — plain English: what the plan is trying to do and what you found. Define every acronym at first use. File paths / method names / change lists go ONLY in an `Appendix` at the bottom — never at the top, never inside a question.
 - **Question blocks** — one `<div class="grill-q">` per question, each with a `.grill-q-text` (the question), an optional `.grill-q-note` (why it matters), and a `.grill-q-rec` (your concrete recommendation). **No answer boxes** — the user answers by dropping a sticky note on the block. Keep each question tight; when a choice is complex, SHOW it with a diagram — two modes only, NEVER Mermaid: default is an ASCII tree in a `<pre>`; when ASCII can't carry it, the row-by-row HTML flow (`.grill-fig` / `.flow` / `.flow-box`). A diagram only when it genuinely helps.
 - **`<meta name="desdoc-key" content="<date>-<slug>-r<round>">`** in `<head>` — a unique value per round so the annotation toolkit starts each round with a clean slate (`grill_current.html` reuses one path across rounds).
-- **Toolkits** — question/diagram styles from `.shared-llm/llm/common/common/toolkits/form-toolkit.html` (style-only), and the sticky-note annotation controls from `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim immediately before `</body>`. The annotation bar is the page's ONLY interactive control. `<title>` = `<Topic> — grill v<round>`.
+- **Toolkits** — question/diagram styles from `.shared-llm/public/llm/common/common/toolkits/form-toolkit.html` (style-only), and the sticky-note annotation controls from `.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim immediately before `</body>`. The annotation bar is the page's ONLY interactive control. `<title>` = `<Topic> — grill v<round>`.
 
 Then tell the user, and end your turn: _"Round `<k>` is up — `http://<host>:8089/.../grill_current.html` — drop a note on anything to answer or change (+ Note), click Copy Feedback, paste the block back here. No note on a question = the recommendation stands."_ Also send `grill_current.html` as a downloadable file when a file-send tool exists. Nothing blocks — feedback arrives as the user's next pasted message.
 
@@ -90,7 +90,7 @@ When the user pastes their `## Feedback —` block: process every note, treat un
 Write the plan to TWO files in the plan dir:
 
 - **`plan.md`** — the canonical, token-lean plan: title, the phases/steps, key decisions, and verification. This is the file downstream tooling reads.
-- **`plan.html`** — the same plan in the dark visual style (the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the `/design-doc` default style), with `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` and a unique `<meta name="desdoc-key" content="<slug>-plan-v<k>">` in `<head>` so each plan version starts with a clean note slate. `<title>` = `<Topic> — plan v<k>`. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.
+- **`plan.html`** — the same plan in the dark visual style (the `<style>` block from `~/project/repos/your-repo-ops/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the `/design-doc` default style), with `.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` and a unique `<meta name="desdoc-key" content="<slug>-plan-v<k>">` in `<head>` so each plan version starts with a clean note slate. `<title>` = `<Topic> — plan v<k>`. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.
 
 **HARD RULE — freeze `plan-v<k>` before every write (this is the same discipline `/do-planish` enforces in its tool):**
 

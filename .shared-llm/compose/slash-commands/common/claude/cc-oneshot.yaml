@@ -1,6 +1,0 @@
-type: skill
-name: cc-oneshot
-description: .shared-llm/layers/slash-commands/common/claude/cc-oneshot/description.md
-inputs:
-- .shared-llm/layers/slash-commands/common/claude/cc-oneshot/command.md
-output: .claude/skills/cc-oneshot/SKILL.md

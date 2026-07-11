@@ -1,0 +1,8 @@
+type: agent
+name: frontend
+model: sonnet
+color: pink
+description: .shared-llm/public/layers/agents/common/frontend.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/frontend.md
+output: .claude/agents/frontend.md

@@ -1,0 +1,6 @@
+type: skill
+name: cc-research
+description: .shared-llm/public/layers/slash-commands/common/claude/cc-research/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/claude/cc-research/command.md
+output: .claude/skills/cc-research/SKILL.md

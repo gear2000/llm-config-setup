@@ -46,7 +46,7 @@ Usage:
     python3 tools/harness.py configure -d /path/to/repo -l cc,pi          # edit ~/.shared-llm.yaml
     python3 tools/harness.py update -v                                    # copy -> compose -> link (+ global)
     # low-level (used by tests + the global staging compose):
-    python3 tools/harness.py compose .shared-llm/compose/skills/x.yaml --shared-llm /p/.shared-llm --target /out
+    python3 tools/harness.py compose .shared-llm/public/compose/skills/x.yaml --shared-llm /p/.shared-llm --target /out
 """
 
 from __future__ import annotations
@@ -440,7 +440,7 @@ class Composer:
         leaving the home-only `global/` skills and the `example-*` demo samples out
         of the consumer's tree.
         """
-        compose_dir = root if root is not None else self.shared / "compose"
+        compose_dir = root if root is not None else self.shared / "public" / "compose"
         if not compose_dir.is_dir():
             print(f"error: compose directory not found: {compose_dir}", file=sys.stderr)
             sys.exit(1)
@@ -586,9 +586,9 @@ class Composer:
 #     codex  .claude/skills/<name>  -> <repo>/.agents/skills/<name>  (common + codex skills)
 #
 #   do_home_runtime (global Pi runtime — plan_pi_runtime):
-#     ext      .shared-llm/llm/pi/common/extensions/<x> -> ~/.pi/agent/extensions/<x>
+#     ext      .shared-llm/public/llm/pi/common/extensions/<x> -> ~/.pi/agent/extensions/<x>
 #              (or ~/.pi/extensions for *-hub.ts)
-#     personas .shared-llm/llm/pi/common/agents/<x>.md  -> ~/.pi/agents/<x>.md
+#     personas .shared-llm/public/llm/pi/common/agents/<x>.md  -> ~/.pi/agents/<x>.md
 #
 # It RECONCILES desired-vs-actual: creates missing links, re-points drifted ones,
 # and PRUNES links whose source was renamed or deleted. It only ever touches a
@@ -608,9 +608,11 @@ MANAGED_MARKERS = (
     "/.claude/agents/",
     "/.ai/shared/skills/",
     "/.ai/shared/agents/",
-    "/.shared-llm/llm/pi/common/extensions/",
+    "/.shared-llm/public/llm/pi/common/extensions/",
     # legacy pre-migration paths — kept so the reconciler recognises and prunes
-    # links left dangling by the layers/ -> .shared-llm/ move.
+    # links left dangling by the .shared-llm/ -> .shared-llm/public/ move and the
+    # earlier layers/ -> .shared-llm/ move.
+    "/.shared-llm/llm/pi/common/extensions/",
     "/layers/llm/pi/common/extensions/",
     "/layers/llm/pi/common/agents/",
 )
@@ -698,7 +700,7 @@ def _skill_dirs(root: Path) -> list[Path]:
 def plan_pi_runtime(root: Path) -> LinkPlan:
     """Global Pi RUNTIME links: the bundled extensions and the hand-authored Pi
     agent personas (tf-reviewer, doc-reviewer, …) under
-    .shared-llm/llm/pi/common/. Skills are handled separately by do_global (copied,
+    .shared-llm/public/llm/pi/common/. Skills are handled separately by do_global (copied,
     routed) and the composed generic agents are COPIED by do_home_runtime, so this
     plan deliberately excludes both — it is only the stable .ts/.md runtime sources
     that are safe to symlink."""
@@ -706,11 +708,11 @@ def plan_pi_runtime(root: Path) -> LinkPlan:
     agent_ext = HOME / ".pi/agent/extensions"
     hub_ext = HOME / ".pi/extensions"
     desired: dict[Path, Path] = {}
-    personas = root / ".shared-llm/llm/pi/common/agents"
+    personas = root / ".shared-llm" / PUBLIC_DIR / "llm/pi/common/agents"
     if personas.is_dir():
         for f in sorted(personas.glob("*.md")):
             desired[pi_agents / f.name] = f
-    ext_src = root / ".shared-llm/llm/pi/common/extensions"
+    ext_src = root / ".shared-llm" / PUBLIC_DIR / "llm/pi/common/extensions"
     if ext_src.is_dir():
         for entry in sorted(ext_src.iterdir()):
             name = entry.name
@@ -832,7 +834,7 @@ def cmd_compose(args: argparse.Namespace) -> None:
     if args.recipe:
         recipe = Path(args.recipe)
         if not recipe.is_absolute():
-            # A recipe path may be given repo-relative (`.shared-llm/compose/...`)
+            # A recipe path may be given repo-relative (`.shared-llm/public/compose/...`)
             # or source-relative (`compose/...`). Resolve against the shared root,
             # stripping the source dir name if the caller included it.
             rel = args.recipe
@@ -877,6 +879,10 @@ COMMON_ROOTS = (
     "llm/claude/common",
     "llm/common/common",
     "llm/pi/common",
+    # Public tool-module extensions (justfile-imported dirs like upagent/ and the
+    # ported specialist/): kit-owned, synced to a destination's public/extensions/common/.
+    # Repo-owned tool modules stay under extensions/this_repo/ and are never synced.
+    "extensions/common",
 )
 
 # ---------------------------------------------------------------------------
@@ -901,9 +907,11 @@ COMMON_ROOTS = (
 # input resolver stays the one repo-root-relative rule (Composer.resolve_input);
 # the split is expressed in the path itself, not in a forking resolver.
 #
-# The KIT's own source tree stays flat (`.shared-llm/layers/...`). Kit recipes
-# are authored flat and TRANSLATED into split paths as they are copied into a
-# destination's public/compose/ (translate_shared_path / _translate_recipe_text).
+# The KIT's own source tree is public-rooted too (`.shared-llm/public/layers/...`),
+# matching a destination's public/ tree 1:1. Kit recipes are authored with public
+# paths, so the copy-time translation (translate_shared_path / _translate_recipe_text)
+# is identity for kit content — it still routes any legacy flat path, but the kit no
+# longer ships one.
 PUBLIC_DIR = "public"
 THIS_REPO_DIR = "this_repo"
 SHARED_PREFIX = ".shared-llm/"
@@ -1094,20 +1102,23 @@ ARTIFACT_DIR_NAMES = frozenset({"node_modules"})
 
 
 def _git_ignored_common_rels(kit_shared: Path) -> frozenset[str]:
-    """Relative paths (under a `.shared-llm/` dir) that git ignores in the KIT —
-    build artifacts (e.g. a compiled hub binary the kit .gitignore lists) that
-    must never propagate to the hub or a destination. Computed from the kit (the
-    ultimate source and a git repo); empty if git is unavailable."""
-    repo = kit_shared.parent
+    """Relative paths (under the kit's public content root) that git ignores in
+    the KIT — build artifacts (e.g. a compiled hub binary the kit .gitignore
+    lists) that must never propagate to the hub or a destination. Computed from
+    the kit (the ultimate source and a git repo); empty if git is unavailable."""
+    # kit_shared is <kit>/.shared-llm/public; its parent (.shared-llm) is inside
+    # the git repo, so `git -C` discovers the repo and lists paths relative to
+    # that cwd — i.e. prefixed with `public/`, which we strip below.
+    cwd = kit_shared.parent
     try:
         out = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--others", "--ignored",
+            ["git", "-C", str(cwd), "ls-files", "--others", "--ignored",
              "--exclude-standard", "-z", "--", str(kit_shared)],
             capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return frozenset()
-    prefix = kit_shared.name + "/"  # ".shared-llm/"
+    prefix = kit_shared.name + "/"  # "public/"
     return frozenset(
         p[len(prefix):] for p in out.split("\0")
         if p.startswith(prefix)
@@ -1236,7 +1247,8 @@ def _recipe_layer_refs(data: dict) -> list[str]:
     return [r for r in refs if r.startswith(SHARED_PREFIX)]
 
 
-def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog) -> collections.Counter:
+def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog,
+                         exclude: list[str]) -> collections.Counter:
     """Wholesale-sync the kit's recipes into a destination's public/compose/,
     translating each recipe's input-side paths from flat to split form, and prune
     any public/compose/ recipe the kit no longer ships. this_repo/compose/ is
@@ -1246,7 +1258,11 @@ def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog) -> co
     split form) already exists at the destination — a recipe that pulls a
     this_repo overlay the repo has not filled in is skipped, so composing it can
     never fail on a missing input (this preserves the additive-seeding guard from
-    the pre-split copy)."""
+    the pre-split copy).
+
+    A recipe whose kit source path is in `exclude` (see `_is_excluded`) is never
+    synced. It is also never added to `wanted`, so the prune sweep below removes
+    any stale copy already at the destination — exactly as if the kit dropped it."""
     counts: collections.Counter = collections.Counter()
     dest_root = dest_shared.parent
     pub_compose = dest_shared / PUBLIC_DIR / "compose"
@@ -1257,6 +1273,11 @@ def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog) -> co
             continue
         for src in sorted(list(base.rglob("*.yaml")) + list(base.rglob("*.yml"))):
             rel = src.relative_to(kit_shared)  # e.g. compose/agents/backend.yaml
+            if _is_excluded(src, kit_shared, exclude):
+                # Config-excluded: skip, and leave it out of `wanted` so the prune
+                # sweep below drops any stale copy already at the destination.
+                log(f"    exclude: {rel}")
+                continue
             dst = dest_shared / PUBLIC_DIR / rel
             text = src.read_text()
             try:
@@ -1294,12 +1315,13 @@ def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog) -> co
 
 
 def do_copy(cfg: dict, log: RunLog) -> None:
-    kit_shared = project_root() / ".shared-llm"
+    kit_shared = project_root() / ".shared-llm" / PUBLIC_DIR
     hub = Path(cfg["source"]).expanduser()
     # Build artifacts the kit .gitignore lists (e.g. a compiled hub binary) must
     # never propagate — a fresh machine builds its own, and a running binary can't
     # be overwritten ("Text file busy").
     ignored = _git_ignored_common_rels(kit_shared)
+    exclude = cfg.get("exclude", [])
     log.always(f"copy: kit {kit_shared} -> hub {hub}")
     c = _copy_common(kit_shared, hub, log, exclude_rels=ignored)
     log.always(f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
@@ -1314,7 +1336,7 @@ def do_copy(cfg: dict, log: RunLog) -> None:
             f"  {name}: {c['new']} new, {c['changed']} changed, "
             f"{c['same']} unchanged, {pruned_layers} pruned"
         )
-        r = _sync_public_recipes(kit_shared, dest_shared, log)
+        r = _sync_public_recipes(kit_shared, dest_shared, log, exclude)
         log.always(
             f"  {name} public recipes: {r['new']} new, {r['changed']} updated, "
             f"{r['same']} unchanged, {r['pruned']} pruned, {r['skipped']} skipped"
@@ -1699,7 +1721,7 @@ def do_global(cfg: dict, log: RunLog) -> None:
     if not wanted:
         return
     kit = project_root()
-    kit_shared = kit / ".shared-llm"
+    kit_shared = kit / ".shared-llm" / PUBLIC_DIR
     staging = kit / "examples"
     home_dirs = {tok: d for tok, d in _global_home_dirs().items() if tok in wanted}
     log.always(f"global: routing home skills to {', '.join(wanted)}")
@@ -1816,7 +1838,7 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
     if not wanted:
         return
     kit = project_root()
-    kit_shared = kit / ".shared-llm"
+    kit_shared = kit / ".shared-llm" / PUBLIC_DIR
     staging = kit / "examples"
     exclude = cfg.get("exclude", [])
     log.always(f"home-runtime: {', '.join(wanted)}" + (f"  (exclude: {', '.join(exclude)})" if exclude else ""))
@@ -1971,7 +1993,7 @@ def main() -> None:
         nargs="?",
         help=(
             "A specific compose YAML to process, OR a directory of recipes to compose "
-            "as a subset (e.g. .shared-llm/compose/agents). Default: all recipes."
+            "as a subset (e.g. .shared-llm/public/compose/agents). Default: all recipes."
         ),
     )
     pc.add_argument("--shared-llm", help="Path to the .shared-llm source root.")

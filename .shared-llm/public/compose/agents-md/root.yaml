@@ -1,0 +1,8 @@
+type: agents-md
+inputs:
+  - .shared-llm/public/layers/llm/this_repo/common/general.md
+  - .shared-llm/public/layers/llm/this_repo/codex/agents.md
+  - .shared-llm/public/layers/llm/common/common/response.md
+  - .shared-llm/public/layers/llm/common/common/plain-english.md
+  - .shared-llm/public/layers/llm/common/common/when_done.md
+output: AGENTS.md

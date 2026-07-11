@@ -47,7 +47,7 @@ def _fixture(tmp_path: Path, bucket: str, name: str, *, inputs: list[str],
              extra_frontmatter: dict | None = None) -> tuple[Path, Path, str]:
     """Build a .shared-llm fixture with one slash-command recipe; return roots + recipe path."""
     shared = tmp_path / ".shared-llm"
-    layer_dir = shared / "layers/slash-commands" / bucket / name
+    layer_dir = shared / "public/layers/slash-commands" / bucket / name
     for i, body in enumerate(inputs):
         _write(layer_dir / f"part{i}.md", body)
     _write(layer_dir / "description.md", "A test command.\n")
@@ -55,16 +55,16 @@ def _fixture(tmp_path: Path, bucket: str, name: str, *, inputs: list[str],
     recipe = {
         "type": "skill",
         "name": name,
-        "description": f".shared-llm/layers/slash-commands/{bucket}/{name}/description.md",
+        "description": f".shared-llm/public/layers/slash-commands/{bucket}/{name}/description.md",
     }
     if extra_frontmatter:
         recipe["frontmatter"] = extra_frontmatter
     recipe["inputs"] = [
-        f".shared-llm/layers/slash-commands/{bucket}/{name}/part{i}.md" for i in range(len(inputs))
+        f".shared-llm/public/layers/slash-commands/{bucket}/{name}/part{i}.md" for i in range(len(inputs))
     ]
     recipe["output"] = f".claude/skills/{name}/SKILL.md"
 
-    recipe_rel = f".shared-llm/compose/slash-commands/{bucket}/{name}.yaml"
+    recipe_rel = f".shared-llm/public/compose/slash-commands/{bucket}/{name}.yaml"
     _write(shared.parent / recipe_rel, yaml.safe_dump(recipe, sort_keys=False, allow_unicode=True))
     return shared, tmp_path, recipe_rel
 
@@ -102,11 +102,11 @@ def test_output_routing_follows_recipe(tmp_path: Path) -> None:
 def test_resources_copied_into_output(tmp_path: Path) -> None:
     shared, target, recipe_rel = _fixture(tmp_path, "common/common", "rescmd", inputs=["body"])
     # add a resources tree to the layer source + point the recipe at it
-    res = shared / "layers/slash-commands/common/common/rescmd/resources"
+    res = shared / "public/layers/slash-commands/common/common/rescmd/resources"
     _write(res / "references/guide.md", "REFERENCE GUIDE")
     recipe_path = shared.parent / recipe_rel
     data = yaml.safe_load(recipe_path.read_text())
-    data["resources"] = ".shared-llm/layers/slash-commands/common/common/rescmd/resources"
+    data["resources"] = ".shared-llm/public/layers/slash-commands/common/common/rescmd/resources"
     recipe_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
     _compose(shared, target, recipe_rel)
     copied = target / ".claude/skills/rescmd/references/guide.md"
@@ -131,20 +131,20 @@ def test_input_outside_shared_llm_resolves_against_repo_root(tmp_path: Path) -> 
     no prefix-stripping, no second base — every input path is `repo_root / path`.
     """
     shared = tmp_path / ".shared-llm"
-    _write(shared / "layers/agents/this_repo/desc.md", "A test agent.\n")
-    _write(shared / "layers/agents/this_repo/body.md", "LAYER BODY from .shared-llm tree.\n")
+    _write(shared / "public/layers/agents/this_repo/desc.md", "A test agent.\n")
+    _write(shared / "public/layers/agents/this_repo/body.md", "LAYER BODY from .shared-llm tree.\n")
     # A file OUTSIDE .shared-llm/, elsewhere in the repo (mirrors the private
     # repo's `ops/mkdocs/...` doc pulled into a skill). It must resolve to
     # repo_root / "external/docs/platform.md", NOT shared / "external/...".
     _write(tmp_path / "external/docs/platform.md", "EXTERNAL DOC outside .shared-llm.\n")
-    recipe_rel = ".shared-llm/compose/agents/demo.yaml"
+    recipe_rel = ".shared-llm/public/compose/agents/demo.yaml"
     _write(shared.parent / recipe_rel, yaml.safe_dump({
         "type": "agent",
         "name": "demo-agent",
         "model": "opus",
-        "description": ".shared-llm/layers/agents/this_repo/desc.md",
+        "description": ".shared-llm/public/layers/agents/this_repo/desc.md",
         "inputs": [
-            ".shared-llm/layers/agents/this_repo/body.md",
+            ".shared-llm/public/layers/agents/this_repo/body.md",
             "external/docs/platform.md",
         ],
         "output": ".claude/agents/demo-agent.md",
@@ -157,13 +157,13 @@ def test_input_outside_shared_llm_resolves_against_repo_root(tmp_path: Path) -> 
 
 def test_copy_verbatim_preserves_executable_bit(tmp_path: Path) -> None:
     shared = tmp_path / ".shared-llm"
-    src = shared / "llm/claude/common/hooks/hook.sh"
+    src = shared / "public/llm/claude/common/hooks/hook.sh"
     _write(src, "#!/usr/bin/env bash\necho hi\n")
     src.chmod(0o755)
-    recipe_rel = ".shared-llm/compose/hooks/common/hook.yaml"
+    recipe_rel = ".shared-llm/public/compose/hooks/common/hook.yaml"
     _write(shared.parent / recipe_rel, yaml.safe_dump({
         "type": "copy",
-        "inputs": [".shared-llm/llm/claude/common/hooks/hook.sh"],
+        "inputs": [".shared-llm/public/llm/claude/common/hooks/hook.sh"],
         "output": ".claude/hooks/hook.sh",
     }, sort_keys=False))
     _compose(shared, tmp_path, recipe_rel)
@@ -174,13 +174,13 @@ def test_copy_verbatim_preserves_executable_bit(tmp_path: Path) -> None:
 
 def test_copy_rejects_multiple_inputs(tmp_path: Path) -> None:
     shared = tmp_path / ".shared-llm"
-    _write(shared / "llm/claude/common/hooks/a.sh", "a")
-    _write(shared / "llm/claude/common/hooks/b.sh", "b")
-    recipe_rel = ".shared-llm/compose/hooks/common/two.yaml"
+    _write(shared / "public/llm/claude/common/hooks/a.sh", "a")
+    _write(shared / "public/llm/claude/common/hooks/b.sh", "b")
+    recipe_rel = ".shared-llm/public/compose/hooks/common/two.yaml"
     _write(shared.parent / recipe_rel, yaml.safe_dump({
         "type": "copy",
-        "inputs": [".shared-llm/llm/claude/common/hooks/a.sh",
-                   ".shared-llm/llm/claude/common/hooks/b.sh"],
+        "inputs": [".shared-llm/public/llm/claude/common/hooks/a.sh",
+                   ".shared-llm/public/llm/claude/common/hooks/b.sh"],
         "output": ".claude/hooks/x.sh",
     }, sort_keys=False))
     stderr = _compose_expect_fail(shared, tmp_path, recipe_rel)
@@ -206,8 +206,8 @@ def test_common_pi_skills_takes_do_star_from_pi_dir_and_common_not_cc(tmp_path: 
     # common + cc-* stay in .claude/skills
     for skill in ("qa", "cc-plan-and-grill"):
         _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
-    _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
-    _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
+    _write(root / ".shared-llm/public/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
+    _write(root / ".shared-llm/public/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
 
     got = harness._common_pi_skills(root)
     assert got["do-plan-and-grill"] == root / ".pi-skills/do-plan-and-grill"  # Pi-only source
@@ -220,8 +220,8 @@ def test_common_codex_skills_includes_common_and_codex(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     for skill in ("qa", "cc-plan-and-grill"):
         _write(root / ".claude/skills" / skill / "SKILL.md", f"---\nname: {skill}\n---\n")
-    _write(root / ".shared-llm/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
-    _write(root / ".shared-llm/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
+    _write(root / ".shared-llm/public/compose/slash-commands/common/common/qa.yaml", "name: qa\n")
+    _write(root / ".shared-llm/public/compose/slash-commands/common/claude/cc-plan-and-grill.yaml", "name: cc-plan-and-grill\n")
 
     got = harness._common_codex_skills(root)
     assert got["qa"] == root / ".claude/skills/qa"
@@ -229,42 +229,42 @@ def test_common_codex_skills_includes_common_and_codex(tmp_path: Path) -> None:
 
 
 def test_planish_visual_contract_is_referenced_and_runtime_exposes_visual_fields() -> None:
-    contract = REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md"
+    contract = REPO_ROOT / ".shared-llm/public/llm/common/common/planish-html-grill-contract.md"
     assert contract.exists()
     for rel in (
-        ".shared-llm/layers/slash-commands/common/common/do-plan-and-grill/command.md",
-        ".shared-llm/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
+        ".shared-llm/public/layers/slash-commands/common/common/do-plan-and-grill/command.md",
+        ".shared-llm/public/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
     ):
         text = (REPO_ROOT / rel).read_text()
         assert "planish-html-grill-contract.md" in text
         assert "plain chat list of questions" in text
 
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts").read_text()
     for token in ("contextHtml", "mermaid", "ascii", "visualHtml", "+ Note", "Copy Feedback"):
         assert token in planish_ts
 
     # do-planish stays an extension-only command (no compose recipe). cc-planish is
     # revived as a standalone Claude Code skill (its recipe + layer must exist).
-    assert not (REPO_ROOT / ".shared-llm/compose/slash-commands/common/common/do-planish.yaml").exists()
-    assert (REPO_ROOT / ".shared-llm/compose/slash-commands/common/claude/cc-planish.yaml").exists()
-    assert (REPO_ROOT / ".shared-llm/layers/slash-commands/common/claude/cc-planish/command.md").exists()
+    assert not (REPO_ROOT / ".shared-llm/public/compose/slash-commands/common/common/do-planish.yaml").exists()
+    assert (REPO_ROOT / ".shared-llm/public/compose/slash-commands/common/claude/cc-planish.yaml").exists()
+    assert (REPO_ROOT / ".shared-llm/public/layers/slash-commands/common/claude/cc-planish/command.md").exists()
 
 
 def test_grill_feedback_is_annotation_only() -> None:
     """One feedback transport everywhere: sticky notes -> Copy Feedback -> paste back.
     No page-level answer boxes, no Submit/Approve buttons, no browser->agent POST."""
     # Pi runtime serves its pages and returns immediately — no blocking POST plumbing.
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts").read_text()
     for banned in ("Copy Answers", "Submit Answers", "grill-respond", "/respond",
                    "Request Changes", "pendingResolve", "grill-a"):
         assert banned not in planish_ts, f"do-planish.ts must not contain {banned!r}"
 
     # Grill-authoring commands: notes are the only answer channel.
     for rel in (
-        ".shared-llm/layers/slash-commands/common/common/do-plan-and-grill/command.md",
-        ".shared-llm/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
-        ".shared-llm/layers/slash-commands/common/common/do-oneshot/command.md",
-        ".shared-llm/layers/slash-commands/common/claude/cc-oneshot/command.md",
+        ".shared-llm/public/layers/slash-commands/common/common/do-plan-and-grill/command.md",
+        ".shared-llm/public/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
+        ".shared-llm/public/layers/slash-commands/common/common/do-oneshot/command.md",
+        ".shared-llm/public/layers/slash-commands/common/claude/cc-oneshot/command.md",
     ):
         text = (REPO_ROOT / rel).read_text()
         assert "Copy Feedback" in text, rel
@@ -273,15 +273,15 @@ def test_grill_feedback_is_annotation_only() -> None:
 
     # Toolkits: the form toolkit is style-only; the annotation toolkit is the
     # single interactive surface, with anchor-tagged Copy Feedback.
-    form = (REPO_ROOT / ".shared-llm/llm/common/common/toolkits/form-toolkit.html").read_text()
+    form = (REPO_ROOT / ".shared-llm/public/llm/common/common/toolkits/form-toolkit.html").read_text()
     for banned in ("<script", "<button", "textarea", "Copy Answers"):
         assert banned not in form, f"form-toolkit.html must not contain {banned!r}"
-    ann = (REPO_ROOT / ".shared-llm/llm/common/common/toolkits/annotation-toolkit.html").read_text()
+    ann = (REPO_ROOT / ".shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html").read_text()
     for token in ("+ Note", "Copy Feedback", "desdoc-key", "ddAnchor"):
         assert token in ann, f"annotation-toolkit.html must contain {token!r}"
 
     # The shared contract spells out the single transport.
-    contract = (REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md").read_text()
+    contract = (REPO_ROOT / ".shared-llm/public/llm/common/common/planish-html-grill-contract.md").read_text()
     for token in ("One feedback transport", "Copy Feedback", "No answer boxes"):
         assert token in contract, f"contract must contain {token!r}"
 
@@ -290,7 +290,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
     """Plans freeze plan-v<k> history (never revised in place), pages are also
     offered as downloadable files where the harness can send them, and URLs
     honor the .planish.yaml host: field for remote (Tailscale) sessions."""
-    planish_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/do-planish.ts").read_text()
+    planish_ts = (REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts").read_text()
     for token in ("plan-v<k>", "resolveHost", "PLANISH_HOST", "0.0.0.0"):
         assert token in planish_ts, f"do-planish.ts must contain {token!r}"
     assert "listen(PORT, \"127.0.0.1\"" not in planish_ts  # bind follows the host
@@ -301,7 +301,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
         assert token in planish_ts, f"do-planish.ts must wire auto-freeze via {token!r}"
 
     # tf-implement's duplicated resolver must stay in sync: same config file.
-    tf_ts = (REPO_ROOT / ".shared-llm/llm/pi/common/extensions/tf-implement.ts").read_text()
+    tf_ts = (REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/tf-implement.ts").read_text()
     assert ".planish.yaml" in tf_ts, "tf-implement resolver must read .planish.yaml"
     assert ".planish.json" not in tf_ts, "drifted .planish.json reference"
     assert "plan-v<k>" in tf_ts
@@ -310,22 +310,22 @@ def test_plan_versioning_downloadable_and_host() -> None:
     assert "host:" in example, ".planish.yaml.example must document host:"
 
     for rel in (
-        ".shared-llm/layers/slash-commands/common/common/do-plan-and-grill/command.md",
-        ".shared-llm/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
+        ".shared-llm/public/layers/slash-commands/common/common/do-plan-and-grill/command.md",
+        ".shared-llm/public/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
     ):
         text = (REPO_ROOT / rel).read_text()
         for token in ("plan-v1.md", "never in place", "SendUserFile", "`host:`"):
             assert token in text, f"{rel} must contain {token!r}"
 
     for rel in (
-        ".shared-llm/layers/slash-commands/common/common/do-oneshot/command.md",
-        ".shared-llm/layers/slash-commands/common/claude/cc-oneshot/command.md",
+        ".shared-llm/public/layers/slash-commands/common/common/do-oneshot/command.md",
+        ".shared-llm/public/layers/slash-commands/common/claude/cc-oneshot/command.md",
     ):
         text = (REPO_ROOT / rel).read_text()
         for token in ("SendUserFile", "`host:`"):
             assert token in text, f"{rel} must contain {token!r}"
 
-    contract = (REPO_ROOT / ".shared-llm/llm/common/common/planish-html-grill-contract.md").read_text()
+    contract = (REPO_ROOT / ".shared-llm/public/llm/common/common/planish-html-grill-contract.md").read_text()
     for token in ("Versioned history", "downloadable", "host:"):
         assert token in contract, f"contract must contain {token!r}"
 
@@ -333,7 +333,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
 def _agent_fixture(tmp_path: Path, name: str, *, model: str | None) -> tuple[Path, Path, str]:
     """Build a .shared-llm fixture with one agent recipe; include `model:` only when given."""
     shared = tmp_path / ".shared-llm"
-    layer_dir = shared / "layers/agents/common" / name
+    layer_dir = shared / "public/layers/agents/common" / name
     _write(layer_dir / "body.md", f"# {name}\n\nAgent body.\n")
     _write(layer_dir / "description.md", "A test agent.\n")
 
@@ -341,14 +341,14 @@ def _agent_fixture(tmp_path: Path, name: str, *, model: str | None) -> tuple[Pat
         "type": "agent",
         "name": name,
         "color": "red",
-        "description": f".shared-llm/layers/agents/common/{name}/description.md",
+        "description": f".shared-llm/public/layers/agents/common/{name}/description.md",
     }
     if model is not None:
         recipe["model"] = model
-    recipe["inputs"] = [f".shared-llm/layers/agents/common/{name}/body.md"]
+    recipe["inputs"] = [f".shared-llm/public/layers/agents/common/{name}/body.md"]
     recipe["output"] = f".claude/agents/{name}.md"
 
-    recipe_rel = f".shared-llm/compose/agents/{name}.yaml"
+    recipe_rel = f".shared-llm/public/compose/agents/{name}.yaml"
     _write(shared.parent / recipe_rel, yaml.safe_dump(recipe, sort_keys=False, allow_unicode=True))
     return shared, tmp_path, recipe_rel
 
@@ -387,13 +387,13 @@ def test_settings_deep_merge(tmp_path: Path) -> None:
         "hooks": {"PreToolUse": [{"matcher": "Bash"}], "PostToolUse": [{"matcher": "Write"}]},
         "effortLevel": "max",
     }
-    _write(shared / "llm/claude/common/settings.json", json.dumps(base))
-    _write(shared / "llm/claude/this_repo/settings.json", json.dumps(overlay))
-    recipe_rel = ".shared-llm/compose/settings/settings.yaml"
+    _write(shared / "public/llm/claude/common/settings.json", json.dumps(base))
+    _write(shared / "public/llm/claude/this_repo/settings.json", json.dumps(overlay))
+    recipe_rel = ".shared-llm/public/compose/settings/settings.yaml"
     _write(shared.parent / recipe_rel, yaml.safe_dump({
         "type": "settings",
-        "inputs": [".shared-llm/llm/claude/common/settings.json",
-                   ".shared-llm/llm/claude/this_repo/settings.json"],
+        "inputs": [".shared-llm/public/llm/claude/common/settings.json",
+                   ".shared-llm/public/llm/claude/this_repo/settings.json"],
         "output": ".claude/settings.json",
     }, sort_keys=False))
     _compose(shared, tmp_path, recipe_rel)

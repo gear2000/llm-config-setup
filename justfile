@@ -8,14 +8,14 @@ default:
 # The command surface is small on purpose: init once, configure once per repo,
 # update whenever layers change.
 #
-# Optional tool modules live under .shared-llm/extensions/this_repo/<module>/
+# Optional tool modules live under .shared-llm/public/extensions/this_repo/<module>/
 # (each a self-contained directory: script + config + its own justfile) and are
 # imported below. To adopt one in a destination repo: copy the WHOLE module
 # directory to the same relative path and add the same import line.
 
-import '.shared-llm/extensions/this_repo/specialist/justfile'
-import '.shared-llm/extensions/this_repo/pi-hub/justfile'
-import '.shared-llm/extensions/this_repo/tf/justfile'
+import '.shared-llm/public/extensions/this_repo/specialist/justfile'
+import '.shared-llm/public/extensions/this_repo/pi-hub/justfile'
+import '.shared-llm/public/extensions/this_repo/tf/justfile'
 
 # One-time OS prerequisite check (python3 + just). e.g. `just init -o mac`.
 init *args:
@@ -79,7 +79,7 @@ pi-extensions:
 # it never adds untracked composed skills to .claude/skills/.
 selfcompose:
     rm -rf examples/self
-    ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/compose/slash-commands --target examples/self --placeholder OPS_REPO=your-repo-ops
+    ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/public/compose/slash-commands --target examples/self --placeholder OPS_REPO=your-repo-ops
     for d in .claude/skills/*/; do n=$(basename "$d"); cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md"; done
     @echo "selfcompose: regenerated the kit's tracked slash-command skills (.claude/skills/{cc,do}-*)"
 
@@ -87,13 +87,13 @@ selfcompose:
 # Python composer/flow tests, plus the zero-dep Node type-stripping unit tests.
 test:
     ${PYTHON_BIN:-python3} -m pytest tools/ -q
-    node --experimental-strip-types .shared-llm/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-schema.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-schema.test.ts
 
 test-iac-guard:
-    node --experimental-strip-types .shared-llm/llm/pi/common/extensions/iac-guard.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/iac-guard.test.ts
 
 test-memsearch:
-    node --experimental-strip-types .shared-llm/llm/pi/common/extensions/memsearch.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/memsearch.test.ts
 
 test-meta-plan:
-    node --experimental-strip-types .shared-llm/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-schema.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-schema.test.ts

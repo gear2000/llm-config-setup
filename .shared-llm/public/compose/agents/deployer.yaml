@@ -1,0 +1,8 @@
+type: agent
+name: deployer
+model: sonnet
+color: green
+description: .shared-llm/public/layers/agents/common/deployer.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/deployer.md
+output: .claude/agents/deployer.md

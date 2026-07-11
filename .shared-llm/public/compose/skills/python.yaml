@@ -1,0 +1,6 @@
+name: python
+description: .shared-llm/public/layers/skills/common/python/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/python/practices.md
+  - .shared-llm/public/layers/skills/this_repo/python.md
+output: .claude/skills/python/SKILL.md

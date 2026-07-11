@@ -1,8 +1,0 @@
-type: agent
-name: phase-evaluator
-model: sonnet
-color: purple
-description: .shared-llm/layers/agents/common/phase-evaluator.description.md
-inputs:
-  - .shared-llm/layers/agents/common/phase-evaluator.md
-output: .claude/agents/phase-evaluator.md

@@ -1,6 +1,0 @@
-type: skill
-name: do-loop
-description: .shared-llm/layers/slash-commands/common/common/do-loop/description.md
-inputs:
-- .shared-llm/layers/slash-commands/common/common/do-loop/command.md
-output: .claude/skills/do-loop/SKILL.md

@@ -1,0 +1,6 @@
+name: update-shared-llm
+description: .shared-llm/public/layers/skills/common/update-shared-llm/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/update-shared-llm/workflow.md
+  - .shared-llm/public/layers/skills/this_repo/update-shared-llm.md
+output: .claude/skills/update-shared-llm/SKILL.md

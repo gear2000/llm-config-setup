@@ -16,12 +16,12 @@ from pathlib import Path
 # from the file's dir reaches the repo root that owns .shared-llm/.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-LAYERS = REPO_ROOT / ".shared-llm/layers"
-PI_HUB = REPO_ROOT / ".shared-llm/llm/pi/common/extensions/meta-orchestrator-hub"
+LAYERS = REPO_ROOT / ".shared-llm/public/layers"
+PI_HUB = REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub"
 
 PHASE_PROTOCOL = LAYERS / "slash-commands/common/common/meta-runner-phase-protocol.md"
 HANDOFF_PROTOCOL = LAYERS / "slash-commands/common/common/meta-runner-handoff-protocol.md"
-COMPOSE_SLASH_COMMANDS = REPO_ROOT / ".shared-llm/compose/slash-commands"
+COMPOSE_SLASH_COMMANDS = REPO_ROOT / ".shared-llm/public/compose/slash-commands"
 META_HERDR_PHASE = LAYERS / "slash-commands/common/common/meta-herdr-phase/command.md"
 META_HERDR = LAYERS / "slash-commands/common/common/meta-herdr/command.md"
 RUN_PHASE = LAYERS / "slash-commands/common/claude/run-phase/command.md"
@@ -96,7 +96,7 @@ def test_adversarial_evaluator_artifact_in_sync_with_source() -> None:
 
     It must never be hand-edited: the source layer's unused-intake block has to
     appear verbatim in the generated artifact. If this fails, re-run
-    `python3 tools/harness.py compose .shared-llm/compose/agents/adversarial-evaluator.yaml`
+    `python3 tools/harness.py compose .shared-llm/public/compose/agents/adversarial-evaluator.yaml`
     instead of editing the artifact by hand.
     """
     src = ADVERSARIAL_EVALUATOR_SRC.read_text()

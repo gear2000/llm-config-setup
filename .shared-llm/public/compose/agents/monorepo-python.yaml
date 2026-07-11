@@ -1,0 +1,8 @@
+type: agent
+name: monorepo-python
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/agents/common/monorepo-python.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/monorepo-python.md
+output: .claude/agents/monorepo-python.md

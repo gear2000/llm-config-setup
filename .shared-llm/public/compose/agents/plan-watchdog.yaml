@@ -1,0 +1,8 @@
+type: agent
+name: plan-watchdog
+model: sonnet
+color: orange
+description: .shared-llm/public/layers/agents/common/plan-watchdog.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/plan-watchdog.md
+output: .claude/agents/plan-watchdog.md

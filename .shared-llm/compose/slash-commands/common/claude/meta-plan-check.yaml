@@ -1,9 +1,0 @@
-type: skill
-name: meta-plan-check
-description: .shared-llm/layers/slash-commands/common/claude/meta-plan-check/description.md
-frontmatter:
-  argument-hint: "<plan.md> [route.yaml]"
-inputs:
-  - .shared-llm/llm/pi/common/extensions/meta-orchestrator-hub/meta-plan-format.md
-  - .shared-llm/layers/slash-commands/common/claude/meta-plan-check/command.md
-output: .claude/skills/meta-plan-check/SKILL.md

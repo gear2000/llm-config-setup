@@ -1,0 +1,6 @@
+type: skill
+name: do-research
+description: .shared-llm/public/layers/slash-commands/common/common/do-research/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/do-research/command.md
+output: .claude/skills/do-research/SKILL.md

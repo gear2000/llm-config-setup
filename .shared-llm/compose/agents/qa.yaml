@@ -1,8 +1,0 @@
-type: agent
-name: qa
-model: sonnet
-color: green
-description: .shared-llm/layers/agents/common/qa.description.md
-inputs:
-  - .shared-llm/layers/agents/common/qa.md
-output: .claude/agents/qa.md

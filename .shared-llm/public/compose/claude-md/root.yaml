@@ -1,0 +1,10 @@
+type: claude-md
+inputs:
+  - .shared-llm/public/layers/llm/this_repo/common/general.md
+  - .shared-llm/public/layers/llm/this_repo/claude/claude.md
+  - .shared-llm/public/layers/llm/common/common/architecture.md
+  - .shared-llm/public/layers/llm/common/common/response.md
+  - .shared-llm/public/layers/llm/common/common/plain-english.md
+  - .shared-llm/public/layers/llm/common/common/found-issues.md
+  - .shared-llm/public/layers/llm/common/common/when_done.md
+output: CLAUDE.md

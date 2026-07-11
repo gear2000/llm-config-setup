@@ -1,0 +1,8 @@
+type: agent
+name: backend
+model: sonnet
+color: purple
+description: .shared-llm/public/layers/agents/common/backend.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/backend.md
+output: .claude/agents/backend.md

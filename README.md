@@ -18,8 +18,8 @@ LLM coding assistants (Claude Code, Codex, Pi, etc.) read instruction files — 
 
 This kit treats those files as **build artifacts** assembled from **layers**:
 
-- `.shared-llm/layers/` — the source prose, split into reusable layers.
-- `.shared-llm/compose/` — YAML recipes that declare which layers to combine and where to write the output.
+- `.shared-llm/public/layers/` — the source prose, split into reusable layers.
+- `.shared-llm/public/compose/` — YAML recipes that declare which layers to combine and where to write the output.
 - `tools/harness.py` — the engine that reads recipes and writes output files, reconciles the skill symlinks, and runs the whole flow. It is the **one** engine, it lives **only** in this kit, and it is **never** copied into a repo you set up. (A per-repo copy used to drift out of sync and silently break Pi skill discovery; centralizing the engine is the core fix.)
 
 You drive it with `just` against a single config file, `~/.shared-llm.yaml`, that lists your destinations. Register a repo once, then rebuild every registered repo with one `just update`.
@@ -105,50 +105,52 @@ A registered destination's `.shared-llm/` is split into two trees with an explic
 - **`public/` is disposable.** Never hand-edit it — the next `just update` overwrites it (and prunes anything the kit dropped). To change a kit-synced layer, edit it in the kit and re-run.
 - **`this_repo/` is yours.** The engine reads it during compose but never writes it. Put project-specific layers, recipes, prompts, and skills here.
 - **Overriding a kit recipe.** Drop a recipe at the *same relative path* under `this_repo/compose/` (e.g. `this_repo/compose/agents/backend.yaml`). Compose runs `public/` first, then `this_repo/`, so your copy wins at the shared output path. Its inputs may pull layers from **either** tree by explicit path.
-- **Kit recipes keep flat source paths.** The kit's own `.shared-llm/` stays flat; the engine translates a kit recipe's `.shared-llm/layers/...` paths into `.shared-llm/public/...` (or `.shared-llm/this_repo/...` for a `this_repo` layer) as it copies the recipe into `public/compose/`.
+- **Kit recipes carry `public/`-form paths.** The kit's own `.shared-llm/` is public-only, so a kit recipe's inputs already point at `.shared-llm/public/layers/...`. Syncing a kit recipe into a destination is a `public/`→`public/` identity copy; a recipe may also pull the destination's own `.shared-llm/this_repo/...` overlay by explicit path.
 
 ## The `.shared-llm/` layout
 
-The layout below is the **kit's own source tree**, which stays flat (`layers/`, `compose/`, `llm/`). A *registered destination's* `.shared-llm/` is reorganized into the `public/` + `this_repo/` split described in [The destination split](#the-destination-split-public-vs-this_repo) — the engine copies the flat kit content into a destination's `public/` and keeps the repo's own content under `this_repo/`.
+The layout below is the **kit's own source tree**, which lives entirely under `.shared-llm/public/` (`public/layers/`, `public/compose/`, `public/llm/`, `public/extensions/`) — the kit is public-only. A *registered destination's* `.shared-llm/` adds a second `this_repo/` tree alongside `public/` (the split described in [The destination split](#the-destination-split-public-vs-this_repo)) — the engine copies the kit's `public/` content into the destination's `public/` (an identity copy) and keeps the repo's own content under `this_repo/`.
 
 The repo splits into the **source tree** (`.shared-llm/`) and the **engine + config machinery** (`tools/`, `justfile`).
 
 ```
 .shared-llm/
-  layers/                         — SOURCE prose, split into reusable layers
-    llm/                          — layers for CLAUDE.md / AGENTS.md
-      common/common/response.md   — portable response-format rules (ready as-is)
-      this_repo/                  — project-specific layers, shipped as TEMPLATE.* stubs
-        common/TEMPLATE.general.md            — project identity, conventions, CI, credentials
-        common/TEMPLATE.authoring.md          — example: CLAUDE.md for a special subdirectory
-        common/TEMPLATE.aws-execution-engine.md — example: CLAUDE.md for a component with a contract
-        common/src/TEMPLATE.packages.md       — shared context for all package CLAUDE.mds
-        common/src/TEMPLATE.services.md       — shared context for all service CLAUDE.mds
-        common/packages/TEMPLATE.example_package.md — per-package leaf template
-        common/services/TEMPLATE.example_service.md — per-service leaf template
-        claude/TEMPLATE.claude.md             — Claude Code-specific conventions (worktrees, planning)
-        codex/TEMPLATE.agents.md              — cross-harness wiring (skills, hooks, MCP)
-    skills/                       — layers for skill files
-      common/python/              — language conventions, ready as-is (practices.md + description.md)
-      common/nextjs/              — ready as-is
-      common/backend/            — ready as-is
-      this_repo/TEMPLATE.python.md — project-specific Python skill layer (stub)
-    agents/                       — layers for agent personas
-      common/<name>.md            — the generic agent bodies (ready as-is, brand-free; see Inventory)
-      common/<name>.description.md — one-line description for each agent's frontmatter
-  compose/                        — RECIPES: which layers to combine, and where to write
-    claude-md/root.yaml           — recipe: root CLAUDE.md
-    claude-md/example-package.yaml — recipe: per-package CLAUDE.md
-    claude-md/example-service.yaml — recipe: per-service CLAUDE.md
-    agents-md/root.yaml           — recipe: root AGENTS.md
-    skills/python.yaml            — recipe: per-repo python skill (general layer + this_repo layer)
-    global/python.yaml            — recipe: GENERAL python skill (no this_repo layer; global step)
-    global/nextjs.yaml            — recipe: general nextjs skill (global step)
-    global/backend.yaml           — recipe: general backend skill (global step)
-    slash-commands/               — recipes: the routed slash-command skills
-    agents/<name>.yaml            — recipe: one generic agent persona (roster count in Inventory)
-  llm/pi/common/                  — Pi harness runtime config (NOT a compose input; see below)
-  llm/claude/common/              — Claude harness runtime config (NOT a compose input; see below)
+  public/                         — the kit's ENTIRE source tree (public-only; a destination adds this_repo/ alongside)
+    layers/                       — SOURCE prose, split into reusable layers
+      llm/                        — layers for CLAUDE.md / AGENTS.md
+        common/common/response.md — portable response-format rules (ready as-is)
+        this_repo/                — project-specific layers, shipped as TEMPLATE.* stubs
+          common/TEMPLATE.general.md            — project identity, conventions, CI, credentials
+          common/TEMPLATE.authoring.md          — example: CLAUDE.md for a special subdirectory
+          common/TEMPLATE.aws-execution-engine.md — example: CLAUDE.md for a component with a contract
+          common/src/TEMPLATE.packages.md       — shared context for all package CLAUDE.mds
+          common/src/TEMPLATE.services.md       — shared context for all service CLAUDE.mds
+          common/packages/TEMPLATE.example_package.md — per-package leaf template
+          common/services/TEMPLATE.example_service.md — per-service leaf template
+          claude/TEMPLATE.claude.md             — Claude Code-specific conventions (worktrees, planning)
+          codex/TEMPLATE.agents.md              — cross-harness wiring (skills, hooks, MCP)
+      skills/                     — layers for skill files
+        common/python/            — language conventions, ready as-is (practices.md + description.md)
+        common/nextjs/            — ready as-is
+        common/backend/           — ready as-is
+        this_repo/TEMPLATE.python.md — project-specific Python skill layer (stub)
+      agents/                     — layers for agent personas
+        common/<name>.md          — the generic agent bodies (ready as-is, brand-free; see Inventory)
+        common/<name>.description.md — one-line description for each agent's frontmatter
+    compose/                      — RECIPES: which layers to combine, and where to write
+      claude-md/root.yaml         — recipe: root CLAUDE.md
+      claude-md/example-package.yaml — recipe: per-package CLAUDE.md
+      claude-md/example-service.yaml — recipe: per-service CLAUDE.md
+      agents-md/root.yaml         — recipe: root AGENTS.md
+      skills/python.yaml          — recipe: per-repo python skill (general layer + this_repo layer)
+      global/python.yaml          — recipe: GENERAL python skill (no this_repo layer; global step)
+      global/nextjs.yaml          — recipe: general nextjs skill (global step)
+      global/backend.yaml         — recipe: general backend skill (global step)
+      slash-commands/             — recipes: the routed slash-command skills
+      agents/<name>.yaml          — recipe: one generic agent persona (roster count in Inventory)
+    llm/pi/common/                — Pi harness runtime config (NOT a compose input; see below)
+    llm/claude/common/            — Claude harness runtime config (NOT a compose input; see below)
+    extensions/this_repo/         — tool-module extensions (specialist, pi-hub, tf); justfile-imported
 tools/
   harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
   install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
@@ -198,7 +200,7 @@ Pi loads a **global** skill before a repo-local one of the same name and keeps t
 
 ## Inventory
 
-The skill, agent, and slash-command counts and tables below are **derived**, not hand-typed — `tools/gen_inventory.py` reads them straight from the compose recipes (`.shared-llm/compose/{skills,agents,slash-commands}/**/*.yaml`) and rewrites the block between the markers. Regenerate after adding, removing, or renaming a recipe:
+The skill, agent, and slash-command counts and tables below are **derived**, not hand-typed — `tools/gen_inventory.py` reads them straight from the compose recipes (`.shared-llm/public/compose/{skills,agents,slash-commands}/**/*.yaml`) and rewrites the block between the markers. Regenerate after adding, removing, or renaming a recipe:
 
 ```bash
 just inventory
@@ -207,7 +209,7 @@ just inventory
 Re-running against unchanged recipes is a zero diff (idempotent) — safe to run any time, and safe to forget to run, since nothing here is hand-maintained.
 
 <!-- BEGIN:inventory -->
-<!-- GENERATED by tools/gen_inventory.py (`just inventory`) — do not hand-edit. Edit a compose recipe under .shared-llm/compose/{skills,agents,slash-commands}/ and re-run. -->
+<!-- GENERATED by tools/gen_inventory.py (`just inventory`) — do not hand-edit. Edit a compose recipe under .shared-llm/public/compose/{skills,agents,slash-commands}/ and re-run. -->
 
 ### Skills (3)
 
@@ -245,7 +247,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
 | `team-pulse` | Tiny single-purpose heartbeat agent for teams. On a fixed interval, pings the team leader with a… |
 
-### Slash-command skills (31)
+### Slash-command skills (35)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only, everything else ships to both. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -269,12 +271,16 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
 | `hub-connect` | Connect THIS Claude session to a running meta-orchestrator message hub (the Go hub a Pi brain… |
 | `meta-auto-run` | The single kickoff workflow the Meta-ORCH brain sends to a freshly spawned Claude Code TUI session.… |
+| `meta-autorun` | The single kickoff workflow the meta-orchestrator brain sends to a freshly spawned Claude Code TUI… |
 | `meta-cc` | Claude Code-side meta runner entrypoint. Consumes a checked runnable `plan.md + route.yaml` pair… |
 | `meta-cc-plan-and-grill` | Convenience wrapper concept for Claude Code: run the normal `/cc-plan-and-grill` front-door… |
+| `meta-connect` | Connect THIS Claude session to a running meta-orchestrator message hub (the Go hub a Pi brain… |
 | `meta-herdr` | Run a checked runnable `plan.md + route.yaml` pair through the Herdr-visible meta runner. Requires… |
 | `meta-herdr-phase` | Phase Lead Agent command for Meta-Herdr. Runs one canonical plan phase inside Herdr using a… |
 | `meta-plan-check` | Check whether a canonical meta plan is runnable before semi-AFK execution. Invoked… |
 | `meta-plan-convert` | Convert a loose Markdown plan into the meta runner two-file shape before semi-AFK execution.… |
+| `meta-response` | A SMALL done-ping to the meta-orchestrator hub. Invoked `/meta-response --hub <hub-json-or-url>… |
+| `meta-run` | Run ONE phase of a plan FROM FILES — the file-based worker playbook the meta-orchestrator brain… |
 | `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
@@ -295,8 +301,8 @@ Recipe types: `skill` (frontmatter name + description), `agent` (name + descript
 
 ```bash
 # low-level, mostly for tests / manual staging (the everyday path is `just update`):
-python3 tools/harness.py compose .shared-llm/compose/claude-md/root.yaml --target /tmp/out
-python3 tools/harness.py compose .shared-llm/compose/agents --target /tmp/out   # a SUBSET (a recipe dir)
+python3 tools/harness.py compose .shared-llm/public/compose/agents/backend.yaml --target /tmp/out
+python3 tools/harness.py compose .shared-llm/public/compose/agents --target /tmp/out   # a SUBSET (a recipe dir)
 ```
 
 ## Quickstart
@@ -347,7 +353,7 @@ See `ONBOARDING.md` for the ordered, token-by-token fill checklist.
 
 ## Claude harness runtime config
 
-`.shared-llm/llm/claude/common/` holds Claude Code-specific runtime config —
+`.shared-llm/public/llm/claude/common/` holds Claude Code-specific runtime config —
 hooks, the statusline, and a home settings template. Like the Pi runtime config,
 these are **not composed into prose**; the global step of `just update` places
 them at the home level so they apply to every project:
@@ -366,7 +372,7 @@ them at the home level so they apply to every project:
   Claude Code merges on top.
 
 For a repo that needs its **own** project-specific hooks, two optional
-`TEMPLATE.*` stubs ship under `.shared-llm/llm/claude/this_repo/`
+`TEMPLATE.*` stubs ship under `.shared-llm/public/llm/claude/this_repo/`
 (`TEMPLATE.example-hook.py`, `TEMPLATE.settings-overlay.json`) — fill them in and
 merge the overlay onto the base with a `type: settings` recipe, or delete them.
 
@@ -376,7 +382,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 ## Pi harness runtime config (optional)
 
-`.shared-llm/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, the global step of `just update` symlinks them directly into `~/.pi/` (reconciling: it creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted) so Pi can discover and load them at runtime.
+`.shared-llm/public/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, the global step of `just update` symlinks them directly into `~/.pi/` (reconciling: it creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted) so Pi can discover and load them at runtime.
 
 **What it contains:**
 
@@ -401,7 +407,7 @@ Two kinds of Pi extension, two install paths. **Do not mix them.**
 - **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by the global step of `just update` — copied/layered, never installed from a registry.
 - **THIRD-PARTY** are **installed from source** via `pi install`, declared as pinned sources in `third-party-extensions.txt` — never copied or vendored into this repo (no committed `node_modules`).
 
-There is one install path for third-party extensions: `pi install` + the manifest. See `.shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md` for the full set and per-extension runtime deps.
+There is one install path for third-party extensions: `pi install` + the manifest. See `.shared-llm/public/llm/pi/common/THIRD-PARTY-EXTENSIONS.md` for the full set and per-extension runtime deps.
 
 **Wiring (part of `just update` when `global:` includes `pi`):**
 
@@ -442,7 +448,7 @@ just tf-reviewer-down        # stop the reviewer
 
 ## Output-style caveat
 
-An active `explanatory` or `learning` Claude Code output style (set via `/config`) competes with the brevity rule in `.shared-llm/layers/llm/common/common/response.md` and can override it. For terse, structured replies use the default or `concise` output style.
+An active `explanatory` or `learning` Claude Code output style (set via `/config`) competes with the brevity rule in `.shared-llm/public/layers/llm/common/common/response.md` and can override it. For terse, structured replies use the default or `concise` output style.
 
 ## What is intentionally out of scope
 

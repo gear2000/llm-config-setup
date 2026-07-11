@@ -1,8 +1,0 @@
-type: agent
-name: ci-trigger
-model: sonnet
-color: orange
-description: .shared-llm/layers/agents/common/ci-trigger.description.md
-inputs:
-  - .shared-llm/layers/agents/common/ci-trigger.md
-output: .claude/agents/ci-trigger.md

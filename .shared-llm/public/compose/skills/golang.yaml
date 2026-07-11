@@ -1,0 +1,6 @@
+name: golang
+description: .shared-llm/public/layers/skills/common/golang/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/golang/practices.md
+  - .shared-llm/public/layers/skills/this_repo/golang.md
+output: .claude/skills/golang/SKILL.md

@@ -1,0 +1,8 @@
+type: agent
+name: security
+model: sonnet
+color: red
+description: .shared-llm/public/layers/agents/common/security.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/security.md
+output: .claude/agents/security.md

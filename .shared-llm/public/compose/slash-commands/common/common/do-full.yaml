@@ -1,0 +1,6 @@
+type: skill
+name: do-full
+description: .shared-llm/public/layers/slash-commands/common/common/do-full/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/do-full/command.md
+output: .claude/skills/do-full/SKILL.md

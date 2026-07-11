@@ -1,7 +1,0 @@
-type: agent
-name: adversarial-evaluator
-color: red
-description: .shared-llm/layers/agents/common/adversarial-evaluator.description.md
-inputs:
-  - .shared-llm/layers/agents/common/adversarial-evaluator.md
-output: .claude/agents/adversarial-evaluator.md

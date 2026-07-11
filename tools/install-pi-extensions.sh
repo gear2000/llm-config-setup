@@ -3,7 +3,7 @@
 # native `pi install` path (appends to the `packages` array in
 # ~/.pi/agent/settings.json and fetches the source).
 #
-# Source of truth: .shared-llm/llm/pi/common/third-party-extensions.txt
+# Source of truth: .shared-llm/public/llm/pi/common/third-party-extensions.txt
 #   - one `pi install` source per non-comment line (e.g. `npm:pi-lens@3.8.45`)
 #   - blank lines and `#` comments are ignored
 #
@@ -18,12 +18,12 @@
 #
 # This installs THIRD-PARTY extensions only. Our OWN authored extensions
 # (extensions/*.ts) are symlinked by harness.py sync — never installed. Keep the two
-# paths separate (see .shared-llm/llm/pi/common/THIRD-PARTY-EXTENSIONS.md).
+# paths separate (see .shared-llm/public/llm/pi/common/THIRD-PARTY-EXTENSIONS.md).
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MANIFEST="$REPO_ROOT/.shared-llm/llm/pi/common/third-party-extensions.txt"
+MANIFEST="$REPO_ROOT/.shared-llm/public/llm/pi/common/third-party-extensions.txt"
 
 command -v pi >/dev/null 2>&1 || {
   echo "ERROR: 'pi' not on PATH. Install it: npm install -g @earendil-works/pi-coding-agent" >&2

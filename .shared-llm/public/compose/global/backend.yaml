@@ -1,0 +1,20 @@
+# Global (all-projects) backend skill recipe.
+#
+# Same compose mechanism as the per-repo recipes under .shared-llm/public/compose/skills/ —
+# the ONLY difference is intent: this assembles the GENERAL backend convention layer
+# (no project stub) for installation into the user's HOME skill dirs, where all three
+# harnesses (Claude Code, Codex, Pi) read skills globally.
+#
+# tools/install-global.sh composes this, then copies the staged SKILL.md into
+# ~/.claude/skills/backend/, ~/.codex/skills/backend/, and ~/.pi/agent/skills/backend/.
+#
+# Inputs: ONLY the general layer — practices.md + description.md. Language/cloud
+# agnostic backend practices; no project-specific layer.
+#
+# Output staging path lives under examples/ (gitignored) because it is a generated
+# artifact, not source — the installer copies it into home.
+name: backend
+description: .shared-llm/public/layers/skills/common/backend/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/backend/practices.md
+output: global-staging/skills/backend/SKILL.md

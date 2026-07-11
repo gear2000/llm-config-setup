@@ -1,0 +1,6 @@
+type: skill
+name: cc-plan-and-grill
+description: .shared-llm/public/layers/slash-commands/common/claude/cc-plan-and-grill/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/claude/cc-plan-and-grill/command.md
+output: .claude/skills/cc-plan-and-grill/SKILL.md

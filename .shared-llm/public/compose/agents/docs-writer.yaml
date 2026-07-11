@@ -1,0 +1,8 @@
+type: agent
+name: docs-writer
+model: sonnet
+color: cyan
+description: .shared-llm/public/layers/agents/common/docs-writer.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/docs-writer.md
+output: .claude/agents/docs-writer.md

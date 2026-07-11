@@ -25,7 +25,7 @@ Each invocation writes a new `vN.html` — never overwrites an existing version.
 
 design-doc is a separate skill from planish/plan-and-grill, but both ultimately point a browser at a local static file server, so they share ONE hostname setting instead of two. Resolve in this order, stop at the first match:
 
-1. **Explicit override** — `.shared-llm/llm/claude/common/config/design-doc.json` or `.claude/design-doc.json` (checked in that order). If either sets `base_url`, use it verbatim (no trailing slash). Use this only when design-doc needs a *different* server than planish's — a different port, scheme, or docs root.
+1. **Explicit override** — `.shared-llm/public/llm/claude/common/config/design-doc.json` or `.claude/design-doc.json` (checked in that order). If either sets `base_url`, use it verbatim (no trailing slash). Use this only when design-doc needs a *different* server than planish's — a different port, scheme, or docs root.
    ```json
    { "base_url": "http://your-machine-name:8088", "docs_dir": "ops/mkdocs/docs" }
    ```
@@ -64,7 +64,7 @@ Write `{dir}/v{N}.html` with:
 
 1. The CSS (from v3.html if found, or the default block below)
 2. Design content appropriate to the topic — use the visual vocabulary below
-3. The canonical annotation toolkit (always — paste the contents of `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` verbatim before `</body>`; see "Annotation Toolkit" below)
+3. The canonical annotation toolkit (always — paste the contents of `.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html` verbatim before `</body>`; see "Annotation Toolkit" below)
 
 **Default CSS** (use when v3.html is not present):
 
@@ -172,7 +172,7 @@ body{font-family:'JetBrains Mono',monospace;background:#0d1017;color:#c8ccd4;pad
   </div>
 </div>
 
-<!-- Canonical annotation toolkit (.shared-llm/llm/common/common/toolkits/annotation-toolkit.html) — paste verbatim before </body> -->
+<!-- Canonical annotation toolkit (.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html) — paste verbatim before </body> -->
 </body>
 </html>
 ```
@@ -216,6 +216,6 @@ When the user pastes output that starts with `## Feedback —` or `## FINALIZED 
 
 Every design doc carries the sticky-note annotation layer — the ONLY interactive control on the page (no answer boxes, no submit buttons: the user drops notes, clicks **Copy Feedback**, and pastes the `## Feedback` block back into the chat, then iterates to v{N+1}).
 
-There is exactly ONE canonical implementation, shared by every planning surface in this kit (`/plan-and-grill`, `/oneshot`, `/research`, and the Pi planish extension). **Do not fork or inline a copy here.** Paste the contents of `.shared-llm/llm/common/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>` in every design doc.
+There is exactly ONE canonical implementation, shared by every planning surface in this kit (`/plan-and-grill`, `/oneshot`, `/research`, and the Pi planish extension). **Do not fork or inline a copy here.** Paste the contents of `.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html` verbatim immediately before `</body>` in every design doc.
 
 The canonical toolkit copies feedback with a resilient `document.execCommand` fallback, so **Copy Feedback** and **Finalize ✓** work on `file://` and plain-HTTP pages too — the old inline fork relied on the secure-context-only async clipboard API and failed silently in those contexts. Design docs write a fresh `vN.html` each version, so the toolkit's default per-pathname note key already isolates versions; no `<meta name="desdoc-key">` is required (that meta is only for pages that reuse one path across rounds, such as a served grill page).

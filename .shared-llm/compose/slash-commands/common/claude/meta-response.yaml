@@ -1,8 +1,0 @@
-type: skill
-name: meta-response
-description: .shared-llm/layers/slash-commands/common/claude/meta-response/description.md
-frontmatter:
-  argument-hint: "--hub <hub-json-or-url> --output <results.md> [--name <worker-name>] [--msg <msg_id>] — hub + output required"
-inputs:
-- .shared-llm/layers/slash-commands/common/claude/meta-response/command.md
-output: .claude/skills/meta-response/SKILL.md

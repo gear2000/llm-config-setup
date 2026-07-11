@@ -166,7 +166,7 @@ def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path
     # Fake KIT with one recipe that references BOTH a common layer and a this_repo
     # overlay via flat paths (the copy step must translate them).
     kit = tmp_path / "kit"
-    kshared = kit / ".shared-llm"
+    kshared = kit / ".shared-llm/public"
     _write(kshared / "compose/agents/backend.yaml", yaml.safe_dump({
         "type": "agent", "name": "backend", "model": "sonnet",
         "description": ".shared-llm/layers/agents/common/backend.description.md",
@@ -205,6 +205,46 @@ def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path
     # Stale public recipe pruned; this_repo recipe untouched.
     assert not (dest / ".shared-llm/public/compose/agents/gone.yaml").exists()
     assert this_repo_recipe.read_text() == demo_before
+
+
+def test_copy_excludes_configured_recipe_and_prunes_stale_copy(tmp_path: Path) -> None:
+    """A recipe whose kit source path is in the config `exclude` list is never
+    synced into public/compose/, and a stale copy already there is pruned — while a
+    non-excluded recipe still syncs normally (exclude is selective, not a nuke)."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    cfg = _cfg(m, dest, ["cc", "pi"])
+    cfg["exclude"] = ["compose/skills/python.yaml"]
+
+    # Fake KIT with two self-contained recipes (no layer refs → nothing gates the
+    # sync): one kept, one named in exclude. Both WOULD sync absent the exclude,
+    # so a missing python.yaml proves the exclude — not a missing-inputs skip.
+    kit = tmp_path / "kit"
+    kshared = kit / ".shared-llm/public"
+    _write(kshared / "compose/agents/backend.yaml", yaml.safe_dump({
+        "type": "agent", "name": "backend", "inputs": [],
+        "output": ".claude/agents/backend.md",
+    }, sort_keys=False))
+    _write(kshared / "compose/skills/python.yaml", yaml.safe_dump({
+        "type": "skill", "name": "python", "inputs": [],
+        "output": ".claude/skills/python/SKILL.md",
+    }, sort_keys=False))
+    m.project_root = lambda: kit
+
+    # A stale copy of the EXCLUDED recipe already at the destination → must be pruned.
+    _write(dest / ".shared-llm/public/compose/skills/python.yaml",
+           "type: skill\nname: python\ninputs: []\noutput: x\n")
+
+    m.do_copy(cfg, _quiet(m))
+
+    # Non-excluded recipe synced normally.
+    assert (dest / ".shared-llm/public/compose/agents/backend.yaml").exists(), \
+        "non-excluded recipe should still sync"
+    # Excluded recipe never synced, and its stale copy was pruned.
+    assert not (dest / ".shared-llm/public/compose/skills/python.yaml").exists(), \
+        "excluded recipe must be absent from the destination (skipped + stale copy pruned)"
 
 
 # --- compose ---------------------------------------------------------------
@@ -299,8 +339,8 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     # A minimal kit that ships the demo's common layers, so the public sweep keeps
     # them (a real destination's public/ layers are always kit-provided).
     kit = tmp_path / "kit"
-    _write(kit / ".shared-llm/layers/skills/common/demo/description.md", "A demo skill.\n")
-    _write(kit / ".shared-llm/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
+    _write(kit / ".shared-llm/public/layers/skills/common/demo/description.md", "A demo skill.\n")
+    _write(kit / ".shared-llm/public/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
     m.project_root = lambda: kit
     # Seed the hub so copy has something to propagate.
     _write(m.DEFAULT_SOURCE / "layers/llm/common/x.md", "hub common.\n")
