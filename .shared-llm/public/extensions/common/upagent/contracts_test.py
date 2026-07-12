@@ -88,6 +88,23 @@ def test_order_env_optional_absent_ok() -> None:
     contracts.parse_order(json.dumps(_valid_order()))  # no env key → fine
 
 
+def test_order_effort_optional_absent_ok() -> None:
+    contracts.parse_order(json.dumps(_valid_order()))  # no effort key → fine
+
+
+def test_order_effort_string_ok() -> None:
+    order = _valid_order()
+    order["effort"] = "high"
+    assert contracts.parse_order(json.dumps(order))["effort"] == "high"
+
+
+def test_order_effort_non_string_fails() -> None:
+    bad = _valid_order()
+    bad["effort"] = 3
+    with pytest.raises(ContractError, match="effort"):
+        contracts.parse_order(json.dumps(bad))
+
+
 def test_not_json_fails() -> None:
     with pytest.raises(ContractError, match="not valid JSON"):
         contracts.parse_order("{not json")

@@ -61,6 +61,20 @@ def test_resolve_unknown_harness_fails() -> None:
         recruiter.resolve_launch_command(_order(harness="pi"), _roster())
 
 
+def test_resolve_effort_substitutes() -> None:
+    roster = {"harnesses": {"claude": "claude --model {model} --effort {effort}"}}
+    cmd = recruiter.resolve_launch_command(_order(effort="high"), roster)
+    assert "--effort high" in cmd
+
+
+def test_resolve_effort_absent_substitutes_empty() -> None:
+    # An order without `effort` formats {effort} as "" (order.get default) — templates that
+    # use the placeholder rely on the leader always resolving an effort (default `medium`).
+    roster = {"harnesses": {"claude": "claude effort:[{effort}]"}}
+    cmd = recruiter.resolve_launch_command(_order(), roster)
+    assert "effort:[]" in cmd
+
+
 def test_resolve_unknown_placeholder_fails() -> None:
     roster = {"harnesses": {"claude": "claude {model} {bogus_field}"}}
     with pytest.raises(RecruiterError, match="unknown placeholder"):

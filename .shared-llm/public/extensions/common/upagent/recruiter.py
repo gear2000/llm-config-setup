@@ -69,8 +69,10 @@ def default_roster_path() -> str:
             return str(this_repo)
     return str(HERE / "upagent.yaml")
 # Placeholders a launch template may use. The template author decides how each harness
-# consumes them; the Recruiter only substitutes.
-TEMPLATE_FIELDS = ("model", "agent", "cwd", "instructions_path", "result_path")
+# consumes them; the Recruiter only substitutes. A field absent from the order substitutes
+# as "" — so a template flag like `--effort {effort}` needs the order to actually carry a
+# value, or the harness CLI will eat the next token as the flag's value.
+TEMPLATE_FIELDS = ("model", "agent", "cwd", "instructions_path", "result_path", "effort")
 
 
 class RecruiterError(RuntimeError):

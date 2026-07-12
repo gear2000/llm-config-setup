@@ -10,11 +10,22 @@
 # harness as a Herdr pane. It never decides the agent.
 #
 # Each template is a Python str.format() string. Available placeholders:
-#   {model}             resolved model id from the route llm_profile (may be empty for claude)
+#   {model}             resolved model id from the route llm_profile (the route schema requires
+#                       a model per profile, so this is never empty on a route-driven order —
+#                       which matters, because a flag like `--model {model}` handed an empty
+#                       value would make the CLI eat the next token as the model)
 #   {agent}             the persona/agent name from the route stage entry
+#   {effort}            reasoning effort from the route llm_profile — the leader resolves it
+#                       to `medium` when the profile omits it, so it is never empty
 #   {cwd}               the phase worktree (also set as the pane's --cwd)
 #   {instructions_path} absolute path to the stage brief the worker must read
 #   {result_path}       absolute path the worker MUST write result.json to
+#
+# Model-id shapes differ per harness: claude takes an alias or full name (`opus`,
+# `claude-opus-4-8`) plus `--effort low|medium|high|xhigh|max`; codex takes a bare id
+# (`gpt-5.5`, `gpt-5.5-codex`) plus `-c model_reasoning_effort=<level>`; pi takes
+# `provider/id` with an optional `:<thinking>` suffix (`openai-codex/gpt-5.5:high`), so
+# for pi the effort rides INSIDE {model} and {effort} is not used.
 #
 # IMPORTANT: because templates are str.format() strings, any LITERAL brace must be DOUBLED —
 # write `${{VAR}}` for a shell variable and `{{a,b}}` for a literal brace group. A single
@@ -31,22 +42,36 @@
 #   codex  → --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
 #   pi     → --approve                          (trusts project-local files for the run)
 #   cursor → --print                            (non-interactive)
+#
+# PI WORKERS RUN INSULATED. `--no-extensions` turns off extension discovery so a broken
+# globally-installed extension can never brick orchestrated workers (a half-installed
+# extension once rerouted every bash/read call through a missing binary — every worker
+# died on its first tool call). Explicit `-e` paths still load, and one is REQUIRED:
+# Herdr's pi integration (`herdr integration install pi` puts it at
+# $HOME/.pi/agent/extensions/herdr-agent-state.ts) is what reports the pane's
+# agent-status — without it the Recruiter's `herdr wait agent-status --status done`
+# never fires and every pi hire times out to blocked. Interactive pi sessions are
+# untouched — they keep the full extension set. Note pi has NO --agent flag: the
+# persona comes to the worker through the stage brief, not the CLI.
 
 harnesses:
   claude: >-
-    claude --dangerously-skip-permissions --agent {agent}
+    claude --dangerously-skip-permissions --agent {agent} --model {model} --effort {effort}
     "Read {instructions_path} and do exactly that one stage in {cwd}.
     When finished, write your result.json to {result_path} (verdict: passed|failed|blocked,
     a revisit list of stage-ids on failure, and a full_log pointer to your session transcript)."
 
   codex: >-
     codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+    --model {model} -c model_reasoning_effort={effort}
     "Read {instructions_path} and do exactly that one stage in {cwd}.
     Write result.json to {result_path} (verdict + revisit + full_log)."
 
   pi: >-
-    pi --approve --model {model} --agent {agent}
-    "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}."
+    pi --approve --no-extensions -e "$HOME/.pi/agent/extensions/herdr-agent-state.ts"
+    --model {model}
+    "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}
+    (verdict + revisit + full_log)."
 
   cursor: >-
     cursor-agent --print --model {model}

@@ -106,6 +106,12 @@ def parse_order(text: str) -> dict:
     # harness side); enforce the key exists and is a string.
     if not isinstance(order.get("model"), str):
         raise ContractError("order.json: `model` must be a string (may be empty)")
+    # `effort` is optional (a roster template may substitute `{effort}` into a flag like
+    # claude's --effort or codex's -c model_reasoning_effort=). When present it must be a
+    # string; the leader resolves it from the route llm_profile (`medium` when the profile
+    # omits it), so a template that uses {effort} never formats an empty value.
+    if "effort" in order and not isinstance(order["effort"], str):
+        raise ContractError("order.json: `effort` must be a string when present")
     # Optional `env` must be a flat str->str map when present (injected via `pane split --env`).
     env = order.get("env")
     if env is not None:
