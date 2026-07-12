@@ -8,12 +8,14 @@ default:
 # The command surface is small on purpose: init once, configure once per repo,
 # update whenever layers change.
 #
-# Optional tool modules live under .shared-llm/public/extensions/this_repo/<module>/
-# (each a self-contained directory: script + config + its own justfile) and are
-# imported below. To adopt one in a destination repo: copy the WHOLE module
-# directory to the same relative path and add the same import line.
+# Tool modules are self-contained directories (script + config + own justfile),
+# imported below. PUBLIC modules live under .shared-llm/public/extensions/common/
+# and are kit-synced to every destination (import the same lines there);
+# this_repo modules under .shared-llm/public/extensions/this_repo/ are repo-owned.
 
-import '.shared-llm/public/extensions/this_repo/specialist/justfile'
+import '.shared-llm/public/extensions/common/upagent/justfile'
+import '.shared-llm/public/extensions/common/specialist/justfile'
+import '.shared-llm/public/extensions/common/herdr/justfile'
 import '.shared-llm/public/extensions/this_repo/pi-hub/justfile'
 import '.shared-llm/public/extensions/this_repo/tf/justfile'
 

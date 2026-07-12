@@ -1,0 +1,80 @@
+# Herdr runner entry module — justfile-driven bring-up and plan kickoff.
+#
+# Herdr runs agents NATIVELY in panes (visible TUIs, agent-status tracked in the
+# sidebar); nothing here ever runs a harness headless. These recipes are the
+# alternative entry point to starting Claude Code / Pi by hand and typing the
+# slash command — `just` drives the Herdr socket directly.
+#
+# This module is PUBLIC (kit-synced) and lands in a destination at
+#   .shared-llm/public/extensions/common/herdr/
+# To adopt, import it (plus its two sibling engines) from your root justfile:
+#   import '.shared-llm/public/extensions/common/upagent/justfile'
+#   import '.shared-llm/public/extensions/common/specialist/justfile'
+#   import '.shared-llm/public/extensions/common/herdr/justfile'
+#
+# Requires the `herdr` CLI on PATH with a running Herdr. The engines are driven
+# over the Herdr unix socket, so these work from any shell (HERDR_ENV is set
+# explicitly where an engine insists on it).
+#
+# FUTURE: a `herdr-plan-from-issue <github-or-linear-ref>` recipe can fetch the
+# plan/details from a GitHub or Linear issue into a run dir (plan.md +
+# route.yaml) and then delegate to `herdr-plan` — the kickoff below stays the
+# single entry seam, so issue-driven runs are an additive fetcher, not a fork.
+
+# Bring up the always-up shared-services workspace: UpAgent Recruiter + Specialist
+# Librarian, each in its own role-labeled pane, registered in the agents sidebar.
+herdr-up:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py up
+    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py up
+
+# Report both hubs.
+herdr-status:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py status
+    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py status
+
+# Tear down the shared services (the Librarian pane via its engine; the
+# Recruiter pane via the pane id its state file recorded).
+herdr-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py down || true
+    state="${UPAGENT_STATE:-/tmp/.upagent/recruiter.json}"
+    if [ -f "$state" ]; then
+        pane=$(${PYTHON_BIN:-python3} -c "import json;print(json.load(open('$state'))['recruiter_pane'])")
+        herdr pane close "$pane" >/dev/null 2>&1 || true
+        rm -f "$state"
+        echo "down: closed recruiter pane $pane"
+    else
+        echo "down: no recruiter state file"
+    fi
+
+# Kick off a checked plan through the Herdr-native runner with a FRESH TUI agent
+# in a fresh `<slug>` cockpit workspace — no manual harness start, no typing the
+# slash command. `dir` is the run dir holding plan.md + route.yaml; the slug is
+# its basename. The TUI agent (running /herdr-run) gates the pair with the
+# meta-plan check, finishes the cockpit layout, and drives the phases; workers
+# are hired per stage through the Recruiter, so run `just herdr-up` first.
+#
+#   just herdr-plan ops/work-log/2026-07-12/my-feature
+#   just herdr-plan ops/work-log/2026-07-12/my-feature pi
+herdr-plan dir harness="claude":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="$(realpath "{{dir}}")"
+    plan="$dir/plan.md"; route="$dir/route.yaml"
+    [ -f "$plan" ]  || { echo "error: $plan not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
+    [ -f "$route" ] || { echo "error: $route not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
+    slug="$(basename "$dir")"
+    repo="{{invocation_directory()}}"
+    case "{{harness}}" in
+        claude) launch="claude" ;;
+        pi)     launch="pi" ;;
+        *) echo "error: unknown harness '{{harness}}' (claude|pi)" >&2; exit 1 ;;
+    esac
+    out=$(herdr workspace create --label "$slug" --no-focus)
+    pane=$(echo "$out" | ${PYTHON_BIN:-python3} -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
+    herdr pane rename "$pane" "tui-agent" >/dev/null 2>&1 || true
+    # Native TUI in the pane — the prompt is the /herdr-run invocation.
+    herdr pane run "$pane" "cd '$repo' && $launch '/herdr-run --plan $plan --route $route --slug $slug'"
+    echo "kicked off: workspace '$slug' pane $pane — $launch running /herdr-run"
+    echo "watch it in Herdr; run 'just herdr-up' first if shared-services is not up"

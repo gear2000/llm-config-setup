@@ -1,25 +1,24 @@
 # UpAgent Hub module (Recruiter over Herdr) — imported by the root justfile:
-#   import '.shared-llm/public/extensions/common/upagent/justfile'   # in a destination
-#   import '.shared-llm/extensions/common/upagent/justfile'          # in the kit itself
+#   import '.shared-llm/public/extensions/common/upagent/justfile'
 #
 # The Recruiter is the always-up broker that hires a fresh worker per work order. It runs
 # inside Herdr (HERDR_ENV=1) and drives the running Herdr over its unix socket. The launch
 # roster lives in upagent.yaml (template: upagent.yaml.example); a split destination points
 # $UPAGENT_CONFIG at its own repo-owned (this_repo) roster.
 #
-# `{{justfile_directory()}}` resolves to this file's own dir, so the recipes find recruiter.py
-# whether the module sits at extensions/common/upagent/ (kit) or public/extensions/common/
-# upagent/ (a configured destination).
+# Paths anchor on `{{justfile_directory()}}` (the ROOT justfile's dir — in an imported
+# module that is the repo root, NOT this file's dir) + the module's fixed repo-relative
+# path, which is identical in the kit and in every destination.
 
 # Ensure the shared-services workspace + an armed Recruiter pane.
 upagent-up:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/recruiter.py up
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py up
 
 # Recruiter state.
 upagent-status:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/recruiter.py status
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py status
 
 # Hire one worker for one order.json. The phase leader normally signals the armed Recruiter
 # pane instead: `herdr pane run <recruiter> "recruit <order.json>"`.
 upagent-recruit order:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/recruiter.py recruit {{order}}
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py recruit {{order}}

@@ -12,4 +12,4 @@
 
 # Librarian: up | down | status | reindex | consult <consult.json>
 specialist-hub *ARGS:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/hub.py {{ARGS}}
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py {{ARGS}}
