@@ -163,6 +163,8 @@ Validate the installed Herdr command surface before launch (the documented basel
 
 **Workers are terminal and non-delegating.** A hired worker does its one stage, writes its result/compacted/handoff, and stops. It must not create further agents, teams, panes, nested harness sessions, or advisors. If it needs more help it returns `blocked` with the decision needed, and the leader decides the next move. A worker may consult the Specialist Hub Librarian for repo knowledge through the same files-plus-signal pattern as an order; that is a question, not delegation.
 
+**Consulting a specialist is MANDATORY, not voluntary, when one owns the area.** An agent does not know what it does not know: grepping cold finds *something* and proceeds confidently past the repo's actual conventions (language idiom, how to test, onboarding/cleanup steps, domain contracts). So the stage brief lists the repo's available specialists (from the Specialist Hub roster), and the worker MUST consult the owning specialist BEFORE deciding anything in a listed area — conventions are asked, never guessed. A worker that skipped a mandated consult and guessed is a blocking Stage 2 audit finding.
+
 ## Handoff between workers
 
 Every worker writes a short, versioned handoff before its pane closes so the next same-role worker — or the leader — resumes with immediate context instead of a cold start. The contract lives in the shared meta-runner handoff protocol; keep it to the `phases/<phase-id>/handoffs/<role>-vN.md` path, never overwritten.
@@ -209,7 +211,7 @@ A meta run creates one phase leader per phase (created, then destroyed at phase 
 - performs the pre-flight boundary/dependency check before any stage writes code;
 - runs `stage-0-alignment` first when `accuracy: high`;
 - places exactly one stage work order at a time to the Recruiter, and reads the worker's `result.json`;
-- injects the stage instructions, route details, worktree branch, deterministic merge timing, and the non-delegation rule into `instructions.md`;
+- injects the stage instructions, route details, worktree branch, deterministic merge timing, the non-delegation rule, and the available-specialist roster with the mandatory-consult rule into `instructions.md`;
 - records evidence and stage outcomes in `phase-status.md`;
 - enforces stage-level `revisit` backtracking (replay forward, increment try) and the `stage_try_budget` → advisor → human ladder;
 - enforces loops back to Stage 1 when Stage 2 raises blocking audit findings;
