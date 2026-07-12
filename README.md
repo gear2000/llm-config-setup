@@ -247,7 +247,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
 | `team-pulse` | Tiny single-purpose heartbeat agent for teams. On a fixed interval, pings the team leader with a… |
 
-### Slash-command skills (35)
+### Slash-command skills (25)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only, everything else ships to both. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -269,24 +269,14 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `do-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
 | `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
-| `hub-connect` | Connect THIS Claude session to a running meta-orchestrator message hub (the Go hub a Pi brain… |
-| `meta-auto-run` | The single kickoff workflow the Meta-ORCH brain sends to a freshly spawned Claude Code TUI session.… |
-| `meta-autorun` | The single kickoff workflow the meta-orchestrator brain sends to a freshly spawned Claude Code TUI… |
-| `meta-cc` | Claude Code-side meta runner entrypoint. Consumes a checked runnable `plan.md + route.yaml` pair… |
+| `herdr-phase` | Run one canonical plan phase as the Herdr-native phase leader, sent to a cockpit pane by… |
+| `herdr-run` | Kick off a checked runnable `plan.md + route.yaml` pair through the Herdr-native meta runner.… |
 | `meta-cc-plan-and-grill` | Convenience wrapper concept for Claude Code: run the normal `/cc-plan-and-grill` front-door… |
-| `meta-connect` | Connect THIS Claude session to a running meta-orchestrator message hub (the Go hub a Pi brain… |
-| `meta-herdr` | Run a checked runnable `plan.md + route.yaml` pair through the Herdr-visible meta runner. Requires… |
-| `meta-herdr-phase` | Phase Lead Agent command for Meta-Herdr. Runs one canonical plan phase inside Herdr using a… |
 | `meta-plan-check` | Check whether a canonical meta plan is runnable before semi-AFK execution. Invoked… |
 | `meta-plan-convert` | Convert a loose Markdown plan into the meta runner two-file shape before semi-AFK execution.… |
-| `meta-response` | A SMALL done-ping to the meta-orchestrator hub. Invoked `/meta-response --hub <hub-json-or-url>… |
-| `meta-run` | Run ONE phase of a plan FROM FILES — the file-based worker playbook the meta-orchestrator brain… |
 | `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
-| `response` | A SMALL done-ping to the meta-orchestrator hub. Invoked `/response --hub <hub-json-or-url> --output… |
-| `run-phase` | Run one phase of a canonical meta plan with a caller-supplied route profile. Invoked `/run-phase… |
-| `run_phase` | Run one phase of a canonical meta plan from files. Invoked `/run_phase --plan <plan.md> --phase… |
 | `security` | Generic security best practices. Use when implementing auth flows, secrets management, IAM… |
 <!-- END:inventory -->
 

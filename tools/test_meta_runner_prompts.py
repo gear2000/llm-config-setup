@@ -17,18 +17,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 LAYERS = REPO_ROOT / ".shared-llm/public/layers"
-PI_HUB = REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub"
+PI_HUB = REPO_ROOT / ".shared-llm/public/llm/pi/common/meta-plan"
 
 PHASE_PROTOCOL = LAYERS / "slash-commands/common/common/meta-runner-phase-protocol.md"
 HANDOFF_PROTOCOL = LAYERS / "slash-commands/common/common/meta-runner-handoff-protocol.md"
 COMPOSE_SLASH_COMMANDS = REPO_ROOT / ".shared-llm/public/compose/slash-commands"
-META_HERDR_PHASE = LAYERS / "slash-commands/common/common/meta-herdr-phase/command.md"
-META_HERDR = LAYERS / "slash-commands/common/common/meta-herdr/command.md"
-RUN_PHASE = LAYERS / "slash-commands/common/claude/run-phase/command.md"
-RUN_PHASE_FILE = LAYERS / "slash-commands/common/claude/run-phase-file/command.md"
+HERDR_PHASE = LAYERS / "slash-commands/common/common/herdr-phase/command.md"
 ADVERSARIAL_EVALUATOR_SRC = LAYERS / "agents/common/adversarial-evaluator.md"
 ADVERSARIAL_EVALUATOR_ARTIFACT = REPO_ROOT / ".claude/agents/adversarial-evaluator.md"
-BRAIN_EXECUTE_PLAN = PI_HUB / "brain-execute-plan-prompt.md"
 META_PLAN_FORMAT = PI_HUB / "meta-plan-format.md"
 
 # The canonical phrase every Stage 2 reference must use verbatim.
@@ -37,12 +33,8 @@ GATE_PHRASE = "unused intake / accepted-but-ignored inputs"
 # Every document that describes or references the Stage 2 audit must name the gate.
 STAGE2_REFERENCING_DOCS = [
     PHASE_PROTOCOL,
-    META_HERDR_PHASE,
-    META_HERDR,
-    RUN_PHASE,
-    RUN_PHASE_FILE,
+    HERDR_PHASE,
     ADVERSARIAL_EVALUATOR_SRC,
-    BRAIN_EXECUTE_PLAN,
     META_PLAN_FORMAT,
 ]
 
@@ -71,16 +63,6 @@ def test_stage2_audit_requires_multi_angle_detection() -> None:
     assert "lint, type, and static-analysis signals" in text
     assert "public interfaces and call-sites" in text
     assert "semantically inspect tests and implementation" in text
-
-
-def test_meta_herdr_stage2_report_requires_evidence_for_ignored_inputs() -> None:
-    text = META_HERDR_PHASE.read_text()
-
-    assert GATE_PHRASE in text
-    assert "name the ignored input" in text
-    assert "where it" in text and "accepted" in text
-    assert "expected behavioral role" in text
-    assert "affected public surface/call-site" in text
 
 
 def test_adversarial_evaluator_source_hunts_accepted_but_ignored_inputs() -> None:

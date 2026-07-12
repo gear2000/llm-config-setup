@@ -1,8 +1,0 @@
-type: skill
-name: meta-autorun
-description: .shared-llm/public/layers/slash-commands/common/claude/meta-autorun/description.md
-frontmatter:
-  argument-hint: "--plan <plan.md> --phase <instructions.md> --output <results.md> --hub <loc> [--team true] — all four required"
-inputs:
-- .shared-llm/public/layers/slash-commands/common/claude/meta-autorun/command.md
-output: .claude/skills/meta-autorun/SKILL.md

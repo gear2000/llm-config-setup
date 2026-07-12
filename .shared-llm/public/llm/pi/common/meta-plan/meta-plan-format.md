@@ -69,7 +69,7 @@ No model names, harness names, agents, teams, worker rosters, stage routing, bra
 ### Strict body rules (enforced by the runtime validator)
 
 The runtime validator (`meta-plan-schema.ts` — the same `validateRunnable` check
-`meta-cc-client run-phase` runs before launching any worker) is the authority, and it is stricter
+`/meta-plan-check` and `/herdr-run` run before launching any worker) is the authority, and it is stricter
 than the shape sketch above:
 
 - `##` (H2) headings are for phases ONLY — `## Phase <N> — <title>`, separated by an em dash

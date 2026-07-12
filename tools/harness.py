@@ -596,13 +596,9 @@ class Composer:
 
 HOME = Path.home()
 
-# Authored extensions present in the tree but intentionally NOT linked as Pi
-# runtime extensions. `meta-orchestrator-hub` is retired as a loadable extension —
-# its old runner index.ts registers a `--fresh` flag that collides with the resident
-# `meta-orchestrator` brain, so Pi refuses to load both. Its source is KEPT (the
-# transport-agnostic meta-plan schema/format substrate under it is still exercised by
-# `just test` via node), but it is no longer symlinked into ~/.pi/agent/extensions/.
-EXT_SKIP = {"meta-orchestrator-hub"}
+# Authored extensions present in the tree but intentionally NOT linked on this
+# clone. Empty in the portable kit — nothing to skip.
+EXT_SKIP = set()  # no private overrides in the portable kit
 
 # Managed sub-path markers. A link counts as "ours" only if its target contains
 # the repo-family token AND one of these — the guard that stops us ever removing
