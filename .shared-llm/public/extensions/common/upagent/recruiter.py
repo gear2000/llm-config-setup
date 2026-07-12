@@ -154,6 +154,22 @@ def _herdr(*args: str) -> None:
         raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
 
 
+def _report_state(pane: str | None, state: str, message: str) -> None:
+    """Surface the Recruiter in Herdr's agents sidebar (`pane report-agent`). BEST-EFFORT:
+    status display must never break a hire, so herdr faults are swallowed. `pane` may be
+    None when the caller cannot know its own pane (then this is a no-op)."""
+    if not pane:
+        return
+    try:
+        _herdr(
+            "pane", "report-agent", pane,
+            "--source", "upagent-recruiter", "--agent", "recruiter",
+            "--state", state, "--message", message,
+        )
+    except (RecruiterError, OSError):
+        pass
+
+
 def _write_blocked_result(order: dict, reason: str) -> None:
     """Ensure a result.json exists so the leader is never stranded. Only writes a fallback
     `blocked` result when the worker did not leave a valid one of its own.
@@ -234,6 +250,11 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     order_id = order["order_id"]
     fell_back = False
     worker_pane: str | None = None
+    # The armed recruit() runs inside the Recruiter's own pane, so HERDR_PANE_ID names it;
+    # flip the sidebar to working for the duration of the hire (best-effort, may be None
+    # when recruit is invoked from outside a Herdr pane).
+    my_pane = os.environ.get("HERDR_PANE_ID")
+    _report_state(my_pane, "working", f"hiring for {order_id}")
     try:
         # Everything that can fail lives INSIDE the fallback block, now that order_id is known, so
         # a bad roster / launch / Herdr call still writes a blocked result and emits DONE rather
@@ -276,6 +297,7 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
             except (RecruiterError, OSError):
                 pass  # closing a gone pane (or a fork/exec fault) must not skip the DONE emit
     # The accelerator signal the leader waits on. The RESULT FILE is the real verdict.
+    _report_state(my_pane, "idle", f"last order: {order_id} ({'blocked' if fell_back else 'done'})")
     print(f"ORDER {order_id} DONE", flush=True)
     return 1 if fell_back else 0
 
@@ -349,6 +371,8 @@ def cmd_up(roster_path: str) -> int:
     state = {"workspace_id": workspace_id, "recruiter_pane": recruiter_pane, "roster": roster_path}
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
+    # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
+    _report_state(recruiter_pane, "idle", "armed — waiting for work orders")
     print(json.dumps({**state, "reused": reused}))
     return 0
 

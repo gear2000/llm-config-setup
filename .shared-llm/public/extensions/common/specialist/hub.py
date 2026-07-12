@@ -338,6 +338,14 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
         "repo_root": str(cfg["repo_root"]),
     }
     paths(cfg)["state"].write_text(json.dumps(state, indent=2) + "\n")
+    # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
+    # BEST-EFFORT: status display must never break bring-up.
+    _herdr(
+        "pane", "report-agent", librarian,
+        "--source", "specialist-librarian", "--agent", "librarian",
+        "--state", "idle", "--message", f"{len(cfg['agents'])} specialists indexed",
+        check=False,
+    )
     print(f"up: {'reused' if reused else 'created'} librarian pane {librarian} "
           f"in workspace {workspace}")
 
