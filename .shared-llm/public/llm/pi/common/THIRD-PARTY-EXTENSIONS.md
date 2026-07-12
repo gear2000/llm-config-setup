@@ -50,9 +50,10 @@ pi install npm:@juicesharp/rpiv-btw@1.12.0     # review-plan-implement-verify wo
 # Added:
 pi install npm:pi-markdown-preview@0.10.0      # rendered markdown / Mermaid / LaTeX preview
 pi install npm:@plannotator/pi-extension@0.20.1 # browser-based plan / diff / PR review UI
-pi install npm:@hypabolic/pi-hypa@0.1.6        # compress noisy tool output out of context
 pi install npm:pi-simplify@0.2.2               # review recently changed code for clarity
 pi install npm:@quintinshaw/pi-dynamic-workflows@2.10.0 # dynamic workflows / subagent fan-out
+pi install npm:pi-intercom@0.6.0               # 1:1 messaging between Pi sessions
+pi install npm:@ayulab/pi-rewind@0.4.2         # /rewind checkpoint navigation
 ```
 
 ### Runtime dependencies (the kit never installs these — install them yourself if you want the feature)
@@ -62,6 +63,12 @@ pi install npm:@quintinshaw/pi-dynamic-workflows@2.10.0 # dynamic workflows / su
   - A **Chromium-based browser** (Chrome / Brave / Edge / Chromium) for terminal/PNG preview. A Chrome binary is present here (`/usr/bin/google-chrome`). Set `PUPPETEER_EXECUTABLE_PATH` to override detection.
   - Optional: Mermaid CLI for Mermaid-in-PDF.
 - **@plannotator/pi-extension** opens reviews in your **default browser**. Requires **Pi >= 0.74.0**.
+
+## Retired to opt-in: @hypabolic/pi-hypa (2026-07-12)
+
+`@hypabolic/pi-hypa` (compress noisy tool output out of context) was in the default set and is now **opt-in only**, commented out in the manifest. It reroutes **every** pi bash / read / grep / find / ls call through an external `hypa` CLI binary — so a half-installed Hypa (binary not on `PATH`, pi harness never registered with `hypa init`) breaks every tool call in every pi session: shell commands die with `hypa: command not found` (exit 127) and file reads with `Error: fetch failed`. That failure mode took down orchestrated pi workers and interactive sessions alike.
+
+To opt in: put `hypa` on `PATH`, run `hypa init --global --agent pi`, verify with `hypa doctor`, then uncomment its manifest line and re-run `tools/install-pi-extensions.sh`.
 
 ## Skipped: pi-cursor-sdk (opt-in; this project doesn't use Cursor)
 
@@ -75,7 +82,7 @@ pi install npm:@quintinshaw/pi-dynamic-workflows@2.10.0 # dynamic workflows / su
 
 To reproduce this exact set anywhere Pi is installed (>= 0.74.0):
 
-1. Copy `third-party-extensions.txt` and `tools/install-pi-extensions.sh` into the project (or just run the ten `pi install` commands above).
+1. Copy `third-party-extensions.txt` and `tools/install-pi-extensions.sh` into the project (or just run the `pi install` commands above).
 2. Run `tools/install-pi-extensions.sh`.
-3. Confirm with `pi list` — you should see the ten entries.
-4. For pi-cursor-sdk, first ensure Pi >= 0.79.1, then uncomment its manifest line and re-run.
+3. Confirm with `pi list` — you should see every uncommented manifest entry.
+4. For the opt-in extensions (pi-cursor-sdk, @hypabolic/pi-hypa), satisfy their prerequisites first, then uncomment their manifest lines and re-run.

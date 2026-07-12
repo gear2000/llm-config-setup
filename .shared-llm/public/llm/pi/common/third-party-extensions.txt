@@ -40,10 +40,6 @@ npm:pi-markdown-preview@0.10.0
 #   Requires Pi >= 0.74.0. Opens reviews in your default browser.
 npm:@plannotator/pi-extension@0.20.1
 
-# @hypabolic/pi-hypa — keeps noisy tool output out of the context window
-#   (rewrites shell commands through Hypa for deterministic compression).
-npm:@hypabolic/pi-hypa@0.1.6
-
 # pi-simplify — reviews recently changed code for clarity, consistency,
 #   and maintainability. (Declares peer range Pi >=0.74.0 <0.76.0 but installs
 #   and runs fine on newer Pi — npm warns, doesn't block.)
@@ -67,3 +63,14 @@ npm:@ayulab/pi-rewind@0.4.2
 #   To enable in a project that uses Cursor: uncomment the line below and run
 #   tools/install-pi-extensions.sh. Needs Pi >= 0.79.1 and Node >= 22.19.
 # npm:pi-cursor-sdk@0.1.42
+
+# @hypabolic/pi-hypa — keeps noisy tool output out of the context window
+#   (rewrites shell commands through Hypa for deterministic compression).
+#   OPT-IN ONLY (retired from the default set 2026-07-12): it reroutes EVERY
+#   pi bash/read/grep/find/ls call through an external `hypa` binary, so a
+#   half-installed Hypa (binary not on PATH, harness never registered) bricks
+#   every tool call in every pi session — "hypa: command not found" on shell
+#   commands and "Error: fetch failed" on file reads. Before uncommenting:
+#   put `hypa` on PATH AND run `hypa init --global --agent pi`, then verify
+#   with `hypa doctor`.
+# npm:@hypabolic/pi-hypa@0.1.6
