@@ -23,7 +23,8 @@ Consult protocol (files + signal, mirroring the UpAgent order/result pattern):
     caller:    herdr pane run <librarian> "consult <consults/<id>.json>"
     librarian: read+route the consult -> herdr pane split (transient specialist in shared-services)
     librarian: herdr pane run <specialist> "<cmd, briefed with the question + answer contract>"
-    librarian: herdr wait agent-status <specialist> --status done
+    librarian: herdr wait agent-status <specialist> --status done (or polls for answer.json
+               directly when the launch command targets codex — see CODEX_CMD_MARKER)
     specialist: writes answer.json {consult_id, answer, citations:[file:line, ...]}
     librarian: validate answer.json -> herdr pane close <specialist> -> print "CONSULT <id> DONE"
     caller:    herdr wait output <librarian> --match "CONSULT <id> DONE" --timeout <ms> -> read answer.json
@@ -60,6 +61,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -78,6 +80,14 @@ LIBRARIAN_PANE_LABEL = "librarian"
 DEFAULT_RUNTIME = "/tmp/.herdr-specialist"
 # How long the Librarian waits for a transient specialist to finish answering (ms).
 CONSULT_TIMEOUT_MS = 600_000
+RESULT_POLL_INTERVAL_S = 2.0
+# A specialist's `cmd` template has no structured harness field (unlike the UpAgent Recruiter's
+# order.harness) — detect a codex-launched specialist from its launch command instead. Codex's
+# Herdr integration never reports an agent-status transition to "done" (only a SessionStart
+# registration), so `herdr wait agent-status --status done` structurally never fires for it —
+# verified live 2026-07-12 against the sibling UpAgent Recruiter bug (same root cause, same
+# fix). Poll for the answer file instead; it's the contract's real source of truth.
+CODEX_CMD_MARKER = "codex exec"
 
 
 # --- config -------------------------------------------------------------------
@@ -400,6 +410,18 @@ class ConsultFailure(RuntimeError):
     emitted — the caller's bounded wait must never be left to hang."""
 
 
+def _wait_for_answer_file(answer_path: Path, timeout_ms: int) -> None:
+    """Poll for the specialist's answer file instead of waiting on herdr agent-status. Used
+    when the launch command targets a harness whose integration never reports a "done"
+    transition (codex). Fail-loud on timeout, same as the agent-status wait it replaces."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if answer_path.is_file():
+            return
+        time.sleep(RESULT_POLL_INTERVAL_S)
+    raise ConsultFailure(f"timed out waiting for {answer_path} to appear")
+
+
 def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
     """Best-effort (consult_id, answer_path) from a malformed consult.json, so the Librarian can
     still leave a failure answer + emit DONE instead of stranding the caller. Returns None if the
@@ -497,8 +519,11 @@ def cmd_consult(args: argparse.Namespace) -> None:
 
         launch = render_launch(entry["cmd"], prompt, prompt_file)
         _herdr("pane", "run", specialist_pane, launch)
-        _herdr("wait", "agent-status", specialist_pane,
-               "--status", "done", "--timeout", str(CONSULT_TIMEOUT_MS))
+        if CODEX_CMD_MARKER in entry["cmd"]:
+            _wait_for_answer_file(Path(consult["answer_path"]), CONSULT_TIMEOUT_MS)
+        else:
+            _herdr("wait", "agent-status", specialist_pane,
+                   "--status", "done", "--timeout", str(CONSULT_TIMEOUT_MS))
         # The specialist must have written a valid answer.json echoing this consult_id.
         cc.load_answer(consult["answer_path"], expected_consult_id=consult_id)
     except (ConsultFailure, ConfigError, cc.ConsultError, OSError, subprocess.CalledProcessError,

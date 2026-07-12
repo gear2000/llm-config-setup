@@ -11,7 +11,10 @@ The Recruiter then, for that one order:
   2. resolves the per-harness launch template from the roster (upagent.yaml);
   3. splits a fresh worker pane from the order's cockpit pane (into the cockpit), with the
      order's cwd (the phase worktree) and env (optional OTel vars);
-  4. runs the worker, then blocks on `herdr wait agent-status <worker> --status done`;
+  4. runs the worker, then blocks until it's done — `herdr wait agent-status <worker>
+     --status done` for most harnesses, or polling for the result file directly for a harness
+     in POLL_RESULT_FILE_HARNESSES (codex — its Herdr integration never reports a "done"
+     transition, only a SessionStart registration);
   5. reads + validates the worker's result.json (must echo the order_id);
   6. closes the worker pane;
   7. emits `ORDER <order_id> DONE` — the signal the leader waits on.
@@ -36,6 +39,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -46,6 +50,14 @@ import contracts  # noqa: E402  (sibling module, path-imported)
 
 SHARED_SERVICES_WORKSPACE = "shared-services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
+RESULT_POLL_INTERVAL_S = 2.0
+# Harnesses whose Herdr integration never reports an agent-status transition to "done" (only a
+# SessionStart registration) — `herdr wait agent-status --status done` structurally never fires
+# for these, verified live 2026-07-12 (a codex worker finished and wrote a valid result.json
+# while the wait sat stuck for its full timeout). Completion is detected by polling for the
+# result file instead, which is the contract's real source of truth regardless of how it's
+# detected.
+POLL_RESULT_FILE_HARNESSES = frozenset({"codex"})
 # Where `up` records the resolved workspace + Recruiter pane so `status`/callers can find it.
 STATE_FILE = Path(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")).expanduser()
 
@@ -154,6 +166,18 @@ def _herdr(*args: str) -> None:
     proc = subprocess.run(["herdr", *args], capture_output=True, text=True)
     if proc.returncode != 0:
         raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
+
+
+def _wait_for_result_file(result_path: Path, timeout_ms: str) -> None:
+    """Poll for the worker's result file instead of waiting on herdr agent-status. Used for
+    harnesses in POLL_RESULT_FILE_HARNESSES, whose integration hook never reports a "done"
+    transition. Fail-loud on timeout, same as the agent-status wait it replaces."""
+    deadline = time.monotonic() + int(timeout_ms) / 1000
+    while time.monotonic() < deadline:
+        if result_path.is_file():
+            return
+        time.sleep(RESULT_POLL_INTERVAL_S)
+    raise RecruiterError(f"timed out waiting for {result_path} to appear")
 
 
 def _report_state(pane: str | None, state: str, message: str) -> None:
@@ -281,7 +305,10 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
 
         _herdr("pane", "run", worker_pane, launch)
         timeout = str(order.get("timeout_ms", DEFAULT_TIMEOUT_MS))
-        _herdr("wait", "agent-status", worker_pane, "--status", "done", "--timeout", timeout)
+        if order["harness"] in POLL_RESULT_FILE_HARNESSES:
+            _wait_for_result_file(Path(order["result_path"]), timeout)
+        else:
+            _herdr("wait", "agent-status", worker_pane, "--status", "done", "--timeout", timeout)
 
         # The worker must have written a valid result.json echoing this order_id.
         contracts.load_result(order["result_path"], expected_order_id=order_id)
