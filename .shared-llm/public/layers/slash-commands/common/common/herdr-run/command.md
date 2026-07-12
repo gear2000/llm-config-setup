@@ -20,7 +20,7 @@ All required flags must be present. Fail loud rather than guessing.
 ## Pre-flight
 
 1. Verify `HERDR_ENV=1`. If not, stop with: `ERROR: /herdr-run must run inside a Herdr-managed pane.`
-2. Run `herdr pane list` to identify the current pane — this pane is the **tui-agent** (the bottom, full-width pane of the cockpit; the one the human talks to). Do not control Herdr from outside Herdr.
+2. Run `herdr pane list` to identify the current pane — this pane is the **tui-agent** (the top, full-width pane of the cockpit; the one the human talks to). Do not control Herdr from outside Herdr.
 3. Validate the installed Herdr command surface (`herdr workspace list/create`, `herdr pane list/split/run/read/close`, `herdr wait output`, `herdr wait agent-status`). Adapt only after validating any local syntax differences.
 4. Read the plan and route profile and run the same gate as `/meta-plan-check <plan.md> <route.yaml>`. If it fails, stop **before** creating any workspace and tell the user to run `/meta-plan-convert` or fix the files. The check must confirm: canonical plan shape; `llm_profiles` defined; every phase to run has `lead.llm_profile`, `lead.agent`, `merge_back_at`, and its stage entries; `stage-0-alignment` present iff `accuracy: high`; worktree branch template, green checks, and log checks configured; all referenced profiles exist; each named agent resolves; Stage 2 (and stage-0's audit when high) independent from Stage 1.
 5. Resolve `<slug>` and `<run-root>`, then create the run tree root `<run-root>/<date>/<slug>/`. Freeze the originals into it (`plan.md`, `route.yaml`, and `research.md` if present) as versioned copies, and initialize `run-status.md`.
@@ -32,19 +32,19 @@ The runtime topology is one cockpit workspace plus one always-up peripheral work
 
 ```text
 ws: <slug>                     ← the run cockpit, one screen
-  ┌──────────────────────┬──────────────────────┐
-  │  phase-leader        │  worker              │  top-left: leader (replaced per phase)
-  │  (top-left)          │  (top-right)         │  top-right: ONE worker at a time
-  ├──────────────────────┴──────────────────────┤
-  │  tui-agent  (bottom, full width)            │  bottom: you talk HERE
-  └─────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────┐
+  │  tui-agent  (top, full width)               │  top: you talk HERE
+  ├──────────────────────┬──────────────────────┤
+  │  phase-leader        │  worker              │  bottom-left: leader (replaced per phase)
+  │  (bottom-left)       │  (bottom-right)      │  bottom-right: ONE worker at a time
+  └──────────────────────┴──────────────────────┘
 
 ws: shared-services            ← plan-agnostic · always up · peripheral
-  ├── recruiter   (UpAgent Hub)    takes a leader's order → spawns the worker INTO <slug> top-right
+  ├── recruiter   (UpAgent Hub)    takes a leader's order → spawns the worker INTO <slug> bottom-right
   └── librarian   (Specialist Hub) routes a question → transient specialist
 ```
 
-1. The cockpit is the workspace holding this (tui-agent) pane. Confirm or create it as `<slug>`. The phase-leader pane (top-left) is created and destroyed per phase; the worker pane (top-right) is created by the Recruiter, one worker at a time — so the cockpit never exceeds three panes.
+1. The cockpit is the workspace holding this (tui-agent) pane, which stays the top, full-width row. Confirm or create it as `<slug>`. The phase-leader pane (bottom-left) is created and destroyed per phase; the worker pane (bottom-right) is created by the Recruiter, one worker at a time — so the cockpit never exceeds three panes: TUI spanning the top, leader and worker sharing the bottom row.
 2. Bring up the **UpAgent Recruiter** by running `just upagent-up` at startup. It ensures the always-up `shared-services` workspace, arms a `recruit` shell function in the Recruiter pane against the resolved roster, and prints/persists `{workspace_id, recruiter_pane, roster}` (to `/tmp/.upagent/recruiter.json` by default, overridable via `UPAGENT_STATE`). Capture the printed `recruiter_pane` id — this is the address every phase leader signals with `herdr pane run <recruiter_pane> "recruit <order.json>"`. `just upagent-up` is idempotent: it reuses an existing `shared-services` and re-arms the pane. The roster it arms (the repo-owned `upagent.yaml`) holds pre-hardened per-harness launch templates — non-interactive bypass flags, harness-native model/effort flags, and an insulated pi launch (`--no-extensions` plus an explicit `-e` for Herdr's pi integration so agent-status reporting stays alive) — so neither the TUI nor a phase leader ever hand-crafts or "improves" a worker launch command: the route picks the profile, the roster does the launching. Bring up the **Specialist Hub Librarian** in the same workspace the same way when repo consults are configured.
 3. Each phase leader discovers `recruiter_pane` by reading the persisted UpAgent state file (`/tmp/.upagent/recruiter.json`, or `UPAGENT_STATE`) that `just upagent-up` wrote — so the leader signals the right pane without it being passed as a flag. The leader stamps its own live cockpit pane id into every order as `cockpit_pane` (since `herdr pane split` splits an existing source pane and has no `--workspace` flag), and the Recruiter spawns each worker by splitting from that `cockpit_pane` into the cockpit, beside the leader that ordered it.
 
@@ -52,11 +52,11 @@ ws: shared-services            ← plan-agnostic · always up · peripheral
 
 For each phase, in canonical order starting at `--start-phase` (respecting `--max-phases`):
 
-1. **Create one phase leader.** Split a top-left pane in the cockpit and launch the phase's `lead.llm_profile` + `lead.agent` there. Assemble the launch command from the validated route profile plus local harness capability; do not hard-code unsupported model names.
+1. **Create one phase leader.** Split the tui-agent pane DOWN (`herdr pane split <tui-pane> --direction down --no-focus`) so the leader lands as the bottom row — full width until the Recruiter's worker splits it into bottom-left/bottom-right; the TUI keeps the whole top. Launch the phase's `lead.llm_profile` + `lead.agent` there. Assemble the launch command from the validated route profile plus local harness capability; do not hard-code unsupported model names.
 2. **Hand the phase to the leader.** Send exactly one `/herdr-phase --phase <phase-id> --plan <plan.md> --route <route.yaml> --run-root <run-root>` invocation to the phase-leader pane. The leader owns the phase's stages, the Recruiter orders, stage-level backtracking, and `phase-status.md`.
 3. **Wait for the leader to finish, always bounded.** Use `herdr wait agent-status <leader-pane> --status done --timeout <ms>`. Every `herdr wait` MUST pass `--timeout` — without it Herdr's wait blocks forever. On timeout, read and validate `phases/<phase-id>/phase-result.json`: if it is present and valid, proceed with it; if it is missing or malformed, mark the phase `blocked` and stop for the human rather than looping on a wait that will never return.
 4. **Read `phase-result.json`.** It is the source of truth; pane output is evidence only.
-5. **Destroy the phase leader.** Close the top-left pane only after the result and evidence are persisted. One leader per phase — a re-run creates a fresh leader.
+5. **Destroy the phase leader.** Close the bottom-left (leader) pane only after the result and evidence are persisted. One leader per phase — a re-run creates a fresh leader.
 6. Append a `run-status.md` line for the phase outcome (phase id, pass number, verdict, and any `revisit`).
 
 ## Phase-level backtracking (forward-only)
