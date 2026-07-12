@@ -45,6 +45,11 @@ llm_profiles:
     harness: pi
     model: configured-default
 
+# model is the HARNESS-NATIVE id shape: claude → alias/full name (paired with effort);
+# codex → bare id (paired with effort); pi → provider/id[:thinking] (the :thinking
+# suffix IS pi's effort). effort is optional — the phase leader resolves it to `medium`
+# at order time when a profile omits it, so roster templates can always use {effort}.
+
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
 

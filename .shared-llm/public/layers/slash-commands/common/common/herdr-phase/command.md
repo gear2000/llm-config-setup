@@ -25,6 +25,7 @@ All four flags are required. Fail loud on any missing or unreadable path.
    - `merge_back_at` is Stage 3, Stage 4, or Stage 5;
    - worktree branch template, green checks, and log checks configured;
    - each referenced profile exists and each named agent resolves in its harness/project context;
+   - each profile's `model` is the harness-native id shape — claude: alias or full name (paired with `effort`); codex: bare id (paired with `effort`); pi: `provider/id[:thinking]` (the `:thinking` suffix is pi's effort). A `provider/…` model on a claude/codex profile, or a bare id on a pi profile, is a route error — fail loud, do not guess a translation;
    - Stage 2 (and, when high, stage-0's audit) is independent from Stage 1.
 4. Determine the current **pass** number: count existing `pass-<p>/` dirs under `phases/<phase-id>/` and use the next one (start at `pass-1`). Read `phase-status.md` if it exists to see where a prior pass left off.
 5. Run the pre-flight dependency/import safety check before any code stage (see the shared phase protocol). On a confirmed circular dependency, write a `blocked` `phase-result.json` and stop.

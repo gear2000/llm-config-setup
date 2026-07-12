@@ -24,8 +24,8 @@ an existing pane, so the order carries a pane to split from, not a workspace lab
 
 Durable files are the source of truth; Herdr only carries the go/done signal.
 
-- The phase leader writes `order.json` (harness, model, agent, cwd/worktree, instructions
-  path, result path, `cockpit_pane`) and signals the armed Recruiter pane:
+- The phase leader writes `order.json` (harness, model, agent, effort, cwd/worktree,
+  instructions path, result path, `cockpit_pane`) and signals the armed Recruiter pane:
   `herdr pane run <recruiter_pane> "recruit <order.json>"`. (`just upagent-up` arms a `recruit`
   shell function in the Recruiter pane and prints/persists its pane id.)
 - The Recruiter splits a fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree,
@@ -41,6 +41,29 @@ Durable files are the source of truth; Herdr only carries the go/done signal.
 
 `route.yaml` is authoritative for which harness/model/agent runs each stage. The Recruiter only
 holds a mechanical per-harness launch template (`upagent.yaml`) — it never picks the agent.
+
+## The roster (`upagent.yaml`) — how each harness launches
+
+The launch templates are pre-hardened; leaders and TUIs never hand-craft a worker command.
+Every template substitutes `{model}` / `{agent}` / `{effort}` / `{cwd}` /
+`{instructions_path}` / `{result_path}` from the order (`{effort}` is resolved by the leader
+from the route profile, `medium` when the profile omits it). Three properties every template
+must keep (see `upagent.yaml.example` for the full rationale):
+
+1. **Non-interactive.** Workers run unattended in panes — every template bypasses
+   trust/permission prompts (`claude --dangerously-skip-permissions`,
+   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check`,
+   `pi --approve`) or the hire hangs until the Recruiter's timeout.
+2. **Harness-native model ids.** claude takes an alias or full name (plus `--effort`);
+   codex takes a bare id (plus `-c model_reasoning_effort=`); pi takes
+   `provider/id[:thinking]`, so pi's effort rides inside the model string.
+3. **pi runs insulated.** `--no-extensions` plus an explicit
+   `-e $HOME/.pi/agent/extensions/herdr-agent-state.ts`. Discovery off means a broken
+   globally-installed extension can never brick automation; the explicit `-e` keeps Herdr's
+   pi integration loaded, which is what reports pane agent-status — without it,
+   `herdr wait agent-status --status done` never fires and every pi hire times out to
+   blocked. Workers are still full visible TUIs in panes (headless `-p` is never used);
+   interactive pi sessions keep the whole extension set.
 
 ## Adopt it
 

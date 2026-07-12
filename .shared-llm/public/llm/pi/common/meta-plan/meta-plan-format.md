@@ -105,6 +105,17 @@ llm_profiles:
     harness: pi
     model: configured-default
 
+# Profile rules (route authors get these wrong most often):
+#   - `model` must be the HARNESS-NATIVE id shape:
+#       claude → alias or full name (e.g. a configured claude alias); pairs with `effort`
+#       codex  → bare model id; pairs with `effort` (mapped to the CLI's reasoning-effort)
+#       pi     → `provider/id[:thinking]` — the optional `:thinking` suffix IS pi's effort,
+#                so a pi profile normally omits `effort`
+#     A `provider/…` model on a claude or codex profile (or a bare id on a pi profile)
+#     is a routing error — the worker CLI will reject or misread it.
+#   - `effort` is OPTIONAL. At order time the phase leader resolves it to `medium` when the
+#     profile omits it, so launch templates can always substitute `{effort}`.
+
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
 
