@@ -56,15 +56,16 @@ herdr-down:
 # are hired per stage through the Recruiter, so run `just herdr-up` first.
 #
 #   just herdr-plan ops/work-log/2026-07-12/my-feature
-#   just herdr-plan ops/work-log/2026-07-12/my-feature pi
-herdr-plan dir harness="claude":
+#   just herdr-plan ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
+#   just herdr-plan ops/work-log/2026-07-12/my-feature "" pi
+herdr-plan dir slug="" harness="claude":
     #!/usr/bin/env bash
     set -euo pipefail
     dir="$(realpath "{{dir}}")"
     plan="$dir/plan.md"; route="$dir/route.yaml"
     [ -f "$plan" ]  || { echo "error: $plan not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
     [ -f "$route" ] || { echo "error: $route not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
-    slug="$(basename "$dir")"
+    slug="{{slug}}"; [ -n "$slug" ] || slug="$(basename "$dir")"
     repo="{{invocation_directory()}}"
     case "{{harness}}" in
         claude) launch="claude" ;;
