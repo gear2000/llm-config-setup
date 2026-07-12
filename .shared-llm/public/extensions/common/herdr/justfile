@@ -21,23 +21,67 @@
 # route.yaml) and then delegate to `herdr-plan` — the kickoff below stays the
 # single entry seam, so issue-driven runs are an additive fetcher, not a fork.
 
-# Bring up the always-up shared-services workspace: UpAgent Recruiter + Specialist
-# Librarian, each in its own role-labeled pane, registered in the agents sidebar.
-herdr-up:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py up
-    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py up
+_UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/recruiter.py"
+_SPECIALIST := justfile_directory() + "/.shared-llm/public/extensions/common/specialist/hub.py"
 
-# Report both hubs.
+# Bring up the always-up shared services (UpAgent Recruiter + Specialist Librarian,
+# each in its own role-labeled pane in the `shared-services` workspace, registered
+# in Herdr's agents sidebar), then print the status table so you can SEE it is up.
+herdr-up:
+    ${PYTHON_BIN:-python3} {{_UPAGENT}} up
+    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} up
+    @{{just_executable()}} --justfile "{{justfile()}}" herdr-status
+
+# Status of the shared services as a table with ✓ up (green) / ✗ down (red).
 herdr-status:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py status
-    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py status
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ${PYTHON_BIN:-python3} - <<'PY'
+    import json, subprocess, os
+    G, R, DIM, RST = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
+    def live_panes():
+        try:
+            out = subprocess.run(["herdr","pane","list"], capture_output=True, text=True)
+            return {p["pane_id"] for p in json.loads(out.stdout)["result"]["panes"]}
+        except Exception:
+            return set()
+    panes = live_panes()
+    def read(p):
+        try: return json.load(open(p))
+        except Exception: return None
+    rows = []
+    # recruiter
+    rec = read(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json"))
+    if rec and rec.get("recruiter_pane") in panes:
+        rows.append(("recruiter", True, f"pane {rec['recruiter_pane']} · roster {os.path.basename(rec.get('roster',''))}"))
+    else:
+        rows.append(("recruiter", False, "not up — run `just herdr-up`"))
+    # librarian
+    lib = read(os.environ.get("SPECIALIST_STATE", "/tmp/.herdr-specialist/state.json"))
+    idx = read("/tmp/.herdr-specialist/index.json")
+    n = len(idx) if isinstance(idx, (dict, list)) else 0
+    if lib and lib.get("librarian_pane") in panes:
+        detail = f"pane {lib['librarian_pane']}" + (f" · {n} specialists" if n else "")
+        rows.append(("librarian", True, detail))
+    else:
+        rows.append(("librarian", False, "not up — run `just herdr-up`"))
+    W = max(len(d) for _,_,d in rows + [("","","Herdr shared services")])
+    bar = "─" * (W + 2)
+    print(f"┌──────────────┬────────┬{bar}┐")
+    print(f"│ hub          │ state  │ {'detail'.ljust(W)} │")
+    print(f"├──────────────┼────────┼{bar}┤")
+    for name, up, detail in rows:
+        mark = f"{G}✓ up  {RST}" if up else f"{R}✗ down{RST}"
+        print(f"│ {name.ljust(12)} │ {mark} │ {DIM}{detail.ljust(W)}{RST} │")
+    print(f"└──────────────┴────────┴{bar}┘")
+    PY
 
 # Tear down the shared services (the Librarian pane via its engine; the
-# Recruiter pane via the pane id its state file recorded).
+# Recruiter pane via the pane id its state file recorded), then show the table.
 herdr-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py down || true
+    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} down || true
     state="${UPAGENT_STATE:-/tmp/.upagent/recruiter.json}"
     if [ -f "$state" ]; then
         pane=$(${PYTHON_BIN:-python3} -c "import json;print(json.load(open('$state'))['recruiter_pane'])")
@@ -47,13 +91,21 @@ herdr-down:
     else
         echo "down: no recruiter state file"
     fi
+    {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
 
 # Kick off a checked plan through the Herdr-native runner with a FRESH TUI agent
 # in a fresh `<slug>` cockpit workspace — no manual harness start, no typing the
-# slash command. `dir` is the run dir holding plan.md + route.yaml; the slug is
-# its basename. The TUI agent (running /herdr-run) gates the pair with the
-# meta-plan check, finishes the cockpit layout, and drives the phases; workers
-# are hired per stage through the Recruiter, so run `just herdr-up` first.
+# slash command. `dir` is the run dir holding plan.md + route.yaml; `slug` names
+# the workspace (defaults to the dir basename). The TUI agent (running /herdr-run)
+# gates the pair with the meta-plan check, finishes the cockpit layout, and drives
+# the phases; workers are hired per stage through the Recruiter, so run
+# `just herdr-up` first.
+#
+# The TUI is launched fully NON-INTERACTIVE (claude --dangerously-skip-permissions
+# / pi --approve) — it trusts its cwd and never blocks on a trust/permission dialog
+# — and the harness self-registers as a Herdr agent (name `tui-agent`), so it shows
+# up in the agents sidebar and in Herdr's remote/phone agent list for you to watch
+# and drive on the move.
 #
 #   just herdr-plan ops/work-log/2026-07-12/my-feature
 #   just herdr-plan ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
@@ -67,15 +119,17 @@ herdr-plan dir slug="" harness="claude":
     [ -f "$route" ] || { echo "error: $route not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
     slug="{{slug}}"; [ -n "$slug" ] || slug="$(basename "$dir")"
     repo="{{invocation_directory()}}"
+    # Non-interactive launch flags per harness — a TUI that blocks on a trust or
+    # permission dialog stalls the whole run.
     case "{{harness}}" in
-        claude) launch="claude" ;;
-        pi)     launch="pi" ;;
+        claude) launch="claude --dangerously-skip-permissions" ;;
+        pi)     launch="pi --approve" ;;
         *) echo "error: unknown harness '{{harness}}' (claude|pi)" >&2; exit 1 ;;
     esac
     out=$(herdr workspace create --label "$slug" --no-focus)
     pane=$(echo "$out" | ${PYTHON_BIN:-python3} -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
     herdr pane rename "$pane" "tui-agent" >/dev/null 2>&1 || true
-    # Native TUI in the pane — the prompt is the /herdr-run invocation.
     herdr pane run "$pane" "cd '$repo' && $launch '/herdr-run --plan $plan --route $route --slug $slug'"
     echo "kicked off: workspace '$slug' pane $pane — $launch running /herdr-run"
-    echo "watch it in Herdr; run 'just herdr-up' first if shared-services is not up"
+    echo "the TUI self-registers as a Herdr agent (tui-agent) — watch it on desktop or phone"
+    echo "run 'just herdr-up' first if the status table shows the shared services down"

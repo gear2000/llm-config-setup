@@ -23,6 +23,14 @@
 # Every worker's job is the same shape: read the instructions, do the one stage, and write a
 # valid result.json (verdict + revisit + full_log pointer) before finishing — the Recruiter
 # blocks on the pane reaching agent-status `done` and then reads that file.
+#
+# NON-INTERACTIVE IS MANDATORY. A worker runs unattended in a pane, so every launch template
+# MUST bypass all trust/permission prompts or the worker hangs forever at a dialog (and the
+# Recruiter's wait times out). The bypass per harness:
+#   claude → --dangerously-skip-permissions   (also trusts the cwd, incl. a fresh worktree)
+#   codex  → --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+#   pi     → --approve                          (trusts project-local files for the run)
+#   cursor → --print                            (non-interactive)
 
 harnesses:
   claude: >-
@@ -37,7 +45,7 @@ harnesses:
     Write result.json to {result_path} (verdict + revisit + full_log)."
 
   pi: >-
-    pi --model {model} --agent {agent}
+    pi --approve --model {model} --agent {agent}
     "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}."
 
   cursor: >-
