@@ -1,0 +1,16 @@
+onboarding = false
+
+[theme]
+name = "catppuccin-latte"
+
+[keys]
+prefix = "ctrl+a"
+
+[ui]
+mouse_capture = false
+
+[ui.toast.clipboard]
+enabled = false
+
+[experimental]
+pane_history = false
