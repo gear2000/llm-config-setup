@@ -2,6 +2,10 @@
 
 # Cross-Harness Orchestration
 
+## Subagents
+
+Do not use subagents unless the human in the loop asks for it.
+
 ## Skills — shared across harnesses
 
 <!-- TODO(project): document your harness wiring here, or delete this layer and drop agents.md from agents-md/root.yaml inputs. -->
