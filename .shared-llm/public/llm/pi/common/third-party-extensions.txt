@@ -33,10 +33,6 @@ npm:pi-powerline-footer@0.5.4
 #   disables PDF/preview rendering; the extension still loads.
 npm:pi-markdown-preview@0.10.0
 
-# @plannotator/pi-extension — browser-based plan / diff / PR review UI (plannotator_submit_plan).
-#   Requires Pi >= 0.74.0. Opens reviews in your default browser.
-npm:@plannotator/pi-extension@0.20.1
-
 # pi-simplify — reviews recently changed code for clarity, consistency,
 #   and maintainability. (Declares peer range Pi >=0.74.0 <0.76.0 but installs
 #   and runs fine on newer Pi — npm warns, doesn't block.)
