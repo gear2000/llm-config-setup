@@ -50,6 +50,17 @@ def _roster() -> dict:
     }
 
 
+def _result(order_id: str, verdict: str = "passed") -> dict:
+    result = {
+        "order_id": order_id,
+        "verdict": verdict,
+        "full_log": "/tmp/worker.log",
+    }
+    if verdict == "failed":
+        result["revisit"] = ["stage-1-implementation"]
+    return result
+
+
 def test_resolve_substitutes_fields() -> None:
     cmd = recruiter.resolve_launch_command(_order(), _roster())
     assert "--model some-model" in cmd
@@ -119,6 +130,40 @@ def test_write_blocked_result_is_best_effort_on_unwritable_path(tmp_path: Path) 
     order = {"order_id": "oid", "result_path": str(blocker / "nested" / "result.json"),
              "stage_id": "stage-1-implementation"}
     recruiter._write_blocked_result(order, "boom")  # must return without raising
+
+
+def test_write_blocked_result_preserves_valid_existing_result(tmp_path: Path) -> None:
+    result_path = tmp_path / "result.json"
+    existing = _result("oid", verdict="failed")
+    result_path.write_text(json.dumps(existing))
+    order = {
+        "order_id": "oid",
+        "result_path": str(result_path),
+        "stage_id": "stage-1-implementation",
+    }
+
+    parsed = recruiter._write_blocked_result(order, "wait timed out")
+
+    assert parsed == existing
+    assert json.loads(result_path.read_text()) == existing
+
+
+def test_write_blocked_result_overwrites_stale_existing_result(tmp_path: Path) -> None:
+    result_path = tmp_path / "result.json"
+    result_path.write_text(json.dumps(_result("other-order")))
+    order = {
+        "order_id": "oid",
+        "result_path": str(result_path),
+        "stage_id": "stage-1-implementation",
+    }
+
+    parsed = recruiter._write_blocked_result(order, "wait timed out")
+
+    written = json.loads(result_path.read_text())
+    assert parsed is None
+    assert written["order_id"] == "oid"
+    assert written["verdict"] == "blocked"
+    assert written["reason"] == "recruiter: wait timed out"
 
 
 def test_load_valid_roster(tmp_path: Path) -> None:
@@ -202,6 +247,44 @@ def test_recruit_submits_and_spawns_without_waiting(tmp_path: Path, monkeypatch)
     assert spawned[0][0][-2] == "run-job" and spawned[0][1]["start_new_session"] is True
     key = recruiter.JobLedger().key(_order()["order_id"])
     assert (tmp_path / "hub/requests" / key / "state/latest.json").is_file()
+
+
+def test_run_order_keeps_worker_result_when_status_wait_fails(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    result_path = tmp_path / "result.json"
+    order = _order(result_path=str(result_path), instructions_path=str(tmp_path / "instructions.md"))
+    order_path = tmp_path / "order.json"
+    roster_path = tmp_path / "upagent.yaml"
+    order_path.write_text(json.dumps(order))
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+
+    def fake_herdr_json(*args: str) -> dict:
+        assert args[:2] == ("pane", "split")
+        return {"result": {"pane": {"pane_id": "worker-pane"}}}
+
+    def fake_herdr(*args: str) -> None:
+        if args[:2] == ("pane", "run"):
+            return
+        if args[:2] == ("wait", "agent-status"):
+            result_path.write_text(json.dumps(_result(order["order_id"], verdict="passed")))
+            raise recruiter.RecruiterError("timed out waiting for done status")
+        if args[:2] == ("pane", "close"):
+            return
+        raise AssertionError(f"unexpected herdr args: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    assert recruiter._run_order(str(order_path), str(roster_path)) == 0
+
+    output = capsys.readouterr()
+    assert f"ORDER {order['order_id']} DONE" in output.out
+    assert "kept existing worker result" in output.err
+    assert json.loads(result_path.read_text()) == _result(order["order_id"], verdict="passed")
 
 
 def test_stage_timeout_defaults_and_explicit_override() -> None:

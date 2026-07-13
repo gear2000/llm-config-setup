@@ -38,6 +38,8 @@ The leader runs the phase's stages in order — `stage-1` … `stage-5` for `acc
 ```text
 leader:    write pass-<p>/stages/<stage-id>/try-<m>/order.json + instructions.md   (order.cockpit_pane = this leader's pane)
 leader:    herdr pane run <recruiter_pane> "recruit <order.json path>"
+leader:    start a tiny per-order result watchdog that polls <result_path> for a valid
+           result.json whose order_id matches <order_id>; it says nothing until found
 leader:    herdr wait output <recruiter_pane> --match "ORDER <order_id> DONE" --timeout <ms>
            # ALWAYS bound this wait (>= the order's timeout_ms + margin). Herdr's `wait output`
            # blocks FOREVER when --timeout is omitted, so an un-emitted DONE (e.g. an
@@ -46,7 +48,9 @@ leader:    herdr wait output <recruiter_pane> --match "ORDER <order_id> DONE" --
 leader:    read + validate pass-<p>/stages/<stage-id>/try-<m>/result.json
 ```
 
-`order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`, optional `env`), with `harness`/`model`/`agent`/`effort` resolved deterministically from the route stage entry (`effort` is the profile's `effort`, or `medium` when the profile omits it — never left empty, because a roster template may substitute it into a CLI flag) and `cockpit_pane` set to a live cockpit pane (this leader's own) for the Recruiter to split the worker from — `herdr pane split` takes a source pane, not a workspace. `instructions.md` is the stage brief: the phase goal, this stage's job, the worktree branch, the deterministic merge timing, the non-delegation rule, the repo's available specialists (from the Specialist Hub roster) with the mandatory-consult rule — any area a listed specialist owns is asked, never guessed — and pointers to the plan and prior handoffs. When the stage's profile routes to any gpt-5.6 model (terra especially), the brief MUST also carry the overproduction guardrail verbatim: implement only what this stage requires; no speculative abstractions or extra features; tests proportionate to the change — cover the contract, not every permutation; prefer extending existing files over creating new ones. The Recruiter splits one fresh worker pane from `cockpit_pane` into the cockpit (`herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env ...]`), runs the harness launch template, waits for the worker to finish, validates its `result.json`, closes the worker pane, and emits `ORDER <order_id> DONE`. The worker writes its own transcript path into `result.json`'s `full_log` field — that pointer is the durable audit trail.
+The result file is the source of truth. The leader races two completion signals instead of trusting one: the Recruiter's `ORDER <order_id> DONE` output, and a dedicated Haiku/low-effort file watchdog that performs only mechanical polling of that order's `result_path` for a valid result whose `order_id` matches. The watchdog is not a Recruiter order, performs no reasoning, reads no code, and never comments on progress; it only alerts the leader that the authoritative result file exists. When either signal arrives, immediately read and validate `result.json`. If the watchdog wins, do not keep waiting for the Recruiter's status wait to unstick.
+
+`order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`, optional `env`), with `harness`/`model`/`agent`/`effort` resolved deterministically from the route stage entry (`effort` is the profile's `effort`, or `medium` when the profile omits it — never left empty, because a roster template may substitute it into a CLI flag) and `cockpit_pane` set to a live cockpit pane (this leader's own) for the Recruiter to split the worker from — `herdr pane split` takes a source pane, not a workspace. `instructions.md` is the stage brief: the phase goal, this stage's job, the worktree branch, the deterministic merge timing, the non-delegation rule, the requirement to write `result.json`/`compacted.md`/handoff and then exit the harness session, the repo's available specialists (from the Specialist Hub roster) with the mandatory-consult rule — any area a listed specialist owns is asked, never guessed — and pointers to the plan and prior handoffs. When the stage's profile routes to any gpt-5.6 model (terra especially), the brief MUST also carry the overproduction guardrail verbatim: implement only what this stage requires; no speculative abstractions or extra features; tests proportionate to the change — cover the contract, not every permutation; prefer extending existing files over creating new ones. The Recruiter splits one fresh worker pane from `cockpit_pane` into the cockpit (`herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env ...]`), runs the harness launch template, waits for the worker to finish, validates its `result.json`, closes the worker pane, and emits `ORDER <order_id> DONE`. The worker writes its own transcript path into `result.json`'s `full_log` field — that pointer is the durable audit trail.
 
 Every generated `instructions.md` includes this copy-pasteable result template, and says that the enum is deliberately strict:
 
@@ -60,9 +64,11 @@ Every generated `instructions.md` includes this copy-pasteable result template, 
 
 Use only `passed`, `failed`, or `blocked` for `result.json.verdict`; a failed result also includes a non-empty `revisit` list of recognized stage ids. `VERIFICATION_PASSED` is the Stage-2 audit-outcome concept, not a result-file verdict.
 
+Every generated `instructions.md` also includes this terminal instruction: after `result.json`, `compacted.md`, and the handoff are durably written, exit the session. Do not stop at an idle prompt and wait for another instruction.
+
 A missing or malformed `result.json`, or a Recruiter error, is treated as a `blocked` stage — never silently retried as if passed.
 
-Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. On a retry that re-investigates the same unresolved failure signature, the leader additionally requires a live Specialist Hub Librarian consult before the worker forms a new hypothesis: provide the failure signature and prior ruled-out work, and require the worker to record the consult id and answer/error path in `result.json`. Reading static specialist docs is not a substitute. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes.
+Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. On a retry that re-investigates the same unresolved failure signature, the leader additionally requires a live Specialist Hub Librarian consult before the worker forms a new hypothesis: provide the failure signature and prior ruled-out work, and require the worker to record the consult id and answer/error path in `result.json`. Reading static specialist docs is not a substitute. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes, then exits its session.
 
 ## Stage-0-alignment (accuracy: high only)
 
@@ -114,7 +120,7 @@ Only write `passed` when every required stage passed and Stage 5 cleanup, green 
 
 1. Herdr-only: require `HERDR_ENV=1`.
 2. A stage is a work order to the Recruiter — never a native subagent, team, pane, or nested harness session created by the leader, and no Claude team mode.
-3. Workers are terminal and non-delegating; a worker that needs more help returns `blocked`.
+3. Workers are terminal and non-delegating; a worker that needs more help returns `blocked`, and a worker that has written its required files exits its session.
 4. The route is authoritative and deterministic per stage; the leader resolves `harness`/`model`/`agent` from it and never lets the Recruiter pick.
 5. `result.json` / `phase-result.json` are the source of truth; pane scrollback is evidence only.
 6. Forward-only: replay forward on `revisit`; never revert merged history from this phase — escalate a true revert to the TUI.

@@ -14,7 +14,9 @@ returns immediately. Only the job runner atomically claims that order, then:
   3. runs the worker, then blocks until it's done — `herdr wait agent-status <worker>
      --status done` for most harnesses, or polling for the result file directly for a harness
      in POLL_RESULT_FILE_HARNESSES (codex — its Herdr integration never reports a "done"
-     transition, only a SessionStart registration);
+     transition, only a SessionStart registration). Leaders may also run an independent
+     lightweight watchdog that watches the order's result_path directly; that watchdog is
+     deliberately decoupled from the Recruiter's own wait path and is not managed here;
   4. reads + validates the worker's result.json (must echo the order_id);
   5. closes that worker pane, records terminal job state, and emits `ORDER <order_id> DONE`.
 
@@ -337,9 +339,13 @@ def _report_state(pane: str | None, state: str, message: str) -> None:
         pass
 
 
-def _write_blocked_result(order: dict, reason: str) -> None:
+def _write_blocked_result(order: dict, reason: str) -> dict | None:
     """Ensure a result.json exists so the leader is never stranded. Only writes a fallback
     `blocked` result when the worker did not leave a valid one of its own.
+
+    Returns the worker's existing parsed result when one was already present and valid for this
+    order; callers use that as the authoritative outcome instead of treating the order as a
+    Recruiter fallback.
 
     BEST-EFFORT and never raises: it runs from cmd_recruit's except path, so a filesystem fault
     here must not escape (which would skip the `ORDER <id> DONE` emission). If it truly cannot
@@ -349,10 +355,9 @@ def _write_blocked_result(order: dict, reason: str) -> None:
         result_path = Path(order["result_path"])
         if result_path.is_file():
             try:
-                contracts.parse_result(
+                return contracts.parse_result(
                     result_path.read_text(), expected_order_id=order["order_id"]
                 )
-                return  # worker left a valid result — keep it
             except (contracts.ContractError, OSError):
                 pass  # unreadable/invalid/stale → fall through and overwrite with a blocked result
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +379,7 @@ def _write_blocked_result(order: dict, reason: str) -> None:
         )
     except OSError as e:
         sys.stderr.write(f"recruiter: could not write blocked result for {order.get('order_id')}: {e}\n")
+    return None
 
 
 # --- commands ----------------------------------------------------------------
@@ -461,9 +467,15 @@ def _run_order(order_path: str, roster_path: str) -> int:
         # KeyError/TypeError guard Herdr JSON shape drift; OSError guards filesystem faults (e.g.
         # a result_path that is a dir, or a permission error on unlink) — all still write a blocked
         # result rather than a silent exit that strands the leader.
-        _write_blocked_result(order, str(e))
-        fell_back = True
-        sys.stderr.write(f"recruiter: order {order_id} fell back to blocked: {e}\n")
+        existing_result = _write_blocked_result(order, str(e))
+        if existing_result is None:
+            fell_back = True
+            sys.stderr.write(f"recruiter: order {order_id} fell back to blocked: {e}\n")
+        else:
+            sys.stderr.write(
+                "recruiter: order "
+                f"{order_id} kept existing worker result after Recruiter wait fault: {e}\n"
+            )
     finally:
         if worker_pane is not None:
             try:
@@ -471,13 +483,18 @@ def _run_order(order_path: str, roster_path: str) -> int:
             except (RecruiterError, OSError):
                 pass  # closing a gone pane (or a fork/exec fault) must not skip the DONE emit
     # The accelerator signal the leader waits on. The RESULT FILE is the real verdict.
-    _report_state(my_pane, "idle", f"last order: {order_id} ({'blocked' if fell_back else 'done'})")
+    final_label = "blocked" if fell_back else "done"
+    _report_state(my_pane, "idle", f"last order: {order_id} ({final_label})")
     print(f"ORDER {order_id} DONE", flush=True)
     return 1 if fell_back else 0
 
 
 def cmd_recruit(order_path: str, roster_path: str) -> int:
-    """Submit an order and return immediately; its claimed job owns the blocking lifecycle."""
+    """Submit an order and return immediately; its claimed job owns the blocking lifecycle.
+
+    Leader-side result watchdogs are independent of this command: they watch the same
+    result_path directly and can wake the leader even if this job's Herdr status wait sticks.
+    """
     try:
         order = contracts.load_order(order_path)
     except contracts.ContractError:

@@ -159,10 +159,12 @@ The order round-trip, all over the Herdr socket:
 ```text
 leader:    write pass-<p>/stages/<stage>/try-<m>/order.json  +  instructions.md  (order.cockpit_pane = the leader's cockpit pane)
 leader:    herdr pane run <recruiter_pane> "recruit <order.json path>"
+leader:    start one tiny per-order result watchdog that polls <result_path> for a valid
+           result.json whose order_id matches <order_id>; it stays silent until found
 Recruiter: read+validate order → herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env k=v ...]
 Recruiter: herdr pane run <worker_pane> "<per-harness launch template>  --agent <agent> --model <model>"
 Recruiter: herdr wait agent-status <worker_pane> --status done --timeout <order.timeout_ms>
-worker (before finishing): write result.json (verdict, revisit, full_log = its transcript path) + compacted.md + handoff
+worker (before finishing): write result.json (verdict, revisit, full_log = its transcript path) + compacted.md + handoff, then exit its session
 Recruiter: validate result.json well-formed → herdr pane close <worker_pane> → emit "ORDER <id> DONE"
 leader:    herdr wait output <recruiter_pane> --match "ORDER <id> DONE" --timeout <ms> → read+validate result.json
            # ALWAYS pass --timeout (>= the order's timeout_ms + margin): Herdr's `wait output`
@@ -173,13 +175,15 @@ leader:    herdr wait output <recruiter_pane> --match "ORDER <id> DONE" --timeou
 
 Validate the installed Herdr command surface before launch (the documented baseline is `herdr pane split <source-pane>`, `herdr pane run`, `herdr wait agent-status`, `herdr wait output`, `herdr pane read`, `herdr pane close`). Every `herdr pane split` names a source pane to split from — there is no `--workspace` flag on split. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
 
-**Workers are terminal and non-delegating.** A hired worker does its one stage, writes its result/compacted/handoff, and stops. It must not create further agents, teams, panes, nested harness sessions, or advisors. If it needs more help it returns `blocked` with the decision needed, and the leader decides the next move. A worker may consult the Specialist Hub Librarian for repo knowledge through the same files-plus-signal pattern as an order; that is a question, not delegation.
+**Every order gets a decoupled result watchdog.** This is separate from the Recruiter's own `herdr wait agent-status ... --status done` call. The leader starts one tiny, low-cost Haiku/low-effort watchdog per order whose only job is to poll the order's `result_path` until it finds a JSON object that validates against the result contract and echoes the same `order_id`. The first of the two completion signals wins: either the Recruiter emits `ORDER <id> DONE`, or the watchdog reports that the authoritative `result.json` exists. The watchdog performs no reasoning, reads no code, makes no verdict call, and stays completely silent until a matching result appears or the order's bounded timeout expires. On a watchdog hit, the leader reads and validates `result.json` immediately; do not wait hours for a stuck Recruiter status wait when the source-of-truth file is already present.
+
+**Workers are terminal and non-delegating.** A hired worker does its one stage, writes its result/compacted/handoff, and then actually exits its harness session; stopping at an idle interactive prompt is not done. It must not create further agents, teams, panes, nested harness sessions, or advisors. If it needs more help it returns `blocked` with the decision needed, and the leader decides the next move. A worker may consult the Specialist Hub Librarian for repo knowledge through the same files-plus-signal pattern as an order; that is a question, not delegation.
 
 **Consulting a specialist is MANDATORY, not voluntary, when one owns the area.** An agent does not know what it does not know: grepping cold finds *something* and proceeds confidently past the repo's actual conventions (language idiom, how to test, onboarding/cleanup steps, domain contracts). So the stage brief lists the repo's available specialists (from the Specialist Hub roster), and the worker MUST consult the owning specialist BEFORE deciding anything in a listed area — conventions are asked, never guessed. A worker that skipped a mandated consult and guessed is a blocking Stage 2 audit finding.
 
 ## Handoff between workers
 
-Every worker writes a short, versioned handoff before its pane closes so the next same-role worker — or the leader — resumes with immediate context instead of a cold start. The contract lives in the shared meta-runner handoff protocol; keep it to the `phases/<phase-id>/handoffs/<role>-vN.md` path, never overwritten.
+Every worker writes a short, versioned handoff before its pane closes so the next same-role worker — or the leader — resumes with immediate context instead of a cold start. The contract lives in the shared meta-runner handoff protocol; keep it to the `phases/<phase-id>/handoffs/<role>-vN.md` path, never overwritten. After `result.json`, `compacted.md`, and the handoff are durably written, the worker exits its session so Herdr can surface a real terminal transition instead of an idle prompt.
 
 ## Backtracking, forward-only passes, and escalation
 
@@ -234,9 +238,12 @@ A meta run creates one phase leader per phase (created, then destroyed at phase 
 
 A phase leader may consult an advisor when configured. The advisor does not write files, run commands, or create agents. After writing and validating `phase-result.json`, the leader's literal last action before idle is to print `PHASE_RESULT: phase-<id> verdict=<passed|failed|blocked> pass=<n>` to its own pane (map a detailed `partial` file verdict to `blocked` in the marker).
 
-### Optional lightweight watchdog
+### Lightweight watchdogs
 
-A TUI or leader may run one plain, mid-tier (not cheapest) watchdog beside a long stage. This is the narrow sanctioned native-subagent exception: it performs no stage work, is not a Recruiter order, and never delegates. On a configurable 5–10 minute cadence it reads watched panes' `agent_status` and short output tails, diffs them from its last sample, and stays silent unless it detects: working with no output change for N checks (stuck); fresh error/traceback/blocked output (failed); or a `phase-result.json` / `PHASE_RESULT` marker (done). It sends one concise alert, not running commentary.
+Watchdogs are the narrow sanctioned native-subagent exception: they perform no stage work, are not Recruiter orders, and never delegate. Use them only for mechanical monitoring.
+
+- **Per-order result watchdog (standard):** one Haiku/low-effort watcher per order, polling only that order's `result_path` for a valid matching `order_id`; silent until found.
+- **Long-stage stuck watchdog (optional):** one plain, mid-tier watchdog beside a long stage. On a configurable 5–10 minute cadence it reads watched panes' `agent_status` and short output tails, diffs them from its last sample, and stays silent unless it detects: working with no output change for N checks (stuck); fresh error/traceback/blocked output (failed); or a `phase-result.json` / `PHASE_RESULT` marker (done). It sends one concise alert, not running commentary.
 
 ## Five-stage phase protocol
 
