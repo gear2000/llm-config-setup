@@ -27,9 +27,6 @@ npm:pi-web-access@0.10.7
 # pi-powerline-footer — powerline-style status footer in the TUI.
 npm:pi-powerline-footer@0.5.4
 
-# @juicesharp/rpiv-btw — "review-plan-implement-verify, by the way" workflow helper.
-npm:@juicesharp/rpiv-btw@1.12.0
-
 # pi-markdown-preview — rendered markdown / Mermaid / LaTeX preview (/preview, /preview-pdf).
 #   Runtime deps (NOT installed by this kit): Pandoc (+ a LaTeX engine for PDF),
 #   and a Chromium-based browser for terminal/PNG preview. Missing Pandoc only
@@ -45,11 +42,6 @@ npm:@plannotator/pi-extension@0.20.1
 #   and runs fine on newer Pi — npm warns, doesn't block.)
 npm:pi-simplify@0.2.2
 
-# @quintinshaw/pi-dynamic-workflows — Claude-Code-style dynamic workflows:
-#   fan a task out across subagents with model routing, cost accounting,
-#   resume, worktree isolation, and a /workflows TUI.
-npm:@quintinshaw/pi-dynamic-workflows@2.10.0
-
 # pi-intercom — direct 1:1 messaging between Pi sessions on the same machine
 #   (Alt+M / /intercom): send context, findings, or requests from one session
 #   to another.
@@ -63,3 +55,8 @@ npm:@ayulab/pi-rewind@0.4.2
 #   To enable in a project that uses Cursor: uncomment the line below and run
 #   tools/install-pi-extensions.sh. Needs Pi >= 0.79.1 and Node >= 22.19.
 # npm:pi-cursor-sdk@0.1.42
+
+# Pi extension that keeps noisy tool output out of your context window. 
+# Automatically rewrites shell commands through Hypa for local, deterministic 
+# compression, context-aware file tools, and recoverable
+npm:@hypabolic/pi-hypa
