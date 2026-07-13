@@ -11,7 +11,7 @@ Run one phase as the Herdr-native **phase leader**. This command is sent to a bo
 All four flags are required. Fail loud on any missing or unreadable path.
 
 - `--phase` identifies one canonical plan phase, for example `phase-0` or `0`.
-- `--plan` / `--route` are the frozen canonical plan and route profile.
+- `--plan` / `--route` are the run-tree frozen copies. During a run, the run-tree `route.yaml` is the only live route: a human profile addition edits that copy only, never the origin.
 - `--run-root` is the run tree root `<run-root>/<date>/<slug>/` that `/herdr-run` created; this leader writes under `phases/<phase-id>/`.
 
 ## Pre-flight
@@ -48,9 +48,21 @@ leader:    read + validate pass-<p>/stages/<stage-id>/try-<m>/result.json
 
 `order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`, optional `env`), with `harness`/`model`/`agent`/`effort` resolved deterministically from the route stage entry (`effort` is the profile's `effort`, or `medium` when the profile omits it — never left empty, because a roster template may substitute it into a CLI flag) and `cockpit_pane` set to a live cockpit pane (this leader's own) for the Recruiter to split the worker from — `herdr pane split` takes a source pane, not a workspace. `instructions.md` is the stage brief: the phase goal, this stage's job, the worktree branch, the deterministic merge timing, the non-delegation rule, the repo's available specialists (from the Specialist Hub roster) with the mandatory-consult rule — any area a listed specialist owns is asked, never guessed — and pointers to the plan and prior handoffs. When the stage's profile routes to any gpt-5.6 model (terra especially), the brief MUST also carry the overproduction guardrail verbatim: implement only what this stage requires; no speculative abstractions or extra features; tests proportionate to the change — cover the contract, not every permutation; prefer extending existing files over creating new ones. The Recruiter splits one fresh worker pane from `cockpit_pane` into the cockpit (`herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env ...]`), runs the harness launch template, waits for the worker to finish, validates its `result.json`, closes the worker pane, and emits `ORDER <order_id> DONE`. The worker writes its own transcript path into `result.json`'s `full_log` field — that pointer is the durable audit trail.
 
+Every generated `instructions.md` includes this copy-pasteable result template, and says that the enum is deliberately strict:
+
+```json
+{
+  "order_id": "<exact order_id>",
+  "verdict": "passed",
+  "full_log": "<worker transcript path or session id>"
+}
+```
+
+Use only `passed`, `failed`, or `blocked` for `result.json.verdict`; a failed result also includes a non-empty `revisit` list of recognized stage ids. `VERIFICATION_PASSED` is the Stage-2 audit-outcome concept, not a result-file verdict.
+
 A missing or malformed `result.json`, or a Recruiter error, is treated as a `blocked` stage — never silently retried as if passed.
 
-Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes.
+Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. On a retry that re-investigates the same unresolved failure signature, the leader additionally requires a live Specialist Hub Librarian consult before the worker forms a new hypothesis: provide the failure signature and prior ruled-out work, and require the worker to record the consult id and answer/error path in `result.json`. Reading static specialist docs is not a substitute. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes.
 
 ## Stage-0-alignment (accuracy: high only)
 
@@ -67,7 +79,7 @@ Misaligned ⇒ loop stage-0 (redo the mini-plan) within the stage-try budget. Un
 The leader runs the shared five-stage worktree lifecycle, ordering one worker per stage:
 
 1. **Stage 1 — implementation** on the temporary worktree branch (unit tests + code, TDD loop, no goal cheating).
-2. **Stage 2 — adversarial audit** of Stage 1 on the same branch, including the hard gate for **unused intake / accepted-but-ignored inputs**. `VERIFICATION_PASSED` advances; blocking findings return `verdict=failed`, `revisit=[stage-1-implementation]` with the raw findings; non-blocking notes are recorded. Stage 2 must be run by a worker independent from Stage 1.
+2. **Stage 2 — adversarial audit** of Stage 1 on the same branch, including the hard gate for **unused intake / accepted-but-ignored inputs**. A verification-passed audit outcome advances; its worker `result.json` still uses the enum `verdict=passed`. Blocking findings return `verdict=failed`, `revisit=[stage-1-implementation]` with the raw findings; non-blocking notes are recorded. Stage 2 must be run by a worker independent from Stage 1.
 3. **Stage 3 — integration/acceptance seams**; merge the worktree back to main here iff `merge_back_at` selects Stage 3.
 4. **Stage 4 — upstream DAG verification**; merge here iff `merge_back_at` selects Stage 4 (or run from main if already merged at Stage 3).
 5. **Stage 5 — finalization**: merge if not already merged, verify main, run green checks, inspect logs for hidden failures, destroy the temporary worktree/branch, and write final evidence. Stage 5 always runs.
@@ -94,7 +106,7 @@ When the leader gives up on the phase, it writes `phase-result.json` with `verdi
 ## phase-status.md and phase-result.json
 
 - `phase-status.md` — one line per stage per pass, appended as work happens: `pass<p> <stage-id> try<m> <verdict> — <reason>, revisit <ids>`. This rolling log is how a later pass or try knows where it failed.
-- `phase-result.json` — the latest phase verdict the TUI reads. Write it as the leader's last act. Include: phase id; pass number; `verdict` (`passed`/`partial`/`blocked`/`failed`); `revisit:[phase-ids]` on any non-passing verdict; lead `llm_profile`/`agent`; `accuracy` and the stage-0 outcome when high; `merge_back_at` and actual merge stage; temporary worktree branch/path and cleanup result; each stage id with `llm_profile`/`agent`/`order_id`/tries/final verdict; advisor status; dependency graph source; commands/evidence/`full_log` pointers; Stage 3 seam decision; Stage 4 upstream result; Stage 5 green-check and log-review result; rollback/cleanup actions.
+- `phase-result.json` — the latest phase verdict the TUI reads. Write and validate it, then as the literal final action before going idle print to this leader pane: `PHASE_RESULT: <phase-id> verdict=<passed|failed|blocked> pass=<n>`. Map `partial` to `blocked` for this completion marker while retaining the detailed file verdict. Include: phase id; pass number; `verdict` (`passed`/`partial`/`blocked`/`failed`); `revisit:[phase-ids]` on any non-passing verdict; lead `llm_profile`/`agent`; `accuracy` and the stage-0 outcome when high; `merge_back_at` and actual merge stage; temporary worktree branch/path and cleanup result; each stage id with `llm_profile`/`agent`/`order_id`/tries/final verdict; advisor status; dependency graph source; commands/evidence/`full_log` pointers; Stage 3 seam decision; Stage 4 upstream result; Stage 5 green-check and log-review result; rollback/cleanup actions.
 
 Only write `passed` when every required stage passed and Stage 5 cleanup, green checks, and log review passed.
 

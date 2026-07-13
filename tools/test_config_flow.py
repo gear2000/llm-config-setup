@@ -176,7 +176,7 @@ def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path
         ],
         "output": ".claude/agents/backend.md",
     }, sort_keys=False))
-    m.project_root = lambda: kit
+    setattr(m, "project_root", lambda: kit)
     # The recipe's layers must exist at the destination (the sync gates on this).
     # Common layers ride in via the hub (so the public sweep keeps them); the
     # overlay is repo-owned under this_repo/.
@@ -231,7 +231,7 @@ def test_copy_excludes_configured_recipe_and_prunes_stale_copy(tmp_path: Path) -
         "type": "skill", "name": "python", "inputs": [],
         "output": ".claude/skills/python/SKILL.md",
     }, sort_keys=False))
-    m.project_root = lambda: kit
+    setattr(m, "project_root", lambda: kit)
 
     # A stale copy of the EXCLUDED recipe already at the destination → must be pruned.
     _write(dest / ".shared-llm/public/compose/skills/python.yaml",
@@ -341,7 +341,7 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     kit = tmp_path / "kit"
     _write(kit / ".shared-llm/public/layers/skills/common/demo/description.md", "A demo skill.\n")
     _write(kit / ".shared-llm/public/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
-    m.project_root = lambda: kit
+    setattr(m, "project_root", lambda: kit)
     # Seed the hub so copy has something to propagate.
     _write(m.DEFAULT_SOURCE / "layers/llm/common/x.md", "hub common.\n")
 
@@ -506,6 +506,58 @@ def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:
     assert (home / ".pi/agent/settings.json").exists()
 
 
+def test_home_runtime_reconciles_managed_herdr_config(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["pi"], "destinations": []}
+
+    m.do_home_runtime(cfg, _quiet(m))
+    target = home / ".config/herdr/config.toml"
+    assert target.is_symlink()
+    assert target.resolve() == (m.project_root() / "herdr-config.toml").resolve()
+
+    counts = m.reconcile(m.plan_herdr_config(m.project_root()), m.repo_family(m.project_root()),
+                         plan_only=False, force=False, repo_root=m.project_root())
+    assert counts["create"] == counts["repoint"] == counts["prune"] == 0
+
+
+def test_herdr_config_preserves_foreign_destination(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    target = home / ".config/herdr/config.toml"
+    _write(target, "mine = true\n")
+
+    counts = m.reconcile(m.plan_herdr_config(m.project_root()), m.repo_family(m.project_root()),
+                         plan_only=False, force=False, repo_root=m.project_root())
+    assert target.read_text() == "mine = true\n"
+    assert counts["skip-foreign"] == 1
+
+
+def test_herdr_config_repoints_and_prunes_managed_stale_link(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    kit = tmp_path / "kit"
+    source = kit / "herdr-config.toml"
+    _write(source, "onboarding = false\n")
+    target = home / ".config/herdr/config.toml"
+    target.parent.mkdir(parents=True)
+    target.symlink_to(kit / "old/herdr-config.toml")
+
+    counts = m.reconcile(m.plan_herdr_config(kit), m.repo_family(kit),
+                         plan_only=False, force=False, repo_root=kit)
+    assert target.resolve() == source.resolve()
+    assert counts["repoint"] == 1
+
+    source.unlink()
+    counts = m.reconcile(m.plan_herdr_config(kit), m.repo_family(kit),
+                         plan_only=False, force=False, repo_root=kit)
+    assert not target.exists() and not target.is_symlink()
+    assert counts["prune"] == 1
+
+
 def test_home_runtime_exclude_by_source_path_skips_install(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
@@ -564,7 +616,7 @@ def test_public_layers_swept_and_this_repo_untouched(tmp_path: Path) -> None:
     # Empty kit so the recipe sync is a no-op — isolate the layer sweep.
     empty_kit = tmp_path / "emptykit"
     (empty_kit / ".shared-llm").mkdir(parents=True)
-    m.project_root = lambda: empty_kit
+    setattr(m, "project_root", lambda: empty_kit)
     cfg = _cfg(m, dest, ["cc"])
 
     hub = m.DEFAULT_SOURCE

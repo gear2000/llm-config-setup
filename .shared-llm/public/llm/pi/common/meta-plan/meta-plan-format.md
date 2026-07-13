@@ -10,7 +10,7 @@ runnable-meta-job/
 └── route.yaml    # who runs it, when it merges, and how finalization proves green
 ```
 
-The runner only starts when both files pass validation. There is only ever ONE route file:
+The runner only starts when both files pass validation. Herdr automatically assigns a 3-hour worker timeout to `stage-1-implementation` and `stage-2-adversarial-audit`; an order may explicitly override it with `timeout_ms`. There is only ever ONE route file:
 `route.todo.yaml` is not a second file — it is the same route file, named `.todo` while required
 values are still TODO placeholders so the runnable check fails loudly. Fill the TODOs and rename
 it to `route.yaml`; the runner consumes exactly `plan.md` + `route.yaml`.
@@ -236,7 +236,7 @@ Every route phase has the same five base stage ids:
 
 Each phase optionally sets `accuracy:`. Absent or `medium` runs the five base stages above — unchanged behavior. `high` additionally requires a pre-code alignment stage that runs **before** stage-1:
 
-0. `stage-0-alignment` — a fresh worker does mini-research for this phase against the original research, drafts a mini-plan against the original plan, then an **independent** audit checks the mini-plan against the big plan. Misaligned ⇒ redo the mini-plan; unreconcilable ⇒ `BLOCKED` (escalates). It is versioned, never overwritten.
+1. `stage-0-alignment` — a fresh worker does mini-research for this phase against the original research, drafts a mini-plan against the original plan, then an **independent** audit checks the mini-plan against the big plan. Misaligned ⇒ redo the mini-plan; unreconcilable ⇒ `BLOCKED` (escalates). It is versioned, never overwritten.
 
 `stage-0-alignment` is **required iff** `accuracy: high` and **forbidden** otherwise. Its audit reviewer must be independent from `stage-1-implementation` (same rule as Stage 2 — by profile, agent, harness, model family, or persona).
 

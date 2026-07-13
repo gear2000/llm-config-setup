@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false
 """Unit tests for the UpAgent order/result contracts. Pure stdlib — no Herdr needed.
 
 Run: python3 -m pytest .shared-llm/extensions/common/upagent/contracts_test.py -q
@@ -16,8 +17,9 @@ from pathlib import Path
 _spec = importlib.util.spec_from_file_location(
     "upagent_contracts", Path(__file__).with_name("contracts.py")
 )
+assert _spec and _spec.loader
 contracts = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(contracts)  # type: ignore[union-attr]
+_spec.loader.exec_module(contracts)
 ContractError = contracts.ContractError
 
 
@@ -120,6 +122,40 @@ def test_result_bad_verdict_fails() -> None:
     bad["verdict"] = "great"
     with pytest.raises(ContractError, match="verdict"):
         contracts.parse_result(json.dumps(bad))
+
+
+@pytest.mark.parametrize("alias, expected", [
+    ("VERIFICATION_PASSED", "passed"), ("VERIFIED", "passed"), ("PASS", "passed"),
+    ("PASSED", "passed"), ("OK", "passed"), ("FAIL", "failed"),
+    ("FAILED", "failed"), ("BLOCKED", "blocked"),
+])
+def test_normalize_cosmetic_verdict_aliases(alias: str, expected: str) -> None:
+    raw = _valid_result()
+    raw["verdict"] = alias
+    if expected == "failed":
+        raw["revisit"] = ["stage-1-implementation"]
+    normalized, corrections = contracts.normalize_cosmetic(raw)
+    assert normalized["verdict"] == expected
+    assert corrections == [f"verdict: {alias} -> {expected}"]
+    assert contracts.parse_result(json.dumps(normalized))["verdict"] == expected
+
+
+def test_normalize_cosmetic_singleton_full_log() -> None:
+    raw = _valid_result()
+    raw["full_log"] = [raw["full_log"]]
+    normalized, corrections = contracts.normalize_cosmetic(raw)
+    assert normalized["full_log"] == "session://transcript/abc.jsonl"
+    assert corrections == ["full_log: [string] -> string"]
+
+
+def test_normalize_cosmetic_does_not_repair_invalid_values() -> None:
+    raw = _valid_result()
+    raw["verdict"] = "great"
+    raw["full_log"] = ["one", "two"]
+    normalized, corrections = contracts.normalize_cosmetic(raw)
+    assert corrections == []
+    with pytest.raises(ContractError):
+        contracts.parse_result(json.dumps(normalized))
 
 
 def test_result_order_id_mismatch_fails() -> None:

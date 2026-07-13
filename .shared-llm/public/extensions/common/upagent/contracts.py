@@ -122,6 +122,31 @@ def parse_order(text: str) -> dict:
     return order
 
 
+def normalize_cosmetic(raw: dict) -> tuple[dict, list[str]]:
+    """Apply the tiny, explicit result.json repairs allowed at the Recruiter boundary.
+
+    This intentionally does not relax ``parse_result``. It copies ``raw`` and only repairs
+    known verdict aliases and a one-element ``full_log`` list, returning a human-readable log
+    of every repair.
+    """
+    normalized = dict(raw)
+    corrections: list[str] = []
+    aliases = {
+        "VERIFICATION_PASSED": "passed", "VERIFIED": "passed", "PASS": "passed",
+        "PASSED": "passed", "OK": "passed", "FAIL": "failed", "FAILED": "failed",
+        "BLOCKED": "blocked",
+    }
+    verdict = normalized.get("verdict")
+    if isinstance(verdict, str) and verdict in aliases:
+        normalized["verdict"] = aliases[verdict]
+        corrections.append(f"verdict: {verdict} -> {aliases[verdict]}")
+    full_log = normalized.get("full_log")
+    if isinstance(full_log, list) and len(full_log) == 1 and isinstance(full_log[0], str):
+        normalized["full_log"] = full_log[0]
+        corrections.append("full_log: [string] -> string")
+    return normalized, corrections
+
+
 def parse_result(text: str, expected_order_id: str | None = None) -> dict:
     """Validate + return a result dict from raw JSON text. Fail-loud on any problem.
 

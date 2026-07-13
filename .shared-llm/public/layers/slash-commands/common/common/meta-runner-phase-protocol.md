@@ -120,8 +120,9 @@ Every run writes a filesystem tree that is the source of truth for what happened
 
 ```text
 <date>/<slug>/
-├── plan.md · route.yaml · research.md      # frozen originals (v<k> history as today)
+├── plan.md · route.yaml · research.md      # frozen run inputs; route.yaml is this run's single live copy
 ├── run-status.md                           # TUI rolling log: phase order, passes, backtracks, why
+├── active-leader-panes.json                # optional canonical phase-id → live leader pane-id map
 └── phases/<phase-id>/
     ├── phase-status.md                     # leader rolling log across this phase's passes/stages
     ├── phase-result.json                   # latest verdict + revisit:[phase-ids]  ← the TUI reads this
@@ -141,6 +142,7 @@ Every run writes a filesystem tree that is the source of truth for what happened
 - **run** / **pass** / **try**: a *run* is the whole plan; a *pass* is one TUI execution of a phase (forward only); a *try* is a leader retry of a stage inside a pass.
 - **Durable vs heavy.** `order.json`, `instructions.md`, `result.json`, `compacted.md`, the handoffs, and the `*-status.md` logs are durable in the work-log. The heavy harness transcript stays where the harness writes it; `result.json.full_log` points to it. OTel is captured only when `OTEL_*` env is injected into the order.
 - **Rolling summaries are the connective tissue.** `phase-status.md` gets one line per stage per pass (for example `pass1 stage-2 failed — reason X, revisit stage-1`). At the start of a new pass or try, the controller reads it, sees where work failed, and replays the pointed units forward. `run-status.md` is the TUI's phase-level equivalent.
+- **The route copy is frozen from the origin but live inside the run.** Once the run tree is created, its `route.yaml` is the single live routing source; the origin is historical/read-only. Every leader receives the run-tree plan/route paths, and every mid-run edit (including the last-writer marker) touches only the run-tree route.
 
 ## Execution model — a stage is a work order, not a subagent
 
@@ -200,6 +202,7 @@ stop-ask-human → the TUI halts and surfaces status to the human
 - **No revert automation.** This is a forward-only Ralph loop: nothing already produced is discarded to "go back". A true revert (throwing away merged work) is a major decision — the TUI stops and asks the human; it is never automated.
 - **The advisor is hired like any worker**, through the Recruiter, on the route's `advisor_profile`. An advisor order is an ordinary order and must carry a **recognized** `stage_id` (the order contract rejects anything outside the six; there is no `stage_id: "advisor"`). For a stage-level advisor (the leader, after a stage try budget) it reuses the failing **stage's** id. For a phase-level advisor (the TUI, after a phase pass budget) a phase has a `phase_id`, not a `stage_id`, so there is nothing "phase" to reuse: set `phase_id` to the failing phase and use the fixed convention `stage-5-finalization` (the whole-phase judgment stage) as the `stage_id` — never write a `phase_id` into `stage_id`. The controller that placed the order (the leader for a stage try, the TUI for a phase pass) knows it is an advisor order. The advisor worker writes a normal `result.json` with `verdict: passed` **plus** the optional `decision` field — one of the exact tokens `continue`, `loop`, or `stop-ask-human` (the contract's `ADVISOR_DECISIONS`). The controller reads `result.json.decision` — not a special verdict — and maps it: `continue` = accept the unit and move on; `loop` = keep looping (reset/extend the budget for another round); `stop-ask-human` = halt and surface to the human. **Fail-safe: if an advisor result is missing `decision` (or its verdict is `blocked`/`failed`), the controller treats it as `stop-ask-human`** — never silently continues on an absent ruling. The advisor reads the relevant `*-status.md`, writes no code, and runs no commands. With no `advisor_profile` set, a budget exhaustion escalates straight to the human (`stop-ask-human`).
 - Budgets default to 3 (`phase_pass_budget`, `stage_try_budget`) when the route omits them.
+- **Mandatory Librarian consult on repeated diagnosis.** When a retry (`try N+1`) revisits the same unresolved failure signature a prior try already investigated, the leader MUST put this instruction in that retry's `instructions.md`: **“Before re-investigating: this is not the first attempt at this failure. Query the Specialist Hub Librarian first. Send it the failure signature and what the last try already tried and ruled out; do this before forming a new hypothesis from docs alone. If the Librarian does not know, record that in `result.json` — it is still useful signal — but do not skip asking.”** Reading static specialist files does not satisfy this requirement. Record the consult id and answer/error path with the retry evidence.
 
 ## Accuracy: medium (five stages) or high (adds stage-0-alignment)
 
@@ -229,7 +232,11 @@ A meta run creates one phase leader per phase (created, then destroyed at phase 
 - enforces Stage 5 finalization, cleanup, green checks, and log review;
 - writes `phase-result.json` (verdict plus `revisit:[phase-ids]` when it gives up).
 
-A phase leader may consult an advisor when configured. The advisor does not write files, run commands, or create agents.
+A phase leader may consult an advisor when configured. The advisor does not write files, run commands, or create agents. After writing and validating `phase-result.json`, the leader's literal last action before idle is to print `PHASE_RESULT: phase-<id> verdict=<passed|failed|blocked> pass=<n>` to its own pane (map a detailed `partial` file verdict to `blocked` in the marker).
+
+### Optional lightweight watchdog
+
+A TUI or leader may run one plain, mid-tier (not cheapest) watchdog beside a long stage. This is the narrow sanctioned native-subagent exception: it performs no stage work, is not a Recruiter order, and never delegates. On a configurable 5–10 minute cadence it reads watched panes' `agent_status` and short output tails, diffs them from its last sample, and stays silent unless it detects: working with no output change for N checks (stuck); fresh error/traceback/blocked output (failed); or a `phase-result.json` / `PHASE_RESULT` marker (done). It sends one concise alert, not running commentary.
 
 ## Five-stage phase protocol
 
@@ -286,7 +293,7 @@ Intentional unused inputs are allowed only when explicit and auditable: undersco
 
 ### Stage 3 — integration/acceptance seam testing
 
-If `merge_back_at` is `stage-3-integration-acceptance-seams`, merge the temporary worktree branch back to main at this stage and run Stage 3 from main. Otherwise, continue on the temporary worktree branch.
+If `merge_back_at` is `stage-3-integration-acceptance-seams`, merge the temporary worktree branch back to main at this stage and run Stage 3 from main. If that merge updates refs without touching a dirty primary checkout, immediately reconcile the primary checkout/index before continuing: `git checkout HEAD -- <phase-touched-files>`, using only the recorded phase-owned manifest. Otherwise, continue on the temporary worktree branch.
 
 Review deep module surfaces and seams affected by the Stage 1 change. Determine whether higher-level tests need to be created or updated:
 
@@ -298,7 +305,7 @@ Do not write tests for their own sake. If no public/deep-module seam changed, re
 
 ### Stage 4 — upstream DAG dependent build/deploy/test verification
 
-If `merge_back_at` is `stage-4-upstream-dag-verification`, merge the temporary worktree branch back to main at this stage and run Stage 4 from main. If the branch was already merged in Stage 3, run Stage 4 from main. Otherwise, continue on the temporary worktree branch.
+If `merge_back_at` is `stage-4-upstream-dag-verification`, merge the temporary worktree branch back to main at this stage and run Stage 4 from main. If that merge is ref-only, immediately run `git checkout HEAD -- <phase-touched-files>` in the primary checkout using the recorded phase-owned manifest before continuing. If the branch was already merged in Stage 3, run Stage 4 from main. Otherwise, continue on the temporary worktree branch.
 
 Locate the modified package/layer/module in the dependency DAG. Trace every upstream dependent that imports, builds on, deploys with, or otherwise depends on the changed layer. For each upstream node, sequentially run the repo-declared equivalent of:
 
@@ -314,7 +321,7 @@ If an upstream build/deploy/test fails, save logs outside the repo when possible
 
 Stage 5 always runs.
 
-- If `merge_back_at` is `stage-5-finalization`, merge the temporary worktree branch back to main now.
+- If `merge_back_at` is `stage-5-finalization`, merge the temporary worktree branch back to main now; after a ref-only merge, immediately run `git checkout HEAD -- <phase-touched-files>` in the primary checkout using the recorded phase-owned manifest.
 - If the branch was already merged in Stage 3 or Stage 4, verify main contains the expected change.
 - Run the effective `green_checks` from `finalization_defaults` plus any phase-level additions/overrides.
 - Inspect the effective `log_checks` sources for hidden failures. Treat obvious fatal/error/traceback/uncaught/deploy-failure patterns as hard failures unless an explicit allowlist explains them.
@@ -328,7 +335,7 @@ If merge, green checks, log review, or cleanup fails, preserve evidence, keep th
 At phase start, record a Git baseline: branch/worktree identity, status, and phase-owned file manifest.
 
 - Temporary worktree branch: Stage 4 regression may use a hard reset after logs are saved.
-- Main branch: inspect whether uncommitted changes include files outside the phase-owned manifest. Ask the human before destructive rollback; prefer restoring only phase-owned paths when safe.
+- Main branch: inspect whether uncommitted changes include files outside the phase-owned manifest. The scoped post-ref-only-merge checkout is allowed only after that merge and only for recorded phase-owned paths; ask the human before any broader destructive rollback.
 - Stage 5 cleanup is not allowed until merge/final checks/log review have succeeded.
 - Because passes are forward-only, a `revisit` never rewinds merged history. A true revert is a human decision surfaced through the `stop-ask-human` path, never an automated step.
 

@@ -191,8 +191,9 @@ When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` 
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section) and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent (never clobbers per-machine tweaks).
+5. **Herdr config** — reconciles the kit-owned `herdr-config.toml` symlink at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning.
 
-Third-party Pi extensions are a separate network step — `just pi-extensions`.
+Third-party Pi extensions are a separate network step — `just pi-extensions`. It reconciles the pinned manifest through the Pi CLI (installs missing entries and removes the one explicitly retired package) but deliberately leaves unrelated user-installed packages untouched.
 
 ### Pi global-vs-repo skill precedence
 
@@ -394,8 +395,8 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 Two kinds of Pi extension, two install paths. **Do not mix them.**
 
-- **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by the global step of `just update` — copied/layered, never installed from a registry.
-- **THIRD-PARTY** are **installed from source** via `pi install`, declared as pinned sources in `third-party-extensions.txt` — never copied or vendored into this repo (no committed `node_modules`).
+- **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by the global step of `just update` — copied/layered, never installed from a registry. The same managed-link ownership model reconciles the kit's `herdr-config.toml` into `~/.config/herdr/config.toml`.
+- **THIRD-PARTY** are **installed from source** via the pinned manifest and `pi install` — never copied or vendored into this repo (no committed `node_modules`). The installer also removes only its explicit retired-package entry; it does not prune unrelated user packages.
 
 There is one install path for third-party extensions: `pi install` + the manifest. See `.shared-llm/public/llm/pi/common/THIRD-PARTY-EXTENSIONS.md` for the full set and per-extension runtime deps.
 

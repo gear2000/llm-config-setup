@@ -6,18 +6,21 @@ an order by writing `order.json` and signaling the Recruiter's pane:
 
     herdr pane run <recruiter-pane> "just upagent recruit <path/to/order.json>"
 
-The Recruiter then, for that one order:
-  1. reads + validates the order (contracts.py, fail-loud);
-  2. resolves the per-harness launch template from the roster (upagent.yaml);
-  3. splits a fresh worker pane from the order's cockpit pane (into the cockpit), with the
+The Recruiter validates and durably submits the order, starts a per-job Python runner, and
+returns immediately. Only the job runner atomically claims that order, then:
+  1. resolves the per-harness launch template from the roster (upagent.yaml);
+  2. splits a fresh worker pane from the order's cockpit pane (into the cockpit), with the
      order's cwd (the phase worktree) and env (optional OTel vars);
-  4. runs the worker, then blocks until it's done — `herdr wait agent-status <worker>
+  3. runs the worker, then blocks until it's done — `herdr wait agent-status <worker>
      --status done` for most harnesses, or polling for the result file directly for a harness
      in POLL_RESULT_FILE_HARNESSES (codex — its Herdr integration never reports a "done"
      transition, only a SessionStart registration);
-  5. reads + validates the worker's result.json (must echo the order_id);
-  6. closes the worker pane;
-  7. emits `ORDER <order_id> DONE` — the signal the leader waits on.
+  4. reads + validates the worker's result.json (must echo the order_id);
+  5. closes that worker pane, records terminal job state, and emits `ORDER <order_id> DONE`.
+
+Independent orders no longer queue behind a long-running worker in the Recruiter pane. The
+filesystem job ledger supplies exclusive per-order ownership; one job runner still owns one
+worker lifecycle end to end.
 
 The RESULT FILE is the source of truth; the `ORDER ... DONE` line is only the accelerator
 the leader matches on. If anything goes wrong (herdr error, timeout, missing/bad result),
@@ -33,6 +36,7 @@ Pure stdlib + PyYAML (as the sibling specialist hub uses). No Go hub, no tmux �
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -40,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import yaml
@@ -50,6 +55,10 @@ import contracts  # noqa: E402  (sibling module, path-imported)
 
 SHARED_SERVICES_WORKSPACE = "shared-services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
+STAGE_TIMEOUT_MS = {
+    "stage-1-implementation": 10_800_000,
+    "stage-2-adversarial-audit": 10_800_000,
+}
 RESULT_POLL_INTERVAL_S = 2.0
 # Harnesses whose Herdr integration never reports an agent-status transition to "done" (only a
 # SessionStart registration) — `herdr wait agent-status --status done` structurally never fires
@@ -91,6 +100,113 @@ class RecruiterError(RuntimeError):
     """A fail-loud Recruiter fault (bad roster, missing herdr, herdr call failed)."""
 
 
+class JobLedger:
+    """Filesystem copy-on-write job state for concurrent Recruiter requests.
+
+    Request state is immutable except for an atomically replaced ``state/latest.json``.
+    ``active/requests/<key>`` is an atomic mkdir claim; its lease is authoritative while
+    ``active/by-expiry`` is a disposable index for recovery/reaping.
+    """
+
+    def __init__(self, root: str | Path | None = None):
+        self.root = Path(root or os.environ.get(
+            "UPAGENT_HUB_DIR", "~/.local/state/herdr/upagent-hub"
+        )).expanduser()
+        self.requests = self.root / "requests"
+        self.active = self.root / "active"
+
+    @staticmethod
+    def key(order_id: str) -> str:
+        return hashlib.sha256(order_id.encode()).hexdigest()
+
+    def request_dir(self, key: str) -> Path:
+        return self.requests / key
+
+    @staticmethod
+    def _write_json(path: Path, value: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with temporary.open("w", encoding="utf-8") as f:
+            json.dump(value, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_DIRECTORY)
+        except OSError:
+            return
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _event(self, key: str, event: str, **detail: object) -> None:
+        payload = {"event": event, "at_ns": time.time_ns(), **detail}
+        event_path = self.request_dir(key) / "events" / f"{payload['at_ns']}-{uuid.uuid4().hex}.json"
+        self._write_json(event_path, payload)
+
+    def _snapshot(self, key: str, state: str, **detail: object) -> None:
+        payload = {"state": state, "at_ns": time.time_ns(), **detail}
+        self._write_json(self.request_dir(key) / "state" / "latest.json", payload)
+
+    def submit(self, order: dict) -> tuple[str, bool]:
+        """Persist a request once. Duplicate identical order ids are idempotent."""
+        key = self.key(order["order_id"])
+        request = self.request_dir(key)
+        try:
+            request.mkdir(parents=True)
+        except FileExistsError:
+            try:
+                stored = json.loads((request / "request.json").read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                raise RecruiterError(f"incomplete request record for {order['order_id']}: {e}") from e
+            if stored != order:
+                raise RecruiterError(f"order_id collision with different request: {order['order_id']}")
+            return key, False
+        self._write_json(request / "request.json", order)
+        self._event(key, "submitted", order_id=order["order_id"])
+        self._snapshot(key, "queued", order_id=order["order_id"])
+        return key, True
+
+    def order(self, key: str) -> dict:
+        try:
+            value = json.loads((self.request_dir(key) / "request.json").read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise RecruiterError(f"job request {key} is unreadable: {e}") from e
+        if not isinstance(value, dict):
+            raise RecruiterError(f"job request {key} is not an object")
+        return value
+
+    def claim(self, key: str, order_id: str, timeout_ms: int) -> str | None:
+        claim_dir = self.active / "requests" / key
+        try:
+            claim_dir.mkdir(parents=True)
+        except FileExistsError:
+            return None
+        token = uuid.uuid4().hex
+        expiry_epoch = int(time.time() + timeout_ms / 1000) + 60
+        lease = {"order_id": order_id, "token": token, "expires_at": expiry_epoch}
+        self._write_json(claim_dir / "lease.json", lease)
+        self._write_json(self.active / "by-expiry" / str(expiry_epoch) / f"{key}-{token}.json", lease)
+        self._event(key, "claimed", **lease)
+        self._snapshot(key, "running", **lease)
+        return token
+
+    def finish(self, key: str, token: str, verdict: str, **detail: object) -> None:
+        claim_dir = self.active / "requests" / key
+        lease_path = claim_dir / "lease.json"
+        try:
+            lease = json.loads(lease_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            lease = {}
+        if lease.get("token") != token:
+            return
+        self._event(key, "finished", verdict=verdict, **detail)
+        self._snapshot(key, "finished", verdict=verdict, **detail)
+        shutil.rmtree(claim_dir, ignore_errors=True)
+
+
 # --- pure, unit-testable core ------------------------------------------------
 
 
@@ -118,6 +234,31 @@ def load_roster(path: str | Path) -> dict:
         if not isinstance(tmpl, str) or not tmpl.strip():
             raise RecruiterError(f"{p} harness `{name}` must map to a non-empty template string")
     return data
+
+
+def _default_timeout_ms(stage_id: str) -> int:
+    """Return the stage-specific default without duplicating stage validation."""
+    return STAGE_TIMEOUT_MS.get(stage_id, DEFAULT_TIMEOUT_MS)
+
+
+def _load_normalized_result(path: str | Path, expected_order_id: str) -> dict:
+    """Apply logged cosmetic repairs at the Recruiter's sole result-read boundary."""
+    result_path = Path(path)
+    if not result_path.is_file():
+        raise contracts.ContractError(f"result.json not found: {result_path}")
+    try:
+        raw = json.loads(result_path.read_text())
+    except json.JSONDecodeError as e:
+        raise contracts.ContractError(f"result.json is not valid JSON: {e}") from e
+    if not isinstance(raw, dict):
+        raise contracts.ContractError("result.json must be a JSON object")
+    normalized, corrections = contracts.normalize_cosmetic(raw)
+    if corrections:
+        sys.stderr.write(
+            "recruiter: auto-corrected cosmetic result.json "
+            f"({'; '.join(corrections)}) — not a real failure\n"
+        )
+    return contracts.parse_result(json.dumps(normalized), expected_order_id=expected_order_id)
 
 
 def resolve_launch_command(order: dict, roster: dict) -> str:
@@ -254,7 +395,7 @@ def _recover_order_fields(order_path: str) -> tuple[str, str] | None:
     return None
 
 
-def cmd_recruit(order_path: str, roster_path: str) -> int:
+def _run_order(order_path: str, roster_path: str) -> int:
     """Hire one worker for one order. Emits `ORDER <id> DONE` whenever the order_id is known (a
     result.json always exists after that). Returns 0 on a clean hire, 1 on a blocked fallback,
     2 when the order is too malformed to even recover an id (leader falls back on its timeout)."""
@@ -301,17 +442,21 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         for k, v in (order.get("env") or {}).items():
             split_args += ["--env", f"{k}={v}"]
         split = _herdr_json(*split_args)
-        worker_pane = split["result"]["pane"]["pane_id"]
+        candidate_pane = split.get("result", {}).get("pane", {}).get("pane_id")
+        if not isinstance(candidate_pane, str) or not candidate_pane:
+            raise RecruiterError("herdr pane split response has no pane_id")
+        worker_pane = candidate_pane
 
         _herdr("pane", "run", worker_pane, launch)
-        timeout = str(order.get("timeout_ms", DEFAULT_TIMEOUT_MS))
+        timeout = str(order.get("timeout_ms") or _default_timeout_ms(order["stage_id"]))
         if order["harness"] in POLL_RESULT_FILE_HARNESSES:
             _wait_for_result_file(Path(order["result_path"]), timeout)
         else:
             _herdr("wait", "agent-status", worker_pane, "--status", "done", "--timeout", timeout)
 
-        # The worker must have written a valid result.json echoing this order_id.
-        contracts.load_result(order["result_path"], expected_order_id=order_id)
+        # The worker must have written a valid result.json echoing this order_id. Only this
+        # Recruiter boundary normalizes explicitly listed cosmetic mistakes; contracts stay strict.
+        _load_normalized_result(order["result_path"], expected_order_id=order_id)
     except (RecruiterError, contracts.ContractError, KeyError, TypeError, OSError) as e:
         # KeyError/TypeError guard Herdr JSON shape drift; OSError guards filesystem faults (e.g.
         # a result_path that is a dir, or a permission error on unlink) — all still write a blocked
@@ -329,6 +474,51 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     _report_state(my_pane, "idle", f"last order: {order_id} ({'blocked' if fell_back else 'done'})")
     print(f"ORDER {order_id} DONE", flush=True)
     return 1 if fell_back else 0
+
+
+def cmd_recruit(order_path: str, roster_path: str) -> int:
+    """Submit an order and return immediately; its claimed job owns the blocking lifecycle."""
+    try:
+        order = contracts.load_order(order_path)
+    except contracts.ContractError:
+        # Preserve the existing malformed-order fallback and terminal DONE signal.
+        return _run_order(order_path, roster_path)
+    ledger = JobLedger()
+    key, _created = ledger.submit(order)
+    # A duplicate submit starts another contender: the atomic claim admits only one while a
+    # prior runner is live, and retries an earlier runner that died before claiming.
+    command = [sys.executable, str(Path(__file__).resolve()), "--roster", roster_path, "run-job", key]
+    try:
+        # Inherit the Recruiter pane's output: the per-job owner emits its terminal marker there.
+        subprocess.Popen(command, start_new_session=True)
+    except OSError as e:
+        _write_blocked_result(order, f"could not start job runner: {e}")
+        ledger._event(key, "start-failed", reason=str(e))
+        ledger._snapshot(key, "finished", verdict="blocked", reason=str(e))
+        print(f"ORDER {order['order_id']} DONE", flush=True)
+        return 1
+    return 0
+
+
+def cmd_run_job(key: str, roster_path: str) -> int:
+    """Claim one persisted request, then run its existing exclusive worker lifecycle."""
+    ledger = JobLedger()
+    order = ledger.order(key)
+    timeout_ms = int(order.get("timeout_ms") or _default_timeout_ms(order["stage_id"]))
+    token = ledger.claim(key, order["order_id"], timeout_ms)
+    if token is None:
+        return 0
+    result_code = 1
+    verdict = "blocked"
+    try:
+        result_code = _run_order(str(ledger.request_dir(key) / "request.json"), roster_path)
+        try:
+            verdict = _load_normalized_result(order["result_path"], order["order_id"])["verdict"]
+        except contracts.ContractError:
+            verdict = "blocked"
+        return result_code
+    finally:
+        ledger.finish(key, token, verdict, exit_code=result_code)
 
 
 def _find_shared_services(workspaces_resp: dict) -> dict | None:
@@ -379,6 +569,8 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
 def cmd_up(roster_path: str) -> int:
     """Ensure the shared-services workspace + an armed Recruiter pane. Idempotent.
 
+    A single armed pane accepts concurrent orders because each accepted order runs in its own
+    claimed job process; callers do not need to create a second Recruiter pane for parallel work.
     Arms a `recruit` shell function in the Recruiter pane so the phase leader can signal it with
     `herdr pane run <recruiter> "recruit <order.json>"`. The resolved roster path is baked into
     that function, so the Recruiter always hires against the intended (repo-owned) roster.
@@ -422,8 +614,10 @@ def main(argv: list[str] | None = None) -> int:
         help="launch-template roster (default: $UPAGENT_CONFIG, else upagent.yaml next to this file)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    p_recruit = sub.add_parser("recruit", help="hire a worker for one order.json")
+    p_recruit = sub.add_parser("recruit", help="submit a worker order without blocking the Recruiter pane")
     p_recruit.add_argument("order", help="path to order.json")
+    p_run = sub.add_parser("run-job", help=argparse.SUPPRESS)
+    p_run.add_argument("key", help=argparse.SUPPRESS)
     sub.add_parser("up", help="ensure the shared-services workspace")
     sub.add_parser("status", help="report shared-services state")
 
@@ -431,6 +625,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "recruit":
             return cmd_recruit(args.order, args.roster)
+        if args.command == "run-job":
+            return cmd_run_job(args.key, args.roster)
         if args.command == "up":
             return cmd_up(args.roster)
         if args.command == "status":

@@ -28,21 +28,28 @@ Durable files are the source of truth; Herdr only carries the go/done signal.
   instructions path, result path, `cockpit_pane`) and signals the armed Recruiter pane:
   `herdr pane run <recruiter_pane> "recruit <order.json>"`. (`just upagent-up` arms a `recruit`
   shell function in the Recruiter pane and prints/persists its pane id.)
-- The Recruiter splits a fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree,
-  `--env` any OTel vars), runs the harness launch template for `order.harness`, and blocks on
-  `herdr wait agent-status <worker> --status done` — except for codex, whose Herdr
-  integration never reports a done transition, so the Recruiter polls for the result file
-  instead. Installing the kit's codex status hook
+- The Recruiter validates and persists a copy-on-write request under
+  `$UPAGENT_HUB_DIR` (default `~/.local/state/herdr/upagent-hub`), then immediately starts a
+  hidden per-job runner and returns. The job runner atomically claims
+  `active/requests/<hashed-order-id>/`, writes an authoritative lease plus a retained expiry
+  index, splits its fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree, `--env`
+  any OTel vars), and runs the harness launch template for `order.harness`. Only that claim
+  owner blocks on `herdr wait agent-status <worker> --status done` — except for codex, whose
+  Herdr integration never reports a done transition, so the job runner polls for the result
+  file instead. Installing the kit's codex status hook
   (`llm/codex/common/hooks/herdr-status-fix.sh`, wired on SessionStart/Stop in
   `~/.codex/hooks.json`) additionally restores live working/idle status for codex panes;
   polling remains the correctness fallback either way.
 - The worker reads the instructions, does the one stage, and **before its pane closes** writes
   `result.json` (verdict `passed|failed|blocked`, a `revisit` list of stage-ids on failure,
   and a `full_log` pointer to its harness transcript) plus its `compacted.md` and handoff.
-- The Recruiter validates the result (must echo the `order_id`), closes the worker pane, and
-  emits `ORDER <order_id> DONE`. If anything goes wrong it still writes a fail-loud `blocked`
-  result and emits `DONE`, so the leader is never stranded — it reads the verdict and escalates
-  per its budget.
+- The job owner validates the result (must echo the `order_id`), closes only its worker pane,
+  writes immutable events plus an atomically replaced terminal snapshot, releases its active
+  claim, and emits `ORDER <order_id> DONE`. If anything goes wrong it still writes a fail-loud
+  `blocked` result and emits `DONE`, so the leader is never stranded — it reads the verdict and
+  escalates per its budget. A request's immutable `request.json` and events are durable; its
+  `state/latest.json` is the copy-on-write current view. The lease is authoritative; retained
+  `active/by-expiry` entries are merely reaping indexes and must be token-checked before reuse.
 
 `route.yaml` is authoritative for which harness/model/agent runs each stage. The Recruiter only
 holds a mechanical per-harness launch template (`upagent.yaml`) — it never picks the agent.

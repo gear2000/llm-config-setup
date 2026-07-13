@@ -64,12 +64,6 @@ pi install npm:@ayulab/pi-rewind@0.4.2         # /rewind checkpoint navigation
   - Optional: Mermaid CLI for Mermaid-in-PDF.
 - **@plannotator/pi-extension** opens reviews in your **default browser**. Requires **Pi >= 0.74.0**.
 
-## Retired to opt-in: @hypabolic/pi-hypa (2026-07-12)
-
-`@hypabolic/pi-hypa` (compress noisy tool output out of context) was in the default set and is now **opt-in only**, commented out in the manifest. It reroutes **every** pi bash / read / grep / find / ls call through an external `hypa` CLI binary — so a half-installed Hypa (binary not on `PATH`, pi harness never registered with `hypa init`) breaks every tool call in every pi session: shell commands die with `hypa: command not found` (exit 127) and file reads with `Error: fetch failed`. That failure mode took down orchestrated pi workers and interactive sessions alike.
-
-To opt in: put `hypa` on `PATH`, run `hypa init --global --agent pi`, verify with `hypa doctor`, then uncomment its manifest line and re-run `tools/install-pi-extensions.sh`.
-
 ## Skipped: pi-cursor-sdk (opt-in; this project doesn't use Cursor)
 
 `pi-cursor-sdk` (use Cursor's models inside Pi) is **commented out** in the manifest and **not installed** — this project doesn't use Cursor.
@@ -85,4 +79,4 @@ To reproduce this exact set anywhere Pi is installed (>= 0.74.0):
 1. Copy `third-party-extensions.txt` and `tools/install-pi-extensions.sh` into the project (or just run the `pi install` commands above).
 2. Run `tools/install-pi-extensions.sh`.
 3. Confirm with `pi list` — you should see every uncommented manifest entry.
-4. For the opt-in extensions (pi-cursor-sdk, @hypabolic/pi-hypa), satisfy their prerequisites first, then uncomment their manifest lines and re-run.
+4. For the opt-in `pi-cursor-sdk` extension, satisfy its prerequisites first, then uncomment its manifest line and re-run.

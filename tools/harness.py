@@ -609,6 +609,7 @@ MANAGED_MARKERS = (
     "/.ai/shared/skills/",
     "/.ai/shared/agents/",
     "/.shared-llm/public/llm/pi/common/extensions/",
+    "/herdr-config.toml",
     # legacy pre-migration paths — kept so the reconciler recognises and prunes
     # links left dangling by the .shared-llm/ -> .shared-llm/public/ move and the
     # earlier layers/ -> .shared-llm/ move.
@@ -724,6 +725,14 @@ def plan_pi_runtime(root: Path) -> LinkPlan:
                 is_hub = name.endswith("-hub.ts") or name.startswith("hub-")
                 desired[(hub_ext if is_hub else agent_ext) / name] = entry
     return LinkPlan(desired, [pi_agents, agent_ext, hub_ext])
+
+
+def plan_herdr_config(root: Path) -> LinkPlan:
+    """Managed whole-file Herdr config under the standard XDG config path."""
+    source = root / "herdr-config.toml"
+    destination = HOME / ".config/herdr/config.toml"
+    desired = {destination: source} if source.is_file() else {}
+    return LinkPlan(desired, [destination.parent])
 
 
 def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool,
@@ -1882,6 +1891,14 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
         if not _is_excluded(kit_shared / "llm/pi/common/settings.template.json", kit_shared, exclude):
             _scaffold_settings(kit_shared / "llm/pi/common/settings.template.json",
                                HOME / ".pi/agent/settings.json", log)
+
+        herdr_counts = reconcile(plan_herdr_config(kit), repo_family(kit),
+                                 plan_only=False, force=False, repo_root=kit)
+        log.always(
+            f"  herdr config: created {herdr_counts['create']}, "
+            f"repointed {herdr_counts['repoint']}, pruned {herdr_counts['prune']}, "
+            f"skipped-foreign {herdr_counts['skip-foreign']}"
+        )
 
 
 # --- update (copy -> compose -> link, with a full run log) -----------------
