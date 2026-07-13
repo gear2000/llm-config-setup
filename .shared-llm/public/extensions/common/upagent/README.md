@@ -30,7 +30,12 @@ Durable files are the source of truth; Herdr only carries the go/done signal.
   shell function in the Recruiter pane and prints/persists its pane id.)
 - The Recruiter splits a fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree,
   `--env` any OTel vars), runs the harness launch template for `order.harness`, and blocks on
-  `herdr wait agent-status <worker> --status done`.
+  `herdr wait agent-status <worker> --status done` — except for codex, whose Herdr
+  integration never reports a done transition, so the Recruiter polls for the result file
+  instead. Installing the kit's codex status hook
+  (`llm/codex/common/hooks/herdr-status-fix.sh`, wired on SessionStart/Stop in
+  `~/.codex/hooks.json`) additionally restores live working/idle status for codex panes;
+  polling remains the correctness fallback either way.
 - The worker reads the instructions, does the one stage, and **before its pane closes** writes
   `result.json` (verdict `passed|failed|blocked`, a `revisit` list of stage-ids on failure,
   and a `full_log` pointer to its harness transcript) plus its `compacted.md` and handoff.

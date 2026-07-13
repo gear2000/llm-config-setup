@@ -49,6 +49,11 @@ llm_profiles:
 # codex → bare id (paired with effort); pi → provider/id[:thinking] (the :thinking
 # suffix IS pi's effort). effort is optional — the phase leader resolves it to `medium`
 # at order time when a profile omits it, so roster templates can always use {effort}.
+#
+# Overproduction-prone models (as of 2026-07: the gpt-5.6 family, terra especially) need
+# an explicit scope-discipline instruction in every stage brief — only what the stage
+# requires, no speculative extras, tests proportionate to the change. See
+# meta-plan-format.md for the guardrail text and the recommended default profiles.
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}

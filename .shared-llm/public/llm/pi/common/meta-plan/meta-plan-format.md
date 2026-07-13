@@ -115,6 +115,24 @@ llm_profiles:
 #     is a routing error — the worker CLI will reject or misread it.
 #   - `effort` is OPTIONAL. At order time the phase leader resolves it to `medium` when the
 #     profile omits it, so launch templates can always substitute `{effort}`.
+#
+# Recommended default profiles (as of 2026-07 — revisit as models move):
+#   implementation (stage-1):       codex  gpt-5.6-terra       effort medium
+#   adversarial audit (stage-2):    claude opus (Opus 4.8)     effort high (max for critical phases)
+#   advisor / lead / high-judgment: codex gpt-5.6-sol effort high,
+#                                   or claude fable (Fable 5) effort medium,
+#                                   or claude opus effort max
+#   planning (outside runs):        Claude Code or Codex directly; through pi use
+#                                   openai-codex/gpt-5.6-sol:medium|high, anthropic opus at
+#                                   max, or fable at low|medium
+#
+# GPT-5.6 OVERPRODUCTION GUARDRAIL. The 5.6 family (terra especially) tends to write far
+# more code and far more tests than a stage needs. Every stage brief for a worker routed
+# to ANY gpt-5.6 model MUST carry an explicit scope-discipline instruction: implement only
+# what the stage requires, no speculative abstractions or extra features, tests
+# proportionate to the change (cover the contract, not every permutation), prefer
+# extending existing files over spawning new ones. Route authors: flag it on the profile;
+# phase leaders: put it in the brief (see /herdr-phase).
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
