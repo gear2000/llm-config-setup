@@ -52,11 +52,15 @@ The result file is the source of truth. The leader races two completion signals 
 
 `order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`, optional `env`), with `harness`/`model`/`agent`/`effort` resolved deterministically from the route stage entry (`effort` is the profile's `effort`, or `medium` when the profile omits it — never left empty, because a roster template may substitute it into a CLI flag) and `cockpit_pane` set to a live cockpit pane (this leader's own) for the Recruiter to split the worker from — `herdr pane split` takes a source pane, not a workspace. `instructions.md` is the stage brief: the phase goal, this stage's job, the worktree branch, the deterministic merge timing, the non-delegation rule, the requirement to write `result.json`/`compacted.md`/handoff and then exit the harness session, the repo's available specialists (from the Specialist Hub roster) with the mandatory-consult rule — any area a listed specialist owns is asked, never guessed — and pointers to the plan and prior handoffs. The Recruiter splits one fresh worker pane from `cockpit_pane` into the cockpit (`herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env ...]`), runs the harness launch template, waits for the worker to finish, validates its `result.json`, closes the worker pane, and emits `ORDER <order_id> DONE`. The worker writes its own transcript path into `result.json`'s `full_log` field — that pointer is the durable audit trail.
 
-Every generated `instructions.md` includes this copy-pasteable result template, and says that the enum is deliberately strict:
+Every generated `instructions.md` includes a copy-pasteable result template and its destination. The leader MUST replace the two values below with the literal `order_id` and literal absolute `result_path` from this order's completed `order.json`; the angle-bracket text is a protocol-writing marker, never text that may appear in a generated instruction. The worker MUST write the result at the stated path and MUST copy the stated `order_id` exactly. It MUST NOT invent, generate, replace, or otherwise alter the order id.
+
+```text
+Write result.json exactly to: <literal result_path from this order.json>
+```
 
 ```json
 {
-  "order_id": "<exact order_id>",
+  "order_id": "<literal order_id from this order.json>",
   "verdict": "passed",
   "full_log": "<worker transcript path or session id>"
 }
