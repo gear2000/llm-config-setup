@@ -49,3 +49,12 @@ agents:
     location: .claude/agents/golang.md
     description: "Answers Go idiom, package-layout, and concurrency questions."
     cmd: "pi --agent golang --prompt-file {prompt_file}"
+
+  # Codex has no --agent flag. `{prompt_file}` is a shell-quoted PATH, not its contents, so pass
+  # `-` as Codex's prompt argument and redirect stdin from the file. The Librarian polls this
+  # consult's private answer_path because Codex may not report agent-status=done, then applies the
+  # same strict answer validation and pane cleanup.
+  - name: reviewer
+    location: .claude/agents/reviewer.md
+    description: "Provides an independent review with cited repository evidence."
+    cmd: "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check - < {prompt_file}"

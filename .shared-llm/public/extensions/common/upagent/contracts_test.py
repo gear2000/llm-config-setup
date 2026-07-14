@@ -76,11 +76,17 @@ def test_order_unknown_harness_fails() -> None:
         contracts.parse_order(json.dumps(bad))
 
 
-def test_order_codex_harness_is_out_of_scope() -> None:
-    bad = _valid_order()
-    bad["harness"] = "codex"
-    with pytest.raises(ContractError, match="unknown harness"):
-        contracts.parse_order(json.dumps(bad))
+def test_order_codex_harness_parses() -> None:
+    order = _valid_order()
+    order["harness"] = "codex"
+    order["model"] = "gpt-5.6-sol"
+    order["effort"] = "high"
+
+    parsed = contracts.parse_order(json.dumps(order))
+
+    assert parsed["harness"] == "codex"
+    assert parsed["model"] == "gpt-5.6-sol"
+    assert parsed["effort"] == "high"
 
 
 def test_order_bad_env_fails() -> None:

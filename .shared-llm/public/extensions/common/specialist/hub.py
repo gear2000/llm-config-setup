@@ -23,7 +23,8 @@ Consult protocol (files + signal, mirroring the UpAgent order/result pattern):
     caller:    herdr pane run <librarian> "consult <consults/<id>.json>"
     librarian: read+route the consult -> herdr pane split (transient specialist in shared-services)
     librarian: herdr pane run <specialist> "<cmd, briefed with the question + answer contract>"
-    librarian: herdr wait agent-status <specialist> --status done
+    librarian: herdr wait agent-status <specialist> --status done, or polls answer_path for
+               a `codex exec` specialist because Codex may never report agent-status=done
     specialist: writes answer.json {consult_id, answer, citations:[file:line, ...]}
     librarian: validate answer.json -> herdr pane close <specialist> -> print "CONSULT <id> DONE"
     caller:    herdr wait output <librarian> --match "CONSULT <id> DONE" --timeout <ms> -> read answer.json
@@ -67,6 +68,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 import yaml
 
@@ -84,6 +86,10 @@ LIBRARIAN_PANE_LABEL = "librarian"
 DEFAULT_RUNTIME = "/tmp/.herdr-specialist"
 # How long the Librarian waits for a transient specialist to finish answering (ms).
 CONSULT_TIMEOUT_MS = 600_000
+ANSWER_POLL_INTERVAL_SECONDS = 0.05
+# Specialist roster entries have only a command string, not a structured harness field. Codex
+# does not reliably report agent-status=done, so its private answer_path is the completion signal.
+CODEX_CMD_MARKER = "codex exec"
 
 
 # --- config -------------------------------------------------------------------
@@ -347,8 +353,12 @@ def build_prompt(consult: dict, location: str, cwd: str) -> str:
 
 
 def render_launch(cmd: str, prompt: str, prompt_file: Path) -> str:
-    """Substitute the briefing into the roster cmd. `{prompt_file}` gets the path (shell-safe for
-    any harness); `{prompt}` gets the shell-quoted inline text. load_config guarantees one exists.
+    """Substitute the briefing into the roster cmd.
+
+    ``{prompt_file}`` expands to the shell-quoted path, never the file contents. A CLI that reads
+    its prompt from stdin must say so in its roster command, for example
+    ``codex exec ... - < {prompt_file}``. ``{prompt}`` expands to shell-quoted inline text.
+    ``load_config`` guarantees that every command contains at least one placeholder.
     """
     if "{prompt_file}" in cmd:
         cmd = cmd.replace("{prompt_file}", shlex.quote(str(prompt_file)))
@@ -441,6 +451,16 @@ class ConsultFailure(RuntimeError):
     """A fail-loud consult fault (unknown specialist, hub not up, herdr call failed, bad answer).
     Caught inside cmd_consult so a failure answer.json is written and the DONE sentinel is still
     emitted — the caller's bounded wait must never be left to hang."""
+
+
+def _wait_for_answer_path(answer_path: Path, timeout_ms: int) -> None:
+    """Wait for a Codex specialist's private answer file when agent-status never reaches done."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if answer_path.is_file():
+            return
+        time.sleep(ANSWER_POLL_INTERVAL_SECONDS)
+    raise ConsultFailure(f"timed out waiting for {answer_path} to appear")
 
 
 def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
@@ -540,7 +560,18 @@ def cmd_consult(args: argparse.Namespace) -> None:
 
         launch = render_launch(entry["cmd"], prompt, prompt_file)
         _herdr("pane", "run", pane_id, launch)
-        _herdr("wait", "agent-status", pane_id, "--status", "done", "--timeout", str(CONSULT_TIMEOUT_MS))
+        if CODEX_CMD_MARKER in entry["cmd"]:
+            _wait_for_answer_path(Path(consult["answer_path"]), CONSULT_TIMEOUT_MS)
+        else:
+            _herdr(
+                "wait",
+                "agent-status",
+                pane_id,
+                "--status",
+                "done",
+                "--timeout",
+                str(CONSULT_TIMEOUT_MS),
+            )
         # The specialist must have written a valid answer.json echoing this consult_id.
         cc.load_answer(consult["answer_path"], expected_consult_id=consult_id)
     except (

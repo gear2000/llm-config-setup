@@ -41,7 +41,7 @@ RECOGNIZED_STAGE_IDS = (
 )
 
 # Harnesses the roster (upagent.yaml) may map a launch template for.
-KNOWN_HARNESSES = ("claude", "pi", "cursor")
+KNOWN_HARNESSES = ("claude", "codex", "pi", "cursor")
 
 # Required keys on an order.json the leader writes.
 ORDER_REQUIRED = (
@@ -106,7 +106,7 @@ def parse_order(text: str) -> dict:
         raise ContractError("order.json: `model` must be a string (may be empty)")
     # `effort` is optional. When present it must be a string; the leader resolves it from the
     # route llm_profile (`medium` when the profile omits it), so a template that uses {effort}
-    # never formats an empty value.
+    # for Claude or Codex never formats an empty value.
     if "effort" in order and not isinstance(order["effort"], str):
         raise ContractError("order.json: `effort` must be a string when present")
     # `timeout_ms` is optional. bool is an int subclass, so reject it explicitly: a timeout

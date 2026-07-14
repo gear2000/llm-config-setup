@@ -41,11 +41,17 @@ llm_profiles:
     model: configured-claude-model
     effort: medium
 
+  codex-implementation:
+    harness: codex
+    model: configured-codex-model
+    effort: medium
+
   pi-default:
     harness: pi
     model: configured-default
 
 # model is the HARNESS-NATIVE id shape: claude → alias/full name (paired with effort);
+# codex → bare model id (paired with effort, passed as model_reasoning_effort);
 # pi → provider/id[:thinking] (the :thinking suffix IS pi's effort). effort is optional —
 # the phase leader resolves it to `medium` at order time when a profile omits it, so roster
 # templates can always use {effort}.
@@ -74,7 +80,7 @@ phases:
       # stage-0-alignment goes here ONLY when accuracy: high (independent from stage-1)
       stage-1-implementation:
         purpose: "unit tests + implementation in a TDD coding loop on the temp worktree branch"
-        llm_profile: claude-low
+        llm_profile: codex-implementation
         agent: backend
       stage-2-adversarial-audit:
         purpose: "hostile audit of Stage 1 code on the same temp worktree branch"
@@ -102,7 +108,7 @@ Rules:
 - Every stage has explicit `llm_profile` and `agent` fields.
 - Every phase has all five base stage ids; `stage-0-alignment` is present **iff** `accuracy: high` and forbidden otherwise.
 - The `agent` value is the configured project or harness agent/persona name, such as `general`, `backend`, `golang`, `python`, `frontend`, `qa`, or a project-specific specialist.
-- The runner resolves `agent` from the appropriate harness/project agent directories and fails loud if a required agent cannot be found. The route is authoritative and deterministic per stage: `llm_profile` → harness + model, `agent` → persona. The Recruiter never picks the agent; it only holds a mechanical per-harness launch template.
+- The runner resolves `agent` from the appropriate harness/project agent directories and fails loud if a required agent cannot be found. The route is authoritative and deterministic per stage: `llm_profile` → harness + model, `agent` → persona. The phase leader includes that persona contract in `instructions.md`; this is mandatory for Codex and any other harness without an `--agent` flag. The Recruiter never picks the agent; it only holds a mechanical per-harness launch template.
 - Prefer domain or feature-specific agents when available. Use `agent: general` only when generic behavior is intentional.
 - Repeated templates are allowed only if resolved to explicit phase/stage entries before execution begins.
 - Stage 2 must be independent from Stage 1 by profile, agent, harness, model family, or persona. When `accuracy: high`, `stage-0-alignment`'s audit reviewer follows the same independence rule against `stage-1-implementation`.
@@ -157,7 +163,7 @@ leader:    herdr pane run <recruiter_pane> "recruit <order.json path>"
 leader:    start one tiny per-order result watchdog that polls <result_path> for a valid
            result.json whose order_id matches <order_id>; it stays silent until found
 Recruiter: read+validate order → herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env k=v ...]
-Recruiter: herdr pane run <worker_pane> "<per-harness launch template>  --agent <agent> --model <model>"
+Recruiter: herdr pane run <worker_pane> "<per-harness launch template with route model/effort>"
 Recruiter: herdr wait agent-status <worker_pane> --status done --timeout <order.timeout_ms>
 worker (before finishing): write result.json (verdict, revisit, full_log = its transcript path) + compacted.md + handoff, then exit its session
 Recruiter: validate result.json well-formed → herdr pane close <worker_pane> → emit "ORDER <id> DONE"

@@ -45,6 +45,11 @@ def _roster() -> dict:
     return {
         "harnesses": {
             "claude": "claude --model {model} --agent {agent} read:{instructions_path} write:{result_path}",
+            "codex": (
+                "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "
+                "--model {model} -c model_reasoning_effort={effort} "
+                "read:{instructions_path} write:{result_path}"
+            ),
             "pi": "pi read:{instructions_path} write:{result_path}",
         }
     }
@@ -72,6 +77,21 @@ def test_resolve_substitutes_fields() -> None:
 def test_resolve_unknown_harness_fails() -> None:
     with pytest.raises(RecruiterError, match="no launch template for harness"):
         recruiter.resolve_launch_command(_order(harness="cursor"), _roster())
+
+
+def test_resolve_codex_direct_launch_substitutes_model_effort_and_paths() -> None:
+    cmd = recruiter.resolve_launch_command(
+        _order(harness="codex", model="gpt-5.6-sol", effort="high"),
+        _roster(),
+    )
+
+    assert cmd.startswith("codex exec --dangerously-bypass-approvals-and-sandbox")
+    assert "--skip-git-repo-check" in cmd
+    assert "--model gpt-5.6-sol" in cmd
+    assert "model_reasoning_effort=high" in cmd
+    assert "--agent" not in cmd
+    assert "read:/tmp/wt/instructions.md" in cmd
+    assert "write:/tmp/wt/result.json" in cmd
 
 
 def test_resolve_effort_substitutes() -> None:
@@ -113,11 +133,13 @@ def test_load_roster_non_string_template_fails(tmp_path: Path) -> None:
         recruiter.load_roster(p)
 
 
-def test_load_roster_rejects_codex_template(tmp_path: Path) -> None:
+def test_load_roster_accepts_codex_template(tmp_path: Path) -> None:
     p = tmp_path / "upagent.yaml"
-    p.write_text("harnesses:\n  codex: 'codex exec {model}'\n")
-    with pytest.raises(RecruiterError, match="unsupported"):
-        recruiter.load_roster(p)
+    p.write_text("harnesses:\n  codex: 'codex exec --model {model}'\n")
+
+    roster = recruiter.load_roster(p)
+
+    assert roster["harnesses"]["codex"] == "codex exec --model {model}"
 
 
 def test_load_roster_invalid_yaml_raises_recruiter_error(tmp_path: Path) -> None:
@@ -364,6 +386,88 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     assert status_wait_timeouts and set(status_wait_timeouts) == {"50"}
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
     assert closed_panes == ["worker-pane", "worker-pane"]
+
+
+def test_codex_completion_monitor_promotes_private_result_when_agent_status_never_finishes(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    result_path = tmp_path / "result.json"
+    order = _order(
+        harness="codex",
+        model="gpt-5.6-sol",
+        effort="high",
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        "harnesses:\n"
+        "  codex: >-\n"
+        "    codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check\n"
+        "    --model {model} -c model_reasoning_effort={effort}\n"
+        "    read:{instructions_path} write:{result_path}\n"
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATUS_WAIT_POLL_MS", 50)
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    worker_launched = threading.Event()
+    status_wait_started = threading.Event()
+    staging_paths: list[Path] = []
+    closed_panes: list[str] = []
+    outcomes: list[int] = []
+
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args: {"result": {"pane": {"pane_id": "codex-worker-pane"}}},
+    )
+
+    def fake_herdr(*args: str) -> None:
+        if args[:2] == ("pane", "run"):
+            launch = args[3]
+            assert launch.startswith("codex exec --dangerously-bypass-approvals-and-sandbox")
+            assert "--model gpt-5.6-sol" in launch
+            assert "model_reasoning_effort=high" in launch
+            staging_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
+            worker_launched.set()
+            return
+        if args[:2] == ("pane", "close"):
+            closed_panes.append(args[2])
+            return
+        raise AssertionError(f"unexpected herdr args: {args}")
+
+    def never_done(command: list[str], **kwargs: object) -> object:
+        assert command[1:3] == ["wait", "agent-status"]
+        status_wait_started.set()
+        time.sleep(0.05)
+        return recruiter.subprocess.CompletedProcess(
+            command, 1, "", "timed out waiting for agent status change"
+        )
+
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(recruiter.subprocess, "run", never_done)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    runner = threading.Thread(target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path))))
+    runner.start()
+    assert worker_launched.wait(timeout=2)
+    assert status_wait_started.wait(timeout=2)
+    assert staging_paths[0] != result_path
+    staging_paths[0].parent.mkdir(parents=True, exist_ok=True)
+    staging_paths[0].write_text(json.dumps(_result(order["order_id"])))
+
+    deadline = time.monotonic() + 2
+    while not result_path.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    runner.join(timeout=1)
+
+    assert not runner.is_alive()
+    assert outcomes == [0]
+    assert json.loads(result_path.read_text()) == _result(order["order_id"])
+    assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
+    assert closed_panes == ["codex-worker-pane", "codex-worker-pane"]
 
 
 def test_run_job_keeps_worker_result_when_status_wait_fails(tmp_path: Path, monkeypatch, capsys) -> None:

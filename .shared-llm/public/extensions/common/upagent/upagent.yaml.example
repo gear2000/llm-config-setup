@@ -22,9 +22,10 @@
 #   {result_path}       absolute path the worker MUST write result.json to
 #
 # Model-id shapes differ per harness: claude takes an alias or full name (`opus`,
-# `claude-opus-4-8`) plus `--effort low|medium|high|xhigh|max`; pi takes `provider/id` with
-# an optional `:<thinking>` suffix (`openai/gpt-5.5:high`), so for pi the effort rides INSIDE
-# {model} and {effort} is not used.
+# `claude-opus-4-8`) plus `--effort low|medium|high|xhigh|max`; Codex takes a bare model id
+# (`gpt-5.6-sol`) plus `-c model_reasoning_effort={effort}`; pi takes `provider/id` with an
+# optional `:<thinking>` suffix (`openai-codex/gpt-5.6-sol:high`), so for pi the effort rides
+# INSIDE {model} and {effort} is not used.
 #
 # IMPORTANT: because templates are str.format() strings, any LITERAL brace must be DOUBLED —
 # write `${{VAR}}` for a shell variable and `{{a,b}}` for a literal brace group. A single
@@ -37,9 +38,10 @@
 # NON-INTERACTIVE IS MANDATORY. A worker runs unattended in a pane, so every launch template
 # MUST bypass all trust/permission prompts or the worker hangs forever at a dialog (and the
 # Recruiter's wait times out). The bypass per harness:
-#   claude → --dangerously-skip-permissions   (also trusts the cwd, incl. a fresh worktree)
-#   pi     → --approve                          (trusts project-local files for the run)
-#   cursor → --print                            (non-interactive)
+#   claude → --dangerously-skip-permissions             (trusts cwd, incl. a fresh worktree)
+#   codex  → --dangerously-bypass-approvals-and-sandbox (with --skip-git-repo-check)
+#   pi     → --approve                                  (trusts project-local files for the run)
+#   cursor → --print                                    (non-interactive)
 #
 # PI WORKERS RUN INSULATED. `--no-extensions` turns off extension discovery so a broken
 # globally-installed extension can never brick orchestrated workers (a half-installed
@@ -58,6 +60,15 @@ harnesses:
     "Read {instructions_path} and do exactly that one stage in {cwd}.
     When finished, write your result.json to {result_path} (verdict: passed|failed|blocked,
     a revisit list of stage-ids on failure, and a full_log pointer to your session transcript)."
+
+  # Codex has no --agent flag. The persona comes from instructions_path. Codex also does not
+  # reliably report agent-status=done; the Recruiter's generic token-scoped completion monitor
+  # finalizes its private staged result without any Codex-specific public-result polling.
+  codex: >-
+    codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+    --model {model} -c model_reasoning_effort={effort}
+    "Read {instructions_path} and do exactly that one stage in {cwd}.
+    Write result.json to {result_path} (verdict + revisit + full_log)."
 
   pi: >-
     pi --approve --no-extensions -e "$HOME/.pi/agent/extensions/herdr-agent-state.ts"

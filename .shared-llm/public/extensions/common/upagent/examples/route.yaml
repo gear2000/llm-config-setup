@@ -2,6 +2,12 @@ llm_profiles:
   claude-mid:
     harness: claude
     model: configured-claude-model
+    effort: medium
+
+  codex-implementation:
+    harness: codex
+    model: configured-codex-model
+    effort: medium
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
@@ -25,7 +31,7 @@ phases:
       agent: herdr-phase-leader
     stages:
       stage-1-implementation:
-        llm_profile: claude-mid
+        llm_profile: codex-implementation
         agent: backend
       stage-2-adversarial-audit:
         llm_profile: claude-mid
@@ -50,7 +56,7 @@ phases:
         llm_profile: claude-mid
         agent: aligner
       stage-1-implementation:
-        llm_profile: claude-mid
+        llm_profile: codex-implementation
         agent: backend
       stage-2-adversarial-audit:
         llm_profile: claude-mid
