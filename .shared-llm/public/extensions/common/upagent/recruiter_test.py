@@ -295,7 +295,7 @@ def test_recruit_submits_and_spawns_without_waiting(tmp_path: Path, monkeypatch)
     assert (tmp_path / "hub/requests" / key / "state/latest.json").is_file()
 
 
-def test_completion_monitor_closes_worker_after_staging_result_while_status_wait_is_stuck(
+def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status_result(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     result_path = tmp_path / "result.json"
@@ -303,13 +303,15 @@ def test_completion_monitor_closes_worker_after_staging_result_while_status_wait
     roster_path = tmp_path / "upagent.yaml"
     roster_path.write_text('harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n')
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATUS_WAIT_POLL_MS", 50)
     ledger = recruiter.JobLedger()
     key, _ = ledger.submit(order)
     worker_launched = threading.Event()
-    release_status_wait = threading.Event()
+    status_wait_started = threading.Event()
     staging_paths: list[Path] = []
     closed_panes: list[str] = []
     worker_closed = threading.Event()
+    status_wait_timeouts: list[str] = []
     outcomes: list[int] = []
 
     monkeypatch.setattr(
@@ -323,21 +325,28 @@ def test_completion_monitor_closes_worker_after_staging_result_while_status_wait
             staging_paths.append(Path(args[3].split("write:", maxsplit=1)[1]))
             worker_launched.set()
             return
-        if args[:2] == ("wait", "agent-status"):
-            assert release_status_wait.wait(timeout=2)
-            return
         if args[:2] == ("pane", "close"):
             closed_panes.append(args[2])
             worker_closed.set()
             return
         raise AssertionError(f"unexpected herdr args: {args}")
 
+    def fake_subprocess_run(command: list[str], **kwargs: object) -> object:
+        assert command[1:3] == ["wait", "agent-status"]
+        status_wait_timeouts.append(command[-1])
+        status_wait_started.set()
+        time.sleep(0.05)
+        return recruiter.subprocess.CompletedProcess(command, 1, "", "timed out waiting for agent status change")
+
     monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(recruiter.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
 
     runner = threading.Thread(target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path))))
     runner.start()
     assert worker_launched.wait(timeout=2)
+    assert status_wait_started.wait(timeout=2)
     staging_paths[0].parent.mkdir(parents=True, exist_ok=True)
     staging_paths[0].write_text(json.dumps(_result(order["order_id"])))
     deadline = time.monotonic() + 2
@@ -347,10 +356,12 @@ def test_completion_monitor_closes_worker_after_staging_result_while_status_wait
     assert worker_closed.wait(timeout=2)
     assert closed_panes == ["worker-pane"]
 
-    release_status_wait.set()
-    runner.join(timeout=2)
+    promoted_at = time.monotonic()
+    runner.join(timeout=1)
     assert not runner.is_alive()
+    assert time.monotonic() - promoted_at < 0.5
     assert outcomes == [0]
+    assert status_wait_timeouts and set(status_wait_timeouts) == {"50"}
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
     assert closed_panes == ["worker-pane", "worker-pane"]
 
@@ -373,16 +384,18 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(tmp_path: Path, monk
         if args[:2] == ("pane", "run"):
             worker_result_paths.append(Path(args[3].split("write:", maxsplit=1)[1]))
             return
-        if args[:2] == ("wait", "agent-status"):
-            worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
-            worker_result_paths[0].write_text(json.dumps(_result(order["order_id"], verdict="passed")))
-            raise recruiter.RecruiterError("timed out waiting for done status")
         if args[:2] == ("pane", "close"):
             return
         raise AssertionError(f"unexpected herdr args: {args}")
 
+    def fail_wait(*args: object) -> bool:
+        worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        worker_result_paths[0].write_text(json.dumps(_result(order["order_id"], verdict="passed")))
+        raise recruiter.RecruiterError("wait transport failed")
+
     monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
     monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", fail_wait)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
@@ -458,19 +471,19 @@ def test_run_order_rejects_cosmetic_result_before_done(tmp_path: Path, monkeypat
         lambda *args: {"result": {"pane": {"pane_id": "worker-pane"}}},
     )
 
-    def fake_herdr(*args: str) -> None:
-        if args[:2] == ("wait", "agent-status"):
-            staging_path.write_text(
-                json.dumps(
-                    {
-                        "order_id": order["order_id"],
-                        "verdict": "PASSED",
-                        "full_log": "/tmp/worker.log",
-                    }
-                )
+    def fake_wait(*args: object) -> bool:
+        staging_path.write_text(
+            json.dumps(
+                {
+                    "order_id": order["order_id"],
+                    "verdict": "PASSED",
+                    "full_log": "/tmp/worker.log",
+                }
             )
+        )
+        return True
 
-    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", fake_wait)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
 
     code, result = recruiter._run_order(str(order_path), str(roster_path), staging_path)

@@ -72,6 +72,7 @@ SHARED_SERVICES_WORKSPACE = "shared-services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
 LEASE_GRACE_SECONDS = 60
 COMPLETION_MONITOR_POLL_SECONDS = 0.05
+STATUS_WAIT_POLL_MS = 1_000
 STAGE_TIMEOUT_MS = {
     "stage-1-implementation": 10_800_000,
     "stage-2-adversarial-audit": 10_800_000,
@@ -430,6 +431,44 @@ def _herdr(*args: str) -> None:
         raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
 
 
+def _wait_for_agent_status(worker_pane: str, timeout_ms: int, monitor_finalized: threading.Event | None) -> bool:
+    """Wait for done status in short intervals, returning False when the monitor wins.
+
+    Herdr returns exit code 1 and this exact message for an ordinary wait interval timeout.
+    Other non-zero exits are real faults. Keeping one short-lived Herdr process at a time means a
+    staging-result monitor can release the job runner promptly without abandoning a wait process.
+    """
+    _herdr_available()
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if monitor_finalized is not None and monitor_finalized.is_set():
+            return False
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            break
+        poll_timeout_ms = min(STATUS_WAIT_POLL_MS, remaining_ms)
+        args = (
+            "wait",
+            "agent-status",
+            worker_pane,
+            "--status",
+            "done",
+            "--timeout",
+            str(poll_timeout_ms),
+        )
+        proc = subprocess.run(["herdr", *args], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return True
+        if monitor_finalized is not None and monitor_finalized.is_set():
+            return False
+        if proc.returncode == 1 and proc.stderr.strip() == "timed out waiting for agent status change":
+            continue
+        raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
+    if monitor_finalized is not None and monitor_finalized.is_set():
+        return False
+    raise RecruiterError(f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms")
+
+
 def _report_state(pane: str | None, state: str, message: str) -> None:
     """Surface the Recruiter in Herdr's agents sidebar (`pane report-agent`). BEST-EFFORT:
     status display must never break a hire, so herdr faults are swallowed. `pane` may be
@@ -522,7 +561,7 @@ def _run_order(
     order_path: str,
     roster_path: str,
     worker_result_path: Path,
-    on_worker_launched: Callable[[str], None] | None = None,
+    on_worker_launched: Callable[[str], threading.Event] | None = None,
 ) -> tuple[int, dict]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -534,6 +573,7 @@ def _run_order(
     fell_back = False
     execution_order = {**order, "result_path": str(worker_result_path)}
     worker_pane: str | None = None
+    monitor_finalized: threading.Event | None = None
     # The armed recruit() runs inside the Recruiter's own pane, so HERDR_PANE_ID names it;
     # flip the sidebar to working for the duration of the hire (best-effort, may be None
     # when recruit is invoked from outside a Herdr pane).
@@ -571,9 +611,9 @@ def _run_order(
 
         _herdr("pane", "run", worker_pane, launch)
         if on_worker_launched is not None:
-            on_worker_launched(worker_pane)
+            monitor_finalized = on_worker_launched(worker_pane)
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
-        _herdr("wait", "agent-status", worker_pane, "--status", "done", "--timeout", str(timeout_ms))
+        _wait_for_agent_status(worker_pane, timeout_ms, monitor_finalized)
 
         # Invalid aliases are a worker contract failure, not a repair.
         result = load_result(worker_result_path, expected_order_id=order_id)
@@ -654,9 +694,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     worker_result_path = ledger.result_staging_path(key, token)
     monitor: tuple[threading.Event, threading.Event, threading.Thread] | None = None
 
-    def start_monitor(worker_pane: str) -> None:
+    def start_monitor(worker_pane: str) -> threading.Event:
         nonlocal monitor
         monitor = _start_completion_monitor(ledger, key, token, order, worker_result_path, worker_pane, timeout_ms)
+        return monitor[1]
 
     result_code, result = _run_order(
         str(ledger.request_dir(key) / "request.json"), roster_path, worker_result_path, start_monitor
