@@ -295,7 +295,7 @@ def test_recruit_submits_and_spawns_without_waiting(tmp_path: Path, monkeypatch)
     assert (tmp_path / "hub/requests" / key / "state/latest.json").is_file()
 
 
-def test_completion_monitor_publishes_staging_result_while_status_wait_is_stuck(
+def test_completion_monitor_closes_worker_after_staging_result_while_status_wait_is_stuck(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     result_path = tmp_path / "result.json"
@@ -308,6 +308,8 @@ def test_completion_monitor_publishes_staging_result_while_status_wait_is_stuck(
     worker_launched = threading.Event()
     release_status_wait = threading.Event()
     staging_paths: list[Path] = []
+    closed_panes: list[str] = []
+    worker_closed = threading.Event()
     outcomes: list[int] = []
 
     monkeypatch.setattr(
@@ -325,6 +327,8 @@ def test_completion_monitor_publishes_staging_result_while_status_wait_is_stuck(
             assert release_status_wait.wait(timeout=2)
             return
         if args[:2] == ("pane", "close"):
+            closed_panes.append(args[2])
+            worker_closed.set()
             return
         raise AssertionError(f"unexpected herdr args: {args}")
 
@@ -340,12 +344,15 @@ def test_completion_monitor_publishes_staging_result_while_status_wait_is_stuck(
     while not result_path.is_file() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert json.loads(result_path.read_text()) == _result(order["order_id"])
+    assert worker_closed.wait(timeout=2)
+    assert closed_panes == ["worker-pane"]
 
     release_status_wait.set()
     runner.join(timeout=2)
     assert not runner.is_alive()
-    assert outcomes == [1]
+    assert outcomes == [0]
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
+    assert closed_panes == ["worker-pane", "worker-pane"]
 
 
 def test_run_job_keeps_worker_result_when_status_wait_fails(tmp_path: Path, monkeypatch, capsys) -> None:

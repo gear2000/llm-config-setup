@@ -481,8 +481,14 @@ def _write_blocked_result(order: dict, reason: str, result_path: str | Path | No
 
 
 def _start_completion_monitor(
-    ledger: JobLedger, key: str, token: str, order: dict, worker_result_path: Path, timeout_ms: int
-) -> tuple[threading.Event, threading.Thread]:
+    ledger: JobLedger,
+    key: str,
+    token: str,
+    order: dict,
+    worker_result_path: Path,
+    worker_pane: str,
+    timeout_ms: int,
+) -> tuple[threading.Event, threading.Event, threading.Thread]:
     """Poll one lease's staging result until it is finalized or the lease window closes.
 
     Herdr's agent-status signal is only an accelerator. This bounded monitor lets a valid worker
@@ -490,6 +496,7 @@ def _start_completion_monitor(
     terminal publisher, so its claim-lock and lease checks choose exactly one winner.
     """
     stop = threading.Event()
+    finalized = threading.Event()
     deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
 
     def monitor() -> None:
@@ -499,22 +506,23 @@ def _start_completion_monitor(
             except ContractError:
                 stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
                 continue
-            if ledger.finalize(
-                key, token, order, result, exit_code=0, completion_source="staging-completion-monitor"
-            ):
+            if ledger.finalize(key, token, order, result, exit_code=0, completion_source="staging-completion-monitor"):
+                finalized.set()
+                with suppress(RecruiterError, OSError):
+                    _herdr("pane", "close", worker_pane)
                 print(f"ORDER {order['order_id']} DONE", flush=True)
             return
 
     thread = threading.Thread(target=monitor, name=f"upagent-monitor-{key[:12]}", daemon=True)
     thread.start()
-    return stop, thread
+    return stop, finalized, thread
 
 
 def _run_order(
     order_path: str,
     roster_path: str,
     worker_result_path: Path,
-    on_worker_launched: Callable[[], None] | None = None,
+    on_worker_launched: Callable[[str], None] | None = None,
 ) -> tuple[int, dict]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -563,7 +571,7 @@ def _run_order(
 
         _herdr("pane", "run", worker_pane, launch)
         if on_worker_launched is not None:
-            on_worker_launched()
+            on_worker_launched(worker_pane)
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
         _herdr("wait", "agent-status", worker_pane, "--status", "done", "--timeout", str(timeout_ms))
 
@@ -644,11 +652,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     if token is None:
         return 0
     worker_result_path = ledger.result_staging_path(key, token)
-    monitor: tuple[threading.Event, threading.Thread] | None = None
+    monitor: tuple[threading.Event, threading.Event, threading.Thread] | None = None
 
-    def start_monitor() -> None:
+    def start_monitor(worker_pane: str) -> None:
         nonlocal monitor
-        monitor = _start_completion_monitor(ledger, key, token, order, worker_result_path, timeout_ms)
+        monitor = _start_completion_monitor(ledger, key, token, order, worker_result_path, worker_pane, timeout_ms)
 
     result_code, result = _run_order(
         str(ledger.request_dir(key) / "request.json"), roster_path, worker_result_path, start_monitor
@@ -658,9 +666,14 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     finalized = ledger.finalize(key, token, order, result, exit_code=result_code, completion_source="agent-status")
     if monitor is not None:
         monitor[0].set()
-        monitor[1].join(timeout=COMPLETION_MONITOR_POLL_SECONDS * 2)
+        if not finalized and monitor[1].is_set():
+            # The monitor owns the terminal marker after winning the lease. Wait for its
+            # close-before-DONE sequence so this runner cannot exit and stop it mid-cleanup.
+            monitor[2].join()
+        else:
+            monitor[2].join(timeout=COMPLETION_MONITOR_POLL_SECONDS * 2)
     if not finalized:
-        return 1
+        return 0 if monitor is not None and monitor[1].is_set() else 1
     print(f"ORDER {order['order_id']} DONE", flush=True)
     return result_code
 
