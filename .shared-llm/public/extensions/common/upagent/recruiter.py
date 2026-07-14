@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """UpAgent Recruiter — the always-up broker that hires a fresh worker per work order.
 
-The Recruiter is a pane in the `shared-services` Herdr workspace. The phase leader places
-an order by writing `order.json` and signaling the Recruiter's pane:
+The Recruiter has a status pane in the `shared-services` Herdr workspace. The phase leader
+places an order by writing `order.json` and using the blocking CLI:
 
-    herdr pane run <recruiter-pane> "just upagent recruit <path/to/order.json>"
+    just upagent-recruit <path/to/order.json>
 
-The Recruiter validates and durably submits the order, starts a per-job Python runner, and
-returns immediately. Only the job runner atomically claims that order, then:
+The normal phase-leader entry point is the blocking ``dispatch`` command. It submits directly
+to the durable ledger instead of injecting command text into the Recruiter's shell pane. Only
+the job runner atomically claims that order, then:
   1. resolves the per-harness launch template from the roster (upagent.yaml);
   2. splits a fresh worker pane from the order's cockpit pane (into the cockpit), with the
      order's cwd (the phase worktree) and env (optional OTel vars);
-  3. runs the worker, starts a bounded monitor for that lease's private staging result, then
-     blocks until Herdr reports `agent-status <worker> --status done`; the monitor atomically
-     promotes a valid staging result if the Herdr status signal remains stuck;
+  3. writes a lease-specific worker brief with one literal result path and order id, runs the
+     worker, and races Herdr's event-driven agent-status wait against that private result;
   4. reads + validates the worker's result.json (must echo the order_id);
-  5. closes that worker pane, records terminal job state, and emits `ORDER <order_id> DONE`.
+  5. closes and verifies that worker pane is absent, then atomically publishes the public
+     result and a durable completion receipt.
 
 Independent orders no longer queue behind a long-running worker in the Recruiter pane. The
 filesystem job ledger supplies exclusive per-order ownership; one job runner still owns one
 worker lifecycle end to end.
 
-The RESULT FILE is the source of truth; the `ORDER ... DONE` line is only the accelerator
-the leader matches on. If anything goes wrong (herdr error, timeout, missing/bad result),
-the Recruiter still writes a fail-loud `blocked` result.json and emits `ORDER ... DONE`, so
+The RESULT FILE is the source of truth and ``receipt.json`` is the durable wake-up record.
+Pane output is display-only. If anything goes wrong (Herdr error, timeout, missing/bad result,
+or cleanup failure), the Recruiter publishes a fail-loud ``blocked`` result and a receipt, so
 the leader is never stranded — it reads the blocked verdict and escalates per its budget.
 
 route.yaml is authoritative for which harness/model/agent runs each stage; the Recruiter
@@ -44,6 +45,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import shlex
 import shutil
 import subprocess
@@ -72,7 +74,7 @@ SHARED_SERVICES_WORKSPACE = "shared-services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
 LEASE_GRACE_SECONDS = 60
 COMPLETION_MONITOR_POLL_SECONDS = 0.05
-STATUS_WAIT_POLL_MS = 1_000
+INVALID_RESULT_SETTLE_SECONDS = 0.5
 STAGE_TIMEOUT_MS = {
     "stage-1-implementation": 10_800_000,
     "stage-2-adversarial-audit": 10_800_000,
@@ -105,7 +107,7 @@ def default_roster_path() -> str:
 # consumes them; the Recruiter only substitutes. A field absent from the order substitutes
 # as "" — so a template flag like `--effort {effort}` needs the order to actually carry a
 # value, or the harness CLI will eat the next token as the flag's value.
-TEMPLATE_FIELDS = ("model", "agent", "cwd", "instructions_path", "result_path", "effort")
+TEMPLATE_FIELDS = ("order_id", "model", "agent", "cwd", "instructions_path", "result_path", "effort")
 
 
 class RecruiterError(RuntimeError):
@@ -234,13 +236,33 @@ class JobLedger:
             raise RecruiterError(f"job state {key} is unreadable: {e}") from e
         if not isinstance(snapshot, dict):
             raise RecruiterError(f"job state {key} is not an object")
-        return snapshot.get("state") == "finished"
+        return snapshot.get("state") in ("finished", "cleanup-failed")
 
     def completed_result(self, key: str, order: dict) -> dict | None:
         """Return a strictly valid terminal result, if this order has already finished."""
         if not self._is_finished(key):
             return None
-        return load_result(order["result_path"], expected_order_id=order["order_id"])
+        result = load_result(order["result_path"], expected_order_id=order["order_id"])
+        receipt = self.completed_receipt(key, order)
+        if receipt["verdict"] != result["verdict"]:
+            raise RecruiterError(f"completion receipt for {order['order_id']} disagrees with result.json")
+        return result
+
+    def completed_receipt(self, key: str, order: dict) -> dict:
+        """Return the durable receipt for a finished order, validating its identity."""
+        path = self.request_dir(key) / "receipt.json"
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise RecruiterError(f"completion receipt for {order['order_id']} is unreadable: {e}") from e
+        if not isinstance(receipt, dict) or receipt.get("order_id") != order["order_id"]:
+            raise RecruiterError(f"completion receipt for {order['order_id']} has the wrong identity")
+        if receipt.get("state") not in ("finished", "cleanup-failed") or receipt.get("result_path") != order["result_path"]:
+            raise RecruiterError(f"completion receipt for {order['order_id']} is not terminal")
+        cleanup = receipt.get("cleanup")
+        if not isinstance(cleanup, dict) or not isinstance(cleanup.get("verified_absent"), bool):
+            raise RecruiterError(f"completion receipt for {order['order_id']} has invalid cleanup state")
+        return receipt
 
     def _reclaim_expired_locked(
         self, key: str, now: int, expected_token: str | None = None, expected_expiry: int | None = None
@@ -254,6 +276,10 @@ class JobLedger:
         if expected_expiry is not None and lease["expires_at"] != expected_expiry:
             return False
         if lease["expires_at"] > now:
+            return False
+        if lease.get("worker_pane"):
+            # Only the runtime reconciler can reclaim a lease after proving its recorded pane
+            # absent. Blind filesystem reaping would orphan a live worker.
             return False
         shutil.rmtree(claim_dir)
         self._event(key, "lease-expired", **lease)
@@ -285,7 +311,20 @@ class JobLedger:
                         reclaimed += 1
         return reclaimed
 
-    def claim(self, key: str, order_id: str, timeout_ms: int) -> str | None:
+    def active_claims(self) -> list[tuple[str, dict]]:
+        """Return validated active leases. The lease token is the ownership proof."""
+        root = self.active / "requests"
+        if not root.is_dir():
+            return []
+        claims = []
+        for claim_dir in root.iterdir():
+            if claim_dir.is_dir() and not claim_dir.name.startswith("."):
+                claims.append((claim_dir.name, self._lease(claim_dir / "lease.json")))
+        return claims
+
+    def claim(
+        self, key: str, order_id: str, timeout_ms: int, *, owner: dict[str, object] | None = None
+    ) -> str | None:
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
             self._reclaim_expired_locked(key, int(time.time()))
@@ -293,7 +332,12 @@ class JobLedger:
                 return None
             token = uuid.uuid4().hex
             expiry_epoch = int(time.time() + timeout_ms / 1000) + 60
-            lease = {"order_id": order_id, "token": token, "expires_at": expiry_epoch}
+            lease = {
+                "order_id": order_id,
+                "token": token,
+                "expires_at": expiry_epoch,
+                **(owner or {}),
+            }
             temporary = claim_dir.with_name(f".{key}.{token}.tmp")
             temporary.mkdir(parents=True)
             self._write_json(temporary / "lease.json", lease)
@@ -318,7 +362,37 @@ class JobLedger:
         """
         return self.request_dir(key) / "results" / f"{token}.json"
 
-    def finalize(self, key: str, token: str, order: dict, result: dict, **detail: object) -> bool:
+    def worker_instructions_path(self, key: str, token: str) -> Path:
+        return self.request_dir(key) / "workers" / f"{token}-instructions.md"
+
+    def record_worker(self, key: str, token: str, worker_pane: str, workspace_id: str | None) -> bool:
+        """Durably add the spawned worker address to the active lease iff token still owns it."""
+        claim_dir = self.active / "requests" / key
+        with self._claim_lock(key):
+            if not claim_dir.is_dir():
+                return False
+            lease = self._lease(claim_dir / "lease.json")
+            if lease["token"] != token:
+                return False
+            lease["worker_pane"] = worker_pane
+            if workspace_id:
+                lease["workspace_id"] = workspace_id
+            self._write_json(claim_dir / "lease.json", lease)
+            self._event(key, "worker-launched", worker_pane=worker_pane, workspace_id=workspace_id)
+            self._snapshot(key, "running", **lease)
+            return True
+
+    def finalize(
+        self,
+        key: str,
+        token: str,
+        order: dict,
+        result: dict,
+        *,
+        cleanup: dict[str, object],
+        allow_expired: bool = False,
+        **detail: object,
+    ) -> bool:
         """Atomically publish a valid result and terminal state iff ``token`` still owns ``key``.
 
         Returns ``False`` when lease recovery has fenced this runner.  Filesystem and contract
@@ -334,16 +408,29 @@ class JobLedger:
                 return False
             # A lease is a fence as well as an ownership token. An expired owner cannot publish
             # a result during the gap before a replacement runner claims this order.
-            if lease["expires_at"] <= int(time.time()):
+            if not allow_expired and lease["expires_at"] <= int(time.time()):
                 return False
-            # Revalidate immediately before the durable public write.  A terminal ledger state
-            # is never published without the result file that makes that state meaningful.
+            verified_absent = cleanup.get("verified_absent") is True
+            # Revalidate immediately before the durable public write. A terminal ledger state
+            # and receipt are never published without the result file that makes them meaningful.
             parsed = parse_result(json.dumps(result), expected_order_id=order["order_id"])
             self._write_json(Path(order["result_path"]), parsed)
             load_result(order["result_path"], expected_order_id=order["order_id"])
-            self._event(key, "finished", verdict=parsed["verdict"], **detail)
-            self._snapshot(key, "finished", verdict=parsed["verdict"], **detail)
-            shutil.rmtree(claim_dir)
+            terminal_state = "finished" if verified_absent else "cleanup-failed"
+            if not verified_absent and parsed["verdict"] != "blocked":
+                raise RecruiterError(f"cleanup-failed order {order['order_id']} must publish a blocked result")
+            receipt = {
+                "cleanup": cleanup,
+                "order_id": order["order_id"],
+                "result_path": order["result_path"],
+                "state": terminal_state,
+                "verdict": parsed["verdict"],
+            }
+            self._event(key, terminal_state, verdict=parsed["verdict"], cleanup=cleanup, **detail)
+            self._write_json(self.request_dir(key) / "receipt.json", receipt)
+            self._snapshot(key, terminal_state, verdict=parsed["verdict"], cleanup=cleanup, **detail)
+            if verified_absent:
+                shutil.rmtree(claim_dir)
             return True
 
 
@@ -431,42 +518,106 @@ def _herdr(*args: str) -> None:
         raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
 
 
-def _wait_for_agent_status(worker_pane: str, timeout_ms: int, monitor_finalized: threading.Event | None) -> bool:
-    """Wait for done status in short intervals, returning False when the monitor wins.
+def _live_pane_ids() -> set[str]:
+    response = _herdr_json("pane", "list")
+    panes = response.get("result", {}).get("panes", [])
+    return {pane["pane_id"] for pane in panes if isinstance(pane, dict) and isinstance(pane.get("pane_id"), str)}
 
-    Herdr returns exit code 1 and this exact message for an ordinary wait interval timeout.
-    Other non-zero exits are real faults. Keeping one short-lived Herdr process at a time means a
-    staging-result monitor can release the job runner promptly without abandoning a wait process.
+
+def _close_worker_pane(worker_pane: str) -> dict[str, object]:
+    """Close one known-owned worker and prove its pane id is no longer live.
+
+    A failed close is recoverable only when a fresh pane listing proves the target was already
+    absent. Other close/list faults propagate; terminal publication must not hide leaked panes.
+    """
+    close_status = "closed"
+    try:
+        _herdr("pane", "close", worker_pane)
+    except RecruiterError:
+        if worker_pane in _live_pane_ids():
+            raise
+        close_status = "already-absent"
+    if worker_pane in _live_pane_ids():
+        raise RecruiterError(f"worker pane {worker_pane} is still live after close")
+    return {"status": close_status, "worker_pane": worker_pane, "verified_absent": True}
+
+
+def _write_worker_instructions(order: dict, worker_result_path: Path, destination: Path) -> None:
+    """Append one final, literal delivery contract to the stage brief.
+
+    The order's public result_path belongs to the Recruiter. The worker writes only this lease's
+    private staging path, which prevents a stale/recovered worker from publishing over its owner.
+    """
+    source = Path(order["instructions_path"])
+    try:
+        original = source.read_text()
+    except OSError as e:
+        raise RecruiterError(f"worker instructions {source} are unreadable: {e}") from e
+    suffix = (
+        "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
+        "The Recruiter, not this worker, publishes the order's public result. "
+        "Ignore any earlier result destination in this brief.\n"
+        f"Write exactly one result JSON file to: {worker_result_path}\n"
+        f'Its `order_id` must be exactly: "{order["order_id"]}"\n'
+        "Do not write a result to any other path.\n"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(original.rstrip() + suffix)
+        os.replace(temporary, destination)
+    except OSError as e:
+        temporary.unlink(missing_ok=True)
+        raise RecruiterError(f"could not write lease-specific worker instructions {destination}: {e}") from e
+
+
+def _wait_for_agent_status(worker_pane: str, timeout_ms: int, monitor_finalized: threading.Event | None) -> bool:
+    """Race one event-driven Herdr wait against the private-result monitor.
+
+    This opens one Herdr subscription for the whole worker lifetime. When the durable file wins,
+    terminate that waiter promptly; do not create a new socket subscription every second.
     """
     _herdr_available()
     deadline = time.monotonic() + timeout_ms / 1000
-    while True:
-        if monitor_finalized is not None and monitor_finalized.is_set():
+    args = (
+        "wait",
+        "agent-status",
+        worker_pane,
+        "--status",
+        "done",
+        "--timeout",
+        str(timeout_ms),
+    )
+    process = subprocess.Popen(
+        ["herdr", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.terminate()
+            try:
+                process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+            raise RecruiterError(f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms")
+        wait_seconds = min(COMPLETION_MONITOR_POLL_SECONDS, remaining)
+        if monitor_finalized is not None and monitor_finalized.wait(wait_seconds):
+            process.terminate()
+            try:
+                process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
             return False
-        remaining_ms = int((deadline - time.monotonic()) * 1000)
-        if remaining_ms <= 0:
-            break
-        poll_timeout_ms = min(STATUS_WAIT_POLL_MS, remaining_ms)
-        args = (
-            "wait",
-            "agent-status",
-            worker_pane,
-            "--status",
-            "done",
-            "--timeout",
-            str(poll_timeout_ms),
-        )
-        proc = subprocess.run(["herdr", *args], capture_output=True, text=True)
-        if proc.returncode == 0:
-            return True
-        if monitor_finalized is not None and monitor_finalized.is_set():
-            return False
-        if proc.returncode == 1 and proc.stderr.strip() == "timed out waiting for agent status change":
-            continue
-        raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
+        if monitor_finalized is None:
+            time.sleep(wait_seconds)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        return True
     if monitor_finalized is not None and monitor_finalized.is_set():
         return False
-    raise RecruiterError(f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms")
+    raise RecruiterError(f"herdr {' '.join(args)} failed: {(stderr or stdout).strip()}")
 
 
 def _report_state(pane: str | None, state: str, message: str) -> None:
@@ -491,14 +642,20 @@ def _report_state(pane: str | None, state: str, message: str) -> None:
         )
 
 
-def _write_blocked_result(order: dict, reason: str, result_path: str | Path | None = None) -> dict:
+def _write_blocked_result(
+    order: dict,
+    reason: str,
+    result_path: str | Path | None = None,
+    *,
+    preserve_valid: bool = True,
+) -> dict:
     """Return a valid fallback result, writing it when no valid worker result exists.
 
     This deliberately does not suppress filesystem failures.  Callers may emit DONE or publish
     terminal ledger state only after this result has been durably promoted by the lease owner.
     """
     path = Path(result_path or order["result_path"])
-    if path.is_file():
+    if preserve_valid and path.is_file():
         try:
             return load_result(path, expected_order_id=order["order_id"])
         except ContractError:
@@ -520,39 +677,47 @@ def _write_blocked_result(order: dict, reason: str, result_path: str | Path | No
 
 
 def _start_completion_monitor(
-    ledger: JobLedger,
-    key: str,
-    token: str,
     order: dict,
     worker_result_path: Path,
-    worker_pane: str,
     timeout_ms: int,
 ) -> tuple[threading.Event, threading.Event, threading.Thread]:
-    """Poll one lease's staging result until it is finalized or the lease window closes.
+    """Watch one lease's staging result and wake its job runner when it validates.
 
-    Herdr's agent-status signal is only an accelerator. This bounded monitor lets a valid worker
-    result reach the public path even if that signal remains stuck. ``finalize`` is the sole
-    terminal publisher, so its claim-lock and lease checks choose exactly one winner.
+    Herdr's agent-status signal is only an accelerator. The monitor never publishes, closes a
+    pane, or emits terminal output; the single job runner retains lifecycle ownership.
     """
     stop = threading.Event()
     finalized = threading.Event()
     deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
 
     def monitor() -> None:
+        invalid_signature: tuple[int, int] | None = None
+        invalid_since = 0.0
         while not stop.is_set() and time.monotonic() < deadline:
             try:
-                result = load_result(worker_result_path, expected_order_id=order["order_id"])
+                load_result(worker_result_path, expected_order_id=order["order_id"])
             except ContractError:
+                try:
+                    stat = worker_result_path.stat()
+                except FileNotFoundError:
+                    invalid_signature = None
+                    stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
+                    continue
+                signature = (stat.st_mtime_ns, stat.st_size)
+                if signature != invalid_signature:
+                    invalid_signature = signature
+                    invalid_since = time.monotonic()
+                elif time.monotonic() - invalid_since >= INVALID_RESULT_SETTLE_SECONDS:
+                    # A stable malformed file is terminal worker output, not an absence to wait
+                    # on for hours. Wake the owner; its strict load produces the blocked reason.
+                    finalized.set()
+                    return
                 stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
                 continue
-            if ledger.finalize(key, token, order, result, exit_code=0, completion_source="staging-completion-monitor"):
-                finalized.set()
-                with suppress(RecruiterError, OSError):
-                    _herdr("pane", "close", worker_pane)
-                print(f"ORDER {order['order_id']} DONE", flush=True)
+            finalized.set()
             return
 
-    thread = threading.Thread(target=monitor, name=f"upagent-monitor-{key[:12]}", daemon=True)
+    thread = threading.Thread(target=monitor, name=f"upagent-monitor-{order['order_id'][:24]}", daemon=True)
     thread.start()
     return stop, finalized, thread
 
@@ -561,8 +726,9 @@ def _run_order(
     order_path: str,
     roster_path: str,
     worker_result_path: Path,
-    on_worker_launched: Callable[[str], threading.Event] | None = None,
-) -> tuple[int, dict]:
+    on_worker_launched: Callable[[str, str | None], threading.Event] | None = None,
+    worker_instructions_path: Path | None = None,
+) -> tuple[int, dict, dict[str, object]]:
     """Run a worker and return its valid private result without publishing terminal state.
 
     ``worker_result_path`` is unique to the lease.  Only ``JobLedger.finalize`` may promote it
@@ -573,11 +739,11 @@ def _run_order(
     fell_back = False
     execution_order = {**order, "result_path": str(worker_result_path)}
     worker_pane: str | None = None
+    cleanup: dict[str, object] = {"status": "not-created", "worker_pane": None, "verified_absent": True}
     monitor_finalized: threading.Event | None = None
-    # The armed recruit() runs inside the Recruiter's own pane, so HERDR_PANE_ID names it;
-    # flip the sidebar to working for the duration of the hire (best-effort, may be None
-    # when recruit is invoked from outside a Herdr pane).
-    my_pane = os.environ.get("HERDR_PANE_ID")
+    # Direct dispatch runs in the phase leader's environment; never report Recruiter state onto
+    # that pane. Resolve the broker's explicit persisted address instead.
+    my_pane = _recruiter_pane_from_state()
     _report_state(my_pane, "working", f"hiring for {order_id}")
     try:
         # Everything that can fail lives INSIDE the fallback block, now that order_id is known, so
@@ -586,7 +752,11 @@ def _run_order(
         roster = load_roster(roster_path)
         # Each lease writes a private result, so stale recovered workers cannot touch the public
         # result path or a newer lease's staging file.
+        worker_result_path.parent.mkdir(parents=True, exist_ok=True)
         worker_result_path.unlink(missing_ok=True)
+        effective_instructions = worker_instructions_path or worker_result_path.with_name("worker-instructions.md")
+        _write_worker_instructions(order, worker_result_path, effective_instructions)
+        execution_order["instructions_path"] = str(effective_instructions)
         launch = resolve_launch_command(execution_order, roster)
         # `herdr pane split` splits an EXISTING pane; the order carries the cockpit pane to
         # split the worker from (there is no --workspace on split). This places the worker in
@@ -609,9 +779,16 @@ def _run_order(
             raise RecruiterError("herdr pane split response has no pane_id")
         worker_pane = candidate_pane
 
-        _herdr("pane", "run", worker_pane, launch)
+        pane_info = split.get("result", {}).get("pane", {})
+        workspace_id = pane_info.get("workspace_id") if isinstance(pane_info, dict) else None
+        if not isinstance(workspace_id, str):
+            workspace_id = None
+
         if on_worker_launched is not None:
-            monitor_finalized = on_worker_launched(worker_pane)
+            monitor_finalized = on_worker_launched(worker_pane, workspace_id)
+        # Ownership is durable before launch. A crash after pane creation can therefore be
+        # reconciled without guessing which pane belongs to this lease.
+        _herdr("pane", "run", worker_pane, launch)
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
         _wait_for_agent_status(worker_pane, timeout_ms, monitor_finalized)
 
@@ -635,18 +812,30 @@ def _run_order(
             )
     finally:
         if worker_pane is not None:
-            with suppress(RecruiterError, OSError):
-                _herdr("pane", "close", worker_pane)
+            try:
+                cleanup = _close_worker_pane(worker_pane)
+            except RecruiterError as e:
+                result = _write_blocked_result(
+                    order, f"worker cleanup failed: {e}", worker_result_path, preserve_valid=False
+                )
+                fell_back = True
+                # The failed pane address remains in the active lease for the supervisor to retry.
+                cleanup = {
+                    "status": "cleanup-failed",
+                    "worker_pane": worker_pane,
+                    "verified_absent": False,
+                    "reason": str(e),
+                }
     final_label = "blocked" if fell_back else "done"
     _report_state(my_pane, "idle", f"last order: {order_id} ({final_label})")
-    return (1 if fell_back else 0), result
+    return (1 if fell_back else 0), result, cleanup
 
 
 def cmd_recruit(order_path: str, roster_path: str) -> int:
     """Submit an order and return immediately; its claimed job owns the blocking lifecycle.
 
-    Leader-side result watchdogs are independent of this command: they watch the same
-    result_path directly and can wake the leader even if this job's Herdr status wait sticks.
+    Compatibility/manual surface only. Phase leaders use ``dispatch`` so their shell call blocks
+    for the durable receipt without depending on this command's pane output.
     """
     try:
         order = load_order(order_path)
@@ -676,10 +865,191 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         result = _write_blocked_result(
             order, f"could not start job runner: {e}", ledger.result_staging_path(key, token)
         )
-        if not ledger.finalize(key, token, order, result, reason=str(e), exit_code=1):
+        cleanup = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+        if not ledger.finalize(key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1):
             return 1
         print(f"ORDER {order['order_id']} DONE", flush=True)
         return 1
+    return 0
+
+
+def _recruiter_pane_from_state() -> str | None:
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    pane = state.get("recruiter_pane") if isinstance(state, dict) else None
+    return pane if isinstance(pane, str) and pane else None
+
+
+def _process_cmdline(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return []
+    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _runner_alive(pid: object, key: str) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    command = _process_cmdline(pid)
+    return "run-job" in command and key in command and str(Path(__file__).resolve()) in command
+
+
+def _terminate_owned_runner(pid: object, key: str) -> None:
+    if not _runner_alive(pid, key):
+        return
+    assert isinstance(pid, int)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 1
+    while _runner_alive(pid, key) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if _runner_alive(pid, key):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+
+
+def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -> bool:
+    """Close and terminalize one dead/expired owned job. Never touches an unrecorded pane."""
+    expired = lease["expires_at"] <= int(time.time())
+    runner_alive = _runner_alive(lease.get("runner_pid"), key)
+    if not force and not expired and runner_alive:
+        return False
+    if runner_alive:
+        _terminate_owned_runner(lease.get("runner_pid"), key)
+
+    worker_pane = lease.get("worker_pane")
+    if isinstance(worker_pane, str) and worker_pane:
+        try:
+            cleanup = _close_worker_pane(worker_pane)
+        except RecruiterError as e:
+            cleanup = {
+                "status": "cleanup-failed",
+                "worker_pane": worker_pane,
+                "verified_absent": False,
+                "reason": str(e),
+            }
+    else:
+        cleanup = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+
+    order = ledger.order(key)
+    staging = ledger.result_staging_path(key, lease["token"])
+    if cleanup["verified_absent"]:
+        try:
+            result = load_result(staging, expected_order_id=order["order_id"])
+        except ContractError as e:
+            result = _write_blocked_result(order, f"runner reconciliation: {e}", staging)
+    else:
+        result = _write_blocked_result(
+            order,
+            f"runner reconciliation could not close worker pane {worker_pane}",
+            staging,
+            preserve_valid=False,
+        )
+    finalized = ledger.finalize(
+        key,
+        lease["token"],
+        order,
+        result,
+        cleanup=cleanup,
+        allow_expired=True,
+        exit_code=1,
+        completion_source="reconciler",
+    )
+    if finalized:
+        marker = "DONE" if cleanup["verified_absent"] else "CLEANUP_FAILED"
+        print(f"ORDER {order['order_id']} {marker}", flush=True)
+    return finalized
+
+
+def cmd_reconcile(*, force: bool = False) -> int:
+    ledger = JobLedger()
+    reconciled = 0
+    for key, lease in ledger.active_claims():
+        if _reconcile_claim(ledger, key, lease, force=force):
+            reconciled += 1
+    print(json.dumps({"reconciled": reconciled, "force": force}, sort_keys=True))
+    return 0
+
+
+def cmd_supervise(token: str) -> int:
+    """Reconcile dead/expired runners while this exact Recruiter generation remains active."""
+    while True:
+        try:
+            state = json.loads(STATE_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return 0
+        if not isinstance(state, dict) or state.get("supervisor_token") != token:
+            return 0
+        cmd_reconcile(force=False)
+        time.sleep(2)
+
+
+def _spawn_job(key: str, roster_path: str) -> subprocess.Popen:
+    command = [sys.executable, str(Path(__file__).resolve()), "--roster", roster_path, "run-job", key]
+    return subprocess.Popen(command, start_new_session=True)
+
+
+def cmd_dispatch(order_path: str, roster_path: str) -> int:
+    """Submit one order and block until its durable terminal receipt exists.
+
+    This is the phase leader's normal transport. It never writes command text into the shared
+    Recruiter shell, so adjacent orders cannot interleave. The child process is the zero-poll
+    wake-up path; an idempotent duplicate falls back to a bounded ledger wait.
+    """
+    try:
+        order = load_order(order_path)
+    except ContractError as e:
+        raise RecruiterError(f"invalid order {order_path}: {e}") from e
+    ledger = JobLedger()
+    key, _created = ledger.submit(order)
+    if ledger.completed_result(key, order) is None:
+        try:
+            process = _spawn_job(key, roster_path)
+        except OSError as e:
+            timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+            token = ledger.claim(
+                key,
+                order["order_id"],
+                timeout_ms,
+                owner={
+                    "runner_pid": os.getpid(),
+                    "phase_leader_pane": order["cockpit_pane"],
+                    "recruiter_pane": _recruiter_pane_from_state(),
+                },
+            )
+            if token is None:
+                raise RecruiterError(f"could not start a contender for live order {order['order_id']}: {e}") from e
+            result = _write_blocked_result(
+                order, f"could not start job runner: {e}", ledger.result_staging_path(key, token)
+            )
+            cleanup = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+            ledger.finalize(key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1)
+            process = None
+        timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+        deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
+        if process is not None:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                matching = next((lease for candidate, lease in ledger.active_claims() if candidate == key), None)
+                if matching is None or not _reconcile_claim(ledger, key, matching, force=True):
+                    raise RecruiterError(f"job runner for {order['order_id']} exceeded its lease window")
+        # Normal jobs publish before exiting. A killed/crashed runner may need the standing
+        # reconciler to publish a blocked receipt; this short bounded wait is anomaly-only.
+        while ledger.completed_result(key, order) is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+    result = ledger.completed_result(key, order)
+    if result is None:
+        raise RecruiterError(f"job runner for {order['order_id']} exited without a completion receipt")
+    receipt = ledger.completed_receipt(key, order)
+    print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
     return 0
 
 
@@ -688,34 +1058,47 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     ledger = JobLedger()
     order = ledger.order(key)
     timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
-    token = ledger.claim(key, order["order_id"], timeout_ms)
+    owner = {
+        "runner_pid": os.getpid(),
+        "phase_leader_pane": order["cockpit_pane"],
+        "recruiter_pane": _recruiter_pane_from_state(),
+    }
+    token = ledger.claim(key, order["order_id"], timeout_ms, owner=owner)
     if token is None:
         return 0
     worker_result_path = ledger.result_staging_path(key, token)
     monitor: tuple[threading.Event, threading.Event, threading.Thread] | None = None
 
-    def start_monitor(worker_pane: str) -> threading.Event:
+    def start_monitor(worker_pane: str, workspace_id: str | None) -> threading.Event:
         nonlocal monitor
-        monitor = _start_completion_monitor(ledger, key, token, order, worker_result_path, worker_pane, timeout_ms)
+        if not ledger.record_worker(key, token, worker_pane, workspace_id):
+            raise RecruiterError(f"lease ownership changed before worker {worker_pane} was recorded")
+        monitor = _start_completion_monitor(order, worker_result_path, timeout_ms)
         return monitor[1]
 
-    result_code, result = _run_order(
-        str(ledger.request_dir(key) / "request.json"), roster_path, worker_result_path, start_monitor
+    result_code, result, cleanup = _run_order(
+        str(ledger.request_dir(key) / "request.json"),
+        roster_path,
+        worker_result_path,
+        start_monitor,
+        ledger.worker_instructions_path(key, token),
     )
-    # Recovery or the completion monitor may have finalized first. The claim lock makes a False
-    # result authoritative: this runner must not emit a second DONE line.
-    finalized = ledger.finalize(key, token, order, result, exit_code=result_code, completion_source="agent-status")
     if monitor is not None:
         monitor[0].set()
-        if not finalized and monitor[1].is_set():
-            # The monitor owns the terminal marker after winning the lease. Wait for its
-            # close-before-DONE sequence so this runner cannot exit and stop it mid-cleanup.
-            monitor[2].join()
-        else:
-            monitor[2].join(timeout=COMPLETION_MONITOR_POLL_SECONDS * 2)
+        monitor[2].join(timeout=COMPLETION_MONITOR_POLL_SECONDS * 2)
+    finalized = ledger.finalize(
+        key,
+        token,
+        order,
+        result,
+        cleanup=cleanup,
+        exit_code=result_code,
+        completion_source="result-or-agent-status",
+    )
     if not finalized:
-        return 0 if monitor is not None and monitor[1].is_set() else 1
-    print(f"ORDER {order['order_id']} DONE", flush=True)
+        return 1
+    marker = "DONE" if cleanup["verified_absent"] else "CLEANUP_FAILED"
+    print(f"ORDER {order['order_id']} {marker}", flush=True)
     return result_code
 
 
@@ -763,12 +1146,10 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
 def cmd_up(roster_path: str) -> int:
     """Ensure the shared-services workspace + an armed Recruiter pane. Idempotent.
 
-    A single armed pane accepts concurrent orders because each accepted order runs in its own
-    claimed job process; callers do not need to create a second Recruiter pane for parallel work.
-    Arms a `recruit` shell function in the Recruiter pane so the phase leader can signal it with
-    `herdr pane run <recruiter> "recruit <order.json>"`. The resolved roster path is baked into
-    that function, so the Recruiter always hires against the intended (repo-owned) roster.
-    Persists {workspace_id, recruiter_pane, roster} to STATE_FILE and prints it.
+    The pane remains a visible status/compatibility surface; normal phase leaders dispatch
+    directly through the CLI and durable ledger. A legacy ``recruit`` shell function remains for
+    manual use, but its output is never a completion contract. The resolved roster is baked into
+    that function. Persists workspace, pane, roster, and supervisor ownership to STATE_FILE.
     """
     # Validate the roster up front so a missing/bad roster fails loudly at bring-up, not silently
     # at the first hire (the armed recruit() bakes this path in).
@@ -783,12 +1164,41 @@ def cmd_up(roster_path: str) -> int:
     )
     _herdr("pane", "run", recruiter_pane, arm)
 
-    state = {"workspace_id": workspace_id, "recruiter_pane": recruiter_pane, "roster": roster_path}
+    supervisor_token = uuid.uuid4().hex
+    state = {
+        "workspace_id": workspace_id,
+        "recruiter_pane": recruiter_pane,
+        "roster": roster_path,
+        "supervisor_token": supervisor_token,
+    }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    JobLedger._write_json(STATE_FILE, state)
+    supervisor = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "--roster", roster_path, "supervise", supervisor_token],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    state["supervisor_pid"] = supervisor.pid
+    JobLedger._write_json(STATE_FILE, state)
     # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
     _report_state(recruiter_pane, "idle", "armed — waiting for work orders")
     print(json.dumps({**state, "reused": reused}))
+    return 0
+
+
+def cmd_down() -> int:
+    """Terminalize all owned jobs, close the Recruiter pane, and retire its supervisor."""
+    cmd_reconcile(force=True)
+    recruiter_pane = _recruiter_pane_from_state()
+    if recruiter_pane:
+        try:
+            _herdr("pane", "close", recruiter_pane)
+        except RecruiterError:
+            if recruiter_pane in _live_pane_ids():
+                raise
+    STATE_FILE.unlink(missing_ok=True)
+    print(json.dumps({"down": True, "recruiter_pane": recruiter_pane}, sort_keys=True))
     return 0
 
 
@@ -810,19 +1220,34 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_recruit = sub.add_parser("recruit", help="submit a worker order without blocking the Recruiter pane")
     p_recruit.add_argument("order", help="path to order.json")
+    p_dispatch = sub.add_parser("dispatch", help="submit an order and block for its durable completion receipt")
+    p_dispatch.add_argument("order", help="path to order.json")
     p_run = sub.add_parser("run-job", help=argparse.SUPPRESS)
     p_run.add_argument("key", help=argparse.SUPPRESS)
+    p_supervise = sub.add_parser("supervise", help=argparse.SUPPRESS)
+    p_supervise.add_argument("token", help=argparse.SUPPRESS)
     sub.add_parser("up", help="ensure the shared-services workspace")
+    sub.add_parser("down", help="stop the Recruiter and reconcile every owned worker")
+    p_reconcile = sub.add_parser("reconcile", help="reconcile dead or expired owned workers")
+    p_reconcile.add_argument("--all", action="store_true", help="reconcile every active worker")
     sub.add_parser("status", help="report shared-services state")
 
     args = parser.parse_args(argv)
     try:
         if args.command == "recruit":
             return cmd_recruit(args.order, args.roster)
+        if args.command == "dispatch":
+            return cmd_dispatch(args.order, args.roster)
         if args.command == "run-job":
             return cmd_run_job(args.key, args.roster)
+        if args.command == "supervise":
+            return cmd_supervise(args.token)
         if args.command == "up":
             return cmd_up(args.roster)
+        if args.command == "down":
+            return cmd_down()
+        if args.command == "reconcile":
+            return cmd_reconcile(force=args.all)
         if args.command == "status":
             return cmd_status()
     except RecruiterError as e:

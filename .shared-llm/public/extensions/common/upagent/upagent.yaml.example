@@ -20,6 +20,7 @@
 #   {cwd}               the phase worktree (also set as the pane's --cwd)
 #   {instructions_path} absolute path to the stage brief the worker must read
 #   {result_path}       absolute path the worker MUST write result.json to
+#   {order_id}          exact order identity the worker MUST echo in result.json
 #
 # Model-id shapes differ per harness: claude takes an alias or full name (`opus`,
 # `claude-opus-4-8`) plus `--effort low|medium|high|xhigh|max`; Codex takes a bare model id
@@ -58,7 +59,8 @@ harnesses:
   claude: >-
     claude --dangerously-skip-permissions --agent {agent} --model {model} --effort {effort}
     "Read {instructions_path} and do exactly that one stage in {cwd}.
-    When finished, write your result.json to {result_path} (verdict: passed|failed|blocked,
+    When finished, write exactly one result.json to {result_path} with order_id exactly {order_id}
+    (verdict: passed|failed|blocked,
     a revisit list of stage-ids on failure, and a full_log pointer to your session transcript)."
 
   # Codex has no --agent flag. The persona comes from instructions_path. Codex also does not
@@ -68,14 +70,16 @@ harnesses:
     codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
     --model {model} -c model_reasoning_effort={effort}
     "Read {instructions_path} and do exactly that one stage in {cwd}.
-    Write result.json to {result_path} (verdict + revisit + full_log)."
+    Write exactly one result.json to {result_path} with order_id exactly {order_id}
+    (verdict + revisit + full_log)."
 
   pi: >-
     pi --approve --no-extensions -e "$HOME/.pi/agent/extensions/herdr-agent-state.ts"
     --model {model}
-    "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}
-    (verdict + revisit + full_log)."
+    "Read {instructions_path}; do the stage in {cwd}; write exactly one result.json to
+    {result_path} with order_id exactly {order_id} (verdict + revisit + full_log)."
 
   cursor: >-
     cursor-agent --print --model {model}
-    "Read {instructions_path}; do the stage in {cwd}; write result.json to {result_path}."
+    "Read {instructions_path}; do the stage in {cwd}; write exactly one result.json to
+    {result_path} with order_id exactly {order_id}."

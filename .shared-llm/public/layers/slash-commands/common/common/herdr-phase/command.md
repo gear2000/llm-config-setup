@@ -17,7 +17,7 @@ All four flags are required. Fail loud on any missing or unreadable path.
 ## Pre-flight
 
 1. Verify `HERDR_ENV=1`, else stop: `ERROR: /herdr-phase must run inside a Herdr-managed pane.`
-2. Read the Recruiter pane id (`recruiter_pane`) from the UpAgent state file that `/herdr-run`'s `just upagent-up` persisted — `/tmp/.upagent/recruiter.json` by default, or the path in `UPAGENT_STATE`. This is the pane the leader signals with `herdr pane run <recruiter_pane> "recruit <order.json>"`. Confirm it is alive. Also determine this leader's OWN pane id — the `cockpit_pane` it stamps on every order — from its `$HERDR_PANE_ID` env var (or `herdr pane current`, which resolves the caller's own pane). Do **not** infer it from `herdr pane list` UI focus: the leader is not necessarily the focused pane, so focus-based discovery can name the wrong pane.
+2. Confirm `just upagent-up` has persisted a live Recruiter in `/tmp/.upagent/recruiter.json` (or `UPAGENT_STATE`). The pane is a visible status surface, not a command mailbox. Determine this leader's OWN pane id — the `cockpit_pane` stamped on every order — from `$HERDR_PANE_ID` (or `herdr pane current`). Do **not** infer it from UI focus.
 3. Validate this phase's route entry:
    - `lead.llm_profile` and `lead.agent` present;
    - `accuracy` is `medium` (default) or `high`; if `high`, `stage-0-alignment` is present, else it is absent;
@@ -37,22 +37,16 @@ The leader runs the phase's stages in order — `stage-1` … `stage-5` for `acc
 
 ```text
 leader:    write pass-<p>/stages/<stage-id>/try-<m>/order.json + instructions.md   (order.cockpit_pane = this leader's pane)
-leader:    herdr pane run <recruiter_pane> "recruit <order.json path>"
-leader:    start a tiny per-order result watchdog that polls <result_path> for a valid
-           result.json whose order_id matches <order_id>; it says nothing until found
-leader:    herdr wait output <recruiter_pane> --match "ORDER <order_id> DONE" --timeout <ms>
-           # ALWAYS bound this wait (>= the order's timeout_ms + margin). Herdr's `wait output`
-           # blocks FOREVER when --timeout is omitted, so an un-emitted DONE (e.g. an
-           # unrecoverable malformed order) would hang the leader. On timeout, the leader treats
-           # the stage as blocked (it always knows order_id — it wrote the order).
+leader:    just upagent-recruit <order.json path>       # blocking dispatch
+Recruiter: return ORDER_RECEIPT <json> only after result publication + verified pane cleanup
 leader:    read + validate pass-<p>/stages/<stage-id>/try-<m>/result.json
 ```
 
-The result file is the source of truth. The leader races two completion signals instead of trusting one: the Recruiter's `ORDER <order_id> DONE` output, and a dedicated Haiku/low-effort file watchdog that performs only mechanical polling of that order's `result_path` for a valid result whose `order_id` matches. The watchdog is not a Recruiter order, performs no reasoning, reads no code, and never comments on progress; it only alerts the leader that the authoritative result file exists. When either signal arrives, immediately read and validate `result.json`. If the watchdog wins, do not keep waiting for the Recruiter's status wait to unstick.
+The public result file is the source of truth; the durable receipt is its wake-up record. `just upagent-recruit` submits directly to the filesystem ledger and blocks on the owning job process/receipt, so shell keystrokes cannot interleave and no LLM file-polling watchdog is needed. `ORDER ... DONE` pane text is display-only and MUST NOT drive a verdict.
 
-`order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`, optional `env`), with `harness`/`model`/`agent`/`effort` resolved deterministically from the route stage entry (`effort` is the profile's `effort`, or `medium` when the profile omits it — never left empty, because a roster template may substitute it into a CLI flag) and `cockpit_pane` set to a live cockpit pane (this leader's own) for the Recruiter to split the worker from — `herdr pane split` takes a source pane, not a workspace. `instructions.md` is the stage brief: the phase goal, this stage's job, the selected route agent/persona contract, the worktree branch, the deterministic merge timing, the non-delegation rule, the requirement to write `result.json`/`compacted.md`/handoff and then exit the harness session, the repo's available specialists (from the Specialist Hub roster) with the mandatory-consult rule — any area a listed specialist owns is asked, never guessed — and pointers to the plan and prior handoffs. This explicit persona content is mandatory for harnesses such as Codex that have no `--agent` flag; `order.agent` remains the durable routing record, but the worker learns the persona from its instructions. The Recruiter splits one fresh worker pane from `cockpit_pane` into the cockpit (`herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env ...]`), runs the harness launch template, waits for the worker to finish, validates its `result.json`, closes the worker pane, and emits `ORDER <order_id> DONE`. The worker writes its own transcript path into `result.json`'s `full_log` field — that pointer is the durable audit trail.
+`order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, public `result_path`, `cockpit_pane`, optional `env`). The Recruiter creates a lease-private result path and a final worker brief that appends the literal private destination and literal order id. The worker writes only that private file. The Recruiter validates it, closes and verifies the owned pane, then publishes the public `result_path` and `receipt.json` atomically under the lease fence. Its lease records runner PID, phase-leader pane, Recruiter pane, worker pane, workspace, token, and expiry so the standing Python supervisor can reconcile an orphan without guessing ownership. The worker's `full_log` points to its harness transcript; it is not the result transport.
 
-Every generated `instructions.md` includes a copy-pasteable result template and its destination. The leader MUST replace the two values below with the literal `order_id` and literal absolute `result_path` from this order's completed `order.json`; the angle-bracket text is a protocol-writing marker, never text that may appear in a generated instruction. The worker MUST write the result at the stated path and MUST copy the stated `order_id` exactly. It MUST NOT invent, generate, replace, or otherwise alter the order id.
+The Recruiter-generated final worker brief includes a copy-pasteable result template and its destination. The Recruiter MUST replace the two values below with the literal `order_id` and literal absolute `result_path` (the lease-private path); angle-bracket text is a protocol-writing marker, never text that may appear in a generated instruction. The worker MUST write exactly one result at that path and MUST copy the stated `order_id` exactly. It MUST NOT invent, generate, replace, or otherwise alter the order id.
 
 ```text
 Write result.json exactly to: <literal result_path from this order.json>

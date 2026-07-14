@@ -83,21 +83,13 @@ herdr-status:
     print(f"└──────────────┴────────┴{bar}┘")
     PY
 
-# Tear down the shared services (the Librarian pane via its engine; the
-# Recruiter pane via the pane id its state file recorded), then show the table.
+# Tear down the shared services. The Recruiter engine first terminalizes every durably owned
+# active worker and verifies pane cleanup; it never closes a foreign/unrecorded pane.
 herdr-down:
     #!/usr/bin/env bash
     set -euo pipefail
     HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} down || true
-    state="${UPAGENT_STATE:-/tmp/.upagent/recruiter.json}"
-    if [ -f "$state" ]; then
-        pane=$(${PYTHON_BIN:-python3} -c "import json;print(json.load(open('$state'))['recruiter_pane'])")
-        herdr pane close "$pane" >/dev/null 2>&1 || true
-        rm -f "$state"
-        echo "down: closed recruiter pane $pane"
-    else
-        echo "down: no recruiter state file"
-    fi
+    ${PYTHON_BIN:-python3} {{_UPAGENT}} down || true
     {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
 
 # Kick off a checked plan through the Herdr-native runner with a FRESH TUI agent

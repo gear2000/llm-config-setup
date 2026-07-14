@@ -153,30 +153,24 @@ The order/result contract (the exact JSON fields the leader and worker exchange)
 
 `cockpit_pane` is the id of an existing pane in the cockpit workspace to split the worker from — Herdr's `pane split` takes a source pane, not a workspace label, so the runner threads a live cockpit pane id (the phase leader's own pane) down into every order.
 
-The armed Recruiter pane is brought up once per run by `just upagent-up` (the UpAgent Recruiter's `up` command). It ensures the `shared-services` workspace, arms a `recruit` shell function in the Recruiter pane against the resolved roster, and persists `{workspace_id, recruiter_pane, roster}` to its state file (`/tmp/.upagent/recruiter.json` by default, overridable via `UPAGENT_STATE`). The leader signals that pane by its id.
+The Recruiter is brought up once per run by `just upagent-up`. Its `shared-services` pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. The leader submits directly through the blocking `just upagent-recruit` CLI; shell pane input is never used as a queue.
 
 The order round-trip, all over the Herdr socket:
 
 ```text
 leader:    write pass-<p>/stages/<stage>/try-<m>/order.json  +  instructions.md  (order.cockpit_pane = the leader's cockpit pane)
-leader:    herdr pane run <recruiter_pane> "recruit <order.json path>"
-leader:    start one tiny per-order result watchdog that polls <result_path> for a valid
-           result.json whose order_id matches <order_id>; it stays silent until found
+leader:    just upagent-recruit <order.json path>  # blocking direct ledger dispatch
 Recruiter: read+validate order → herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env k=v ...]
-Recruiter: herdr pane run <worker_pane> "<per-harness launch template with route model/effort>"
-Recruiter: herdr wait agent-status <worker_pane> --status done --timeout <order.timeout_ms>
-worker (before finishing): write result.json (verdict, revisit, full_log = its transcript path) + compacted.md + handoff, then exit its session
-Recruiter: validate result.json well-formed → herdr pane close <worker_pane> → emit "ORDER <id> DONE"
-leader:    herdr wait output <recruiter_pane> --match "ORDER <id> DONE" --timeout <ms> → read+validate result.json
-           # ALWAYS pass --timeout (>= the order's timeout_ms + margin): Herdr's `wait output`
-           # blocks forever when it is omitted. On timeout the leader treats the stage as blocked
-           # — the leader wrote the order, so it always knows order_id and can bound the wait even
-           # when the Recruiter cannot emit DONE.
+Recruiter: write final lease-specific brief with literal order_id + one private result path
+Recruiter: run worker; race agent-status against the private result
+worker:    write private result + compacted.md + handoff, then exit
+Recruiter: validate → close + verify owned worker absent → publish public result + receipt
+leader:    receive ORDER_RECEIPT → read + validate public result.json
 ```
 
 Validate the installed Herdr command surface before launch (the documented baseline is `herdr pane split <source-pane>`, `herdr pane run`, `herdr wait agent-status`, `herdr wait output`, `herdr pane read`, `herdr pane close`). Every `herdr pane split` names a source pane to split from — there is no `--workspace` flag on split. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
 
-**Every order gets a decoupled result watchdog.** This is separate from the Recruiter's own `herdr wait agent-status ... --status done` call. The leader starts one tiny, low-cost Haiku/low-effort watchdog per order whose only job is to poll the order's `result_path` until it finds a JSON object that validates against the result contract and echoes the same `order_id`. The first of the two completion signals wins: either the Recruiter emits `ORDER <id> DONE`, or the watchdog reports that the authoritative `result.json` exists. The watchdog performs no reasoning, reads no code, makes no verdict call, and stays completely silent until a matching result appears or the order's bounded timeout expires. On a watchdog hit, the leader reads and validates `result.json` immediately; do not wait hours for a stuck Recruiter status wait when the source-of-truth file is already present.
+**Notification follows ownership boundaries.** The worker has no Recruiter/leader/TUI addresses and sends no terminal text. Its one private result wakes the owning Recruiter job; the durable receipt wakes the phase leader; `phase-result.json` plus `PHASE_RESULT` wakes the TUI. Pane text and human toasts are observational only.
 
 **Workers are terminal and non-delegating.** A hired worker does its one stage, writes its result/compacted/handoff, and then actually exits its harness session; stopping at an idle interactive prompt is not done. It must not create further agents, teams, panes, nested harness sessions, or advisors. If it needs more help it returns `blocked` with the decision needed, and the leader decides the next move. A worker may consult the Specialist Hub Librarian for repo knowledge through the same files-plus-signal pattern as an order; that is a question, not delegation.
 
@@ -239,12 +233,9 @@ A meta run creates one phase leader per phase (created, then destroyed at phase 
 
 A phase leader may consult an advisor when configured. The advisor does not write files, run commands, or create agents. After writing and validating `phase-result.json`, the leader's literal last action before idle is to print `PHASE_RESULT: phase-<id> verdict=<passed|failed|blocked> pass=<n>` to its own pane (map a detailed `partial` file verdict to `blocked` in the marker).
 
-### Lightweight watchdogs
+### Anomaly monitors
 
-Watchdogs are the narrow sanctioned native-subagent exception: they perform no stage work, are not Recruiter orders, and never delegate. Use them only for mechanical monitoring.
-
-- **Per-order result watchdog (standard):** one Haiku/low-effort watcher per order, polling only that order's `result_path` for a valid matching `order_id`; silent until found.
-- **Long-stage stuck watchdog (optional):** one plain, mid-tier watchdog beside a long stage. On a configurable 5–10 minute cadence it reads watched panes' `agent_status` and short output tails, diffs them from its last sample, and stays silent unless it detects: working with no output change for N checks (stuck); fresh error/traceback/blocked output (failed); or a `phase-result.json` / `PHASE_RESULT` marker (done). It sends one concise alert, not running commentary.
+Normal delivery is deterministic and uses no LLM monitor. An optional low-cost model may inspect a bounded status/output snapshot after the Python supervisor reports a stuck runner, cleanup failure, or malformed result. It interprets evidence and alerts the owner; it never polls continuously or advances work.
 
 ## Five-stage phase protocol
 

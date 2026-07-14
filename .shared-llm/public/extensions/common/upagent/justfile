@@ -18,7 +18,12 @@ upagent-up:
 upagent-status:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py status
 
-# Hire one worker for one order.json. The phase leader normally signals the armed Recruiter
-# pane instead: `herdr pane run <recruiter> "recruit <order.json>"`.
+# Hire one worker for one order.json. This is a blocking dispatch: it returns only after the
+# Recruiter has published a durable ORDER_RECEIPT (including verified pane cleanup). Never send
+# recruit commands into the shared Recruiter shell; terminal input is not a message queue.
 upagent-recruit order:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py recruit {{order}}
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py dispatch "{{order}}"
+
+# Reconcile dead/expired runners using their durable lease ownership records.
+upagent-reconcile:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py reconcile

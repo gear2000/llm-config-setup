@@ -15,35 +15,35 @@ Herdr session
     └── librarian  (Specialist Hub — sibling module)
 ```
 
-The Recruiter pane lives in `shared-services`. It spawns each hired worker pane **into the
+The Recruiter pane lives in `shared-services` as a visible status surface. The phase leader
+submits through the blocking CLI, not by typing into that pane. The engine spawns each worker **into the
 cockpit** — by splitting the cockpit pane the order names (`order.cockpit_pane`) — beside the
 phase leader that ordered it, then closes it when the stage is done. (`herdr pane split` splits
 an existing pane, so the order carries a pane to split from, not a workspace label.)
 
 ## The order → result contract (`contracts.py`)
 
-Durable files are the source of truth; Herdr only carries the go/done signal.
+Durable files are the source of truth; terminal text is display-only.
 
-- The phase leader writes `order.json` (harness, model, agent, effort, cwd/worktree,
-  instructions path, result path, `cockpit_pane`) and signals the armed Recruiter pane:
-  `herdr pane run <recruiter_pane> "recruit <order.json>"`. (`just upagent-up` arms a `recruit`
-  shell function in the Recruiter pane and prints/persists its pane id.)
+- The phase leader writes `order.json` and runs `just upagent-recruit <order.json>`. This direct,
+  blocking dispatch cannot interleave terminal keystrokes with another order.
 - The Recruiter validates and persists a copy-on-write request under
   `$UPAGENT_HUB_DIR` (default `~/.local/state/herdr/upagent-hub`), then immediately starts a
-  hidden per-job runner and returns. The job runner atomically claims
+  per-job runner. The dispatch waits for that runner's durable receipt. The runner atomically claims
   `active/requests/<hashed-order-id>/`, writes an authoritative lease plus a retained expiry
   index, splits its fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree, `--env`
   any OTel vars), and runs the harness launch template for `order.harness`. Only that claim
   owner blocks on `herdr wait agent-status <worker> --status done` and then accepts only a
   strictly valid result file.
-- The worker reads the instructions, does the one stage, and **before its pane closes** writes
+- The Recruiter appends a final lease-specific delivery contract containing one private result
+  path and the literal order id. The worker does the stage and writes exactly that one private
   `result.json` (verdict `passed|failed|blocked`, a `revisit` list of stage-ids on failure,
   and a `full_log` pointer to its harness transcript) plus its `compacted.md` and handoff.
-- The job owner validates the result (must echo the `order_id`), closes only its worker pane,
-  writes immutable events plus an atomically replaced terminal snapshot, releases its active
-  claim, and emits `ORDER <order_id> DONE`. If anything goes wrong it still writes a fail-loud
-  `blocked` result and emits `DONE`, so the leader is never stranded — it reads the verdict and
-  escalates per its budget. A request's immutable `request.json` and events are durable; its
+- The job owner validates the result, closes only its recorded worker pane, verifies it is absent,
+  then publishes the public result plus `receipt.json`. `ORDER_RECEIPT` wakes the blocked leader.
+  If anything goes wrong it publishes a fail-loud `blocked` result/receipt. The lease records the
+  runner, leader, Recruiter, worker, workspace, token, and expiry; a small Python supervisor safely
+  reconciles dead/expired owners. A request's immutable `request.json` and events are durable; its
   `state/latest.json` is the copy-on-write current view. The lease is authoritative; retained
   `active/by-expiry` entries are merely reaping indexes and must be token-checked before reuse.
 
@@ -61,8 +61,8 @@ codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
 ## The roster (`upagent.yaml`) — how each harness launches
 
 The launch templates are pre-hardened; leaders and TUIs never hand-craft a worker command.
-Every template substitutes `{model}` / `{agent}` / `{effort}` / `{cwd}` /
-`{instructions_path}` / `{result_path}` from the order (`{effort}` is resolved by the leader
+Every template substitutes `{order_id}` / `{model}` / `{agent}` / `{effort}` / `{cwd}` /
+`{instructions_path}` / the lease-private `{result_path}` (`{effort}` is resolved by the leader
 from the route profile, `medium` when the profile omits it). Four properties every template
 must keep (see `upagent.yaml.example` for the full rationale):
 

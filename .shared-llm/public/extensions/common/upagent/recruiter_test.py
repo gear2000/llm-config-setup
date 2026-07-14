@@ -44,7 +44,10 @@ def _order(**over) -> dict:
 def _roster() -> dict:
     return {
         "harnesses": {
-            "claude": "claude --model {model} --agent {agent} read:{instructions_path} write:{result_path}",
+            "claude": (
+                "claude --model {model} --agent {agent} id:{order_id} "
+                "read:{instructions_path} write:{result_path}"
+            ),
             "codex": (
                 "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "
                 "--model {model} -c model_reasoning_effort={effort} "
@@ -66,12 +69,21 @@ def _result(order_id: str, verdict: str = "passed") -> dict:
     return result
 
 
+def _cleanup(worker_pane: str | None = "worker-pane") -> dict:
+    return {
+        "status": "closed" if worker_pane else "not-created",
+        "worker_pane": worker_pane,
+        "verified_absent": True,
+    }
+
+
 def test_resolve_substitutes_fields() -> None:
     cmd = recruiter.resolve_launch_command(_order(), _roster())
     assert "--model some-model" in cmd
     assert "--agent backend" in cmd
     assert "read:/tmp/wt/instructions.md" in cmd
     assert "write:/tmp/wt/result.json" in cmd
+    assert "id:phase-0.stage-1-implementation.pass-1.try-1" in cmd
 
 
 def test_resolve_unknown_harness_fails() -> None:
@@ -277,12 +289,84 @@ def test_job_ledger_finalization_publishes_valid_result_and_terminal_state(tmp_p
     lease = json.loads((root / "active/requests" / key / "lease.json").read_text())
     index = root / "active/by-expiry" / str(lease["expires_at"]) / f"{key}-{token}.json"
     assert index.is_file()
-    assert ledger.finalize(key, token, order, _result(order["order_id"]), exit_code=0)
+    cleanup = _cleanup()
+    assert ledger.finalize(key, token, order, _result(order["order_id"]), cleanup=cleanup, exit_code=0)
     assert not (root / "active/requests" / key).exists()
     assert index.is_file()
     assert json.loads(Path(order["result_path"]).read_text()) == _result(order["order_id"])
     latest = json.loads((ledger.request_dir(key) / "state/latest.json").read_text())
     assert latest["state"] == "finished" and latest["verdict"] == "passed"
+    receipt = json.loads((ledger.request_dir(key) / "receipt.json").read_text())
+    assert receipt == {
+        "cleanup": cleanup,
+        "order_id": order["order_id"],
+        "result_path": order["result_path"],
+        "state": "finished",
+        "verdict": "passed",
+    }
+
+
+def test_worker_instructions_end_with_one_literal_private_result_contract(tmp_path: Path) -> None:
+    original = tmp_path / "instructions.md"
+    original.write_text("Do the stage. An older brief mentioned /public/result.json.\n")
+    private_result = tmp_path / "hub/results/token.json"
+    generated = tmp_path / "hub/worker-instructions.md"
+
+    recruiter._write_worker_instructions(_order(instructions_path=str(original)), private_result, generated)
+
+    text = generated.read_text()
+    assert text.endswith(
+        "Write exactly one result JSON file to: " + str(private_result) + "\n"
+        'Its `order_id` must be exactly: "phase-0.stage-1-implementation.pass-1.try-1"\n'
+        "Do not write a result to any other path.\n"
+    )
+
+
+def test_run_order_creates_private_result_parent_before_worker_launch(tmp_path: Path, monkeypatch) -> None:
+    public_result = tmp_path / "public-result.json"
+    private_result = tmp_path / "hub" / "missing-results-dir" / "token.json"
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Do the stage.\n")
+    order = _order(result_path=str(public_result), instructions_path=str(instructions))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text('harnesses:\n  claude: "worker write:{result_path}"\n')
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args: {"result": {"pane": {"pane_id": "worker-pane"}}}
+        if args[:2] == ("pane", "split")
+        else {"result": {"panes": []}},
+    )
+
+    def fake_herdr(*args: str) -> None:
+        if args[:2] == ("pane", "run"):
+            assert private_result.parent.is_dir()
+            private_result.write_text(json.dumps(_result(order["order_id"])))
+
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", lambda *args: True)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    code, result, cleanup = recruiter._run_order(str(order_path), str(roster_path), private_result)
+
+    assert code == 0
+    assert result == _result(order["order_id"])
+    assert cleanup["verified_absent"] is True
+
+
+def test_completion_monitor_wakes_on_stable_malformed_result(tmp_path: Path, monkeypatch) -> None:
+    malformed = tmp_path / "private-result.json"
+    malformed.write_text('{"order_id": null}')
+    monkeypatch.setattr(recruiter, "INVALID_RESULT_SETTLE_SECONDS", 0.05)
+
+    stop, ready, thread = recruiter._start_completion_monitor(_order(), malformed, 1_000)
+
+    assert ready.wait(timeout=0.5)
+    stop.set()
+    thread.join(timeout=0.5)
+    assert not thread.is_alive()
 
 
 def test_recruit_completed_order_emits_done_without_spawning(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -292,8 +376,9 @@ def test_recruit_completed_order_emits_done_without_spawning(tmp_path: Path, mon
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     ledger = recruiter.JobLedger()
     key, _ = ledger.submit(order)
-    Path(order["result_path"]).write_text(json.dumps(_result(order["order_id"])))
-    ledger._snapshot(key, "finished", verdict="passed")
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    assert ledger.finalize(key, token, order, _result(order["order_id"]), cleanup=_cleanup(None))
     monkeypatch.setattr(
         recruiter.subprocess,
         "Popen",
@@ -317,15 +402,155 @@ def test_recruit_submits_and_spawns_without_waiting(tmp_path: Path, monkeypatch)
     assert (tmp_path / "hub/requests" / key / "state/latest.json").is_file()
 
 
+def test_dispatch_blocks_on_job_process_and_returns_durable_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    waits = []
+
+    class Process:
+        def wait(self, timeout: float) -> int:
+            waits.append(timeout)
+            ledger = recruiter.JobLedger()
+            key = ledger.key(order["order_id"])
+            token = ledger.claim(key, order["order_id"], 1_000)
+            assert token
+            assert ledger.finalize(key, token, order, _result(order["order_id"]), cleanup=_cleanup())
+            return 0
+
+    monkeypatch.setattr(recruiter, "_spawn_job", lambda key, roster: Process())
+
+    assert recruiter.cmd_dispatch(str(order_path), "roster.yaml") == 0
+
+    output = capsys.readouterr().out
+    assert output.startswith("ORDER_RECEIPT ")
+    assert json.loads(output.removeprefix("ORDER_RECEIPT "))["order_id"] == order["order_id"]
+    assert waits
+
+
+def test_expired_lease_with_recorded_worker_requires_runtime_reconciliation(tmp_path: Path) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"runner_pid": 123})
+    assert token
+    assert ledger.record_worker(key, token, "owned-worker", "cockpit")
+    lease_path = ledger.active / "requests" / key / "lease.json"
+    lease = json.loads(lease_path.read_text())
+    lease["expires_at"] = int(time.time()) - 1
+    ledger._write_json(lease_path, lease)
+
+    assert ledger.claim(key, order["order_id"], 1_000) is None
+    assert json.loads(lease_path.read_text())["worker_pane"] == "owned-worker"
+
+
+def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"runner_pid": 999})
+    assert token
+    assert ledger.record_worker(key, token, "owned-worker", "cockpit")
+    staging = ledger.result_staging_path(key, token)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text(json.dumps(_result(order["order_id"])))
+    closed = []
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda pid, candidate_key: False)
+    monkeypatch.setattr(
+        recruiter,
+        "_close_worker_pane",
+        lambda pane: closed.append(pane) or {"status": "closed", "worker_pane": pane, "verified_absent": True},
+    )
+
+    assert recruiter.cmd_reconcile(force=True) == 0
+
+    assert closed == ["owned-worker"]
+    assert ledger.completed_result(key, order) == _result(order["order_id"])
+    assert ledger.completed_receipt(key, order)["cleanup"]["worker_pane"] == "owned-worker"
+
+
+def test_cleanup_failure_keeps_owned_lease_until_reconciler_verifies_absence(tmp_path: Path) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    assert ledger.record_worker(key, token, "owned-worker", "cockpit")
+    cleanup = {
+        "status": "cleanup-failed",
+        "worker_pane": "owned-worker",
+        "verified_absent": False,
+        "reason": "socket unavailable",
+    }
+
+    assert ledger.finalize(
+        key,
+        token,
+        order,
+        _result(order["order_id"], verdict="blocked"),
+        cleanup=cleanup,
+    )
+
+    assert (ledger.active / "requests" / key / "lease.json").is_file()
+    assert ledger.completed_receipt(key, order)["state"] == "cleanup-failed"
+
+
+def test_worker_ownership_is_recorded_before_launch_command(tmp_path: Path, monkeypatch) -> None:
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Do the stage.\n")
+    order = _order(instructions_path=str(instructions), result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text('harnesses:\n  claude: "worker write:{result_path}"\n')
+    private_result = tmp_path / "hub/results/token.json"
+    recorded = threading.Event()
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args: {"result": {"pane": {"pane_id": "worker-pane", "workspace_id": "cockpit"}}}
+        if args[:2] == ("pane", "split")
+        else {"result": {"panes": []}},
+    )
+
+    def on_worker(worker_pane: str, workspace_id: str | None) -> threading.Event:
+        assert worker_pane == "worker-pane" and workspace_id == "cockpit"
+        recorded.set()
+        return threading.Event()
+
+    def fake_herdr(*args: str) -> None:
+        if args[:2] == ("pane", "run"):
+            assert recorded.is_set()
+            private_result.write_text(json.dumps(_result(order["order_id"])))
+
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", lambda *args: True)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    code, result, cleanup = recruiter._run_order(
+        str(order_path), str(roster_path), private_result, on_worker
+    )
+
+    assert code == 0 and result["verdict"] == "passed" and cleanup["verified_absent"] is True
+
+
 def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status_result(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     result_path = tmp_path / "result.json"
-    order = _order(result_path=str(result_path), instructions_path=str(tmp_path / "instructions.md"))
+    order = _order(
+        result_path=str(result_path), instructions_path=str(tmp_path / "instructions.md"), timeout_ms=1_000
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
     roster_path = tmp_path / "upagent.yaml"
     roster_path.write_text('harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n')
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
-    monkeypatch.setattr(recruiter, "STATUS_WAIT_POLL_MS", 50)
     ledger = recruiter.JobLedger()
     key, _ = ledger.submit(order)
     worker_launched = threading.Event()
@@ -353,16 +578,30 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
             return
         raise AssertionError(f"unexpected herdr args: {args}")
 
-    def fake_subprocess_run(command: list[str], **kwargs: object) -> object:
+    class NeverDoneProcess:
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            return "", ""
+
+    def fake_popen(command: list[str], **kwargs: object) -> NeverDoneProcess:
         assert command[1:3] == ["wait", "agent-status"]
         status_wait_timeouts.append(command[-1])
         status_wait_started.set()
-        time.sleep(0.05)
-        return recruiter.subprocess.CompletedProcess(command, 1, "", "timed out waiting for agent status change")
+        return NeverDoneProcess()
 
     monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
-    monkeypatch.setattr(recruiter.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(recruiter.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
 
     runner = threading.Thread(target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path))))
@@ -383,9 +622,9 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     assert not runner.is_alive()
     assert time.monotonic() - promoted_at < 0.5
     assert outcomes == [0]
-    assert status_wait_timeouts and set(status_wait_timeouts) == {"50"}
+    assert status_wait_timeouts and set(status_wait_timeouts) == {"1000"}
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
-    assert closed_panes == ["worker-pane", "worker-pane"]
+    assert closed_panes == ["worker-pane"]
 
 
 def test_codex_completion_monitor_promotes_private_result_when_agent_status_never_finishes(
@@ -398,7 +637,9 @@ def test_codex_completion_monitor_promotes_private_result_when_agent_status_neve
         effort="high",
         result_path=str(result_path),
         instructions_path=str(tmp_path / "instructions.md"),
+        timeout_ms=1_000,
     )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
     roster_path = tmp_path / "upagent.yaml"
     roster_path.write_text(
         "harnesses:\n"
@@ -408,7 +649,6 @@ def test_codex_completion_monitor_promotes_private_result_when_agent_status_neve
         "    read:{instructions_path} write:{result_path}\n"
     )
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
-    monkeypatch.setattr(recruiter, "STATUS_WAIT_POLL_MS", 50)
     ledger = recruiter.JobLedger()
     key, _ = ledger.submit(order)
     worker_launched = threading.Event()
@@ -437,17 +677,29 @@ def test_codex_completion_monitor_promotes_private_result_when_agent_status_neve
             return
         raise AssertionError(f"unexpected herdr args: {args}")
 
-    def never_done(command: list[str], **kwargs: object) -> object:
+    class NeverDoneProcess:
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            return "", ""
+
+    def never_done(command: list[str], **kwargs: object) -> NeverDoneProcess:
         assert command[1:3] == ["wait", "agent-status"]
         status_wait_started.set()
-        time.sleep(0.05)
-        return recruiter.subprocess.CompletedProcess(
-            command, 1, "", "timed out waiting for agent status change"
-        )
+        return NeverDoneProcess()
 
     monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
-    monkeypatch.setattr(recruiter.subprocess, "run", never_done)
+    monkeypatch.setattr(recruiter.subprocess, "Popen", never_done)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
 
     runner = threading.Thread(target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path))))
@@ -467,12 +719,13 @@ def test_codex_completion_monitor_promotes_private_result_when_agent_status_neve
     assert outcomes == [0]
     assert json.loads(result_path.read_text()) == _result(order["order_id"])
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
-    assert closed_panes == ["codex-worker-pane", "codex-worker-pane"]
+    assert closed_panes == ["codex-worker-pane"]
 
 
 def test_run_job_keeps_worker_result_when_status_wait_fails(tmp_path: Path, monkeypatch, capsys) -> None:
     result_path = tmp_path / "result.json"
     order = _order(result_path=str(result_path), instructions_path=str(tmp_path / "instructions.md"))
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
     roster_path = tmp_path / "upagent.yaml"
     roster_path.write_text('harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n')
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
@@ -481,8 +734,11 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(tmp_path: Path, monk
     worker_result_paths: list[Path] = []
 
     def fake_herdr_json(*args: str) -> dict:
-        assert args[:2] == ("pane", "split")
-        return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        if args[:2] == ("pane", "list"):
+            return {"result": {"panes": []}}
+        raise AssertionError(f"unexpected herdr args: {args}")
 
     def fake_herdr(*args: str) -> None:
         if args[:2] == ("pane", "run"):
@@ -523,7 +779,7 @@ def test_expired_owner_cannot_finalize_before_replacement_claims(tmp_path: Path)
     }
     ledger._write_json(ledger.active / "requests" / key / "lease.json", expired_lease)
 
-    assert not ledger.finalize(key, expired_token, order, _result(order["order_id"]))
+    assert not ledger.finalize(key, expired_token, order, _result(order["order_id"]), cleanup=_cleanup())
     assert not Path(order["result_path"]).exists()
     assert json.loads((ledger.request_dir(key) / "state/latest.json").read_text())["state"] == "running"
     assert (ledger.active / "requests" / key).is_dir()
@@ -549,7 +805,7 @@ def test_expired_lease_is_reclaimed_and_stale_index_cannot_remove_new_lease(tmp_
     assert ledger.reap_expired(now=expired_at) == 0
     active_lease = json.loads((ledger.active / "requests" / key / "lease.json").read_text())
     assert active_lease["token"] == new_token
-    assert not ledger.finalize(key, old_token, order, _result(order["order_id"]))
+    assert not ledger.finalize(key, old_token, order, _result(order["order_id"]), cleanup=_cleanup())
     assert (ledger.active / "requests" / key).is_dir()
 
 
@@ -564,6 +820,7 @@ def test_run_order_rejects_cosmetic_result_before_done(tmp_path: Path, monkeypat
     result_path = tmp_path / "result.json"
     staging_path = tmp_path / "staging.json"
     order = _order(result_path=str(result_path), instructions_path=str(tmp_path / "instructions.md"))
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
     order_path = tmp_path / "order.json"
     roster_path = tmp_path / "upagent.yaml"
     order_path.write_text(json.dumps(order))
@@ -590,12 +847,13 @@ def test_run_order_rejects_cosmetic_result_before_done(tmp_path: Path, monkeypat
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", fake_wait)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
 
-    code, result = recruiter._run_order(str(order_path), str(roster_path), staging_path)
+    code, result, cleanup = recruiter._run_order(str(order_path), str(roster_path), staging_path)
     assert code == 1
     assert result["verdict"] == "blocked"
     assert json.loads(staging_path.read_text())["verdict"] == "blocked"
     assert not result_path.exists()
     assert "ORDER" not in capsys.readouterr().out
+    assert cleanup["verified_absent"] is True
 
 
 def test_duplicate_popen_failure_cannot_finalize_live_owner(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -630,9 +888,13 @@ def test_recovered_lease_fences_stale_runner_result_and_terminal_state(tmp_path:
     new_token = ledger.claim(key, order["order_id"], 1_000)
     assert new_token is not None and new_token != old_token
 
-    assert not ledger.finalize(key, old_token, order, _result(order["order_id"], verdict="passed"))
+    assert not ledger.finalize(
+        key, old_token, order, _result(order["order_id"], verdict="passed"), cleanup=_cleanup()
+    )
     assert not Path(order["result_path"]).exists()
-    assert ledger.finalize(key, new_token, order, _result(order["order_id"], verdict="blocked"))
+    assert ledger.finalize(
+        key, new_token, order, _result(order["order_id"], verdict="blocked"), cleanup=_cleanup()
+    )
     assert json.loads(Path(order["result_path"]).read_text())["verdict"] == "blocked"
 
 
