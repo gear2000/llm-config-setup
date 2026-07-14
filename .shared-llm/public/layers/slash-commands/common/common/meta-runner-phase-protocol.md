@@ -69,7 +69,7 @@ phases:
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
-      agent: phase-evaluator
+      agent: herdr-phase-leader
     stages:
       # stage-0-alignment goes here ONLY when accuracy: high (independent from stage-1)
       stage-1-implementation:

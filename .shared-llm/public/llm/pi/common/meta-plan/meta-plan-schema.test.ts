@@ -171,8 +171,8 @@ async function main() {
 	const unknownProfileRef = validateRunnable(
 		canonicalPlan,
 		validRoute.replace(
-			"llm_profile: claude-low\n      agent: phase-evaluator",
-			"llm_profile: does-not-exist\n      agent: phase-evaluator",
+			"llm_profile: claude-low\n      agent: herdr-phase-leader",
+			"llm_profile: does-not-exist\n      agent: herdr-phase-leader",
 		),
 	);
 	check(

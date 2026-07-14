@@ -22,7 +22,7 @@ phases:
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-mid
-      agent: phase-evaluator
+      agent: herdr-phase-leader
     stages:
       stage-1-implementation:
         llm_profile: claude-mid
@@ -44,7 +44,7 @@ phases:
     merge_back_at: stage-5-finalization
     lead:
       llm_profile: claude-mid
-      agent: phase-evaluator
+      agent: herdr-phase-leader
     stages:
       stage-0-alignment:
         llm_profile: claude-mid

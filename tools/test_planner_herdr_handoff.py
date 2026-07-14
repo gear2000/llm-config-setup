@@ -52,6 +52,13 @@ WATCHER_RECIPES = {
     "plan-watchdog": PUBLIC / "compose/agents/plan-watchdog.yaml",
     "team-pulse": PUBLIC / "compose/agents/team-pulse.yaml",
 }
+ROUTE_LEAD_EXAMPLES = (
+    PUBLIC / "extensions/common/upagent/examples/route.yaml",
+    PUBLIC / "llm/pi/common/meta-plan/fixtures/route.yaml",
+    PUBLIC / "llm/pi/common/meta-plan/meta-plan-format.md",
+    LAYERS / "common/common/meta-runner-phase-protocol.md",
+)
+PHASE_EVALUATOR_SOURCE = PUBLIC / "layers/agents/common/phase-evaluator.md"
 
 
 def test_retained_planners_finish_with_checked_herdr_input() -> None:
@@ -193,6 +200,17 @@ def test_active_agents_and_watchers_follow_the_herdr_dispatch_model(
 def test_shared_herdr_protocol_names_only_herdr_runners() -> None:
     protocol = (LAYERS / "common/common/meta-runner-phase-protocol.md").read_text()
     assert "transitional `/meta-*` runners" not in protocol
+
+
+def test_public_route_guidance_uses_the_phase_leader_not_the_evaluator() -> None:
+    for path in ROUTE_LEAD_EXAMPLES:
+        text = path.read_text()
+        assert "agent: herdr-phase-leader" in text, path
+
+    evaluator = PHASE_EVALUATOR_SOURCE.read_text()
+    assert "optional, independent **phase evaluator**" in evaluator
+    assert "You do not move phase files, start another worker, or fix implementation." in evaluator
+    assert "The phase leader alone makes the durable `phase-result.json` decision" in evaluator
 
 
 def test_public_planning_layers_have_no_retired_execution_reference() -> None:

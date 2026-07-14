@@ -157,7 +157,7 @@ phases:
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
-      agent: phase-evaluator
+      agent: herdr-phase-leader  # Jiffy controller that runs /herdr-phase
     stages:
       # stage-0-alignment goes here ONLY when accuracy: high — e.g.:
       #   stage-0-alignment:
@@ -219,6 +219,8 @@ Each phase lead and each stage must name both:
 llm_profile: <profile from llm_profiles>
 agent: <real configured agent/persona name>
 ```
+
+For Jiffy, every `lead.agent` is `herdr-phase-leader`. That dedicated Claude agent runs the `/herdr-phase` controller protocol. `phase-evaluator` remains an optional evidence-only worker that can recommend a verdict to the leader; never use `phase-evaluator` as a lead.
 
 `runner_adapters` are optional launch hints. They are not part of the required MVP runnable schema.
 
