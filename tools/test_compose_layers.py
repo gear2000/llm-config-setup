@@ -263,8 +263,7 @@ def test_grill_feedback_is_annotation_only() -> None:
     for rel in (
         ".shared-llm/public/layers/slash-commands/common/common/do-plan-and-grill/command.md",
         ".shared-llm/public/layers/slash-commands/common/claude/cc-plan-and-grill/command.md",
-        ".shared-llm/public/layers/slash-commands/common/common/do-oneshot/command.md",
-        ".shared-llm/public/layers/slash-commands/common/claude/cc-oneshot/command.md",
+        ".shared-llm/public/layers/slash-commands/common/claude/cc-planish/command.md",
     ):
         text = (REPO_ROOT / rel).read_text()
         assert "Copy Feedback" in text, rel
@@ -315,14 +314,6 @@ def test_plan_versioning_downloadable_and_host() -> None:
     ):
         text = (REPO_ROOT / rel).read_text()
         for token in ("plan-v1.md", "never in place", "SendUserFile", "`host:`"):
-            assert token in text, f"{rel} must contain {token!r}"
-
-    for rel in (
-        ".shared-llm/public/layers/slash-commands/common/common/do-oneshot/command.md",
-        ".shared-llm/public/layers/slash-commands/common/claude/cc-oneshot/command.md",
-    ):
-        text = (REPO_ROOT / rel).read_text()
-        for token in ("SendUserFile", "`host:`"):
             assert token in text, f"{rel} must contain {token!r}"
 
     contract = (REPO_ROOT / ".shared-llm/public/llm/common/common/planish-html-grill-contract.md").read_text()

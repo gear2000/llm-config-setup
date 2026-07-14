@@ -153,6 +153,25 @@ def test_copy_propagates_new_and_flags_changed(tmp_path: Path) -> None:
     assert (dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
 
 
+def test_copy_prunes_retired_hub_slash_command_layer(tmp_path: Path) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    cfg = _cfg(m, dest, ["cc", "pi"])
+    kit = tmp_path / "kit"
+    _write(kit / ".shared-llm/public/layers/slash-commands/common/claude/kept/command.md", "kept\n")
+    setattr(m, "project_root", lambda: kit)
+    _write(m.DEFAULT_SOURCE / "layers/slash-commands/common/claude/kept/command.md", "old kept\n")
+    stale = m.DEFAULT_SOURCE / "layers/slash-commands/common/claude/retired/command.md"
+    _write(stale, "retired\n")
+
+    m.do_copy(cfg, _quiet(m))
+
+    assert not stale.exists(), "retired hub command layer must not reach destinations"
+    assert (dest / ".shared-llm/public/layers/slash-commands/common/claude/kept/command.md").exists()
+
+
 def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path) -> None:
     """copy syncs the kit's recipes into public/compose/ (translating flat paths to
     split), prunes a public recipe the kit no longer ships, and never touches a
@@ -261,6 +280,26 @@ def test_compose_reads_destination_shared_llm_and_merges_overlay(tmp_path: Path)
     assert "THIS_REPO overlay body." in out
     # order: common input before this_repo input
     assert out.index("COMMON practices body.") < out.index("THIS_REPO overlay body.")
+
+
+def test_compose_prunes_removed_legacy_runner_skill(tmp_path: Path) -> None:
+    """Removing the old team recipe also removes its generated entrypoint."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    _add_slash_skill(dest, "team", "claude")
+    command = dest / ".shared-llm/this_repo/layers/slash-commands/this_repo/claude/team/command.md"
+    command.write_text("The meta-orchestrator injects ask_brain.\n")
+    cfg = _cfg(m, dest, ["cc", "pi"])
+
+    m.do_compose(cfg, _quiet(m))
+    generated = dest / ".claude/skills/team/SKILL.md"
+    assert generated.is_file()
+
+    (dest / ".shared-llm/this_repo/compose/slash-commands/this_repo/claude/team.yaml").unlink()
+    m.do_compose(cfg, _quiet(m))
+    assert not generated.exists()
 
 
 # --- link ------------------------------------------------------------------
@@ -452,6 +491,97 @@ def test_do_star_is_pi_only_cc_star_is_claude_only(tmp_path: Path) -> None:
     assert (codex / "demo").is_symlink()
     assert not (codex / "do-plan-and-grill").exists()
     assert not (codex / "cc-plan-and-grill").exists()
+
+
+def test_repo_pi_front_door_overrides_portable_do_recipe(tmp_path: Path) -> None:
+    """The repository Pi front door is the final output when it replaces a portable do-* recipe."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    shared = dest / ".shared-llm"
+    public_base = "public/layers/slash-commands/common/common/do-full"
+    _write(shared / f"{public_base}/description.md", "portable description\n")
+    _write(shared / f"{public_base}/command.md", "PORTABLE PI FRONT DOOR\n")
+    _write(
+        shared / "public/compose/slash-commands/common/common/do-full.yaml",
+        yaml.safe_dump(
+            {
+                "type": "skill",
+                "name": "do-full",
+                "description": f".shared-llm/{public_base}/description.md",
+                "inputs": [f".shared-llm/{public_base}/command.md"],
+                "output": ".claude/skills/do-full/SKILL.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    _add_slash_skill(dest, "do-full", "pi")
+    cfg = _cfg(m, dest, ["pi"])
+
+    m.do_compose(cfg, _quiet(m))
+    m.do_link(cfg, _quiet(m))
+
+    pi_front_door = dest / ".pi-skills/do-full/SKILL.md"
+    assert pi_front_door.exists()
+    assert "do-full body" in pi_front_door.read_text()
+    assert "PORTABLE PI FRONT DOOR" not in pi_front_door.read_text()
+    assert not (dest / ".claude/skills/do-full").exists()
+    assert m.harness_of(dest, "do-full") == "pi"
+    assert (home / ".pi/agent/skills/do-full").resolve() == pi_front_door.parent.resolve()
+
+
+def test_route_do_skills_prunes_removed_command_output(tmp_path: Path) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    _add_slash_skill(dest, "do-kept", "common")
+    m.do_compose(_cfg(m, dest, ["pi"]), _quiet(m))
+    stale = dest / ".pi-skills/do-retired/SKILL.md"
+    _write(stale, "stale\n")
+
+    m._route_do_skills(dest, _quiet(m))
+
+    assert (dest / ".pi-skills/do-kept/SKILL.md").exists()
+    assert not stale.exists(), "removed do-* output must not remain routable by Pi"
+
+
+def test_compose_prunes_removed_cc_command_output(tmp_path: Path) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    _add_slash_skill(dest, "cc-kept", "claude")
+    stale = dest / ".claude/skills/cc-retired/SKILL.md"
+    _write(stale, "stale\n")
+
+    m.do_compose(_cfg(m, dest, ["cc"]), _quiet(m))
+
+    assert (dest / ".claude/skills/cc-kept/SKILL.md").exists()
+    assert not stale.exists(), "removed cc-* output must not remain discoverable by Claude Code"
+
+
+def test_pi_discovers_portable_meta_plan_helpers(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    _add_slash_skill(dest, "meta-plan-convert", "pi")
+    _add_slash_skill(dest, "meta-plan-check", "pi")
+    cfg = _cfg(m, dest, ["pi", "codex"])
+
+    m.do_compose(cfg, _quiet(m))
+    m.do_link(cfg, _quiet(m))
+
+    pi = home / ".pi/agent/skills"
+    codex = home / ".agents/skills"
+    assert (pi / "meta-plan-convert").is_symlink()
+    assert (pi / "meta-plan-check").is_symlink()
+    assert not (codex / "meta-plan-convert").exists()
+    assert not (codex / "meta-plan-check").exists()
 
 
 def test_check_passes_after_update_and_fails_on_violation(tmp_path: Path) -> None:

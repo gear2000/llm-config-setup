@@ -1,6 +1,6 @@
 # Meta plan runnable input format
 
-This is the shared schema for Meta-CC, Meta-ORCH/Pi Harness, and Meta-Herdr. It defines the current five-stage worktree lifecycle protocol. Do not invent a new runner-specific plan shape.
+This format defines the runnable `plan.md` + `route.yaml` input that planners prepare for Herdr. Herdr is the sole active runner. Do not invent a runner-specific plan shape.
 
 A runnable meta job is **two files**:
 
@@ -287,14 +287,12 @@ If merge, checks, log review, or cleanup fails, the runner preserves evidence, k
 
 Conversion preserves the source plan's intent. It must not invent model, harness, profile, agent choices, or finalization commands. If route information is missing, conversion writes explicit TODO values and the runnable check fails until a human fills them in. Non-interactive conversion still fills `merge_back_at: stage-3-integration-acceptance-seams` as the safe default.
 
-## Runner gate
+## Herdr runner gate
 
-Before semi-AFK execution, every meta runner must validate both files:
+Before execution, Herdr validates both files:
 
 ```text
-Meta-CC       checks plan.md + route.yaml first
-Meta-ORCH/Pi  checks plan.md + route.yaml first
-Meta-Herdr    checks plan.md + route.yaml first
+Herdr checks plan.md + route.yaml first
 ```
 
-Invalid input stops before execution and points the user to check/convert. Runners do not silently auto-convert at runtime.
+Invalid input stops before execution and points the user to check/convert. Herdr does not silently auto-convert at runtime.

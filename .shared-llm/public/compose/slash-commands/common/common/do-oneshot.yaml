@@ -1,6 +1,0 @@
-type: skill
-name: do-oneshot
-description: .shared-llm/public/layers/slash-commands/common/common/do-oneshot/description.md
-inputs:
-- .shared-llm/public/layers/slash-commands/common/common/do-oneshot/command.md
-output: .claude/skills/do-oneshot/SKILL.md

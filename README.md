@@ -248,33 +248,27 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
 | `team-pulse` | Tiny single-purpose heartbeat agent for teams. On a fixed interval, pings the team leader with a… |
 
-### Slash-command skills (25)
+### Slash-command skills (19)
 
-Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only, everything else ships to both. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
+Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only, and `meta-plan-convert` plus `meta-plan-check` are Pi-only helpers. Other common skills ship to both. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
 | Name | Description |
 | --- | --- |
-| `cc-full` | The full interactive build pipeline in ONE command. Chains, in a single session: research + plan +… |
-| `cc-implement` | Execute an implementation plan produced by /cc-plan-and-grill. The plan dictates the roster —… |
-| `cc-loop` | Run all available phases of a phase-driven plan sequentially inside the current Claude Code… |
-| `cc-oneshot` | Combined research + plan + implement in one shot. The lightweight shortcut through the build… |
-| `cc-plan-and-grill` | Research a problem, draft a plan, then grill the user iteratively until the plan is rock solid.… |
-| `cc-planish` | Standalone lightweight planner: grill the user on an annotatable HTML page, then build and iterate… |
+| `cc-full` | Claude Code planning conductor: research and grill a plan, create and check the canonical `plan.md`… |
+| `cc-plan-and-grill` | Claude Code planning front door: research, grill, produce and check `plan.md` + `route.yaml`, then… |
+| `cc-planish` | Standalone lightweight Claude Code planner: grill the user on an annotatable HTML page, then… |
 | `cc-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `codex-delegate` | Hand a routine substantive coding task to Codex CLI as a peer subagent. Same underlying runtime as… |
-| `do-full` | The full interactive build pipeline in ONE command. Chains, in a single session: research + plan +… |
-| `do-implement` | Execute an implementation plan produced by /do-plan-and-grill. The plan dictates the roster —… |
-| `do-loop` | Run all available phases of a phase-driven plan sequentially inside the current agent session. The… |
-| `do-oneshot` | Combined research + plan + implement in one shot. The lightweight shortcut through the build… |
-| `do-plan-and-grill` | Research a problem, draft a plan, then grill the user iteratively until the plan is rock solid.… |
+| `do-full` | Pi planning conductor: run the Pi grill, create and check the canonical `plan.md` + `route.yaml`… |
+| `do-plan-and-grill` | Pi planning front door: use the Planish grill, produce and check `plan.md` + `route.yaml`, then… |
 | `do-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
 | `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
 | `herdr-phase` | Run one canonical plan phase as the Herdr-native phase leader, sent to a cockpit pane by… |
 | `herdr-run` | Kick off a checked runnable `plan.md + route.yaml` pair through the Herdr-native meta runner.… |
-| `meta-cc-plan-and-grill` | Convenience wrapper concept for Claude Code: run the normal `/cc-plan-and-grill` front-door… |
-| `meta-plan-check` | Check whether a canonical meta plan is runnable before semi-AFK execution. Invoked… |
-| `meta-plan-convert` | Convert a loose Markdown plan into the meta runner two-file shape before semi-AFK execution.… |
+| `meta-cc-plan-and-grill` | Claude Code planning helper: run the normal `cc-plan-and-grill` flow, normalize its approved output… |
+| `meta-plan-check` | Check whether a canonical `plan.md` and `route.yaml` pair is runnable by Herdr. It validates the… |
+| `meta-plan-convert` | Convert a loose Markdown plan into the canonical `plan.md` plus `route.yaml` input pair for Herdr.… |
 | `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |

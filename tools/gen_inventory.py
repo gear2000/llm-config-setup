@@ -61,7 +61,7 @@ CATEGORIES: list[tuple[str, Path, str]] = [
         "Slash-command skills",
         SHARED / "compose" / "slash-commands",
         "Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only, "
-        "everything else ships to both. Composed into a destination's "
+        "and `meta-plan-convert` plus `meta-plan-check` are Pi-only helpers. Other common skills ship to both. Composed into a destination's "
         "`.claude/skills/<name>/SKILL.md`.",
     ),
 ]

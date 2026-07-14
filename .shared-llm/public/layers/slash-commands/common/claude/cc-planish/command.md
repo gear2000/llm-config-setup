@@ -1,8 +1,8 @@
 # cc-planish — Standalone plan → grill → finalize (Claude Code)
 
-The lightweight standalone planner: grill the user on an annotatable HTML page, build a versioned `plan.md` + `plan.html`, iterate until approved. This is the Claude Code port of the Pi `/do-planish` extension — the same flow, the same `.planish.yaml` contract, the same annotation-only feedback — expressed as a file-based skill instead of an in-memory HTTP server.
+The lightweight standalone planner: grill the user on an annotatable HTML page, build a versioned `plan.md` + `plan.html`, then produce a checked `route.yaml` before handing the work to Herdr. This is the Claude Code port of the Pi `/do-planish` extension — the same flow, the same `.planish.yaml` contract, the same annotation-only feedback — expressed as a file-based skill instead of an in-memory HTTP server.
 
-It is deliberately smaller than `/cc-plan-and-grill`: **no research subagents, no `## Team` section, no phase routing, no size tags.** Just grill → build → review. If you find you need research, a roster, or phased execution, you have outgrown `/cc-planish` — use `/cc-plan-and-grill` instead.
+It is deliberately smaller than `/cc-plan-and-grill`: **no research subagents, no `## Team` section, and no implementation work.** Just grill → build → check → Herdr handoff. If you find you need research or a larger planning process, use `/cc-plan-and-grill` instead.
 
 This command follows the canonical **Planish HTML Grill Contract** at `.shared-llm/public/llm/common/common/planish-html-grill-contract.md`. The default grill surface is a visual, annotatable HTML page — never a plain chat list of questions. Read that contract; the rules below defer to it.
 
@@ -83,8 +83,9 @@ When the user pastes their `## Feedback —` block: process every note, treat un
 
 Write the plan to TWO files in the plan dir:
 
-- **`plan.md`** — the canonical, token-lean plan: title, the phases/steps, key decisions, and verification. This is the file downstream tooling reads.
+- **`plan.md`** — the canonical Herdr plan: exactly one `# Plan:` heading, one `Goal:` line, ordered `## Phase 0 — ...` headings, and a non-empty `Done:` section in every phase. If the approved Markdown is not canonical, run `/meta-plan-convert` and preserve the original in the frozen plan history.
 - **`plan.html`** — the same plan in the dark visual style (the `<style>` block from `~/project/repos/{{OPS_REPO}}/mkdocs/docs/diagrams/architecture/v3.html` if it exists, else the `/design-doc` default style), with `.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html` pasted verbatim before `</body>` and a unique `<meta name="desdoc-key" content="<slug>-plan-v<k>">` in `<head>` so each plan version starts with a clean note slate. `<title>` = `<Topic> — plan v<k>`. The annotation bar is the page's ONLY interactive control — no answer boxes, no submit buttons.
+- **`route.yaml`** — the Herdr route profile with profiles, worktree template, finalization checks, and every phase lead/stage route. Ask for values the planning conversation did not establish; never invent models, agents, or checks.
 
 **HARD RULE — freeze `plan-v<k>` before every write (this is the same discipline `/do-planish` enforces in its tool):**
 
@@ -97,8 +98,15 @@ Write the plan to TWO files in the plan dir:
 
 Serve `plan.html` and hand the user the URL (host resolved as above); also send the file when a file-send tool exists. Tell them the page is ready and END YOUR TURN — nothing blocks. The user annotates and pastes back:
 
-- A **`## FINALIZED`** block (or an explicit approval message) means the plan is APPROVED — the deliverable is done.
+- A **`## FINALIZED`** block (or an explicit approval message) means the plan is approved. Run `/meta-plan-check <plan.md> <route.yaml>`, resolve every reported error, and repeat until it prints `PLAN_CHECK: PASS`. Then stop and show exactly:
+
+  ```text
+  /herdr-run --plan <plan.md> --route <route.yaml> --run-root <work-log-dir>
+  ```
+
 - Notes requesting changes mean: revise BOTH files, freeze the revision as the next `plan-v<k>` pair FIRST (STEP 2's hard rule), then serve `plan.html` again. Loop until approved.
+
+Do not implement the approved plan, start workers, or run phases. The human reviews the checked pair and deliberately starts Herdr.
 
 ## `--review <path>` mode
 

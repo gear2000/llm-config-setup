@@ -69,4 +69,15 @@ PASS  [<repo>] .pi-skills is do-* only
 ```
 
 Then confirm in the harnesses themselves: launch `pi` in the repo (shows `do-*`, no
-`cc-*`); open Claude Code in the repo (shows `cc-*`, no `do-*`).
+`cc-*`); open Claude Code in the repo (shows `cc-*`, no `do-*`). Pi discovers those
+skills from `~/.pi/agent/skills/`, not `<repo>/.pi/skills/`.
+
+## Planner-to-Herdr inventory
+
+- Claude Code planning front doors: `cc-*`; shared plan helpers: `meta-cc-plan-and-grill`,
+  `meta-plan-convert`, and `meta-plan-check`.
+- Pi planning front doors: `do-*`; `meta-plan-convert` and `meta-plan-check` use the Pi-only
+  helper route, so Codex keeps its existing command surface.
+- Both harnesses use `herdr-run` and `herdr-phase` for execution after planning has produced a
+  checked `plan.md` + `route.yaml` pair.
+- `rphase-*`, `cc-loop`, and `do-loop` are not installed command surfaces.

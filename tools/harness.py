@@ -653,12 +653,18 @@ def harness_of(root: Path, name: str) -> str:
         root / ".shared-llm" / PUBLIC_DIR / "compose",
         root / ".shared-llm" / THIS_REPO_DIR / "compose",
     ]
+    # Composition writes public recipes first and repository recipes second. Keep
+    # scanning after a public match so the reported harness belongs to the final
+    # writer at a shared output path, not to the portable recipe it replaced.
+    slash_harness = "unknown"
     for base in compose_bases:
         slash = base / "slash-commands"
         if slash.is_dir():
-            hits = list(slash.rglob(f"{name}.yaml"))
+            hits = sorted(slash.rglob(f"{name}.yaml"))
             if hits:
-                return hits[0].parent.name
+                slash_harness = hits[-1].parent.name
+    if slash_harness != "unknown":
+        return slash_harness
     for base in compose_bases:
         if (base / "skills" / f"{name}.yaml").exists():
             return "common"
@@ -1198,6 +1204,30 @@ def _prune_empty_dirs(root: Path) -> None:
             pass  # not empty — keep
 
 
+def _prune_hub_slash_command_layers(kit_shared: Path, hub: Path, log: RunLog) -> int:
+    """Keep the hub's slash-command layers an exact kit mirror.
+
+    The hub may carry additive generic layers, but it must not preserve a retired
+    command layer: otherwise a removed runner can be copied back into every
+    destination even after its recipe was pruned. Repo-specific commands belong
+    under a destination's this_repo tree, never the shared hub.
+    """
+    source = kit_shared / "layers/slash-commands"
+    target = hub / "layers/slash-commands"
+    if not source.is_dir() or not target.is_dir():
+        return 0
+    wanted = {path.relative_to(source) for path in source.rglob("*") if path.is_file()}
+    removed = 0
+    for path in sorted(target.rglob("*")):
+        if path.is_file() and path.relative_to(target) not in wanted:
+            path.unlink()
+            removed += 1
+            log(f"    - pruned stale hub slash-command layer: {path.relative_to(hub)}")
+    if removed:
+        _prune_empty_dirs(target)
+    return removed
+
+
 def _prune_public_layers(src_shared: Path, dst_shared: Path, log: RunLog) -> int:
     """Sweep the destination's public/layers/ wholesale: delete any file there
     that the source (hub) no longer ships. Scoped to layers/ — pure source that
@@ -1333,7 +1363,11 @@ def do_copy(cfg: dict, log: RunLog) -> None:
     exclude = cfg.get("exclude", [])
     log.always(f"copy: kit {kit_shared} -> hub {hub}")
     c = _copy_common(kit_shared, hub, log, exclude_rels=ignored)
-    log.always(f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged")
+    pruned_hub_commands = _prune_hub_slash_command_layers(kit_shared, hub, log)
+    log.always(
+        f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged, "
+        f"{pruned_hub_commands} retired slash-command layers pruned"
+    )
     for d in cfg["destinations"]:
         dest = Path(d["path"]).expanduser()
         dest_shared = dest / ".shared-llm"
@@ -1375,6 +1409,68 @@ CONSUMER_RECIPE_GROUPS = (
 PI_ONLY_SKILLS_DIR = ".pi-skills"
 
 
+def _declared_skill_names(dest: Path, prefix: str) -> set[str]:
+    """Return composer-managed slash-command skill names with ``prefix``."""
+    names: set[str] = set()
+    shared = dest / ".shared-llm"
+    for compose_root in (shared / PUBLIC_DIR / "compose", shared / THIS_REPO_DIR / "compose"):
+        if not compose_root.is_dir():
+            continue
+        for recipe in compose_root.rglob("*.yaml"):
+            try:
+                data = yaml.safe_load(recipe.read_text())
+            except yaml.YAMLError:
+                continue
+            if isinstance(data, dict) and data.get("type", "skill") == "skill":
+                name = data.get("name")
+                if isinstance(name, str) and name.startswith(prefix):
+                    names.add(name)
+    return names
+
+
+def _prune_removed_cc_skills(dest: Path, log: RunLog) -> int:
+    """Remove stale composer-managed Claude workflow skills after recipe deletion."""
+    claude_skills = dest / ".claude/skills"
+    declared = _declared_skill_names(dest, "cc-")
+    removed = 0
+    if not claude_skills.is_dir():
+        return removed
+    for stale in sorted(claude_skills.iterdir()):
+        if stale.is_dir() and stale.name.startswith("cc-") and stale.name not in declared:
+            shutil.rmtree(stale)
+            removed += 1
+            log(f"    - pruned stale Claude cc-* skill: .claude/skills/{stale.name}")
+    return removed
+
+
+# A retired recipe leaves a tracked generated output behind. Restrict cleanup to
+# an unmistakable signature so an unrelated manually maintained `team` skill is
+# never removed.
+LEGACY_RUNNER_SKILL_MARKERS = {
+    "team": ("ask_brain", "meta-orchestrator"),
+}
+
+
+def _prune_removed_legacy_runner_skills(dest: Path, log: RunLog) -> int:
+    """Remove unreferenced legacy runner skills that retain their old signature."""
+    claude_skills = dest / ".claude/skills"
+    if not claude_skills.is_dir():
+        return 0
+    declared = _declared_skill_names(dest, "")
+    removed = 0
+    for name, markers in LEGACY_RUNNER_SKILL_MARKERS.items():
+        skill_dir = claude_skills / name
+        skill = skill_dir / "SKILL.md"
+        if name in declared or not skill.is_file():
+            continue
+        if not any(marker in skill.read_text() for marker in markers):
+            continue
+        shutil.rmtree(skill_dir)
+        removed += 1
+        log(f"    - pruned stale legacy runner skill: .claude/skills/{name}")
+    return removed
+
+
 def _route_do_skills(dest: Path, log: RunLog) -> int:
     """Move composed do-* skill dirs OUT of .claude/skills (which Claude Code
     reads) into <repo>/.pi-skills, so do-* are Pi-only. Idempotent: compose
@@ -1382,6 +1478,7 @@ def _route_do_skills(dest: Path, log: RunLog) -> int:
     claude_skills = dest / ".claude/skills"
     pi_src = dest / PI_ONLY_SKILLS_DIR
     moved = 0
+    declared = _declared_skill_names(dest, "do-")
     if not claude_skills.is_dir():
         return 0
     for d in sorted(claude_skills.iterdir()):
@@ -1394,6 +1491,14 @@ def _route_do_skills(dest: Path, log: RunLog) -> int:
         shutil.move(str(d), str(target))
         moved += 1
         log(f"    route do-* (Pi-only): {d.name} -> {PI_ONLY_SKILLS_DIR}/")
+    # The directory is composer-managed. A removed recipe no longer creates its
+    # source dir above, so remove the old routed output rather than leaving an
+    # executable stale Pi command or a global link to it.
+    if pi_src.is_dir():
+        for stale in sorted(pi_src.iterdir()):
+            if stale.is_dir() and stale.name.startswith("do-") and stale.name not in declared:
+                shutil.rmtree(stale)
+                log(f"    - pruned stale routed do-* skill: {PI_ONLY_SKILLS_DIR}/{stale.name}")
     return moved
 
 
@@ -1419,7 +1524,13 @@ def _compose_destination(dest: Path, log: RunLog,
             elif path.is_file():
                 composer.compose_one(path)
     composer.copy_standalone_skills(shared / THIS_REPO_DIR / "skills")
+    pruned_cc = _prune_removed_cc_skills(dest, log)
+    pruned_legacy = _prune_removed_legacy_runner_skills(dest, log)
     moved = _route_do_skills(dest, log)
+    if pruned_cc:
+        log.always(f"  pruned {pruned_cc} stale cc-* skill(s) from .claude/skills")
+    if pruned_legacy:
+        log.always(f"  pruned {pruned_legacy} stale legacy runner skill(s) from .claude/skills")
     if moved:
         log.always(f"  routed {moved} do-* skill(s) to {PI_ONLY_SKILLS_DIR}/ (Pi-only, out of Claude's .claude/skills)")
 
@@ -1465,11 +1576,12 @@ def _common_pi_skills(dest: Path) -> dict[str, Path]:
         for d in sorted(pi_src.iterdir()):
             if d.is_dir() and not d.name.startswith("."):
                 out[d.name.replace(":", "-")] = d
-    # common (portable) skills that stay in .claude/skills — never cc-*, never do-*.
+    # Common skills and Pi-scoped helpers stay in .claude/skills — never cc-*,
+    # never do-*. Pi-scoped helpers are intentionally excluded from Codex.
     for d in _skill_dirs(dest):
         if d.name.startswith("cc-") or d.name.startswith("do-"):
             continue
-        if harness_of(dest, d.name) == "common":
+        if harness_of(dest, d.name) in ("common", "pi"):
             out[d.name.replace(":", "-")] = d
     return out
 
