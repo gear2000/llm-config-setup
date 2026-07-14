@@ -1,0 +1,1 @@
+Check whether a canonical `plan.md` and `route.yaml` pair is runnable by Herdr. It validates the work plan, route profiles, finalization checks, per-phase merge timing, and every required stage route. It never starts execution.
