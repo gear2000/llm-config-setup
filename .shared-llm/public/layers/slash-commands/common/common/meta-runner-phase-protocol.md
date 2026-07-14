@@ -36,9 +36,9 @@ llm_profiles:
     advisor:
       enabled: false
 
-  codex-auditor:
-    harness: codex
-    model: configured-codex-model
+  claude-auditor:
+    harness: claude
+    model: configured-claude-model
     effort: medium
 
   pi-default:
@@ -46,14 +46,9 @@ llm_profiles:
     model: configured-default
 
 # model is the HARNESS-NATIVE id shape: claude → alias/full name (paired with effort);
-# codex → bare id (paired with effort); pi → provider/id[:thinking] (the :thinking
-# suffix IS pi's effort). effort is optional — the phase leader resolves it to `medium`
-# at order time when a profile omits it, so roster templates can always use {effort}.
-#
-# Overproduction-prone models (as of 2026-07: the gpt-5.6 family, terra especially) need
-# an explicit scope-discipline instruction in every stage brief — only what the stage
-# requires, no speculative extras, tests proportionate to the change. See
-# meta-plan-format.md for the guardrail text and the recommended default profiles.
+# pi → provider/id[:thinking] (the :thinking suffix IS pi's effort). effort is optional —
+# the phase leader resolves it to `medium` at order time when a profile omits it, so roster
+# templates can always use {effort}.
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
@@ -83,7 +78,7 @@ phases:
         agent: backend
       stage-2-adversarial-audit:
         purpose: "hostile audit of Stage 1 code on the same temp worktree branch"
-        llm_profile: codex-auditor
+        llm_profile: claude-auditor
         agent: adversarial-evaluator
         must_differ_from: stage-1-implementation
       stage-3-integration-acceptance-seams:
@@ -135,7 +130,7 @@ Every run writes a filesystem tree that is the source of truth for what happened
                 ├── result.json             # SOURCE OF TRUTH: verdict + revisit:[stage-ids] + full_log ptr
                 ├── compacted.md            # worker's own short summary back to the leader
                 └── log/
-                    ├── full_log →          # POINTER to the harness transcript (Claude JSONL / Codex session)
+                    ├── full_log →          # POINTER to the worker's harness transcript
                     └── otel/               # optional structured full-IO (only if OTEL_* injected)
 ```
 

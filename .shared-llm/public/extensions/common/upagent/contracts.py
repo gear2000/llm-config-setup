@@ -41,31 +41,31 @@ RECOGNIZED_STAGE_IDS = (
 )
 
 # Harnesses the roster (upagent.yaml) may map a launch template for.
-KNOWN_HARNESSES = ("claude", "codex", "pi", "cursor")
+KNOWN_HARNESSES = ("claude", "pi", "cursor")
 
 # Required keys on an order.json the leader writes.
 ORDER_REQUIRED = (
-    "order_id",       # unique per work order, e.g. "phase-0.stage-1-implementation.pass-1.try-1"
-    "phase_id",       # e.g. "phase-0"
-    "stage_id",       # one of RECOGNIZED_STAGE_IDS
-    "harness",        # resolved from the route llm_profile: one of KNOWN_HARNESSES
+    "order_id",  # unique per work order, e.g. "phase-0.stage-1-implementation.pass-1.try-1"
+    "phase_id",  # e.g. "phase-0"
+    "stage_id",  # one of RECOGNIZED_STAGE_IDS
+    "harness",  # resolved from the route llm_profile: one of KNOWN_HARNESSES
     # NOTE: `model` is validated separately below — it is required present but MAY be empty
     # (claude resolves its model from --model on the harness side), so it is not in this
     # non-empty-required set.
-    "agent",          # persona name from the route stage entry
-    "cwd",            # absolute path the worker runs in (the phase worktree)
+    "agent",  # persona name from the route stage entry
+    "cwd",  # absolute path the worker runs in (the phase worktree)
     "instructions_path",  # absolute path to the stage brief the worker reads
-    "result_path",    # absolute path the worker MUST write result.json to
-    "cockpit_pane",   # id of an existing pane IN the cockpit workspace to split the worker
-                      # from (Herdr `pane split` takes a source pane, not a workspace label).
-                      # /herdr-run creates the cockpit and threads this pane id down.
+    "result_path",  # absolute path the worker MUST write result.json to
+    "cockpit_pane",  # id of an existing pane IN the cockpit workspace to split the worker
+    # from (Herdr `pane split` takes a source pane, not a workspace label).
+    # /herdr-run creates the cockpit and threads this pane id down.
 )
 
 # Required keys on a result.json the worker writes.
 RESULT_REQUIRED = (
-    "order_id",       # MUST echo the order's order_id
-    "verdict",        # one of VERDICTS
-    "full_log",       # pointer to the harness transcript (absolute path or session id)
+    "order_id",  # MUST echo the order's order_id
+    "verdict",  # one of VERDICTS
+    "full_log",  # pointer to the harness transcript (absolute path or session id)
 )
 
 
@@ -94,57 +94,34 @@ def parse_order(text: str) -> dict:
 
     if order["stage_id"] not in RECOGNIZED_STAGE_IDS:
         raise ContractError(
-            f"order.json: unknown stage_id {order['stage_id']!r}; "
-            f"expected one of {', '.join(RECOGNIZED_STAGE_IDS)}"
+            f"order.json: unknown stage_id {order['stage_id']!r}; expected one of {', '.join(RECOGNIZED_STAGE_IDS)}"
         )
     if order["harness"] not in KNOWN_HARNESSES:
         raise ContractError(
-            f"order.json: unknown harness {order['harness']!r}; "
-            f"expected one of {', '.join(KNOWN_HARNESSES)}"
+            f"order.json: unknown harness {order['harness']!r}; expected one of {', '.join(KNOWN_HARNESSES)}"
         )
     # `model` is required present but may be empty (claude resolves it from --model on the
     # harness side); enforce the key exists and is a string.
     if not isinstance(order.get("model"), str):
         raise ContractError("order.json: `model` must be a string (may be empty)")
-    # `effort` is optional (a roster template may substitute `{effort}` into a flag like
-    # claude's --effort or codex's -c model_reasoning_effort=). When present it must be a
-    # string; the leader resolves it from the route llm_profile (`medium` when the profile
-    # omits it), so a template that uses {effort} never formats an empty value.
+    # `effort` is optional. When present it must be a string; the leader resolves it from the
+    # route llm_profile (`medium` when the profile omits it), so a template that uses {effort}
+    # never formats an empty value.
     if "effort" in order and not isinstance(order["effort"], str):
         raise ContractError("order.json: `effort` must be a string when present")
+    # `timeout_ms` is optional. bool is an int subclass, so reject it explicitly: a timeout
+    # must be an actual, positive integer before the Recruiter starts any runner work.
+    if "timeout_ms" in order:
+        timeout_ms = order["timeout_ms"]
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
+            raise ContractError("order.json: `timeout_ms` must be a positive integer when present")
     # Optional `env` must be a flat str->str map when present (injected via `pane split --env`).
     env = order.get("env")
-    if env is not None:
-        if not isinstance(env, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in env.items()
-        ):
-            raise ContractError("order.json: `env` must be a map of string->string")
+    if env is not None and (
+        not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+    ):
+        raise ContractError("order.json: `env` must be a map of string->string")
     return order
-
-
-def normalize_cosmetic(raw: dict) -> tuple[dict, list[str]]:
-    """Apply the tiny, explicit result.json repairs allowed at the Recruiter boundary.
-
-    This intentionally does not relax ``parse_result``. It copies ``raw`` and only repairs
-    known verdict aliases and a one-element ``full_log`` list, returning a human-readable log
-    of every repair.
-    """
-    normalized = dict(raw)
-    corrections: list[str] = []
-    aliases = {
-        "VERIFICATION_PASSED": "passed", "VERIFIED": "passed", "PASS": "passed",
-        "PASSED": "passed", "OK": "passed", "FAIL": "failed", "FAILED": "failed",
-        "BLOCKED": "blocked",
-    }
-    verdict = normalized.get("verdict")
-    if isinstance(verdict, str) and verdict in aliases:
-        normalized["verdict"] = aliases[verdict]
-        corrections.append(f"verdict: {verdict} -> {aliases[verdict]}")
-    full_log = normalized.get("full_log")
-    if isinstance(full_log, list) and len(full_log) == 1 and isinstance(full_log[0], str):
-        normalized["full_log"] = full_log[0]
-        corrections.append("full_log: [string] -> string")
-    return normalized, corrections
 
 
 def parse_result(text: str, expected_order_id: str | None = None) -> dict:
@@ -164,9 +141,7 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
         _require_str(result, key, "result.json")
 
     if result["verdict"] not in VERDICTS:
-        raise ContractError(
-            f"result.json: verdict {result['verdict']!r} must be one of {', '.join(VERDICTS)}"
-        )
+        raise ContractError(f"result.json: verdict {result['verdict']!r} must be one of {', '.join(VERDICTS)}")
     if expected_order_id is not None and result["order_id"] != expected_order_id:
         raise ContractError(
             f"result.json: order_id {result['order_id']!r} does not match the order "
@@ -180,20 +155,14 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
         raise ContractError("result.json: `revisit` must be a list of stage-id strings")
     for stage in revisit:
         if stage not in RECOGNIZED_STAGE_IDS:
-            raise ContractError(
-                f"result.json: revisit stage {stage!r} is not a recognized stage id"
-            )
+            raise ContractError(f"result.json: revisit stage {stage!r} is not a recognized stage id")
     if result["verdict"] == "failed" and not revisit:
-        raise ContractError(
-            "result.json: a `failed` verdict must name at least one stage to `revisit`"
-        )
+        raise ContractError("result.json: a `failed` verdict must name at least one stage to `revisit`")
 
     # Optional advisor ruling. Present only on an advisor order's result; must be recognized.
     decision = result.get("decision")
     if decision is not None and decision not in ADVISOR_DECISIONS:
-        raise ContractError(
-            f"result.json: decision {decision!r} must be one of {', '.join(ADVISOR_DECISIONS)}"
-        )
+        raise ContractError(f"result.json: decision {decision!r} must be one of {', '.join(ADVISOR_DECISIONS)}")
     return result
 
 

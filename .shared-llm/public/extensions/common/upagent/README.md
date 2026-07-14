@@ -34,12 +34,8 @@ Durable files are the source of truth; Herdr only carries the go/done signal.
   `active/requests/<hashed-order-id>/`, writes an authoritative lease plus a retained expiry
   index, splits its fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree, `--env`
   any OTel vars), and runs the harness launch template for `order.harness`. Only that claim
-  owner blocks on `herdr wait agent-status <worker> --status done` — except for codex, whose
-  Herdr integration never reports a done transition, so the job runner polls for the result
-  file instead. Installing the kit's codex status hook
-  (`llm/codex/common/hooks/herdr-status-fix.sh`, wired on SessionStart/Stop in
-  `~/.codex/hooks.json`) additionally restores live working/idle status for codex panes;
-  polling remains the correctness fallback either way.
+  owner blocks on `herdr wait agent-status <worker> --status done` and then accepts only a
+  strictly valid result file.
 - The worker reads the instructions, does the one stage, and **before its pane closes** writes
   `result.json` (verdict `passed|failed|blocked`, a `revisit` list of stage-ids on failure,
   and a `full_log` pointer to its harness transcript) plus its `compacted.md` and handoff.
@@ -63,11 +59,9 @@ from the route profile, `medium` when the profile omits it). Three properties ev
 must keep (see `upagent.yaml.example` for the full rationale):
 
 1. **Non-interactive.** Workers run unattended in panes — every template bypasses
-   trust/permission prompts (`claude --dangerously-skip-permissions`,
-   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check`,
-   `pi --approve`) or the hire hangs until the Recruiter's timeout.
-2. **Harness-native model ids.** claude takes an alias or full name (plus `--effort`);
-   codex takes a bare id (plus `-c model_reasoning_effort=`); pi takes
+   trust/permission prompts (`claude --dangerously-skip-permissions`, `pi --approve`) or the
+   hire hangs until the Recruiter's timeout.
+2. **Harness-native model ids.** claude takes an alias or full name (plus `--effort`); pi takes
    `provider/id[:thinking]`, so pi's effort rides inside the model string.
 3. **pi runs insulated.** `--no-extensions` plus an explicit
    `-e $HOME/.pi/agent/extensions/herdr-agent-state.ts`. Discovery off means a broken

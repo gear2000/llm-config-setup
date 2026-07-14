@@ -22,8 +22,9 @@
 # Where runtime files land (state.json, index.json roster, consults/ drop-box).
 runtime_dir: /tmp/.herdr-specialist
 
-# Optional: the repo transient specialists run in so their file:line citations resolve.
-# Defaults to the directory `up` was invoked from.
+# Optional: the repository transient specialists run in so their file:line citations resolve.
+# Defaults to the directory `up` was invoked from. Relative locations below are resolved from
+# this repository root, never from the nested roster directory.
 # repo_root: /path/to/your/repo
 
 # IMPORTANT: every `cmd` MUST contain either `{prompt_file}` or `{prompt}` so the Librarian
@@ -35,7 +36,7 @@ runtime_dir: /tmp/.herdr-specialist
 
 agents:
   - name: docs
-    location: .claude/agents/docs.md        # relative = resolved from this file
+    location: .claude/agents/docs.md        # relative = resolved from repo_root
     description: "Answers documentation / markdown / site-structure questions."
     cmd: "claude -p {prompt} --agent docs"
 

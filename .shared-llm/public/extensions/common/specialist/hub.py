@@ -23,8 +23,7 @@ Consult protocol (files + signal, mirroring the UpAgent order/result pattern):
     caller:    herdr pane run <librarian> "consult <consults/<id>.json>"
     librarian: read+route the consult -> herdr pane split (transient specialist in shared-services)
     librarian: herdr pane run <specialist> "<cmd, briefed with the question + answer contract>"
-    librarian: herdr wait agent-status <specialist> --status done (or polls for answer.json
-               directly when the launch command targets codex — see CODEX_CMD_MARKER)
+    librarian: herdr wait agent-status <specialist> --status done
     specialist: writes answer.json {consult_id, answer, citations:[file:line, ...]}
     librarian: validate answer.json -> herdr pane close <specialist> -> print "CONSULT <id> DONE"
     caller:    herdr wait output <librarian> --match "CONSULT <id> DONE" --timeout <ms> -> read answer.json
@@ -47,22 +46,27 @@ Runtime files (one directory, default /tmp/.herdr-specialist):
   index.json    roster: name -> {description, location, cmd}
   consults/     where callers drop consult.json (and the Librarian writes prompt briefs)
 
+Roster paths are portable: when `repo_root` is absent, the hub walks upward from the discovered
+roster path until it finds the repository's `.git` marker. Relative specialist `location` values
+are always resolved from that repository root, never from the process current directory or the
+nested roster directory.
+
 To adopt from another repo: fill agents.yaml in your repo's `this_repo` config (this engine
 is synced from the kit into `.shared-llm/public/extensions/specialist/`) and import the
 sibling justfile so `just specialist-hub <cmd>` runs this file.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import shutil
 import subprocess
 import sys
-import time
-from pathlib import Path
 
 import yaml
 
@@ -80,17 +84,10 @@ LIBRARIAN_PANE_LABEL = "librarian"
 DEFAULT_RUNTIME = "/tmp/.herdr-specialist"
 # How long the Librarian waits for a transient specialist to finish answering (ms).
 CONSULT_TIMEOUT_MS = 600_000
-RESULT_POLL_INTERVAL_S = 2.0
-# A specialist's `cmd` template has no structured harness field (unlike the UpAgent Recruiter's
-# order.harness) — detect a codex-launched specialist from its launch command instead. Codex's
-# Herdr integration never reports an agent-status transition to "done" (only a SessionStart
-# registration), so `herdr wait agent-status --status done` structurally never fires for it —
-# verified live 2026-07-12 against the sibling UpAgent Recruiter bug (same root cause, same
-# fix). Poll for the answer file instead; it's the contract's real source of truth.
-CODEX_CMD_MARKER = "codex exec"
 
 
 # --- config -------------------------------------------------------------------
+
 
 def default_config_path() -> Path:
     """Resolve the roster path. The filled roster is repo-owned, so prefer, in order:
@@ -115,6 +112,22 @@ def default_config_path() -> Path:
 class ConfigError(RuntimeError):
     """A bad roster (missing/invalid agents.yaml). Raised fail-loud; the consult path catches it
     to still leave a failure answer + emit DONE, other commands convert it to a clean exit."""
+
+
+def _resolve_path(value: object, base: Path, field: str) -> Path:
+    """Resolve a configured path against `base`, rejecting non-string path values."""
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{field} must be a non-empty string (got {value!r})")
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
+def _repo_root_from_roster(path: Path) -> Path:
+    """Find the repository containing a discovered roster without consulting the current directory."""
+    for candidate in (path.parent, *path.parent.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    raise ConfigError(f"could not find a repository root above roster {path}: no .git marker")
 
 
 def load_config() -> dict:
@@ -142,13 +155,24 @@ def load_config() -> dict:
                 f"agent {a['name']!r} cmd must contain '{{prompt}}' or '{{prompt_file}}' "
                 f"so the Librarian can pass the question: {a['cmd']!r}"
             )
-    cfg["runtime_dir"] = Path(cfg.get("runtime_dir", DEFAULT_RUNTIME)).expanduser()
-    cfg["config_path"] = path.resolve()
-    cfg["config_dir"] = path.resolve().parent
-    # repo_root: where transient specialists run so their file:line citations resolve. Default
-    # to the directory `up` was invoked from (the destination repo root); overridable in yaml.
-    cfg["repo_root"] = Path(cfg.get("repo_root", os.getcwd())).expanduser()
+
+    config_path = path.resolve()
+    repo_root = cfg.get("repo_root")
+    cfg["repo_root"] = (
+        _repo_root_from_roster(config_path)
+        if repo_root is None
+        else _resolve_path(repo_root, config_path.parent, "repo_root")
+    )
+    runtime_dir = _resolve_path(cfg.get("runtime_dir", DEFAULT_RUNTIME), cfg["repo_root"], "runtime_dir")
+    cfg["runtime_dir"] = runtime_dir
+    cfg["config_path"] = config_path
+    cfg["config_dir"] = config_path.parent
     return cfg
+
+
+def resolve_specialist_location(cfg: dict, location: str) -> Path:
+    """Resolve a specialist definition location from the configured repository root."""
+    return _resolve_path(location, cfg["repo_root"], "agent location")
 
 
 def load_config_or_exit() -> dict:
@@ -166,6 +190,7 @@ def paths(cfg: dict) -> dict:
 
 # --- index --------------------------------------------------------------------
 
+
 def _description(cfg: dict, agent: dict) -> str:
     """One-line description: agent's own 'description', else the definition file's
     frontmatter description, else empty."""
@@ -174,9 +199,7 @@ def _description(cfg: dict, agent: dict) -> str:
     loc = agent.get("location")
     if not loc:
         return ""
-    p = Path(loc)
-    if not p.is_absolute():
-        p = cfg["config_dir"] / p
+    p = resolve_specialist_location(cfg, str(loc))
     if not p.is_file():
         return ""
     m = re.match(r"\A---\n(.*?)\n---\n", p.read_text(), re.DOTALL)
@@ -216,6 +239,7 @@ def read_index(cfg: dict) -> dict:
 
 
 # --- herdr socket -------------------------------------------------------------
+
 
 def _require_herdr() -> None:
     if os.environ.get("HERDR_ENV") != "1":
@@ -296,13 +320,16 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
         sys.exit(f"error: shared-services workspace {workspace_id} has no pane to split from")
     new_pane = _dig(
         _herdr_json("pane", "split", anchor, "--direction", "down", "--no-focus"),
-        "result", "pane", "pane_id",
+        "result",
+        "pane",
+        "pane_id",
     )
     _herdr("pane", "rename", new_pane, role_label)
     return workspace_id, new_pane, True
 
 
 # --- specialist briefing ------------------------------------------------------
+
 
 def build_prompt(consult: dict, location: str, cwd: str) -> str:
     """The briefing a transient specialist reads: the question, where its own definition and the
@@ -332,6 +359,7 @@ def render_launch(cmd: str, prompt: str, prompt_file: Path) -> str:
 
 # --- commands -----------------------------------------------------------------
 
+
 def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
     _require_herdr()
     write_index(cfg)
@@ -351,13 +379,20 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
     # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
     # BEST-EFFORT: status display must never break bring-up.
     _herdr(
-        "pane", "report-agent", librarian,
-        "--source", "specialist-librarian", "--agent", "librarian",
-        "--state", "idle", "--message", f"{len(cfg['agents'])} specialists indexed",
+        "pane",
+        "report-agent",
+        librarian,
+        "--source",
+        "specialist-librarian",
+        "--agent",
+        "librarian",
+        "--state",
+        "idle",
+        "--message",
+        f"{len(cfg['agents'])} specialists indexed",
         check=False,
     )
-    print(f"up: {'reused' if reused else 'created'} librarian pane {librarian} "
-          f"in workspace {workspace}")
+    print(f"up: {'reused' if reused else 'created'} librarian pane {librarian} in workspace {workspace}")
 
 
 def _arm_librarian(cfg: dict, librarian: str) -> None:
@@ -395,31 +430,17 @@ def cmd_status(cfg: dict, args: argparse.Namespace) -> None:
     index = read_index(cfg)
     ws = _find_shared_services()
     if ws is None:
-        print(f"librarian: NOT UP (no shared-services workspace) | "
-              f"roster: {len(index)} specialist(s)")
+        print(f"librarian: NOT UP (no shared-services workspace) | roster: {len(index)} specialist(s)")
         return
     pane = _find_role_pane(ws["workspace_id"], LIBRARIAN_PANE_LABEL)
     state = f"alive (pane {pane})" if pane else "DOWN (no librarian pane)"
-    print(f"librarian: {state} in workspace {ws['workspace_id']} | "
-          f"roster: {len(index)} specialist(s)")
+    print(f"librarian: {state} in workspace {ws['workspace_id']} | roster: {len(index)} specialist(s)")
 
 
 class ConsultFailure(RuntimeError):
     """A fail-loud consult fault (unknown specialist, hub not up, herdr call failed, bad answer).
     Caught inside cmd_consult so a failure answer.json is written and the DONE sentinel is still
     emitted — the caller's bounded wait must never be left to hang."""
-
-
-def _wait_for_answer_file(answer_path: Path, timeout_ms: int) -> None:
-    """Poll for the specialist's answer file instead of waiting on herdr agent-status. Used
-    when the launch command targets a harness whose integration never reports a "done"
-    transition (codex). Fail-loud on timeout, same as the agent-status wait it replaces."""
-    deadline = time.monotonic() + timeout_ms / 1000
-    while time.monotonic() < deadline:
-        if answer_path.is_file():
-            return
-        time.sleep(RESULT_POLL_INTERVAL_S)
-    raise ConsultFailure(f"timed out waiting for {answer_path} to appear")
 
 
 def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
@@ -488,9 +509,7 @@ def cmd_consult(args: argparse.Namespace) -> None:
         index = read_index(cfg)
         specialist = consult["specialist"]
         if specialist not in index:
-            raise ConsultFailure(
-                f"unknown specialist {specialist!r}; roster: {', '.join(index) or '(empty)'}"
-            )
+            raise ConsultFailure(f"unknown specialist {specialist!r}; roster: {', '.join(index) or '(empty)'}")
         entry = index[specialist]
 
         state = _read_state(cfg)
@@ -499,8 +518,7 @@ def cmd_consult(args: argparse.Namespace) -> None:
 
         location = entry.get("location") or "(no definition file)"
         if entry.get("location"):
-            loc = Path(entry["location"])
-            location = str(loc if loc.is_absolute() else (cfg["config_dir"] / loc))
+            location = str(resolve_specialist_location(cfg, entry["location"]))
 
         prompt = build_prompt(consult, location, cwd)
         prompt_file = paths(cfg)["consults"] / f"{consult_id}.prompt.txt"
@@ -513,29 +531,36 @@ def cmd_consult(args: argparse.Namespace) -> None:
         # Spawn the transient specialist as a pane split off the Librarian, running in the repo.
         split = _herdr("pane", "split", librarian, "--direction", "down", "--cwd", cwd, "--no-focus")
         try:
-            specialist_pane = json.loads(split.stdout)["result"]["pane"]["pane_id"]
+            pane_id = json.loads(split.stdout)["result"]["pane"]["pane_id"]
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             raise ConsultFailure(f"herdr pane split returned unexpected output: {e}") from e
+        if not isinstance(pane_id, str) or not pane_id:
+            raise ConsultFailure(f"herdr pane split returned invalid pane_id: {pane_id!r}")
+        specialist_pane = pane_id
 
         launch = render_launch(entry["cmd"], prompt, prompt_file)
-        _herdr("pane", "run", specialist_pane, launch)
-        if CODEX_CMD_MARKER in entry["cmd"]:
-            _wait_for_answer_file(Path(consult["answer_path"]), CONSULT_TIMEOUT_MS)
-        else:
-            _herdr("wait", "agent-status", specialist_pane,
-                   "--status", "done", "--timeout", str(CONSULT_TIMEOUT_MS))
+        _herdr("pane", "run", pane_id, launch)
+        _herdr("wait", "agent-status", pane_id, "--status", "done", "--timeout", str(CONSULT_TIMEOUT_MS))
         # The specialist must have written a valid answer.json echoing this consult_id.
         cc.load_answer(consult["answer_path"], expected_consult_id=consult_id)
-    except (ConsultFailure, ConfigError, cc.ConsultError, OSError, subprocess.CalledProcessError,
-            KeyError, TypeError) as e:
+    except (
+        ConsultFailure,
+        ConfigError,
+        cc.ConsultError,
+        OSError,
+        subprocess.CalledProcessError,
+        KeyError,
+        TypeError,
+    ) as e:
         _write_failure_answer(consult["answer_path"], consult_id, str(e))
         sys.stderr.write(f"specialist-hub: consult {consult_id} failed: {e}\n")
     finally:
         if specialist_pane is not None:
             try:
                 _herdr("pane", "close", specialist_pane, check=False)
-            except OSError:
-                pass  # a fork/exec fault closing a pane must not skip the CONSULT DONE emit below
+            except OSError as e:
+                # A fork/exec fault closing a pane must not skip the CONSULT DONE emit below.
+                sys.stderr.write(f"specialist-hub: could not close pane {specialist_pane}: {e}\n")
 
     # The go/done signal the caller waits on; the answer.json (real or failure) is the durable
     # record. Emitted on EVERY path above so a bounded caller wait always resolves.
@@ -556,15 +581,15 @@ def _read_state(cfg: dict) -> dict:
 
 # --- entrypoint ---------------------------------------------------------------
 
+
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("up")
     sub.add_parser("down")
     sub.add_parser("status")
     sub.add_parser("reindex")
+    sub.add_parser("runtime-dir", help="print the configured Specialist Hub runtime directory")
     con = sub.add_parser("consult")
     con.add_argument("consult_path", help="path to the consult.json to answer")
     args = ap.parse_args()
@@ -581,6 +606,7 @@ def main() -> None:
         "down": cmd_down,
         "status": cmd_status,
         "reindex": lambda c, a: write_index(c),
+        "runtime-dir": lambda c, a: print(c["runtime_dir"]),
     }
     handlers[args.cmd](cfg, args)
 

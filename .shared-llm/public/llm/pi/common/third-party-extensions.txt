@@ -52,7 +52,7 @@ npm:@ayulab/pi-rewind@0.4.2
 #   tools/install-pi-extensions.sh. Needs Pi >= 0.79.1 and Node >= 22.19.
 # npm:pi-cursor-sdk@0.1.42
 
-# Pi extension that keeps noisy tool output out of your context window. 
-# Automatically rewrites shell commands through Hypa for local, deterministic 
+# Pi extension that keeps noisy tool output out of your context window.
+# Automatically rewrites shell commands through Hypa for local, deterministic
 # compression, context-aware file tools, and recoverable
 npm:@hypabolic/pi-hypa

@@ -36,19 +36,25 @@ herdr-up:
 herdr-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    ${PYTHON_BIN:-python3} - <<'PY'
-    import json, subprocess, os
+    runtime=$(${PYTHON_BIN:-python3} "{{_SPECIALIST}}" runtime-dir)
+    SPECIALIST_RUNTIME="$runtime" ${PYTHON_BIN:-python3} - <<'PY'
+    import json, os, subprocess
     G, R, DIM, RST = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
     def live_panes():
         try:
-            out = subprocess.run(["herdr","pane","list"], capture_output=True, text=True)
+            out = subprocess.run(
+                ["herdr", "pane", "list"], check=True, capture_output=True, text=True
+            )
             return {p["pane_id"] for p in json.loads(out.stdout)["result"]["panes"]}
-        except Exception:
+        except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
             return set()
     panes = live_panes()
     def read(p):
-        try: return json.load(open(p))
-        except Exception: return None
+        try:
+            with open(p) as state:
+                return json.load(state)
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
     rows = []
     # recruiter
     rec = read(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json"))
@@ -57,8 +63,9 @@ herdr-status:
     else:
         rows.append(("recruiter", False, "not up — run `just herdr-up`"))
     # librarian
-    lib = read(os.environ.get("SPECIALIST_STATE", "/tmp/.herdr-specialist/state.json"))
-    idx = read("/tmp/.herdr-specialist/index.json")
+    specialist_runtime = os.environ["SPECIALIST_RUNTIME"]
+    lib = read(os.path.join(specialist_runtime, "state.json"))
+    idx = read(os.path.join(specialist_runtime, "index.json"))
     n = len(idx) if isinstance(idx, (dict, list)) else 0
     if lib and lib.get("librarian_pane") in panes:
         detail = f"pane {lib['librarian_pane']}" + (f" · {n} specialists" if n else "")

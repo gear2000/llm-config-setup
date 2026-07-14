@@ -6,17 +6,14 @@ Run: python3 -m pytest .shared-llm/extensions/common/upagent/contracts_test.py -
 
 from __future__ import annotations
 
+# Import the sibling module by path so the test runs from the repo root without packaging.
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
-# Import the sibling module by path so the test runs from the repo root without packaging.
-import importlib.util
-from pathlib import Path
-
-_spec = importlib.util.spec_from_file_location(
-    "upagent_contracts", Path(__file__).with_name("contracts.py")
-)
+_spec = importlib.util.spec_from_file_location("upagent_contracts", Path(__file__).with_name("contracts.py"))
 assert _spec and _spec.loader
 contracts = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(contracts)
@@ -79,6 +76,13 @@ def test_order_unknown_harness_fails() -> None:
         contracts.parse_order(json.dumps(bad))
 
 
+def test_order_codex_harness_is_out_of_scope() -> None:
+    bad = _valid_order()
+    bad["harness"] = "codex"
+    with pytest.raises(ContractError, match="unknown harness"):
+        contracts.parse_order(json.dumps(bad))
+
+
 def test_order_bad_env_fails() -> None:
     bad = _valid_order()
     bad["env"] = {"OK": 3}
@@ -107,6 +111,20 @@ def test_order_effort_non_string_fails() -> None:
         contracts.parse_order(json.dumps(bad))
 
 
+@pytest.mark.parametrize("timeout_ms", [True, "1000", 0, -1])
+def test_order_timeout_ms_must_be_a_positive_integer(timeout_ms: object) -> None:
+    bad = _valid_order()
+    bad["timeout_ms"] = timeout_ms
+    with pytest.raises(ContractError, match="timeout_ms"):
+        contracts.parse_order(json.dumps(bad))
+
+
+def test_order_positive_timeout_ms_is_valid() -> None:
+    order = _valid_order()
+    order["timeout_ms"] = 1
+    assert contracts.parse_order(json.dumps(order))["timeout_ms"] == 1
+
+
 def test_not_json_fails() -> None:
     with pytest.raises(ContractError, match="not valid JSON"):
         contracts.parse_order("{not json")
@@ -124,38 +142,31 @@ def test_result_bad_verdict_fails() -> None:
         contracts.parse_result(json.dumps(bad))
 
 
-@pytest.mark.parametrize("alias, expected", [
-    ("VERIFICATION_PASSED", "passed"), ("VERIFIED", "passed"), ("PASS", "passed"),
-    ("PASSED", "passed"), ("OK", "passed"), ("FAIL", "failed"),
-    ("FAILED", "failed"), ("BLOCKED", "blocked"),
-])
-def test_normalize_cosmetic_verdict_aliases(alias: str, expected: str) -> None:
-    raw = _valid_result()
-    raw["verdict"] = alias
-    if expected == "failed":
-        raw["revisit"] = ["stage-1-implementation"]
-    normalized, corrections = contracts.normalize_cosmetic(raw)
-    assert normalized["verdict"] == expected
-    assert corrections == [f"verdict: {alias} -> {expected}"]
-    assert contracts.parse_result(json.dumps(normalized))["verdict"] == expected
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "VERIFICATION_PASSED",
+        "VERIFIED",
+        "PASS",
+        "PASSED",
+        "OK",
+        "FAIL",
+        "FAILED",
+        "BLOCKED",
+    ],
+)
+def test_result_cosmetic_verdict_aliases_are_rejected(alias: str) -> None:
+    result = _valid_result()
+    result["verdict"] = alias
+    with pytest.raises(ContractError, match="verdict"):
+        contracts.parse_result(json.dumps(result))
 
 
-def test_normalize_cosmetic_singleton_full_log() -> None:
-    raw = _valid_result()
-    raw["full_log"] = [raw["full_log"]]
-    normalized, corrections = contracts.normalize_cosmetic(raw)
-    assert normalized["full_log"] == "session://transcript/abc.jsonl"
-    assert corrections == ["full_log: [string] -> string"]
-
-
-def test_normalize_cosmetic_does_not_repair_invalid_values() -> None:
-    raw = _valid_result()
-    raw["verdict"] = "great"
-    raw["full_log"] = ["one", "two"]
-    normalized, corrections = contracts.normalize_cosmetic(raw)
-    assert corrections == []
-    with pytest.raises(ContractError):
-        contracts.parse_result(json.dumps(normalized))
+def test_result_singleton_full_log_list_is_rejected() -> None:
+    result = _valid_result()
+    result["full_log"] = [result["full_log"]]
+    with pytest.raises(ContractError, match="full_log"):
+        contracts.parse_result(json.dumps(result))
 
 
 def test_result_order_id_mismatch_fails() -> None:

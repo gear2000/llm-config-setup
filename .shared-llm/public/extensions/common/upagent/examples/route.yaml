@@ -2,9 +2,6 @@ llm_profiles:
   claude-mid:
     harness: claude
     model: configured-claude-model
-  codex-adv:
-    harness: codex
-    model: configured-codex-model
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
@@ -31,13 +28,13 @@ phases:
         llm_profile: claude-mid
         agent: backend
       stage-2-adversarial-audit:
-        llm_profile: codex-adv
+        llm_profile: claude-mid
         agent: adversarial-evaluator
       stage-3-integration-acceptance-seams:
         llm_profile: claude-mid
         agent: qa
       stage-4-upstream-dag-verification:
-        llm_profile: codex-adv
+        llm_profile: claude-mid
         agent: monorepo-pkgs
       stage-5-finalization:
         llm_profile: claude-mid
@@ -50,19 +47,19 @@ phases:
       agent: phase-evaluator
     stages:
       stage-0-alignment:
-        llm_profile: codex-adv
+        llm_profile: claude-mid
         agent: aligner
       stage-1-implementation:
         llm_profile: claude-mid
         agent: backend
       stage-2-adversarial-audit:
-        llm_profile: codex-adv
+        llm_profile: claude-mid
         agent: adversarial-evaluator
       stage-3-integration-acceptance-seams:
         llm_profile: claude-mid
         agent: qa
       stage-4-upstream-dag-verification:
-        llm_profile: codex-adv
+        llm_profile: claude-mid
         agent: monorepo-pkgs
       stage-5-finalization:
         llm_profile: claude-mid
