@@ -58,6 +58,16 @@ def test_tui_requests_one_managed_phase_watchdog() -> None:
     assert "Do not send `/herdr-phase` to any pane yourself." in text
 
 
+def test_tui_final_message_is_short_and_unambiguous() -> None:
+    text = RUNNER.read_text()
+
+    assert "SUCCESS — Everything succeeded. Safe to close this workspace." in text
+    assert "SUCCESS — Everything succeeded. Cleanup is still finishing" in text
+    assert "STOPPED — This run did not succeed." in text
+    assert "Do not print a stage-by-stage recap" in text
+    assert "Those details belong only in `run-status.md`" in text
+
+
 def test_plan_launcher_owns_tui_and_plan_watchdog_startup() -> None:
     runner = RUNNER.read_text()
     launcher = HERDR_JUSTFILE.read_text()

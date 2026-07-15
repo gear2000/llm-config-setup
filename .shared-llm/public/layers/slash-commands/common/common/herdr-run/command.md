@@ -101,6 +101,27 @@ This is a Ralph-style forward loop. Nothing already produced is discarded to go 
 
 When every in-scope phase has a passing `phase-result.json` (or the human has resolved a STOP), write a final `run-status.md` summary: the phase order actually run, passes and backtracks per phase with reasons, the run tree root, and the overall verdict. The run tree under `<run-root>/<date>/<slug>/` is the durable record.
 
+Keep the final TUI message deliberately short. After writing the durable summary, wait a bounded
+interval for every managed run pane except this TUI to close. Then use exactly one of these forms:
+
+```text
+SUCCESS — Everything succeeded. Safe to close this workspace.
+Details: <absolute run-status.md path>
+```
+
+```text
+SUCCESS — Everything succeeded. Cleanup is still finishing; leave this workspace open.
+Details: <absolute run-status.md path>
+```
+
+```text
+STOPPED — This run did not succeed. See: <absolute run-status.md path>
+```
+
+Do not print a stage-by-stage recap, model list, commit narrative, verification transcript, or
+implementation caveats in the final TUI message. Those details belong only in `run-status.md` and
+the run tree. The terminal message exists solely to make outcome and close-safety unmistakable.
+
 ## Hard rules
 
 1. Herdr-only: require `HERDR_ENV=1`.
