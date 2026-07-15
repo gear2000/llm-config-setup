@@ -20,7 +20,11 @@ PhaseStartError = phase_controller.PhaseStartError
 
 
 def _route(path: Path, *, watchdog_profile: bool = True) -> None:
-    defaults = "finalization_defaults:\n  watchdog_profile: cheap\n" if watchdog_profile else "finalization_defaults: {}\n"
+    defaults = (
+        "finalization_defaults:\n  watchdog_profile: cheap\n"
+        if watchdog_profile
+        else "finalization_defaults: {}\n"
+    )
     path.write_text(
         "llm_profiles:\n"
         "  lead:\n"
@@ -70,13 +74,20 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
     closed: list[str] = []
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
-    monkeypatch.setattr(phase_controller.shutil, "which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr(
+        phase_controller.shutil, "which", lambda binary: f"/bin/{binary}"
+    )
     monkeypatch.setattr(
         phase_controller,
         "_start_gated_leader",
-        lambda name, tui, cwd, script: (started.append(name) or "leader-pane", "workspace-1"),
+        lambda name, tui, cwd, script: (
+            started.append(name) or "leader-pane",
+            "workspace-1",
+        ),
     )
-    monkeypatch.setattr(phase_controller, "_verify_gated_leader", lambda pane, script: None)
+    monkeypatch.setattr(
+        phase_controller, "_verify_gated_leader", lambda pane, script: None
+    )
     monkeypatch.setattr(
         phase_controller,
         "_release_leader_gate",
@@ -102,7 +113,7 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
     monkeypatch.setattr(
         phase_controller.recruiter,
         "_close_worker_pane",
-        lambda pane: (closed.append(pane) or {"verified_absent": True}),
+        lambda pane: closed.append(pane) or {"verified_absent": True},
     )
     return started, closed
 
@@ -155,7 +166,10 @@ def test_phase_start_publishes_watchdog_capability_before_releasing_leader(
         receipt_path = gate.with_name("phase-start.json")
         observed.update(json.loads(receipt_path.read_text()))
         script = gate.with_name("launch-leader.sh").read_text()
-        assert f"export {phase_controller.recruiter.PHASE_START_RECEIPT_ENV}={receipt_path}" in script
+        assert (
+            f"export {phase_controller.recruiter.PHASE_START_RECEIPT_ENV}={receipt_path}"
+            in script
+        )
         gate.unlink()
 
     monkeypatch.setattr(phase_controller, "_release_leader_gate", verify_release)
@@ -177,12 +191,13 @@ def test_phase_start_publishes_watchdog_capability_before_releasing_leader(
         "manager_pane": "manager-pane",
         "order_path": str(run_root / "phases/phase-0/pass-1/watchdog/order.json"),
         "request_id": "sample-run.phase-0.pass-1.phase-watchdog",
+        "state": "ready",
         "worker_address": "watchdog-address",
         "worker_pane": "watchdog-pane",
     }
 
 
-def test_watchdog_start_failure_closes_gated_leader_and_records_cause(
+def test_watchdog_start_failure_releases_leader_in_degraded_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_root, route, roster = _inputs(tmp_path)
@@ -190,26 +205,29 @@ def test_watchdog_start_failure_closes_gated_leader_and_records_cause(
     monkeypatch.setattr(
         phase_controller,
         "_request_watchdog",
-        lambda order, roster: (_ for _ in ()).throw(PhaseStartError("watchdog rejected")),
+        lambda order, roster: (_ for _ in ()).throw(
+            PhaseStartError("watchdog rejected")
+        ),
     )
 
-    with pytest.raises(PhaseStartError, match="watchdog rejected"):
-        phase_controller.start_phase(
-            route_path=route,
-            run_root=run_root,
-            phase_id="phase-0",
-            pass_number=1,
-            tui_pane="tui-pane",
-            cwd=tmp_path,
-            roster_path=str(roster),
-        )
+    receipt = phase_controller.start_phase(
+        route_path=route,
+        run_root=run_root,
+        phase_id="phase-0",
+        pass_number=1,
+        tui_pane="tui-pane",
+        cwd=tmp_path,
+        roster_path=str(roster),
+    )
 
     control = run_root / "phases/phase-0/pass-1/control"
-    failure = json.loads((control / "phase-start.json").read_text())
-    assert failure["state"] == "failed"
-    assert failure["reason"] == "watchdog rejected"
-    assert closed == ["leader-pane"]
-    assert json.loads((run_root / "active-leader-panes.json").read_text()) == {}
+    assert receipt["state"] == "ready-degraded"
+    assert receipt["watchdog"]["state"] == "unavailable"
+    assert receipt["watchdog"]["reason"] == "watchdog rejected"
+    assert closed == []
+    assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
+        "phase-0": "leader-pane"
+    }
     assert not (control / "watchdog-ready.fifo").exists()
 
 
@@ -220,7 +238,9 @@ def test_missing_phase_leader_template_fails_before_creating_a_pane(
     _roster(roster, phase_leaders=False)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
-    monkeypatch.setattr(phase_controller.shutil, "which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr(
+        phase_controller.shutil, "which", lambda binary: f"/bin/{binary}"
+    )
 
     with pytest.raises(PhaseStartError, match="phase_leaders.claude"):
         phase_controller.start_phase(
@@ -242,7 +262,9 @@ def test_live_prior_leader_is_never_destroyed_by_a_new_start(
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
     monkeypatch.setattr(phase_controller, "_live_panes", lambda: {"owned-pane"})
-    monkeypatch.setattr(phase_controller.shutil, "which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr(
+        phase_controller.shutil, "which", lambda binary: f"/bin/{binary}"
+    )
 
     with pytest.raises(PhaseStartError, match="only its owning TUI"):
         phase_controller.start_phase(
@@ -266,7 +288,9 @@ def test_watchdog_profile_falls_back_to_leader_profile(tmp_path: Path) -> None:
     assert resolved["watchdog"]["profile"]["model"] == "leader-model"
 
 
-def test_phase_start_refuses_to_run_outside_herdr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_phase_start_refuses_to_run_outside_herdr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     run_root, route, roster = _inputs(tmp_path)
     monkeypatch.delenv("HERDR_ENV", raising=False)
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
@@ -331,12 +355,20 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
         if args == ("pane", "get", "tui-pane"):
             return {
                 "result": {
-                    "pane": {"pane_id": "tui-pane", "tab_id": "tab-1", "workspace_id": "ws-1"}
+                    "pane": {
+                        "pane_id": "tui-pane",
+                        "tab_id": "tab-1",
+                        "workspace_id": "ws-1",
+                    }
                 }
             }
         return {
             "result": {
-                "agent": {"name": "phase-leader", "pane_id": "leader-pane", "workspace_id": "ws-1"}
+                "agent": {
+                    "name": "phase-leader",
+                    "pane_id": "leader-pane",
+                    "workspace_id": "ws-1",
+                }
             }
         }
 

@@ -152,25 +152,28 @@ PYTHON PHASE CONTROLLER
 ├─ records the exact leader pane under the phase/pass transaction
 ├─ submits one ordinary phase-watchdog order to the Recruiter Hub
 │  └─ Recruiter creates and verifies its Account Manager and watchdog worker
-├─ requires REQUEST_ACCEPTED with both verified pane addresses
-├─ records a `watchdog-ready` receipt, then opens the leader gate with that receipt in its environment
+├─ attempts REQUEST_ACCEPTED with both verified pane addresses
+├─ records `watchdog-ready` or an explicit degraded warning, then opens the leader gate
 ├─ verifies the expected leader process, harness, and cwd
-└─ atomically publishes PHASE_STARTED only after the complete pair is healthy
+└─ atomically publishes PHASE_STARTED as `ready` or `ready-degraded`
 ```
 
-If validation or watchdog startup fails, the leader gate never opens and Python closes only the
-leader pane created by that transaction. A live leader recorded by a prior owner is never
-destroyed by a new start. The failure cause remains in `phase-start.json`. This makes “leader is
-running without a watchdog” an invalid state rather than something a human must notice later.
+Leader validation failures still keep the gate closed and close only the leader created by that
+transaction. A watchdog startup failure is different: it is an observability degradation, not a
+work failure. Python records the cause, releases the healthy leader, returns `ready-degraded`, and
+lets the TUI continue AFK. A live leader recorded by a prior owner is never destroyed by a new
+start.
 
 The roster has separate `phase_leaders:` templates because a controller launch is not a stage
 worker launch. Python refuses a missing template instead of trimming a worker command or guessing
 how a harness should run a phase leader.
 
-The receipt is also an enforced capability, not merely a status file. A conventional phase-tree
-stage order is accepted only when its leader process inherited the exact
-`UPAGENT_PHASE_START_RECEIPT` path and that receipt binds the same phase, leader pane, and live
-watchdog address. Thus a manually-created leader may be visible, but it cannot dispatch phase
-work. The phase-watchdog bootstrap order is the narrow exception: it is created by the controller
-before the leader is released. This boundary is harness-neutral; TUI and phase-leader prompts must
-also treat the controller as mandatory and report a failed start rather than improvising panes.
+The receipt is an observability record, not a work capability. The Recruiter inspects conventional
+phase-tree orders and durably records a `phase-watchdog-degraded` event when the receipt or live
+watchdog address is absent, but it still accepts the work. This prevents monitoring infrastructure
+from freezing the plan. The TUI prompt remains harness-neutral and treats the controller as the
+mandatory normal path; a stale or mistaken client can continue degraded instead of hanging.
+
+Every compatibility rejection with a usable `order_id` and `result_path` writes a terminal
+`blocked` result before emitting the old `ORDER … DONE` marker. Modern requesters receive typed
+receipts directly. No caller should wait forever for success evidence that can no longer arrive.

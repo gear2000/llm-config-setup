@@ -60,7 +60,9 @@ import uuid
 import yaml
 
 HERE = Path(__file__).resolve().parent
-_contracts_spec = importlib.util.spec_from_file_location("upagent_contracts", HERE / "contracts.py")
+_contracts_spec = importlib.util.spec_from_file_location(
+    "upagent_contracts", HERE / "contracts.py"
+)
 if _contracts_spec is None or _contracts_spec.loader is None:
     raise RuntimeError("could not load UpAgent contracts")
 contracts = cast(Any, importlib.util.module_from_spec(_contracts_spec))
@@ -72,7 +74,9 @@ load_order = contracts.load_order
 load_result = contracts.load_result
 parse_result = contracts.parse_result
 
-_lifecycle_spec = importlib.util.spec_from_file_location("upagent_lifecycle", HERE / "lifecycle.py")
+_lifecycle_spec = importlib.util.spec_from_file_location(
+    "upagent_lifecycle", HERE / "lifecycle.py"
+)
 if _lifecycle_spec is None or _lifecycle_spec.loader is None:
     raise RuntimeError("could not load UpAgent lifecycle contracts")
 lifecycle = cast(Any, importlib.util.module_from_spec(_lifecycle_spec))
@@ -80,7 +84,9 @@ sys.modules[_lifecycle_spec.name] = lifecycle
 _lifecycle_spec.loader.exec_module(lifecycle)
 LifecycleError = lifecycle.LifecycleError
 
-_management_spec = importlib.util.spec_from_file_location("upagent_llm_management", HERE / "llm_management.py")
+_management_spec = importlib.util.spec_from_file_location(
+    "upagent_llm_management", HERE / "llm_management.py"
+)
 if _management_spec is None or _management_spec.loader is None:
     raise RuntimeError("could not load UpAgent LLM management contracts")
 llm_management = cast(Any, importlib.util.module_from_spec(_management_spec))
@@ -112,9 +118,11 @@ STAGE_TIMEOUT_MS = {
     "stage-2-adversarial-audit": 10_800_000,
 }
 # Where `up` records the resolved workspace + Recruiter pane so `status`/callers can find it.
-STATE_FILE = Path(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")).expanduser()
+STATE_FILE = Path(
+    os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")
+).expanduser()
 PHASE_START_RECEIPT_ENV = "UPAGENT_PHASE_START_RECEIPT"
-PHASE_START_READY_STATES = ("watchdog-ready", "ready")
+PHASE_START_READY_STATES = ("watchdog-ready", "ready", "ready-degraded")
 
 
 def default_roster_path() -> str:
@@ -131,7 +139,9 @@ def default_roster_path() -> str:
     if env:
         return env
     for parent in [Path.cwd(), *Path.cwd().parents]:
-        this_repo = parent / ".shared-llm/this_repo/extensions/common/upagent/upagent.yaml"
+        this_repo = (
+            parent / ".shared-llm/this_repo/extensions/common/upagent/upagent.yaml"
+        )
         if this_repo.is_file():
             return str(this_repo)
     return str(HERE / "upagent.yaml")
@@ -141,7 +151,15 @@ def default_roster_path() -> str:
 # consumes them; the Recruiter only substitutes. A field absent from the order substitutes
 # as "" — so a template flag like `--effort {effort}` needs the order to actually carry a
 # value, or the harness CLI will eat the next token as the flag's value.
-TEMPLATE_FIELDS = ("order_id", "model", "agent", "cwd", "instructions_path", "result_path", "effort")
+TEMPLATE_FIELDS = (
+    "order_id",
+    "model",
+    "agent",
+    "cwd",
+    "instructions_path",
+    "result_path",
+    "effort",
+)
 
 
 class RecruiterError(RuntimeError):
@@ -161,7 +179,10 @@ class JobLedger:
     """
 
     def __init__(self, root: str | Path | None = None):
-        self.root = Path(root or os.environ.get("UPAGENT_HUB_DIR", "~/.local/state/herdr/upagent-hub")).expanduser()
+        self.root = Path(
+            root
+            or os.environ.get("UPAGENT_HUB_DIR", "~/.local/state/herdr/upagent-hub")
+        ).expanduser()
         self.requests = self.root / "requests"
         self.active = self.root / "active"
 
@@ -211,26 +232,41 @@ class JobLedger:
             raise RecruiterError(f"lease {path} is unreadable: {e}") from e
         token = lease.get("token") if isinstance(lease, dict) else None
         expires_at = lease.get("expires_at") if isinstance(lease, dict) else None
-        if not isinstance(token, str) or not token or isinstance(expires_at, bool) or not isinstance(expires_at, int):
+        if (
+            not isinstance(token, str)
+            or not token
+            or isinstance(expires_at, bool)
+            or not isinstance(expires_at, int)
+        ):
             raise RecruiterError(f"lease {path} has an invalid token or expiry")
         return lease
 
     def _event(self, key: str, event: str, **detail: object) -> None:
         payload = {"event": event, "at_ns": time.time_ns(), **detail}
-        event_path = self.request_dir(key) / "events" / f"{payload['at_ns']}-{uuid.uuid4().hex}.json"
+        event_path = (
+            self.request_dir(key)
+            / "events"
+            / f"{payload['at_ns']}-{uuid.uuid4().hex}.json"
+        )
         self._write_json(event_path, payload)
 
     def _snapshot(self, key: str, state: str, **detail: object) -> None:
         payload = {"state": state, "at_ns": time.time_ns(), **detail}
         self._write_json(self.request_dir(key) / "state" / "latest.json", payload)
 
-    def _existing_request(self, request: Path, order: dict, key: str) -> tuple[str, bool]:
+    def _existing_request(
+        self, request: Path, order: dict, key: str
+    ) -> tuple[str, bool]:
         try:
             stored = json.loads((request / "request.json").read_text())
         except (OSError, json.JSONDecodeError) as e:
-            raise RecruiterError(f"incomplete request record for {order['order_id']}: {e}") from e
+            raise RecruiterError(
+                f"incomplete request record for {order['order_id']}: {e}"
+            ) from e
         if stored != order:
-            raise RecruiterError(f"order_id collision with different request: {order['order_id']}")
+            raise RecruiterError(
+                f"order_id collision with different request: {order['order_id']}"
+            )
         return key, False
 
     def submit(self, order: dict) -> tuple[str, bool]:
@@ -250,7 +286,9 @@ class JobLedger:
             try:
                 legacy_order = json.loads((legacy_request / "request.json").read_text())
             except (OSError, json.JSONDecodeError) as error:
-                raise RecruiterError(f"legacy request record for {order['order_id']} is unreadable: {error}") from error
+                raise RecruiterError(
+                    f"legacy request record for {order['order_id']} is unreadable: {error}"
+                ) from error
             if legacy_order == order:
                 return legacy_key, False
 
@@ -308,7 +346,9 @@ class JobLedger:
 
     def _is_finished(self, key: str) -> bool:
         try:
-            snapshot = json.loads((self.request_dir(key) / "state" / "latest.json").read_text())
+            snapshot = json.loads(
+                (self.request_dir(key) / "state" / "latest.json").read_text()
+            )
         except (OSError, json.JSONDecodeError) as e:
             raise RecruiterError(f"job state {key} is unreadable: {e}") from e
         if not isinstance(snapshot, dict):
@@ -322,7 +362,9 @@ class JobLedger:
         result = load_result(order["result_path"], expected_order_id=order["order_id"])
         receipt = self.completed_receipt(key, order)
         if receipt["verdict"] != result["verdict"]:
-            raise RecruiterError(f"completion receipt for {order['order_id']} disagrees with result.json")
+            raise RecruiterError(
+                f"completion receipt for {order['order_id']} disagrees with result.json"
+            )
         return result
 
     def completed_receipt(self, key: str, order: dict) -> dict:
@@ -331,18 +373,38 @@ class JobLedger:
         try:
             receipt = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as e:
-            raise RecruiterError(f"completion receipt for {order['order_id']} is unreadable: {e}") from e
-        if not isinstance(receipt, dict) or receipt.get("order_id") != order["order_id"]:
-            raise RecruiterError(f"completion receipt for {order['order_id']} has the wrong identity")
-        if receipt.get("state") not in ("finished", "cleanup-failed") or receipt.get("result_path") != order["result_path"]:
-            raise RecruiterError(f"completion receipt for {order['order_id']} is not terminal")
+            raise RecruiterError(
+                f"completion receipt for {order['order_id']} is unreadable: {e}"
+            ) from e
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("order_id") != order["order_id"]
+        ):
+            raise RecruiterError(
+                f"completion receipt for {order['order_id']} has the wrong identity"
+            )
+        if (
+            receipt.get("state") not in ("finished", "cleanup-failed")
+            or receipt.get("result_path") != order["result_path"]
+        ):
+            raise RecruiterError(
+                f"completion receipt for {order['order_id']} is not terminal"
+            )
         cleanup = receipt.get("cleanup")
-        if not isinstance(cleanup, dict) or not isinstance(cleanup.get("verified_absent"), bool):
-            raise RecruiterError(f"completion receipt for {order['order_id']} has invalid cleanup state")
+        if not isinstance(cleanup, dict) or not isinstance(
+            cleanup.get("verified_absent"), bool
+        ):
+            raise RecruiterError(
+                f"completion receipt for {order['order_id']} has invalid cleanup state"
+            )
         return receipt
 
     def _reclaim_expired_locked(
-        self, key: str, now: int, expected_token: str | None = None, expected_expiry: int | None = None
+        self,
+        key: str,
+        now: int,
+        expected_token: str | None = None,
+        expected_expiry: int | None = None,
     ) -> bool:
         claim_dir = self.active / "requests" / key
         if not claim_dir.is_dir():
@@ -374,17 +436,23 @@ class JobLedger:
             try:
                 expiry = int(expiry_dir.name)
             except ValueError as e:
-                raise RecruiterError(f"invalid lease expiry index directory: {expiry_dir}") from e
+                raise RecruiterError(
+                    f"invalid lease expiry index directory: {expiry_dir}"
+                ) from e
             if expiry > current_time:
                 continue
             for index_path in expiry_dir.glob("*.json"):
                 lease = self._lease(index_path)
                 suffix = f"-{lease['token']}.json"
                 if not index_path.name.endswith(suffix):
-                    raise RecruiterError(f"lease index {index_path} does not match its token")
+                    raise RecruiterError(
+                        f"lease index {index_path} does not match its token"
+                    )
                 key = index_path.name.removesuffix(suffix)
                 with self._claim_lock(key):
-                    if self._reclaim_expired_locked(key, current_time, lease["token"], expiry):
+                    if self._reclaim_expired_locked(
+                        key, current_time, lease["token"], expiry
+                    ):
                         reclaimed += 1
         return reclaimed
 
@@ -400,7 +468,12 @@ class JobLedger:
         return claims
 
     def claim(
-        self, key: str, order_id: str, timeout_ms: int, *, owner: dict[str, object] | None = None
+        self,
+        key: str,
+        order_id: str,
+        timeout_ms: int,
+        *,
+        owner: dict[str, object] | None = None,
     ) -> str | None:
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
@@ -419,7 +492,10 @@ class JobLedger:
             temporary = claim_dir.with_name(f".{key}.{token}.tmp")
             temporary.mkdir(parents=True)
             self._write_json(temporary / "lease.json", lease)
-            self._write_json(self.active / "by-expiry" / str(expiry_epoch) / f"{key}-{token}.json", lease)
+            self._write_json(
+                self.active / "by-expiry" / str(expiry_epoch) / f"{key}-{token}.json",
+                lease,
+            )
             try:
                 os.replace(temporary, claim_dir)
             except OSError as e:
@@ -458,12 +534,21 @@ class JobLedger:
         message: str,
         detail: dict | None = None,
     ) -> Path:
-        path = self.requester_mailbox(key).publish(request_id, generation, message_type, message, detail)
-        self._event(key, "requester-message", message_type=message_type, message_path=str(path))
+        path = self.requester_mailbox(key).publish(
+            request_id, generation, message_type, message, detail
+        )
+        self._event(
+            key, "requester-message", message_type=message_type, message_path=str(path)
+        )
         return path
 
     def record_worker(
-        self, key: str, token: str, worker_pane: str, workspace_id: str | None, worker_address: str | None = None
+        self,
+        key: str,
+        token: str,
+        worker_pane: str,
+        workspace_id: str | None,
+        worker_address: str | None = None,
     ) -> bool:
         """Durably add the spawned worker address to the active lease iff token still owns it."""
         claim_dir = self.active / "requests" / key
@@ -489,7 +574,9 @@ class JobLedger:
             self._snapshot(key, "startup-check", **lease)
             return True
 
-    def mark_worker_healthy(self, key: str, token: str, evidence: dict[str, object]) -> bool:
+    def mark_worker_healthy(
+        self, key: str, token: str, evidence: dict[str, object]
+    ) -> bool:
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
             if not claim_dir.is_dir():
@@ -499,7 +586,12 @@ class JobLedger:
                 return False
             self._write_json(self.request_dir(key) / "worker-health.json", evidence)
             self._event(key, "worker-healthy", evidence=evidence)
-            self._snapshot(key, "running", **lease, worker_health_path=str(self.request_dir(key) / "worker-health.json"))
+            self._snapshot(
+                key,
+                "running",
+                **lease,
+                worker_health_path=str(self.request_dir(key) / "worker-health.json"),
+            )
             return True
 
     def record_manager(
@@ -556,7 +648,9 @@ class JobLedger:
             self._snapshot(key, "manager-ready", **{**lease, **detail})
             return True
 
-    def mark_awaiting_requester(self, key: str, token: str, nonce: str, timeout_number: int) -> dict:
+    def mark_awaiting_requester(
+        self, key: str, token: str, nonce: str, timeout_number: int
+    ) -> dict:
         """Publish a timeout decision point while preserving the lease ownership fence."""
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
@@ -579,13 +673,20 @@ class JobLedger:
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
                 raise RecruiterError("request lease changed before extension")
-            expires_at = max(lease["expires_at"], int(time.time())) + int(extension_ms / 1000) + 1
+            expires_at = (
+                max(lease["expires_at"], int(time.time()))
+                + int(extension_ms / 1000)
+                + 1
+            )
             lease["expires_at"] = expires_at
             self._write_json(claim_dir / "lease.json", lease)
             self._write_json(
-                self.active / "by-expiry" / str(expires_at) / f"{key}-{token}.json", lease
+                self.active / "by-expiry" / str(expires_at) / f"{key}-{token}.json",
+                lease,
             )
-            self._event(key, "lease-extended", extension_ms=extension_ms, expires_at=expires_at)
+            self._event(
+                key, "lease-extended", extension_ms=extension_ms, expires_at=expires_at
+            )
             self._snapshot(key, "running", **lease)
             return expires_at
 
@@ -598,7 +699,9 @@ class JobLedger:
                 raise RecruiterError("request is no longer active")
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
-                raise RecruiterError("request generation changed before the requester decision")
+                raise RecruiterError(
+                    "request generation changed before the requester decision"
+                )
             path = self.request_dir(key) / "responses" / f"{nonce}.json"
             if path.exists():
                 raise RecruiterError("this timeout decision has already been answered")
@@ -610,7 +713,12 @@ class JobLedger:
                 "message": getattr(decision, "message"),
             }
             self._write_json(path, value)
-            self._event(key, "requester-decision", decision_path=str(path), action=value["action"])
+            self._event(
+                key,
+                "requester-decision",
+                decision_path=str(path),
+                action=value["action"],
+            )
             return path
 
     def finalize(
@@ -644,24 +752,42 @@ class JobLedger:
             verified_absent = cleanup.get("verified_absent") is True
             # Revalidate immediately before the durable public write. A terminal ledger state
             # and receipt are never published without the result file that makes them meaningful.
-            parsed = parse_result(json.dumps(result), expected_order_id=order["order_id"])
+            parsed = parse_result(
+                json.dumps(result), expected_order_id=order["order_id"]
+            )
             self._write_json(Path(order["result_path"]), parsed)
             load_result(order["result_path"], expected_order_id=order["order_id"])
             terminal_state = "finished" if verified_absent else "cleanup-failed"
             if not verified_absent and parsed["verdict"] != "blocked":
-                raise RecruiterError(f"cleanup-failed order {order['order_id']} must publish a blocked result")
+                raise RecruiterError(
+                    f"cleanup-failed order {order['order_id']} must publish a blocked result"
+                )
             receipt = {
                 "cleanup": cleanup,
                 "generation": lease.get("generation", 1),
                 "order_id": order["order_id"],
-                "request_id": lease.get("request_id", lifecycle.request_identity(order)),
+                "request_id": lease.get(
+                    "request_id", lifecycle.request_identity(order)
+                ),
                 "result_path": order["result_path"],
                 "state": terminal_state,
                 "verdict": parsed["verdict"],
             }
-            self._event(key, terminal_state, verdict=parsed["verdict"], cleanup=cleanup, **detail)
+            self._event(
+                key,
+                terminal_state,
+                verdict=parsed["verdict"],
+                cleanup=cleanup,
+                **detail,
+            )
             self._write_json(self.request_dir(key) / "receipt.json", receipt)
-            self._snapshot(key, terminal_state, verdict=parsed["verdict"], cleanup=cleanup, **detail)
+            self._snapshot(
+                key,
+                terminal_state,
+                verdict=parsed["verdict"],
+                cleanup=cleanup,
+                **detail,
+            )
             if verified_absent:
                 shutil.rmtree(claim_dir)
             return True
@@ -692,22 +818,30 @@ def load_roster(path: str | Path) -> dict:
         raise RecruiterError(f"{p} must define a non-empty `harnesses:` map")
     for name, tmpl in harnesses.items():
         if name not in KNOWN_HARNESSES:
-            raise RecruiterError(f"{p} harness `{name}` is unsupported; expected one of {', '.join(KNOWN_HARNESSES)}")
+            raise RecruiterError(
+                f"{p} harness `{name}` is unsupported; expected one of {', '.join(KNOWN_HARNESSES)}"
+            )
         if not isinstance(tmpl, str) or not tmpl.strip():
-            raise RecruiterError(f"{p} harness `{name}` must map to a non-empty template string")
+            raise RecruiterError(
+                f"{p} harness `{name}` must map to a non-empty template string"
+            )
     health = data.get("health", {})
     if not isinstance(health, dict):
         raise RecruiterError(f"{p} `health:` must be an object when present")
     for name, value in health.items():
         if name not in harnesses or not isinstance(value, dict):
-            raise RecruiterError(f"{p} health `{name}` must match a configured harness and be an object")
+            raise RecruiterError(
+                f"{p} health `{name}` must match a configured harness and be an object"
+            )
         for field in ("expected_agent", "expected_process"):
             if not isinstance(value.get(field), str) or not value[field]:
                 raise RecruiterError(f"{p} health `{name}` needs non-empty `{field}`")
     try:
         llm_management.load_management_config(data)
     except ManagementConfigError as error:
-        raise RecruiterError(f"{p} has invalid LLM management configuration: {error}") from error
+        raise RecruiterError(
+            f"{p} has invalid LLM management configuration: {error}"
+        ) from error
     return data
 
 
@@ -729,38 +863,96 @@ def _phase_start_receipt(order: dict) -> Path | None:
     return None
 
 
-def require_phase_watchdog_capability(order: dict) -> None:
-    """Reject phase work that was not released by the deterministic phase transaction.
+def phase_watchdog_warning(order: dict) -> str | None:
+    """Describe degraded phase observability without blocking useful stage work.
 
-    A phase watchdog is itself the transaction's bootstrap order, so it is the sole exception.
-    All later stage orders inherit this receipt path from the released leader process.
+    The phase watchdog is advisory. Its bootstrap order and non-phase orders need no receipt.
+    Conventional phase orders are still inspected so the warning can be persisted and returned
+    to their requester, but a missing or stale receipt never becomes a work-stopping gate.
     """
     if order.get("agent") == "phase-watchdog":
-        return
+        return None
     receipt_path = _phase_start_receipt(order)
     if receipt_path is None:
-        return
-    provided = os.environ.get(PHASE_START_RECEIPT_ENV)
-    if provided != str(receipt_path):
-        raise RecruiterError(
-            f"phase order {order['order_id']} was not released by upagent-phase-start; "
-            f"expected {PHASE_START_RECEIPT_ENV}={receipt_path}"
+        return None
+    if not receipt_path.is_file():
+        return (
+            f"phase order {order['order_id']} has no managed phase watchdog; "
+            f"missing {receipt_path}. Continuing with degraded observability"
         )
     try:
         receipt = json.loads(receipt_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
-        raise RecruiterError(f"phase-start receipt {receipt_path} is unreadable: {error}") from error
+        return f"phase-start receipt {receipt_path} is unreadable ({error}); continuing degraded"
     if not isinstance(receipt, dict):
-        raise RecruiterError(f"phase-start receipt {receipt_path} is not an object")
+        return (
+            f"phase-start receipt {receipt_path} is not an object; continuing degraded"
+        )
     if receipt.get("state") not in PHASE_START_READY_STATES:
-        raise RecruiterError(f"phase-start receipt {receipt_path} is not released")
+        return f"phase-start receipt {receipt_path} is not ready; continuing degraded"
     if receipt.get("phase_id") != order["phase_id"]:
-        raise RecruiterError(f"phase-start receipt {receipt_path} belongs to another phase")
+        return f"phase-start receipt {receipt_path} belongs to another phase; continuing degraded"
     if receipt.get("leader_pane") != order["cockpit_pane"]:
-        raise RecruiterError(f"phase order {order['order_id']} does not belong to the released leader pane")
+        return (
+            f"phase-start receipt {receipt_path} belongs to leader {receipt.get('leader_pane')}; "
+            f"order requester is {order['cockpit_pane']}. Continuing degraded"
+        )
     watchdog = receipt.get("watchdog")
-    if not isinstance(watchdog, dict) or not isinstance(watchdog.get("worker_pane"), str):
-        raise RecruiterError(f"phase-start receipt {receipt_path} has no healthy watchdog address")
+    if not isinstance(watchdog, dict) or not isinstance(
+        watchdog.get("worker_pane"), str
+    ):
+        reason = watchdog.get("reason") if isinstance(watchdog, dict) else None
+        detail = f": {reason}" if isinstance(reason, str) and reason else ""
+        return f"phase watchdog is unavailable{detail}; continuing degraded"
+    return None
+
+
+def _record_phase_watchdog_warning(
+    ledger: JobLedger, key: str, order: dict
+) -> str | None:
+    warning = phase_watchdog_warning(order)
+    if warning is not None:
+        ledger._event(key, "phase-watchdog-degraded", warning=warning)
+    return warning
+
+
+def _reject_legacy_order(order_path: str, reason: str) -> None:
+    """Best-effort terminal response for the deprecated pane-driven recruit command.
+
+    A well-formed JSON object can still carry its correlation id and result destination even when
+    the complete order contract is invalid. Persist BLOCKED before emitting DONE so old waiters
+    wake up and propagate the infrastructure failure instead of waiting forever.
+    """
+    path = Path(order_path)
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        print(
+            f"ORDER_REJECTED {json.dumps({'order_path': order_path, 'reason': reason}, sort_keys=True)}",
+            flush=True,
+        )
+        return
+    if not isinstance(value, dict):
+        print(
+            f"ORDER_REJECTED {json.dumps({'order_path': order_path, 'reason': reason}, sort_keys=True)}",
+            flush=True,
+        )
+        return
+    order_id = value.get("order_id")
+    result_path = value.get("result_path")
+    if (
+        not isinstance(order_id, str)
+        or not order_id
+        or not isinstance(result_path, str)
+        or not result_path
+    ):
+        print(
+            f"ORDER_REJECTED {json.dumps({'order_path': order_path, 'reason': reason}, sort_keys=True)}",
+            flush=True,
+        )
+        return
+    _write_blocked_result(value, reason, result_path, preserve_valid=False)
+    print(f"ORDER {order_id} DONE", flush=True)
 
 
 def resolve_launch_command(order: dict, roster: dict) -> str:
@@ -792,7 +984,9 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
     if not cwd.is_absolute() or not cwd.is_dir():
         errors.append(f"cwd is not an existing absolute directory: {cwd}")
     if not instructions.is_absolute() or not instructions.is_file():
-        errors.append(f"instructions_path is not an existing absolute file: {instructions}")
+        errors.append(
+            f"instructions_path is not an existing absolute file: {instructions}"
+        )
     if not result.is_absolute():
         errors.append(f"result_path is not absolute: {result}")
     template = roster.get("harnesses", {}).get(order["harness"], "")
@@ -804,7 +998,9 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
     if order["harness"] == "pi" and "/" not in model:
         errors.append("Pi model must use provider/id[:thinking] form")
     if order["harness"] in ("claude", "codex") and "/" in model:
-        errors.append(f"{order['harness']} model must use a harness-native id without provider/")
+        errors.append(
+            f"{order['harness']} model must use a harness-native id without provider/"
+        )
     launch: str | None = None
     try:
         launch = resolve_launch_command(order, roster)
@@ -838,7 +1034,9 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
 
 def _herdr_available() -> None:
     if shutil.which("herdr") is None:
-        raise RecruiterError("`herdr` not found in PATH — the Recruiter runs inside Herdr")
+        raise RecruiterError(
+            "`herdr` not found in PATH — the Recruiter runs inside Herdr"
+        )
 
 
 def _herdr_json(*args: str) -> dict:
@@ -850,7 +1048,9 @@ def _herdr_json(*args: str) -> dict:
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as e:
-        raise RecruiterError(f"herdr {' '.join(args)} did not print JSON: {proc.stdout[:200]}") from e
+        raise RecruiterError(
+            f"herdr {' '.join(args)} did not print JSON: {proc.stdout[:200]}"
+        ) from e
 
 
 def _herdr(*args: str) -> None:
@@ -864,7 +1064,16 @@ def _herdr(*args: str) -> None:
 def _pane_recent_output(pane: str, lines: int = 80) -> str:
     _herdr_available()
     process = subprocess.run(
-        ["herdr", "pane", "read", pane, "--source", "recent-unwrapped", "--lines", str(lines)],
+        [
+            "herdr",
+            "pane",
+            "read",
+            pane,
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            str(lines),
+        ],
         capture_output=True,
         text=True,
     )
@@ -874,21 +1083,41 @@ def _pane_recent_output(pane: str, lines: int = 80) -> str:
 
 
 def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
-    compact = "".join(character if character.isalnum() or character in "-_" else "-" for character in request_id)
+    compact = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in request_id
+    )
     return f"{prefix}-{compact[:40]}-g{generation}"
 
 
-def _start_herdr_agent(name: str, order: dict, launch: str) -> tuple[str, str | None, str]:
+def _start_herdr_agent(
+    name: str, order: dict, launch: str
+) -> tuple[str, str | None, str]:
     """Atomically create a named Herdr pane and start its process.
 
     ``herdr agent start`` carries argv through the socket in one request; unlike ``pane run`` it
     cannot interleave launch keystrokes with another command in a shared shell.
     """
-    cockpit = _herdr_json("pane", "get", order["cockpit_pane"]).get("result", {}).get("pane", {})
+    cockpit = (
+        _herdr_json("pane", "get", order["cockpit_pane"])
+        .get("result", {})
+        .get("pane", {})
+    )
     tab_id = cockpit.get("tab_id") if isinstance(cockpit, dict) else None
     if not isinstance(tab_id, str) or not tab_id:
         raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
-    args = ["agent", "start", name, "--cwd", order["cwd"], "--tab", tab_id, "--split", "right", "--no-focus"]
+    args = [
+        "agent",
+        "start",
+        name,
+        "--cwd",
+        order["cwd"],
+        "--tab",
+        tab_id,
+        "--split",
+        "right",
+        "--no-focus",
+    ]
     for key, value in (order.get("env") or {}).items():
         args.extend(("--env", f"{key}={value}"))
     args.extend(("--", "bash", "-lc", launch))
@@ -927,7 +1156,11 @@ def _wait_for_agent_health(
             .get("result", {})
             .get("process_info", {})
         )
-        processes = process_info.get("foreground_processes", []) if isinstance(process_info, dict) else []
+        processes = (
+            process_info.get("foreground_processes", [])
+            if isinstance(process_info, dict)
+            else []
+        )
         matching_process = next(
             (
                 process
@@ -936,14 +1169,19 @@ def _wait_for_agent_health(
                 and (
                     process.get("name") == expected_process
                     or expected_process in str(process.get("cmdline", ""))
-                    or expected_process in " ".join(str(item) for item in process.get("argv", []))
+                    or expected_process
+                    in " ".join(str(item) for item in process.get("argv", []))
                 )
             ),
             None,
         )
         detected_agent = pane.get("agent") if isinstance(pane, dict) else None
         status = pane.get("agent_status") if isinstance(pane, dict) else None
-        cwd = pane.get("foreground_cwd", pane.get("cwd")) if isinstance(pane, dict) else None
+        cwd = (
+            pane.get("foreground_cwd", pane.get("cwd"))
+            if isinstance(pane, dict)
+            else None
+        )
         cwd_matches = isinstance(cwd, str) and os.path.realpath(cwd) == resolved_cwd
         latest = {
             "agent_status": status,
@@ -954,18 +1192,27 @@ def _wait_for_agent_health(
             "expected_process": expected_process,
             "healthy": False,
             "pane_id": pane_id,
-            "process_pid": matching_process.get("pid") if isinstance(matching_process, dict) else None,
+            "process_pid": matching_process.get("pid")
+            if isinstance(matching_process, dict)
+            else None,
         }
-        if matching_process is not None and detected_agent == expected_agent and status in ("working", "idle", "done"):
+        if (
+            matching_process is not None
+            and detected_agent == expected_agent
+            and status in ("working", "idle", "done")
+        ):
             if not cwd_matches:
-                raise RecruiterError(f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}")
+                raise RecruiterError(
+                    f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}"
+                )
             latest["healthy"] = True
             return latest
         completed_during_startup = False
         if completion_order is not None:
             try:
                 load_result(
-                    completion_order["result_path"], expected_order_id=completion_order["order_id"]
+                    completion_order["result_path"],
+                    expected_order_id=completion_order["order_id"],
                 )
             except ContractError:
                 completed_during_startup = False
@@ -975,7 +1222,10 @@ def _wait_for_agent_health(
             latest["completed_during_startup"] = True
             latest["healthy"] = True
             return latest
-        if matching_process is None and time.monotonic() - started >= STARTUP_FAILURE_SETTLE_SECONDS:
+        if (
+            matching_process is None
+            and time.monotonic() - started >= STARTUP_FAILURE_SETTLE_SECONDS
+        ):
             output = _pane_recent_output(pane_id)
             raise RecruiterError(
                 f"agent pane {pane_id} did not start expected {expected_process} process; recent output: {output[-1000:]}"
@@ -992,8 +1242,12 @@ def _wait_for_worker_health(
     override = (roster or {}).get("health", {}).get(order["harness"], {})
     return _wait_for_agent_health(
         worker_pane,
-        expected_agent=override.get("expected_agent", EXPECTED_HARNESS_AGENT[order["harness"]]),
-        expected_process=override.get("expected_process", EXPECTED_HARNESS_PROCESS[order["harness"]]),
+        expected_agent=override.get(
+            "expected_agent", EXPECTED_HARNESS_AGENT[order["harness"]]
+        ),
+        expected_process=override.get(
+            "expected_process", EXPECTED_HARNESS_PROCESS[order["harness"]]
+        ),
         expected_cwd=order["cwd"],
         timeout_ms=timeout_ms,
         completion_order=order,
@@ -1003,7 +1257,11 @@ def _wait_for_worker_health(
 def _live_pane_ids() -> set[str]:
     response = _herdr_json("pane", "list")
     panes = response.get("result", {}).get("panes", [])
-    return {pane["pane_id"] for pane in panes if isinstance(pane, dict) and isinstance(pane.get("pane_id"), str)}
+    return {
+        pane["pane_id"]
+        for pane in panes
+        if isinstance(pane, dict) and isinstance(pane.get("pane_id"), str)
+    }
 
 
 def _close_worker_pane(worker_pane: str) -> dict[str, object]:
@@ -1024,7 +1282,9 @@ def _close_worker_pane(worker_pane: str) -> dict[str, object]:
     return {"status": close_status, "worker_pane": worker_pane, "verified_absent": True}
 
 
-def _write_worker_instructions(order: dict, worker_result_path: Path, destination: Path) -> None:
+def _write_worker_instructions(
+    order: dict, worker_result_path: Path, destination: Path
+) -> None:
     """Append one final, literal delivery contract to the stage brief.
 
     The order's public result_path belongs to the Recruiter. The worker writes only this lease's
@@ -1050,10 +1310,14 @@ def _write_worker_instructions(order: dict, worker_result_path: Path, destinatio
         os.replace(temporary, destination)
     except OSError as e:
         temporary.unlink(missing_ok=True)
-        raise RecruiterError(f"could not write lease-specific worker instructions {destination}: {e}") from e
+        raise RecruiterError(
+            f"could not write lease-specific worker instructions {destination}: {e}"
+        ) from e
 
 
-def _wait_for_agent_status(worker_pane: str, timeout_ms: int, monitor_finalized: threading.Event | None) -> bool:
+def _wait_for_agent_status(
+    worker_pane: str, timeout_ms: int, monitor_finalized: threading.Event | None
+) -> bool:
     """Race one event-driven Herdr wait against the private-result monitor.
 
     This opens one Herdr subscription for the whole worker lifetime. When the durable file wins,
@@ -1187,7 +1451,11 @@ def _start_completion_monitor(
         invalid_since = 0.0
         check_number = 0
         while not stop.is_set():
-            if next_check is not None and on_inactivity is not None and time.monotonic() >= next_check:
+            if (
+                next_check is not None
+                and on_inactivity is not None
+                and time.monotonic() >= next_check
+            ):
                 check_number += 1
                 on_inactivity(check_number)
                 next_check = time.monotonic() + cast(int, inactivity_check_ms) / 1000
@@ -1214,7 +1482,9 @@ def _start_completion_monitor(
             finalized.set()
             return
 
-    thread = threading.Thread(target=monitor, name=f"upagent-monitor-{order['order_id'][:24]}", daemon=True)
+    thread = threading.Thread(
+        target=monitor, name=f"upagent-monitor-{order['order_id'][:24]}", daemon=True
+    )
     thread.start()
     return stop, finalized, thread
 
@@ -1229,7 +1499,9 @@ def _write_text_atomic(path: Path, text_value: str) -> None:
     os.replace(temporary, path)
 
 
-def _wait_typed_file(path: Path, timeout_ms: int, parser: Callable[[str], object]) -> object:
+def _wait_typed_file(
+    path: Path, timeout_ms: int, parser: Callable[[str], object]
+) -> object:
     """Wait for one atomically replaceable LLM response and reject stable malformed output."""
     deadline = time.monotonic() + timeout_ms / 1000
     invalid_signature: tuple[int, int] | None = None
@@ -1251,7 +1523,9 @@ def _wait_typed_file(path: Path, timeout_ms: int, parser: Callable[[str], object
             invalid_signature = signature
             invalid_since = time.monotonic()
         elif time.monotonic() - invalid_since >= INVALID_RESULT_SETTLE_SECONDS:
-            raise RecruiterError(f"LLM response {path} is invalid: {latest_error}") from latest_error
+            raise RecruiterError(
+                f"LLM response {path} is invalid: {latest_error}"
+            ) from latest_error
         time.sleep(HEALTH_PROBE_SECONDS)
     raise RecruiterError(f"LLM response {path} did not arrive within {timeout_ms} ms")
 
@@ -1267,7 +1541,15 @@ def _submit_agent_prompt(target: str, message: str, idle_timeout_ms: int) -> Non
     safe for a dedicated manager; requester delivery remains best-effort and is skipped while busy.
     """
     with _PROMPT_SUBMISSION_LOCK:
-        _herdr("agent", "wait", target, "--status", "idle", "--timeout", str(idle_timeout_ms))
+        _herdr(
+            "agent",
+            "wait",
+            target,
+            "--status",
+            "idle",
+            "--timeout",
+            str(idle_timeout_ms),
+        )
         agent = _herdr_json("agent", "get", target).get("result", {}).get("agent", {})
         pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
         if not isinstance(pane_id, str) or not pane_id:
@@ -1288,7 +1570,9 @@ def _notify_requester(
     address = lifecycle.requester_address(order)
     ledger.publish_requester(key, request_id, generation, message_type, message, detail)
     if address.kind == "file-mailbox":
-        lifecycle.RequestMailbox(address.address).publish(request_id, generation, message_type, message, detail)
+        lifecycle.RequestMailbox(address.address).publish(
+            request_id, generation, message_type, message, detail
+        )
         return
     try:
         _submit_agent_prompt(
@@ -1297,8 +1581,12 @@ def _notify_requester(
             idle_timeout_ms=250,
         )
     except RecruiterError as error:
-        ledger._event(key, "requester-delivery-failed", address=address.address, reason=str(error))
-        sys.stderr.write(f"recruiter: requester notification failed for {request_id}: {error}\n")
+        ledger._event(
+            key, "requester-delivery-failed", address=address.address, reason=str(error)
+        )
+        sys.stderr.write(
+            f"recruiter: requester notification failed for {request_id}: {error}\n"
+        )
 
 
 def _start_account_manager(
@@ -1322,14 +1610,22 @@ def _start_account_manager(
             request_id, generation, order, decision_path, mechanical_validation
         ),
     )
-    command = llm_management.render_role_command(config.account_manager, brief_path, order["cwd"], decision_path)
+    command = llm_management.render_role_command(
+        config.account_manager, brief_path, order["cwd"], decision_path
+    )
     name = _safe_agent_name("upagent-manager", request_id, generation)
     recruiter_pane = _recruiter_pane_from_state()
     manager_order = {**order, "cockpit_pane": recruiter_pane or order["cockpit_pane"]}
-    manager_pane, workspace_id, manager_address = _start_herdr_agent(name, manager_order, command)
-    if not ledger.record_manager(key, token, manager_pane, manager_address, workspace_id, generation):
+    manager_pane, workspace_id, manager_address = _start_herdr_agent(
+        name, manager_order, command
+    )
+    if not ledger.record_manager(
+        key, token, manager_pane, manager_address, workspace_id, generation
+    ):
         _close_worker_pane(manager_pane)
-        raise RecruiterError(f"lease ownership changed before manager {manager_address} was recorded")
+        raise RecruiterError(
+            f"lease ownership changed before manager {manager_address} was recorded"
+        )
     try:
         health = _wait_for_agent_health(
             manager_pane,
@@ -1341,14 +1637,18 @@ def _start_account_manager(
         decision = _wait_typed_file(
             decision_path,
             config.account_manager.timeout_ms,
-            lambda text_value: lifecycle.parse_manager_decision(text_value, request_id, generation),
+            lambda text_value: lifecycle.parse_manager_decision(
+                text_value, request_id, generation
+            ),
         )
     except (RecruiterError, OSError):
         _close_worker_pane(manager_pane)
         raise
     if not ledger.mark_manager_ready(key, token, decision):
         _close_worker_pane(manager_pane)
-        raise RecruiterError(f"lease ownership changed before manager {manager_address} became ready")
+        raise RecruiterError(
+            f"lease ownership changed before manager {manager_address} became ready"
+        )
     _notify_requester(
         ledger,
         key,
@@ -1383,14 +1683,20 @@ def _ask_manager_about_startup(
     output_path.unlink(missing_ok=True)
     JobLedger._write_json(evidence_path, worker_evidence)
     config = cast(Any, manager["config"])
-    message = llm_management.checker_brief(request_id, generation, evidence_path, output_path)
+    message = llm_management.checker_brief(
+        request_id, generation, evidence_path, output_path
+    )
     _submit_agent_prompt(
-        cast(str, manager["address"]), message, idle_timeout_ms=config.account_manager.timeout_ms
+        cast(str, manager["address"]),
+        message,
+        idle_timeout_ms=config.account_manager.timeout_ms,
     )
     assessment = _wait_typed_file(
         output_path,
         config.account_manager.timeout_ms,
-        lambda text_value: lifecycle.parse_check_assessment(text_value, request_id, generation),
+        lambda text_value: lifecycle.parse_check_assessment(
+            text_value, request_id, generation
+        ),
     )
     ledger._event(
         key,
@@ -1444,9 +1750,13 @@ def _run_one_shot_checker(
     brief_path = directory / "brief.md"
     _write_text_atomic(
         brief_path,
-        llm_management.checker_brief(request_id, generation, evidence_path, output_path),
+        llm_management.checker_brief(
+            request_id, generation, evidence_path, output_path
+        ),
     )
-    command = llm_management.render_role_command(config.checker, brief_path, order["cwd"], output_path)
+    command = llm_management.render_role_command(
+        config.checker, brief_path, order["cwd"], output_path
+    )
     name = _safe_agent_name(f"upagent-check-{check_number}", request_id, generation)
     checker_order = {**order, "cockpit_pane": cast(str, manager["pane"])}
     checker_pane, _, _ = _start_herdr_agent(name, checker_order, command)
@@ -1461,7 +1771,9 @@ def _run_one_shot_checker(
         assessment = _wait_typed_file(
             output_path,
             config.checker.timeout_ms,
-            lambda text_value: lifecycle.parse_check_assessment(text_value, request_id, generation),
+            lambda text_value: lifecycle.parse_check_assessment(
+                text_value, request_id, generation
+            ),
         )
     finally:
         _close_worker_pane(checker_pane)
@@ -1549,7 +1861,11 @@ def _await_requester_timeout_decision(
     deadline = time.monotonic() + config.requester_grace_ms / 1000
     while time.monotonic() < deadline:
         if monitor_finalized is not None and monitor_finalized.is_set():
-            ledger._event(key, "result-arrived-during-timeout-grace", timeout_number=timeout_number)
+            ledger._event(
+                key,
+                "result-arrived-during-timeout-grace",
+                timeout_number=timeout_number,
+            )
             return 1
         if response_path.is_file():
             try:
@@ -1557,7 +1873,9 @@ def _await_requester_timeout_decision(
                     response_path.read_text(), request_id, generation
                 )
             except (OSError, LifecycleError) as error:
-                raise RecruiterError(f"requester decision is invalid: {error}") from error
+                raise RecruiterError(
+                    f"requester decision is invalid: {error}"
+                ) from error
             if decision.action == "extend":
                 assert decision.extension_ms is not None
                 ledger.extend_lease(key, token, decision.extension_ms)
@@ -1568,7 +1886,10 @@ def _await_requester_timeout_decision(
                     generation,
                     "worker-extended",
                     decision.message,
-                    {"extension_ms": decision.extension_ms, "timeout_number": timeout_number},
+                    {
+                        "extension_ms": decision.extension_ms,
+                        "timeout_number": timeout_number,
+                    },
                 )
                 return decision.extension_ms
             _notify_requester(
@@ -1614,7 +1935,11 @@ def _run_order(
     fell_back = False
     execution_order = {**order, "result_path": str(worker_result_path)}
     worker_pane: str | None = None
-    cleanup: dict[str, object] = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+    cleanup: dict[str, object] = {
+        "status": "not-created",
+        "worker_pane": None,
+        "verified_absent": True,
+    }
     monitor_finalized: threading.Event | None = None
     startup_validated = False
     # Direct dispatch runs in the phase leader's environment; never report Recruiter state onto
@@ -1630,16 +1955,23 @@ def _run_order(
         # result path or a newer lease's staging file.
         worker_result_path.parent.mkdir(parents=True, exist_ok=True)
         worker_result_path.unlink(missing_ok=True)
-        effective_instructions = worker_instructions_path or worker_result_path.with_name("worker-instructions.md")
+        effective_instructions = (
+            worker_instructions_path
+            or worker_result_path.with_name("worker-instructions.md")
+        )
         _write_worker_instructions(order, worker_result_path, effective_instructions)
         execution_order["instructions_path"] = str(effective_instructions)
         launch = resolve_launch_command(execution_order, roster)
         management_config = llm_management.load_management_config(roster)
         request_id = lifecycle.request_identity(order)
         worker_name = _safe_agent_name("upagent", request_id, 1)
-        worker_pane, workspace_id, worker_address = _start_herdr_agent(worker_name, execution_order, launch)
+        worker_pane, workspace_id, worker_address = _start_herdr_agent(
+            worker_name, execution_order, launch
+        )
         if on_worker_launched is not None:
-            monitor_finalized = on_worker_launched(worker_pane, workspace_id, worker_address)
+            monitor_finalized = on_worker_launched(
+                worker_pane, workspace_id, worker_address
+            )
         # The pane address is durably owned before health validation. A failed launch can
         # therefore be cleaned without guessing, while nobody is told "running" prematurely.
         health = _wait_for_worker_health(
@@ -1694,7 +2026,10 @@ def _run_order(
                 cleanup = _close_worker_pane(worker_pane)
             except RecruiterError as e:
                 result = _write_blocked_result(
-                    order, f"worker cleanup failed: {e}", worker_result_path, preserve_valid=False
+                    order,
+                    f"worker cleanup failed: {e}",
+                    worker_result_path,
+                    preserve_valid=False,
                 )
                 fell_back = True
                 # The failed pane address remains in the active lease for the supervisor to retry.
@@ -1718,10 +2053,16 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     try:
         order = load_order(order_path)
     except ContractError as e:
-        raise RecruiterError(f"invalid order {order_path}: {e}") from e
-    require_phase_watchdog_capability(order)
+        _reject_legacy_order(order_path, f"invalid order {order_path}: {e}")
+        return 1
     ledger = JobLedger()
     key, _created = ledger.submit(order)
+    warning = _record_phase_watchdog_warning(ledger, key, order)
+    if warning is not None:
+        print(
+            f"ORDER {order['order_id']} DEGRADED {json.dumps({'warning': warning})}",
+            flush=True,
+        )
     if ledger.completed_result(key, order) is not None:
         # A completed order is terminal and idempotent: its strict result already exists, so do
         # not open another job runner or worker pane.
@@ -1729,7 +2070,14 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         return 0
     # A duplicate of a queued or live order starts another contender: the atomic claim admits
     # only one while a prior runner is live, and retries an earlier runner that died before claim.
-    command = [sys.executable, str(Path(__file__).resolve()), "--roster", roster_path, "run-job", key]
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--roster",
+        roster_path,
+        "run-job",
+        key,
+    ]
     try:
         # Inherit the Recruiter pane's output: the per-job owner emits its terminal marker there.
         subprocess.Popen(command, start_new_session=True)
@@ -1742,10 +2090,18 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
             ledger._event(key, "start-failed-unowned", reason=str(e))
             return 1
         result = _write_blocked_result(
-            order, f"could not start job runner: {e}", ledger.result_staging_path(key, token)
+            order,
+            f"could not start job runner: {e}",
+            ledger.result_staging_path(key, token),
         )
-        cleanup = {"status": "not-created", "worker_pane": None, "verified_absent": True}
-        if not ledger.finalize(key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1):
+        cleanup = {
+            "status": "not-created",
+            "worker_pane": None,
+            "verified_absent": True,
+        }
+        if not ledger.finalize(
+            key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1
+        ):
             return 1
         print(f"ORDER {order['order_id']} DONE", flush=True)
         return 1
@@ -1773,7 +2129,11 @@ def _runner_alive(pid: object, key: str) -> bool:
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
     command = _process_cmdline(pid)
-    return "run-job" in command and key in command and str(Path(__file__).resolve()) in command
+    return (
+        "run-job" in command
+        and key in command
+        and str(Path(__file__).resolve()) in command
+    )
 
 
 def _terminate_owned_runner(pid: object, key: str) -> None:
@@ -1801,7 +2161,11 @@ def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
     for role, field in (("worker", "worker_pane"), ("manager", "manager_pane")):
         pane = lease.get(field)
         if not isinstance(pane, str) or not pane:
-            outcomes[role] = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+            outcomes[role] = {
+                "status": "not-created",
+                "worker_pane": None,
+                "verified_absent": True,
+            }
             continue
         try:
             outcomes[role] = _close_worker_pane(pane)
@@ -1840,7 +2204,9 @@ def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -
         try:
             result = load_result(staging, expected_order_id=order["order_id"])
         except ContractError as e:
-            result = _write_blocked_result(order, f"runner reconciliation: {e}", staging)
+            result = _write_blocked_result(
+                order, f"runner reconciliation: {e}", staging
+            )
     else:
         result = _write_blocked_result(
             order,
@@ -1888,7 +2254,14 @@ def cmd_supervise(token: str) -> int:
 
 
 def _spawn_job(key: str, roster_path: str) -> subprocess.Popen:
-    command = [sys.executable, str(Path(__file__).resolve()), "--roster", roster_path, "run-job", key]
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--roster",
+        roster_path,
+        "run-job",
+        key,
+    ]
     return subprocess.Popen(command, start_new_session=True)
 
 
@@ -1903,9 +2276,14 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as e:
         raise RecruiterError(f"invalid order {order_path}: {e}") from e
-    require_phase_watchdog_capability(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
+    warning = _record_phase_watchdog_warning(ledger, key, order)
+    if warning is not None:
+        print(
+            f"REQUEST_DEGRADED {json.dumps({'request_id': lifecycle.request_identity(order), 'warning': warning}, sort_keys=True)}",
+            flush=True,
+        )
     if ledger.completed_result(key, order) is None:
         try:
             process = _spawn_job(key, roster_path)
@@ -1922,12 +2300,22 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
                 },
             )
             if token is None:
-                raise RecruiterError(f"could not start a contender for live order {order['order_id']}: {e}") from e
+                raise RecruiterError(
+                    f"could not start a contender for live order {order['order_id']}: {e}"
+                ) from e
             result = _write_blocked_result(
-                order, f"could not start job runner: {e}", ledger.result_staging_path(key, token)
+                order,
+                f"could not start job runner: {e}",
+                ledger.result_staging_path(key, token),
             )
-            cleanup = {"status": "not-created", "worker_pane": None, "verified_absent": True}
-            ledger.finalize(key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1)
+            cleanup = {
+                "status": "not-created",
+                "worker_pane": None,
+                "verified_absent": True,
+            }
+            ledger.finalize(
+                key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1
+            )
             process = None
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
         deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
@@ -1935,16 +2323,31 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
             try:
                 process.wait(timeout=max(0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                matching = next((lease for candidate, lease in ledger.active_claims() if candidate == key), None)
-                if matching is None or not _reconcile_claim(ledger, key, matching, force=True):
-                    raise RecruiterError(f"job runner for {order['order_id']} exceeded its lease window")
+                matching = next(
+                    (
+                        lease
+                        for candidate, lease in ledger.active_claims()
+                        if candidate == key
+                    ),
+                    None,
+                )
+                if matching is None or not _reconcile_claim(
+                    ledger, key, matching, force=True
+                ):
+                    raise RecruiterError(
+                        f"job runner for {order['order_id']} exceeded its lease window"
+                    )
         # Normal jobs publish before exiting. A killed/crashed runner may need the standing
         # reconciler to publish a blocked receipt; this short bounded wait is anomaly-only.
-        while ledger.completed_result(key, order) is None and time.monotonic() < deadline:
+        while (
+            ledger.completed_result(key, order) is None and time.monotonic() < deadline
+        ):
             time.sleep(0.1)
     result = ledger.completed_result(key, order)
     if result is None:
-        raise RecruiterError(f"job runner for {order['order_id']} exited without a completion receipt")
+        raise RecruiterError(
+            f"job runner for {order['order_id']} exited without a completion receipt"
+        )
     receipt = ledger.completed_receipt(key, order)
     print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
     return 0
@@ -1956,11 +2359,11 @@ def cmd_request(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as error:
         raise RecruiterError(f"invalid order {order_path}: {error}") from error
-    require_phase_watchdog_capability(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
     key, _ = ledger.submit(order)
+    warning = _record_phase_watchdog_warning(ledger, key, order)
     existing = ledger.completed_result(key, order)
     if existing is not None:
         receipt = ledger.completed_receipt(key, order)
@@ -1969,10 +2372,13 @@ def cmd_request(order_path: str, roster_path: str) -> int:
     try:
         process = _spawn_job(key, roster_path)
     except OSError as error:
-        raise RecruiterError(f"could not start request owner for {order['order_id']}: {error}") from error
-    deadline = time.monotonic() + (
-        config.account_manager.timeout_ms + config.startup_timeout_ms * 2
-    ) / 1000
+        raise RecruiterError(
+            f"could not start request owner for {order['order_id']}: {error}"
+        ) from error
+    deadline = (
+        time.monotonic()
+        + (config.account_manager.timeout_ms + config.startup_timeout_ms * 2) / 1000
+    )
     while time.monotonic() < deadline:
         state = ledger.state(key)
         if state.get("state") == "running":
@@ -1985,18 +2391,29 @@ def cmd_request(order_path: str, roster_path: str) -> int:
                 "worker_address": state.get("worker_address"),
                 "worker_pane": state.get("worker_pane"),
             }
-            print(f"REQUEST_ACCEPTED {json.dumps(response, sort_keys=True)}", flush=True)
+            if warning is not None:
+                response["degraded"] = True
+                response["warning"] = warning
+            print(
+                f"REQUEST_ACCEPTED {json.dumps(response, sort_keys=True)}", flush=True
+            )
             return 0
         if state.get("state") in ("finished", "cleanup-failed"):
             receipt = ledger.completed_receipt(key, order)
             print(f"REQUEST_TERMINAL {json.dumps(receipt, sort_keys=True)}", flush=True)
             return 0 if receipt["verdict"] == "passed" else 1
-        if process.poll() is not None and state.get("state") not in ("running", "finished", "cleanup-failed"):
+        if process.poll() is not None and state.get("state") not in (
+            "running",
+            "finished",
+            "cleanup-failed",
+        ):
             raise RecruiterError(
                 f"request owner for {order['order_id']} exited before worker health: state={state.get('state')}"
             )
         time.sleep(HEALTH_PROBE_SECONDS)
-    raise RecruiterError(f"request {order['order_id']} did not reach worker-healthy before its startup deadline")
+    raise RecruiterError(
+        f"request {order['order_id']} did not reach worker-healthy before its startup deadline"
+    )
 
 
 def cmd_await(order_path: str) -> int:
@@ -2008,7 +2425,9 @@ def cmd_await(order_path: str) -> int:
     ledger = JobLedger()
     key = ledger.key_for_order(order)
     if not ledger.request_dir(key).is_dir():
-        raise RecruiterError(f"request {lifecycle.request_identity(order)} has not been submitted")
+        raise RecruiterError(
+            f"request {lifecycle.request_identity(order)} has not been submitted"
+        )
     deadline = time.monotonic() + (
         order.get("timeout_ms", _default_timeout_ms(order["stage_id"])) / 1000
         + LEASE_GRACE_SECONDS
@@ -2022,14 +2441,19 @@ def cmd_await(order_path: str) -> int:
                 "state": "awaiting-requester",
                 "timeout_number": state.get("timeout_number"),
             }
-            print(f"REQUESTER_DECISION_REQUIRED {json.dumps(response, sort_keys=True)}", flush=True)
+            print(
+                f"REQUESTER_DECISION_REQUIRED {json.dumps(response, sort_keys=True)}",
+                flush=True,
+            )
             return 2
         if state.get("state") in ("finished", "cleanup-failed"):
             receipt = ledger.completed_receipt(key, order)
             print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
             return 0 if receipt["verdict"] == "passed" else 1
         time.sleep(HEALTH_PROBE_SECONDS)
-    raise RecruiterError(f"request {lifecycle.request_identity(order)} exceeded its await window")
+    raise RecruiterError(
+        f"request {lifecycle.request_identity(order)} exceeded its await window"
+    )
 
 
 def cmd_respond(
@@ -2049,14 +2473,25 @@ def cmd_respond(
     key = ledger.key_for_order(order)
     claim_dir = ledger.active / "requests" / key
     if not claim_dir.is_dir():
-        raise RecruiterError(f"request {lifecycle.request_identity(order)} is not active")
+        raise RecruiterError(
+            f"request {lifecycle.request_identity(order)} is not active"
+        )
     state = ledger.state(key)
-    if state.get("state") != "awaiting-requester" or state.get("decision_nonce") != nonce:
-        raise RecruiterError("response does not match the current requester decision point")
+    if (
+        state.get("state") != "awaiting-requester"
+        or state.get("decision_nonce") != nonce
+    ):
+        raise RecruiterError(
+            "response does not match the current requester decision point"
+        )
     lease = ledger._lease(claim_dir / "lease.json")
     expected_control = lease.get("requester_control_token")
-    if not isinstance(expected_control, str) or not hmac.compare_digest(expected_control, control_token):
-        raise RecruiterError("requester control token does not match the current request generation")
+    if not isinstance(expected_control, str) or not hmac.compare_digest(
+        expected_control, control_token
+    ):
+        raise RecruiterError(
+            "requester control token does not match the current request generation"
+        )
     generation = lease.get("generation", 1)
     payload = {
         "request_id": lifecycle.request_identity(order),
@@ -2069,7 +2504,12 @@ def cmd_respond(
         json.dumps(payload), lifecycle.request_identity(order), generation
     )
     path = ledger.record_requester_decision(key, lease["token"], nonce, decision)
-    print(json.dumps({"accepted": True, "decision_path": str(path), "action": action}, sort_keys=True))
+    print(
+        json.dumps(
+            {"accepted": True, "decision_path": str(path), "action": action},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -2122,8 +2562,14 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             "account-manager-failed",
             f"The Hub could not establish lifecycle ownership: {error}",
         )
-        result = _write_blocked_result(order, f"account manager failed: {error}", worker_result_path)
-        cleanup = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+        result = _write_blocked_result(
+            order, f"account manager failed: {error}", worker_result_path
+        )
+        cleanup = {
+            "status": "not-created",
+            "worker_pane": None,
+            "verified_absent": True,
+        }
         ledger.finalize(
             key,
             token,
@@ -2144,7 +2590,9 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             message_type = "needs-requester"
             message = f"Worker configuration is invalid: {'; '.join(configuration_errors)}. {message}"
         _notify_requester(ledger, key, order, generation, message_type, message)
-        result = _write_blocked_result(order, f"account manager: {message}", worker_result_path)
+        result = _write_blocked_result(
+            order, f"account manager: {message}", worker_result_path
+        )
         manager_cleanup = _close_worker_pane(cast(str, manager["pane"]))
         cleanup = {
             "manager": manager_cleanup,
@@ -2166,12 +2614,18 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     inactivity_lock = threading.Lock()
     owned_worker_pane: str | None = None
 
-    def start_monitor(worker_pane: str, workspace_id: str | None, worker_address: str) -> threading.Event:
+    def start_monitor(
+        worker_pane: str, workspace_id: str | None, worker_address: str
+    ) -> threading.Event:
         nonlocal owned_worker_pane
         nonlocal monitor
         owned_worker_pane = worker_pane
-        if not ledger.record_worker(key, token, worker_pane, workspace_id, worker_address):
-            raise RecruiterError(f"lease ownership changed before worker {worker_pane} was recorded")
+        if not ledger.record_worker(
+            key, token, worker_pane, workspace_id, worker_address
+        ):
+            raise RecruiterError(
+                f"lease ownership changed before worker {worker_pane} was recorded"
+            )
 
         def check_inactivity(check_number: int) -> None:
             assert manager is not None
@@ -2187,7 +2641,12 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                         check_number,
                     )
                 except (RecruiterError, LifecycleError, OSError) as error:
-                    ledger._event(key, "worker-check-failed", check_number=check_number, reason=str(error))
+                    ledger._event(
+                        key,
+                        "worker-check-failed",
+                        check_number=check_number,
+                        reason=str(error),
+                    )
                     _notify_requester(
                         ledger,
                         key,
@@ -2207,7 +2666,9 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         )
         return monitor[1]
 
-    def handle_timeout(timeout_number: int, finalized: threading.Event | None) -> int | None:
+    def handle_timeout(
+        timeout_number: int, finalized: threading.Event | None
+    ) -> int | None:
         assert manager is not None
         assert owned_worker_pane is not None
         return _await_requester_timeout_decision(
@@ -2245,9 +2706,13 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 message,
                 {"assessment": getattr(assessment, "assessment")},
             )
-            raise RecruiterError(f"account manager did not validate worker startup: {message}")
+            raise RecruiterError(
+                f"account manager did not validate worker startup: {message}"
+            )
         if not ledger.mark_worker_healthy(key, token, evidence):
-            raise RecruiterError("lease ownership changed before worker health could be published")
+            raise RecruiterError(
+                "lease ownership changed before worker health could be published"
+            )
         _notify_requester(
             ledger,
             key,
@@ -2272,7 +2737,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         manager_cleanup = _close_worker_pane(cast(str, manager["pane"]))
     except RecruiterError as error:
         result = _write_blocked_result(
-            order, f"account manager cleanup failed: {error}", worker_result_path, preserve_valid=False
+            order,
+            f"account manager cleanup failed: {error}",
+            worker_result_path,
+            preserve_valid=False,
         )
         result_code = 1
         manager_cleanup = {
@@ -2282,7 +2750,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             "reason": str(error),
         }
     cleanup["manager"] = manager_cleanup
-    cleanup["verified_absent"] = cleanup["verified_absent"] is True and manager_cleanup["verified_absent"] is True
+    cleanup["verified_absent"] = (
+        cleanup["verified_absent"] is True
+        and manager_cleanup["verified_absent"] is True
+    )
     _notify_requester(
         ledger,
         key,
@@ -2330,21 +2801,33 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
     """
     existing = _find_shared_services(_herdr_json("workspace", "list"))
     if existing is None:
-        created = _herdr_json("workspace", "create", "--label", SHARED_SERVICES_WORKSPACE, "--no-focus")["result"]
+        created = _herdr_json(
+            "workspace", "create", "--label", SHARED_SERVICES_WORKSPACE, "--no-focus"
+        )["result"]
         workspace_id = created["workspace"]["workspace_id"]
         pane_id = created["root_pane"]["pane_id"]
         _herdr("pane", "rename", pane_id, role_label)
         return workspace_id, pane_id, False
 
     workspace_id = existing["workspace_id"]
-    panes = _herdr_json("pane", "list", "--workspace", workspace_id).get("result", {}).get("panes", [])
-    mine = next((p for p in panes if p.get("label") == role_label and p.get("pane_id")), None)
+    panes = (
+        _herdr_json("pane", "list", "--workspace", workspace_id)
+        .get("result", {})
+        .get("panes", [])
+    )
+    mine = next(
+        (p for p in panes if p.get("label") == role_label and p.get("pane_id")), None
+    )
     if mine is not None:
         return workspace_id, mine["pane_id"], True
     anchor = next((p["pane_id"] for p in panes if p.get("pane_id")), None)
     if anchor is None:
-        raise RecruiterError(f"shared-services workspace {workspace_id} has no pane to split from")
-    new_pane = _herdr_json("pane", "split", anchor, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
+        raise RecruiterError(
+            f"shared-services workspace {workspace_id} has no pane to split from"
+        )
+    new_pane = _herdr_json(
+        "pane", "split", anchor, "--direction", "down", "--no-focus"
+    )["result"]["pane"]["pane_id"]
     _herdr("pane", "rename", new_pane, role_label)
     return workspace_id, new_pane, True
 
@@ -2380,7 +2863,14 @@ def cmd_up(roster_path: str) -> int:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     JobLedger._write_json(STATE_FILE, state)
     supervisor = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "--roster", roster_path, "supervise", supervisor_token],
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--roster",
+            roster_path,
+            "supervise",
+            supervisor_token,
+        ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -2424,28 +2914,44 @@ def main(argv: list[str] | None = None) -> int:
         help="launch-template roster (default: $UPAGENT_CONFIG, else upagent.yaml next to this file)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    p_recruit = sub.add_parser("recruit", help="submit a worker order without blocking the Recruiter pane")
+    p_recruit = sub.add_parser(
+        "recruit", help="submit a worker order without blocking the Recruiter pane"
+    )
     p_recruit.add_argument("order", help="path to order.json")
-    p_dispatch = sub.add_parser("dispatch", help="submit an order and block for its durable completion receipt")
+    p_dispatch = sub.add_parser(
+        "dispatch", help="submit an order and block for its durable completion receipt"
+    )
     p_dispatch.add_argument("order", help="path to order.json")
-    p_request = sub.add_parser("request", help="submit an order and return after verified worker startup")
+    p_request = sub.add_parser(
+        "request", help="submit an order and return after verified worker startup"
+    )
     p_request.add_argument("order", help="path to order.json")
-    p_await = sub.add_parser("await", help="wait for completion or an owner decision point")
+    p_await = sub.add_parser(
+        "await", help="wait for completion or an owner decision point"
+    )
     p_await.add_argument("order", help="path to order.json")
-    p_respond = sub.add_parser("respond", help="authorize extension or cancellation as the requester")
+    p_respond = sub.add_parser(
+        "respond", help="authorize extension or cancellation as the requester"
+    )
     p_respond.add_argument("order", help="path to order.json")
     p_respond.add_argument("control_token", help="control token returned by request")
     p_respond.add_argument("nonce", help="nonce returned by await/timeout warning")
     p_respond.add_argument("action", choices=lifecycle.REQUESTER_ACTIONS)
-    p_respond.add_argument("extension_ms", type=int, help="positive for extend; 0 for cancel")
+    p_respond.add_argument(
+        "extension_ms", type=int, help="positive for extend; 0 for cancel"
+    )
     p_run = sub.add_parser("run-job", help=argparse.SUPPRESS)
     p_run.add_argument("key", help=argparse.SUPPRESS)
     p_supervise = sub.add_parser("supervise", help=argparse.SUPPRESS)
     p_supervise.add_argument("token", help=argparse.SUPPRESS)
     sub.add_parser("up", help="ensure the shared-services workspace")
     sub.add_parser("down", help="stop the Recruiter and reconcile every owned worker")
-    p_reconcile = sub.add_parser("reconcile", help="reconcile dead or expired owned workers")
-    p_reconcile.add_argument("--all", action="store_true", help="reconcile every active worker")
+    p_reconcile = sub.add_parser(
+        "reconcile", help="reconcile dead or expired owned workers"
+    )
+    p_reconcile.add_argument(
+        "--all", action="store_true", help="reconcile every active worker"
+    )
     sub.add_parser("status", help="report shared-services state")
 
     args = parser.parse_args(argv)

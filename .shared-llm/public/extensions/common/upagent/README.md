@@ -30,14 +30,14 @@ just upagent-phase-start <frozen-route.yaml> <run-tree> <phase-id> <pass-number>
 ```
 
 It starts the leader behind a gate, submits the phase watchdog through the normal Recruiter
-lifecycle, requires verified Account Manager and watchdog startup, then releases and verifies the
-leader. It returns `PHASE_STARTED` only after the complete pair is healthy. A startup failure
-closes the still-gated leader and records the cause; it never leaves an unwatched phase running.
+lifecycle, and releases the verified leader after recording either a healthy watchdog or an
+explicit degraded warning. It returns `PHASE_STARTED` with `ready` or `ready-degraded`. Leader
+startup failures still close the gated leader; watchdog failures never freeze useful phase work.
 
-The controller exports a receipt capability only to the released leader. The Recruiter rejects a
-conventional phase-tree stage order unless that capability names a ready receipt for the same
-phase, leader pane, and watchdog. A manually opened leader can therefore not silently perform
-phase work.
+The controller exports its receipt path to the released leader. The Recruiter inspects that
+receipt and records degraded observability when it is missing, stale, or has no watchdog address,
+but accepts the stage order. The warning is included in modern startup responses and stored in the
+durable request ledger.
 
 ## The order → result contract (`contracts.py`)
 

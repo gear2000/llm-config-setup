@@ -2,9 +2,10 @@
 """Deterministic phase startup for the Herdr meta-runner.
 
 The TUI supplies durable run inputs; this controller owns the mechanical transition from
-"no phase" to "leader and watchdog both healthy".  The phase leader is held behind a
-filesystem gate until the watchdog's ordinary UpAgent request has passed manager and worker
-startup validation.  A ready receipt is published only after the leader process is healthy.
+"no phase" to "healthy leader with healthy-or-degraded watchdog evidence". The phase leader is
+held behind a filesystem gate while the watchdog's ordinary UpAgent request is attempted. A
+watchdog failure is recorded but does not block the leader. A terminal startup receipt is
+published only after the leader process itself is healthy.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ import yaml
 
 
 HERE = Path(__file__).resolve().parent
-_recruiter_spec = importlib.util.spec_from_file_location("upagent_phase_recruiter", HERE / "recruiter.py")
+_recruiter_spec = importlib.util.spec_from_file_location(
+    "upagent_phase_recruiter", HERE / "recruiter.py"
+)
 if _recruiter_spec is None or _recruiter_spec.loader is None:
     raise RuntimeError("could not load UpAgent Recruiter")
 recruiter = cast(Any, importlib.util.module_from_spec(_recruiter_spec))
@@ -37,7 +40,14 @@ _recruiter_spec.loader.exec_module(recruiter)
 
 PHASE_WATCHDOG_TIMEOUT_MS = 10 * 60 * 60 * 1000
 STARTUP_TIMEOUT_MS = 45_000
-PHASE_LEADER_TEMPLATE_FIELDS = ("agent", "cwd", "effort", "instructions_path", "model", "phase_id")
+PHASE_LEADER_TEMPLATE_FIELDS = (
+    "agent",
+    "cwd",
+    "effort",
+    "instructions_path",
+    "model",
+    "phase_id",
+)
 
 
 class PhaseStartError(RuntimeError):
@@ -86,7 +96,9 @@ def _release_leader_gate(path: Path, request_id: str) -> None:
         descriptor = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
     except OSError as error:
         if error.errno == errno.ENXIO:
-            raise PhaseStartError(f"phase leader stopped waiting on gate {path}") from error
+            raise PhaseStartError(
+                f"phase leader stopped waiting on gate {path}"
+            ) from error
         raise
     try:
         os.write(descriptor, f"{request_id}\n".encode())
@@ -123,19 +135,30 @@ def _load_route(route_path: Path, phase_id: str) -> dict[str, Any]:
     try:
         route = yaml.safe_load(route_path.read_text())
     except (OSError, yaml.YAMLError) as error:
-        raise PhaseStartError(f"route {route_path} is unreadable or invalid YAML: {error}") from error
+        raise PhaseStartError(
+            f"route {route_path} is unreadable or invalid YAML: {error}"
+        ) from error
     route = _object(route, "route")
     profiles = _object(route.get("llm_profiles"), "route.llm_profiles")
     phases = _object(route.get("phases"), "route.phases")
     phase = _object(phases.get(phase_id), f"route.phases.{phase_id}")
     lead = _object(phase.get("lead"), f"route.phases.{phase_id}.lead")
-    lead_profile_name = _string(lead.get("llm_profile"), f"route.phases.{phase_id}.lead.llm_profile")
-    lead_profile = _object(profiles.get(lead_profile_name), f"route.llm_profiles.{lead_profile_name}")
-    defaults = _object(route.get("finalization_defaults"), "route.finalization_defaults")
+    lead_profile_name = _string(
+        lead.get("llm_profile"), f"route.phases.{phase_id}.lead.llm_profile"
+    )
+    lead_profile = _object(
+        profiles.get(lead_profile_name), f"route.llm_profiles.{lead_profile_name}"
+    )
+    defaults = _object(
+        route.get("finalization_defaults"), "route.finalization_defaults"
+    )
     watchdog_profile_name = defaults.get("watchdog_profile", lead_profile_name)
-    watchdog_profile_name = _string(watchdog_profile_name, "route.finalization_defaults.watchdog_profile")
+    watchdog_profile_name = _string(
+        watchdog_profile_name, "route.finalization_defaults.watchdog_profile"
+    )
     watchdog_profile = _object(
-        profiles.get(watchdog_profile_name), f"route.llm_profiles.{watchdog_profile_name}"
+        profiles.get(watchdog_profile_name),
+        f"route.llm_profiles.{watchdog_profile_name}",
     )
     return {
         "lead": {
@@ -157,14 +180,20 @@ def _validated_profile(profile: dict[str, Any], name: str) -> dict[str, str]:
             f"route.llm_profiles.{name}.harness must be one of {', '.join(recruiter.KNOWN_HARNESSES)}"
         )
     return {
-        "effort": _string(profile.get("effort", "medium"), f"route.llm_profiles.{name}.effort"),
+        "effort": _string(
+            profile.get("effort", "medium"), f"route.llm_profiles.{name}.effort"
+        ),
         "harness": harness,
         "model": _string(profile.get("model"), f"route.llm_profiles.{name}.model"),
     }
 
 
 def _resolve_leader_launch(
-    roster: dict[str, Any], phase_id: str, lead: dict[str, Any], cwd: Path, instructions: Path
+    roster: dict[str, Any],
+    phase_id: str,
+    lead: dict[str, Any],
+    cwd: Path,
+    instructions: Path,
 ) -> str:
     profile = cast(dict[str, str], lead["profile"])
     harness = profile["harness"]
@@ -176,7 +205,9 @@ def _resolve_leader_launch(
         )
     template = templates[harness]
     if not isinstance(template, str) or not template.strip():
-        raise PhaseStartError(f"roster phase_leaders.{harness} must be a non-empty template")
+        raise PhaseStartError(
+            f"roster phase_leaders.{harness} must be a non-empty template"
+        )
     fields = {
         "agent": lead["agent"],
         "cwd": str(cwd),
@@ -195,7 +226,9 @@ def _resolve_leader_launch(
     try:
         words = shlex.split(launch)
     except ValueError as error:
-        raise PhaseStartError(f"phase leader launch is not valid shell syntax: {error}") from error
+        raise PhaseStartError(
+            f"phase leader launch is not valid shell syntax: {error}"
+        ) from error
     if not words:
         raise PhaseStartError("phase leader launch resolved to an empty command")
     if shutil.which(words[0]) is None:
@@ -219,9 +252,15 @@ def _active_leaders(path: Path) -> dict[str, str]:
     try:
         value = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
-        raise PhaseStartError(f"active leader map {path} is unreadable: {error}") from error
-    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
-        raise PhaseStartError(f"active leader map {path} must contain only phase-id to pane-id strings")
+        raise PhaseStartError(
+            f"active leader map {path} is unreadable: {error}"
+        ) from error
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise PhaseStartError(
+            f"active leader map {path} must contain only phase-id to pane-id strings"
+        )
     return value
 
 
@@ -235,8 +274,12 @@ def _set_active_leader(path: Path, phase_id: str, pane_id: str | None) -> None:
         _write_json_atomic(path, cast(dict[str, object], leaders))
 
 
-def _start_gated_leader(name: str, tui_pane: str, cwd: Path, script_path: Path) -> tuple[str, str]:
-    tui = recruiter._herdr_json("pane", "get", tui_pane).get("result", {}).get("pane", {})
+def _start_gated_leader(
+    name: str, tui_pane: str, cwd: Path, script_path: Path
+) -> tuple[str, str]:
+    tui = (
+        recruiter._herdr_json("pane", "get", tui_pane).get("result", {}).get("pane", {})
+    )
     tab_id = tui.get("tab_id") if isinstance(tui, dict) else None
     workspace_id = tui.get("workspace_id") if isinstance(tui, dict) else None
     if not isinstance(tab_id, str) or not tab_id:
@@ -261,7 +304,11 @@ def _start_gated_leader(name: str, tui_pane: str, cwd: Path, script_path: Path) 
     if not isinstance(pane_id, str) or not pane_id:
         raise PhaseStartError("herdr agent start returned no phase leader pane_id")
     returned_workspace = agent.get("workspace_id") if isinstance(agent, dict) else None
-    if isinstance(workspace_id, str) and isinstance(returned_workspace, str) and returned_workspace != workspace_id:
+    if (
+        isinstance(workspace_id, str)
+        and isinstance(returned_workspace, str)
+        and returned_workspace != workspace_id
+    ):
         raise PhaseStartError(
             f"phase leader started in workspace {returned_workspace}, expected {workspace_id}"
         )
@@ -274,9 +321,19 @@ def _verify_gated_leader(pane_id: str, script_path: Path) -> None:
         .get("result", {})
         .get("process_info", {})
     )
-    processes = process_info.get("foreground_processes", []) if isinstance(process_info, dict) else []
-    if not any(str(script_path) in str(process.get("cmdline", "")) for process in processes if isinstance(process, dict)):
-        raise PhaseStartError(f"phase leader pane {pane_id} is not waiting on its startup gate")
+    processes = (
+        process_info.get("foreground_processes", [])
+        if isinstance(process_info, dict)
+        else []
+    )
+    if not any(
+        str(script_path) in str(process.get("cmdline", ""))
+        for process in processes
+        if isinstance(process, dict)
+    ):
+        raise PhaseStartError(
+            f"phase leader pane {pane_id} is not waiting on its startup gate"
+        )
 
 
 def _request_watchdog(order_path: Path, roster_path: str) -> dict[str, object]:
@@ -290,15 +347,30 @@ def _request_watchdog(order_path: Path, roster_path: str) -> dict[str, object]:
     ]
     process = subprocess.run(command, capture_output=True, text=True)
     if process.returncode != 0:
-        detail = process.stderr.strip() or process.stdout.strip() or f"exit {process.returncode}"
+        detail = (
+            process.stderr.strip()
+            or process.stdout.strip()
+            or f"exit {process.returncode}"
+        )
         raise PhaseStartError(f"phase watchdog startup failed: {detail}")
-    marker = next((line for line in process.stdout.splitlines() if line.startswith("REQUEST_ACCEPTED ")), None)
+    marker = next(
+        (
+            line
+            for line in process.stdout.splitlines()
+            if line.startswith("REQUEST_ACCEPTED ")
+        ),
+        None,
+    )
     if marker is None:
-        raise PhaseStartError(f"phase watchdog did not reach healthy startup: {process.stdout.strip()}")
+        raise PhaseStartError(
+            f"phase watchdog did not reach healthy startup: {process.stdout.strip()}"
+        )
     try:
         response = json.loads(marker.removeprefix("REQUEST_ACCEPTED "))
     except json.JSONDecodeError as error:
-        raise PhaseStartError(f"phase watchdog returned malformed startup evidence: {error}") from error
+        raise PhaseStartError(
+            f"phase watchdog returned malformed startup evidence: {error}"
+        ) from error
     if not isinstance(response, dict) or response.get("state") != "running":
         raise PhaseStartError("phase watchdog startup response is not a running object")
     for field in ("manager_pane", "worker_pane", "request_id"):
@@ -307,11 +379,15 @@ def _request_watchdog(order_path: Path, roster_path: str) -> dict[str, object]:
     return response
 
 
-def _leader_health(pane_id: str, cwd: Path, profile: dict[str, str], roster: dict[str, Any]) -> dict[str, object]:
+def _leader_health(
+    pane_id: str, cwd: Path, profile: dict[str, str], roster: dict[str, Any]
+) -> dict[str, object]:
     health = roster.get("health", {}).get(profile["harness"], {})
     return recruiter._wait_for_agent_health(
         pane_id,
-        expected_agent=health.get("expected_agent", recruiter.EXPECTED_HARNESS_AGENT[profile["harness"]]),
+        expected_agent=health.get(
+            "expected_agent", recruiter.EXPECTED_HARNESS_AGENT[profile["harness"]]
+        ),
         expected_process=health.get(
             "expected_process", recruiter.EXPECTED_HARNESS_PROCESS[profile["harness"]]
         ),
@@ -322,7 +398,10 @@ def _leader_health(pane_id: str, cwd: Path, profile: dict[str, str], roster: dic
 
 def _safe_name(slug: str, phase_id: str, pass_number: int) -> str:
     raw = f"phase-leader-{slug}-{phase_id}-p{pass_number}"
-    return "".join(character if character.isalnum() or character in "-_" else "-" for character in raw)[:80]
+    return "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in raw
+    )[:80]
 
 
 def start_phase(
@@ -337,7 +416,9 @@ def start_phase(
 ) -> dict[str, object]:
     """Start one leader/watchdog pair and return only after both are mechanically healthy."""
     if os.environ.get("HERDR_ENV") != "1":
-        raise PhaseStartError("phase startup must run inside a Herdr-managed pane (HERDR_ENV=1)")
+        raise PhaseStartError(
+            "phase startup must run inside a Herdr-managed pane (HERDR_ENV=1)"
+        )
     current_pane = os.environ.get("HERDR_PANE_ID")
     if current_pane is not None and current_pane != tui_pane:
         raise PhaseStartError(
@@ -346,7 +427,9 @@ def start_phase(
     if pass_number <= 0:
         raise PhaseStartError("pass must be a positive integer")
     if not run_root.is_absolute() or not run_root.is_dir():
-        raise PhaseStartError(f"run_root must be an existing absolute directory: {run_root}")
+        raise PhaseStartError(
+            f"run_root must be an existing absolute directory: {run_root}"
+        )
     if not cwd.is_absolute() or not cwd.is_dir():
         raise PhaseStartError(f"cwd must be an existing absolute directory: {cwd}")
     plan_path = run_root / "plan.md"
@@ -374,11 +457,15 @@ def start_phase(
             try:
                 existing = json.loads(receipt_path.read_text())
             except (OSError, json.JSONDecodeError) as error:
-                raise PhaseStartError(f"phase-start receipt {receipt_path} is unreadable: {error}") from error
+                raise PhaseStartError(
+                    f"phase-start receipt {receipt_path} is unreadable: {error}"
+                ) from error
             if isinstance(existing, dict) and existing.get("state") == "ready":
                 leader_pane = existing.get("leader_pane")
                 watchdog = existing.get("watchdog")
-                watchdog_pane = watchdog.get("worker_pane") if isinstance(watchdog, dict) else None
+                watchdog_pane = (
+                    watchdog.get("worker_pane") if isinstance(watchdog, dict) else None
+                )
                 live = _live_panes()
                 if (
                     isinstance(leader_pane, str)
@@ -390,7 +477,9 @@ def start_phase(
                 raise PhaseStartError(
                     "phase-start receipt says ready but its leader/watchdog pair is no longer fully live"
                 )
-            raise PhaseStartError(f"phase start already has non-ready state at {receipt_path}")
+            raise PhaseStartError(
+                f"phase start already has non-ready state at {receipt_path}"
+            )
 
         leaders = _active_leaders(active_path)
         prior = leaders.get(phase_id)
@@ -400,8 +489,14 @@ def start_phase(
             )
         if prior is not None:
             _set_active_leader(active_path, phase_id, None)
-        if watchdog_order_path.exists() or watchdog_result_path.exists() or gate_path.exists():
-            raise PhaseStartError(f"phase-start artifacts already exist under {control_dir.parent}")
+        if (
+            watchdog_order_path.exists()
+            or watchdog_result_path.exists()
+            or gate_path.exists()
+        ):
+            raise PhaseStartError(
+                f"phase-start artifacts already exist under {control_dir.parent}"
+            )
 
         leader_command = (
             f"/herdr-phase --phase {shlex.quote(phase_id)} --plan {shlex.quote(str(plan_path))} "
@@ -417,13 +512,15 @@ def start_phase(
             f"```text\n{leader_command}\n```\n",
         )
         lead_profile = cast(dict[str, str], lead["profile"])
-        launch = _resolve_leader_launch(roster, phase_id, lead, cwd, leader_instructions)
+        launch = _resolve_leader_launch(
+            roster, phase_id, lead, cwd, leader_instructions
+        )
         _write_text_atomic(
             script_path,
             "#!/usr/bin/env bash\nset -euo pipefail\n"
             f"IFS= read -r watchdog_request_id < {shlex.quote(str(gate_path))}\n"
             f"rm -f {shlex.quote(str(gate_path))}\n"
-            f"[[ \"$watchdog_request_id\" == {shlex.quote(request_id)} ]]\n"
+            f'[[ "$watchdog_request_id" == {shlex.quote(request_id)} ]]\n'
             f"export {recruiter.PHASE_START_RECEIPT_ENV}={shlex.quote(str(receipt_path))}\n"
             f"exec bash -lc {shlex.quote(launch)}\n",
             executable=True,
@@ -490,22 +587,44 @@ def start_phase(
                 "order_id": order_id,
                 "phase_id": phase_id,
                 "request_id": request_id,
-                "requester": {"address": tui_pane, "id": f"tui:{tui_pane}", "kind": "herdr-agent"},
+                "requester": {
+                    "address": tui_pane,
+                    "id": f"tui:{tui_pane}",
+                    "kind": "herdr-agent",
+                },
                 "result_path": str(watchdog_result_path),
                 "stage_id": "stage-5-finalization",
                 "timeout_ms": PHASE_WATCHDOG_TIMEOUT_MS,
             }
             _write_json_atomic(watchdog_order_path, watchdog_order)
-            recruiter.load_order(watchdog_order_path)
-            watchdog = _request_watchdog(watchdog_order_path, roster_path)
-            watchdog_receipt = {
-                "manager_address": watchdog.get("manager_address"),
-                "manager_pane": watchdog["manager_pane"],
-                "order_path": str(watchdog_order_path),
-                "request_id": watchdog["request_id"],
-                "worker_address": watchdog.get("worker_address"),
-                "worker_pane": watchdog["worker_pane"],
-            }
+            watchdog_ready = False
+            try:
+                recruiter.load_order(watchdog_order_path)
+                watchdog = _request_watchdog(watchdog_order_path, roster_path)
+            except (
+                PhaseStartError,
+                recruiter.ContractError,
+                recruiter.RecruiterError,
+                OSError,
+                subprocess.SubprocessError,
+            ) as watchdog_error:
+                watchdog_receipt: dict[str, object] = {
+                    "order_path": str(watchdog_order_path),
+                    "reason": str(watchdog_error),
+                    "request_id": request_id,
+                    "state": "unavailable",
+                }
+            else:
+                watchdog_ready = True
+                watchdog_receipt = {
+                    "manager_address": watchdog.get("manager_address"),
+                    "manager_pane": watchdog["manager_pane"],
+                    "order_path": str(watchdog_order_path),
+                    "request_id": watchdog["request_id"],
+                    "state": "ready",
+                    "worker_address": watchdog.get("worker_address"),
+                    "worker_pane": watchdog["worker_pane"],
+                }
             _write_json_atomic(
                 receipt_path,
                 {
@@ -513,7 +632,9 @@ def start_phase(
                     "leader_pane": leader_pane,
                     "pass": pass_number,
                     "phase_id": phase_id,
-                    "state": "watchdog-ready",
+                    "state": "watchdog-ready"
+                    if watchdog_ready
+                    else "watchdog-degraded",
                     "tui_pane": tui_pane,
                     "watchdog": watchdog_receipt,
                     "workspace_id": workspace_id,
@@ -527,7 +648,7 @@ def start_phase(
                 "leader_pane": leader_pane,
                 "pass": pass_number,
                 "phase_id": phase_id,
-                "state": "ready",
+                "state": "ready" if watchdog_ready else "ready-degraded",
                 "tui_pane": tui_pane,
                 "watchdog": watchdog_receipt,
                 "workspace_id": workspace_id,
@@ -570,9 +691,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("run_root", type=Path, help="frozen run tree root")
     parser.add_argument("phase", help="phase id from route.yaml")
     parser.add_argument("pass_number", type=int, help="positive phase pass number")
-    parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="leader/watchdog working directory")
-    parser.add_argument("--tui-pane", default=os.environ.get("HERDR_PANE_ID"), help="owning TUI pane")
-    parser.add_argument("--roster", default=recruiter.default_roster_path(), help="UpAgent roster")
+    parser.add_argument(
+        "--cwd", type=Path, default=Path.cwd(), help="leader/watchdog working directory"
+    )
+    parser.add_argument(
+        "--tui-pane", default=os.environ.get("HERDR_PANE_ID"), help="owning TUI pane"
+    )
+    parser.add_argument(
+        "--roster", default=recruiter.default_roster_path(), help="UpAgent roster"
+    )
     args = parser.parse_args(argv)
     if not args.tui_pane:
         parser.error("--tui-pane is required when HERDR_PANE_ID is not set")
