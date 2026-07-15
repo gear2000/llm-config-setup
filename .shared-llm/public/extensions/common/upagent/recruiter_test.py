@@ -1143,11 +1143,15 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         "approved",
         "Configuration is coherent.",
     )
-    monkeypatch.setattr(
-        recruiter,
-        "_start_herdr_agent",
-        lambda name, launch_order, command: ("manager-pane", "workspace", name),
-    )
+    launch_orders: list[dict] = []
+
+    def start_manager(
+        name: str, launch_order: dict, command: str
+    ) -> tuple[str, str, str]:
+        launch_orders.append(launch_order)
+        return "manager-pane", "cockpit-workspace", name
+
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", start_manager)
     monkeypatch.setattr(
         recruiter, "_wait_for_agent_health", lambda *args, **kwargs: {"healthy": True}
     )
@@ -1160,6 +1164,17 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     assert manager["decision"].decision == "approved"
     assert lease["manager_pane"] == "manager-pane"
     assert lease["manager_address"].startswith("upagent-manager-")
+    assert lease["manager_workspace_id"] == "cockpit-workspace"
+    assert launch_orders[0]["cockpit_pane"] == order["cockpit_pane"]
+
+
+def test_explicit_shared_manager_placement_uses_recruiter_pane(monkeypatch) -> None:
+    order = _order(manager_placement={"mode": "shared"})
+    monkeypatch.setattr(
+        recruiter, "_recruiter_pane_from_state", lambda: "recruiter-pane"
+    )
+
+    assert recruiter._manager_anchor_pane(order) == "recruiter-pane"
 
 
 def test_file_mailbox_requester_receives_correlated_lifecycle_message(

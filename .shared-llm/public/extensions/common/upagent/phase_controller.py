@@ -373,7 +373,13 @@ def _request_watchdog(order_path: Path, roster_path: str) -> dict[str, object]:
         ) from error
     if not isinstance(response, dict) or response.get("state") != "running":
         raise PhaseStartError("phase watchdog startup response is not a running object")
-    for field in ("manager_pane", "worker_pane", "request_id"):
+    for field in (
+        "manager_pane",
+        "manager_workspace_id",
+        "worker_pane",
+        "worker_workspace_id",
+        "request_id",
+    ):
         if not isinstance(response.get(field), str) or not response[field]:
             raise PhaseStartError(f"phase watchdog startup response has no {field}")
     return response
@@ -583,6 +589,10 @@ def start_phase(
                 "effort": watchdog_profile["effort"],
                 "harness": watchdog_profile["harness"],
                 "instructions_path": str(watchdog_instructions),
+                "manager_placement": {
+                    "anchor_pane": leader_pane,
+                    "mode": "requester",
+                },
                 "model": watchdog_profile["model"],
                 "order_id": order_id,
                 "phase_id": phase_id,
@@ -601,6 +611,13 @@ def start_phase(
             try:
                 recruiter.load_order(watchdog_order_path)
                 watchdog = _request_watchdog(watchdog_order_path, roster_path)
+                if (
+                    watchdog["manager_workspace_id"] != workspace_id
+                    or watchdog["worker_workspace_id"] != workspace_id
+                ):
+                    raise PhaseStartError(
+                        "phase watchdog manager/worker did not start in the leader workspace"
+                    )
             except (
                 PhaseStartError,
                 recruiter.ContractError,
@@ -619,11 +636,13 @@ def start_phase(
                 watchdog_receipt = {
                     "manager_address": watchdog.get("manager_address"),
                     "manager_pane": watchdog["manager_pane"],
+                    "manager_workspace_id": watchdog["manager_workspace_id"],
                     "order_path": str(watchdog_order_path),
                     "request_id": watchdog["request_id"],
                     "state": "ready",
                     "worker_address": watchdog.get("worker_address"),
                     "worker_pane": watchdog["worker_pane"],
+                    "worker_workspace_id": watchdog["worker_workspace_id"],
                 }
             _write_json_atomic(
                 receipt_path,

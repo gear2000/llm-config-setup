@@ -1589,6 +1589,73 @@ def _notify_requester(
         )
 
 
+def _manager_anchor_pane(order: dict) -> str:
+    """Resolve where the dedicated manager belongs.
+
+    Managers default to their requester's cockpit so the lifecycle owner is visible beside the
+    TUI/leader and worker it serves. `shared` is an explicit opt-in for peripheral work. A named
+    workspace is resolved to a real pane before launch; `_start_herdr_agent` then atomically starts
+    the manager in that pane's tab.
+    """
+    placement = order.get("manager_placement") or {"mode": "requester"}
+    mode = placement.get("mode")
+    if mode == "requester":
+        return placement.get("anchor_pane") or order["cockpit_pane"]
+    if mode == "shared":
+        recruiter_pane = _recruiter_pane_from_state()
+        if recruiter_pane is None:
+            raise RecruiterError(
+                "shared manager placement requires a live Recruiter pane"
+            )
+        return recruiter_pane
+    if mode != "workspace":
+        raise RecruiterError(f"unsupported manager placement mode: {mode}")
+
+    workspaces = (
+        _herdr_json("workspace", "list").get("result", {}).get("workspaces", [])
+    )
+    workspace_id = placement.get("workspace_id")
+    if workspace_id is None:
+        workspace_label = placement.get("workspace_label")
+        match = next(
+            (
+                workspace
+                for workspace in workspaces
+                if isinstance(workspace, dict)
+                and workspace.get("label") == workspace_label
+            ),
+            None,
+        )
+        workspace_id = match.get("workspace_id") if isinstance(match, dict) else None
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise RecruiterError("manager placement workspace does not exist")
+
+    anchor = placement.get("anchor_pane")
+    if isinstance(anchor, str) and anchor:
+        pane = _herdr_json("pane", "get", anchor).get("result", {}).get("pane", {})
+        if not isinstance(pane, dict) or pane.get("workspace_id") != workspace_id:
+            raise RecruiterError(
+                f"manager anchor pane {anchor} is not in requested workspace {workspace_id}"
+            )
+        return anchor
+    panes = (
+        _herdr_json("pane", "list", "--workspace", workspace_id)
+        .get("result", {})
+        .get("panes", [])
+    )
+    anchor = next(
+        (
+            pane.get("pane_id")
+            for pane in panes
+            if isinstance(pane, dict) and isinstance(pane.get("pane_id"), str)
+        ),
+        None,
+    )
+    if not isinstance(anchor, str):
+        raise RecruiterError(f"manager placement workspace {workspace_id} has no pane")
+    return anchor
+
+
 def _start_account_manager(
     ledger: JobLedger,
     key: str,
@@ -1614,8 +1681,7 @@ def _start_account_manager(
         config.account_manager, brief_path, order["cwd"], decision_path
     )
     name = _safe_agent_name("upagent-manager", request_id, generation)
-    recruiter_pane = _recruiter_pane_from_state()
-    manager_order = {**order, "cockpit_pane": recruiter_pane or order["cockpit_pane"]}
+    manager_order = {**order, "cockpit_pane": _manager_anchor_pane(order)}
     manager_pane, workspace_id, manager_address = _start_herdr_agent(
         name, manager_order, command
     )
@@ -1656,7 +1722,11 @@ def _start_account_manager(
         generation,
         "account-manager-ready",
         getattr(decision, "message"),
-        {"manager_address": manager_address, "manager_pane": manager_pane},
+        {
+            "manager_address": manager_address,
+            "manager_pane": manager_pane,
+            "manager_workspace_id": workspace_id,
+        },
     )
     return {
         "address": manager_address,
@@ -1665,6 +1735,7 @@ def _start_account_manager(
         "generation": generation,
         "health": health,
         "pane": manager_pane,
+        "workspace_id": workspace_id,
     }
 
 
@@ -2386,10 +2457,12 @@ def cmd_request(order_path: str, roster_path: str) -> int:
                 "control_token": state.get("requester_control_token"),
                 "manager_address": state.get("manager_address"),
                 "manager_pane": state.get("manager_pane"),
+                "manager_workspace_id": state.get("manager_workspace_id"),
                 "request_id": lifecycle.request_identity(order),
                 "state": "running",
                 "worker_address": state.get("worker_address"),
                 "worker_pane": state.get("worker_pane"),
+                "worker_workspace_id": state.get("workspace_id"),
             }
             if warning is not None:
                 response["degraded"] = True

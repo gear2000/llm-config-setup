@@ -97,6 +97,8 @@ PYTHON RECRUITER HUB
    managers to watch managers.
 10. No manager failure may leave an unowned worker. No cleanup receipt may claim success until
     the owned pane is verified absent.
+11. A Dedicated Account Manager defaults to the requester's cockpit workspace, beside its worker.
+    Shared-services placement is explicit rather than an invisible default.
 
 ## Lifecycle states
 

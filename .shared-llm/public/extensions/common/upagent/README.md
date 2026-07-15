@@ -10,18 +10,17 @@ for the authority model and use-case tree.
 
 ```
 Herdr session
-├── ws: <slug>                 TUI + phase leader + managed workers/watchdog
+├── ws: <slug>                 TUI + leader + workers/watchdog + their managers/checkers
 └── ws: shared-services        always up, plan-agnostic
     ├── recruiter               deterministic Python Hub
-    ├── account managers        one conversational owner per request
-    ├── one-shot checkers       bounded anomaly interpretation
     └── librarian  (Specialist Hub — sibling module)
 ```
 
 The Recruiter pane is a visible status surface, never a command queue. Requests go directly to
-the durable ledger. Manager/checker panes live in `shared-services`; a worker starts beside the
-`order.cockpit_pane` through one atomic `herdr agent start` call and is closed only by its fenced
-lease owner.
+the durable ledger. A request's manager, worker, and short-lived checkers start beside the
+`order.cockpit_pane` through atomic `herdr agent start` calls, making the whole dedicated lifecycle
+visible in one workspace. `manager_placement.mode: shared` remains an explicit opt-in for callers
+that truly want a peripheral manager. Every pane is closed only by its fenced lease owner.
 
 Phase startup has its own deterministic front door:
 

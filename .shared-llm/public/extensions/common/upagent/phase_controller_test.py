@@ -99,10 +99,12 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
         lambda order, roster: {
             "manager_address": "manager-address",
             "manager_pane": "manager-pane",
+            "manager_workspace_id": "workspace-1",
             "request_id": "sample-run.phase-0.pass-1.phase-watchdog",
             "state": "running",
             "worker_address": "watchdog-address",
             "worker_pane": "watchdog-pane",
+            "worker_workspace_id": "workspace-1",
         },
     )
     monkeypatch.setattr(
@@ -150,6 +152,10 @@ def test_phase_start_releases_leader_only_after_watchdog_is_healthy(
     }
     assert order["agent"] == "phase-watchdog"
     assert order["model"] == "cheap-model"
+    assert order["manager_placement"] == {
+        "anchor_pane": "leader-pane",
+        "mode": "requester",
+    }
     assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
         "phase-0": "leader-pane"
     }
@@ -189,11 +195,13 @@ def test_phase_start_publishes_watchdog_capability_before_releasing_leader(
     assert observed["watchdog"] == {
         "manager_address": "manager-address",
         "manager_pane": "manager-pane",
+        "manager_workspace_id": "workspace-1",
         "order_path": str(run_root / "phases/phase-0/pass-1/watchdog/order.json"),
         "request_id": "sample-run.phase-0.pass-1.phase-watchdog",
         "state": "ready",
         "worker_address": "watchdog-address",
         "worker_pane": "watchdog-pane",
+        "worker_workspace_id": "workspace-1",
     }
 
 
