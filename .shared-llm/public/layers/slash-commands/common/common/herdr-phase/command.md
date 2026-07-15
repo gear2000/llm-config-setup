@@ -1,6 +1,6 @@
 # /herdr-phase
 
-Run one phase as the Herdr-native **phase leader**. This command is sent to a bottom-left cockpit pane by `/herdr-run` (below the full-width tui-agent row), once per phase; the Recruiter's worker pane splits off to its right (bottom-right). The leader runs the phase's stages by placing a work ORDER per stage to the UpAgent Recruiter — never by spawning a native or nested subagent — applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
+Run one phase as the Herdr-native **phase leader**. This command is sent to a cockpit pane by `/herdr-run`, once per phase. The leader runs the phase's stages by placing a work ORDER per stage with the UpAgent Recruiter — never by spawning a native or nested subagent — applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
 
 ## Invocation
 
@@ -37,14 +37,16 @@ The leader runs the phase's stages in order — `stage-1` … `stage-5` for `acc
 
 ```text
 leader:    write pass-<p>/stages/<stage-id>/try-<m>/order.json + instructions.md   (order.cockpit_pane = this leader's pane)
-leader:    just upagent-recruit <order.json path>       # blocking dispatch
-Recruiter: return ORDER_RECEIPT <json> only after result publication + verified pane cleanup
+leader:    just upagent-request <order.json path>       # returns only after verified startup
+Recruiter: return REQUEST_ACCEPTED <json> with manager/worker addresses + control token
+leader:    just upagent-await <order.json path>         # deterministic wait; no LLM polling
+Recruiter: return ORDER_RECEIPT <json>, or REQUESTER_DECISION_REQUIRED at a work cap
 leader:    read + validate pass-<p>/stages/<stage-id>/try-<m>/result.json
 ```
 
-The public result file is the source of truth; the durable receipt is its wake-up record. `just upagent-recruit` submits directly to the filesystem ledger and blocks on the owning job process/receipt, so shell keystrokes cannot interleave and no LLM file-polling watchdog is needed. `ORDER ... DONE` pane text is display-only and MUST NOT drive a verdict.
+The public result file is the source of truth; the durable receipt is its wake-up record. `upagent-request` and `upagent-await` call the filesystem ledger directly, so shell keystrokes cannot interleave and no LLM file-polling watchdog is needed. Save the `control_token` from `REQUEST_ACCEPTED`. If `upagent-await` returns `REQUESTER_DECISION_REQUIRED`, inspect the evidence and use `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`; then call `upagent-await` again after an extension. Only this recorded requester may make that decision. `ORDER ... DONE` pane text is display-only and MUST NOT drive a verdict.
 
-`order.json` carries the contract fields (`order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, public `result_path`, `cockpit_pane`, optional `env`). The Recruiter creates a lease-private result path and a final worker brief that appends the literal private destination and literal order id. The worker writes only that private file. The Recruiter validates it, closes and verifies the owned pane, then publishes the public `result_path` and `receipt.json` atomically under the lease fence. Its lease records runner PID, phase-leader pane, Recruiter pane, worker pane, workspace, token, and expiry so the standing Python supervisor can reconcile an orphan without guessing ownership. The worker's `full_log` points to its harness transcript; it is not the result transport.
+`order.json` carries the contract fields (`order_id`, globally scoped `request_id`, `requester: {id, kind, address}`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, public `result_path`, `cockpit_pane`, optional `env`). Build `request_id` from the run slug, phase, pass, stage, and try; never use a phase-local name. Set the requester address to this leader's exact Herdr agent name or pane. The Recruiter creates a Dedicated Account Manager, validates its startup, creates a lease-private result path, atomically launches the worker, and proves its process/agent/cwd before reporting healthy. The worker writes only the private result. The Recruiter validates it, closes and verifies the owned panes, then publishes the public `result_path` and `receipt.json` atomically under the lease fence. Its lease records requester, manager, runner, worker, workspace, generation, control token, and expiry so the standing Python supervisor can reconcile an orphan without guessing ownership. The worker's `full_log` points to its harness transcript; it is not the result transport.
 
 The Recruiter-generated final worker brief includes a copy-pasteable result template and its destination. The Recruiter MUST replace the two values below with the literal `order_id` and literal absolute `result_path` (the lease-private path); angle-bracket text is a protocol-writing marker, never text that may appear in a generated instruction. The worker MUST write exactly one result at that path and MUST copy the stated `order_id` exactly. It MUST NOT invent, generate, replace, or otherwise alter the order id.
 
@@ -123,3 +125,4 @@ Only write `passed` when every required stage passed and Stage 5 cleanup, green 
 5. `result.json` / `phase-result.json` are the source of truth; pane scrollback is evidence only.
 6. Forward-only: replay forward on `revisit`; never revert merged history from this phase — escalate a true revert to the TUI.
 7. Do not close the worker pane until its evidence is persisted; do not reset shared/main branches without checking for unrelated changes and asking the human.
+8. The Dedicated Account Manager interprets misconfiguration and anomalies, but only the Hub executes lifecycle actions and only this requester authorizes extension/cancellation before the hard-deadline grace expires.

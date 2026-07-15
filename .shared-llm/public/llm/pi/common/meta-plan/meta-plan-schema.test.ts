@@ -284,16 +284,33 @@ async function main() {
 			),
 	);
 
-	// --- optional finalization_defaults: advisor_profile + budgets ---
+	// --- optional finalization_defaults: advisor/watchdog profiles + budgets ---
 	const withAdvisorAndBudgets = validRoute.replace(
 		"finalization_defaults:\n",
-		"finalization_defaults:\n  advisor_profile: claude-low\n  phase_pass_budget: 5\n  stage_try_budget: 2\n",
+		"finalization_defaults:\n  advisor_profile: claude-low\n  watchdog_profile: claude-low\n  phase_pass_budget: 5\n  stage_try_budget: 2\n",
 	);
 	const advisorOk = validateRunnable(canonicalPlan, withAdvisorAndBudgets);
 	check(
-		"optional advisor_profile + budgets parse and pass",
+		"optional advisor/watchdog profiles + budgets parse and pass",
 		advisorOk.ok,
 		advisorOk.issues.map((i) => i.message).join("; "),
+	);
+
+	const watchdogUnknown = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"finalization_defaults:\n",
+			"finalization_defaults:\n  watchdog_profile: nonexistent\n",
+		),
+	);
+	check(
+		"watchdog_profile referencing an unknown profile fails",
+		!watchdogUnknown.ok &&
+			watchdogUnknown.issues.some(
+				(i) =>
+					i.message.includes("watchdog_profile") &&
+					i.message.includes("unknown profile"),
+			),
 	);
 
 	const advisorUnknown = validateRunnable(

@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
-"""specialist-hub — the Librarian: an always-up pane that answers repo-knowledge
-questions by spawning a transient specialist per consult.
+"""specialist-hub — the Librarian: deterministic routing into managed UpAgent specialists.
 
 Herdr-native. There is no tmux and no Go message hub anywhere in this engine — the
 Librarian pane lives in a `shared-services` Herdr workspace and every action goes over
 the `herdr` CLI (which talks to the running Herdr over its unix socket).
 
 Reads agents.yaml (next to this file, or $SPECIALIST_HUB_CONFIG): each entry names a
-specialist, points at its definition file, and states the FULL command that runs it. No
-discovery magic — the yaml IS the roster. The engine is public (kit-synced); the FILLED
+specialist, points at its definition, and declares an UpAgent harness/model/agent. Executable
+launch commands remain centralized in the Recruiter roster. The engine is public; the FILLED
 roster is a destination's own `this_repo` config (template: agents.yaml.example).
 
 Topology:
 
     ws: shared-services            always up, plan-agnostic
-    └── librarian (root pane)      owns the routing map; runs `consult <path>` per question
-        └── <specialist>           TRANSIENT pane, split per consult, closed after it answers
+    ├── librarian                  owns the routing map only
+    └── recruiter                  owns manager/specialist lifecycle and cleanup
 
 Consult protocol (files + signal, mirroring the UpAgent order/result pattern):
 
     caller:    write  consults/<id>.json   {consult_id, specialist, question, answer_path}
-    caller:    herdr pane run <librarian> "consult <consults/<id>.json>"
-    librarian: read+route the consult -> herdr pane split (transient specialist in shared-services)
-    librarian: herdr pane run <specialist> "<cmd, briefed with the question + answer contract>"
-    librarian: herdr wait agent-status <specialist> --status done, or polls answer_path for
-               a `codex exec` specialist because Codex may never report agent-status=done
+    caller:    invoke `specialist-hub consult <consults/<id>.json>` directly
+    librarian: validate+route -> write an ordinary UpAgent order and cited-answer brief
+    recruiter: create manager -> atomically start/verify specialist -> monitor result/deadline
     specialist: writes answer.json {consult_id, answer, citations:[file:line, ...]}
-    librarian: validate answer.json -> herdr pane close <specialist> -> print "CONSULT <id> DONE"
-    caller:    herdr wait output <librarian> --match "CONSULT <id> DONE" --timeout <ms> -> read answer.json
+    librarian: receive durable receipt -> validate answer.json -> print "CONSULT <id> DONE"
 
-ALWAYS bound the caller's wait with --timeout: Herdr's `wait output` blocks FOREVER without it.
 The Librarian ALWAYS emits `CONSULT <id> DONE` once the consult_id is known — even on its error
 paths, where it first writes a FAILURE answer.json ({consult_id, error}) — so a bounded wait
 resolves promptly. On timeout (only if the id was unrecoverable and no sentinel was emitted) OR on
@@ -40,11 +35,11 @@ Commands:
   down                close the Librarian pane, remove runtime state
   status              workspace/pane health + roster size
   reindex             rewrite index.json from agents.yaml
-  consult <path>      per-question handler run IN the Librarian pane (spawns the specialist)
+  consult <path>      route and await one managed specialist consult
 
 Runtime files (one directory, default /tmp/.herdr-specialist):
   state.json    {workspace, librarian_pane, repo_root} written by `up`
-  index.json    roster: name -> {description, location, cmd}
+  index.json    roster: name -> {description, location, harness, model, agent, effort}
   consults/     where callers drop consult.json (and the Librarian writes prompt briefs)
 
 Roster paths are portable: when `repo_root` is absent, the hub walks upward from the discovered
@@ -60,15 +55,14 @@ sibling justfile so `just specialist-hub <cmd>` runs this file.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import subprocess
 import sys
-import time
 
 import yaml
 
@@ -84,12 +78,9 @@ WORKSPACE_LABEL = "shared-services"
 # other's panes — regardless of which engine brought the workspace up first.
 LIBRARIAN_PANE_LABEL = "librarian"
 DEFAULT_RUNTIME = "/tmp/.herdr-specialist"
-# How long the Librarian waits for a transient specialist to finish answering (ms).
+# How long the Librarian grants a managed specialist worker (ms).
 CONSULT_TIMEOUT_MS = 600_000
-ANSWER_POLL_INTERVAL_SECONDS = 0.05
-# Specialist roster entries have only a command string, not a structured harness field. Codex
-# does not reliably report agent-status=done, so its private answer_path is the completion signal.
-CODEX_CMD_MARKER = "codex exec"
+UPAGENT_RECRUITER = HERE.parent / "upagent" / "recruiter.py"
 
 
 # --- config -------------------------------------------------------------------
@@ -150,17 +141,15 @@ def load_config() -> dict:
     if not isinstance(agents, list) or not agents:
         raise ConfigError(f"{path} must have a non-empty 'agents:' list")
     for a in agents:
-        for key in ("name", "cmd"):
-            if not a.get(key):
-                raise ConfigError(f"every agent needs '{key}': {a}")
-        # The cmd must state how the specialist receives its briefing prompt, so the
-        # Librarian can inject the question. Fail loud now rather than spawning a
-        # clueless specialist that never learns what it was asked.
-        if "{prompt}" not in a["cmd"] and "{prompt_file}" not in a["cmd"]:
-            raise ConfigError(
-                f"agent {a['name']!r} cmd must contain '{{prompt}}' or '{{prompt_file}}' "
-                f"so the Librarian can pass the question: {a['cmd']!r}"
-            )
+        if not isinstance(a, dict):
+            raise ConfigError(f"every agent entry must be an object: {a!r}")
+        for key in ("name", "harness", "model", "agent"):
+            if not isinstance(a.get(key), str) or not a[key]:
+                raise ConfigError(f"every agent needs a non-empty '{key}': {a}")
+        if a["harness"] not in ("claude", "codex", "pi", "cursor"):
+            raise ConfigError(f"agent {a['name']!r} has unsupported harness {a['harness']!r}")
+        if "effort" in a and (not isinstance(a["effort"], str) or not a["effort"]):
+            raise ConfigError(f"agent {a['name']!r} effort must be a non-empty string")
 
     config_path = path.resolve()
     repo_root = cfg.get("repo_root")
@@ -224,7 +213,10 @@ def write_index(cfg: dict) -> dict:
         a["name"]: {
             "description": _description(cfg, a),
             "location": a.get("location", ""),
-            "cmd": a["cmd"],
+            "agent": a["agent"],
+            "effort": a.get("effort", "medium"),
+            "harness": a["harness"],
+            "model": a["model"],
         }
         for a in cfg["agents"]
     }
@@ -352,19 +344,52 @@ def build_prompt(consult: dict, location: str, cwd: str) -> str:
     )
 
 
-def render_launch(cmd: str, prompt: str, prompt_file: Path) -> str:
-    """Substitute the briefing into the roster cmd.
+def _specialist_order(
+    cfg: dict, consult: dict, entry: dict, prompt_file: Path, librarian: str, cwd: str
+) -> tuple[Path, Path]:
+    """Build an ordinary UpAgent order; the Librarian remains routing, never lifecycle."""
+    digest = hashlib.sha256(consult["consult_id"].encode()).hexdigest()[:24]
+    order_path = paths(cfg)["consults"] / f"{consult['consult_id']}.order.json"
+    result_path = paths(cfg)["consults"] / f"{consult['consult_id']}.upagent-result.json"
+    order = {
+        "order_id": f"specialist-consult-{digest}",
+        "request_id": f"specialist-{digest}",
+        "requester": {
+            "id": "specialist-librarian",
+            "kind": "file-mailbox",
+            "address": str(cfg["runtime_dir"] / "librarian-inbox"),
+        },
+        "phase_id": "specialist-consult",
+        "stage_id": "stage-5-finalization",
+        "harness": entry["harness"],
+        "model": entry["model"],
+        "agent": entry["agent"],
+        "effort": entry.get("effort", "medium"),
+        "cwd": cwd,
+        "instructions_path": str(prompt_file),
+        "result_path": str(result_path),
+        "cockpit_pane": librarian,
+        "timeout_ms": CONSULT_TIMEOUT_MS,
+    }
+    result_path.unlink(missing_ok=True)
+    document = json.dumps(order, indent=2, sort_keys=True) + "\n"
+    temporary = order_path.with_name(f".{order_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(document)
+    os.replace(temporary, order_path)
+    return order_path, result_path
 
-    ``{prompt_file}`` expands to the shell-quoted path, never the file contents. A CLI that reads
-    its prompt from stdin must say so in its roster command, for example
-    ``codex exec ... - < {prompt_file}``. ``{prompt}`` expands to shell-quoted inline text.
-    ``load_config`` guarantees that every command contains at least one placeholder.
-    """
-    if "{prompt_file}" in cmd:
-        cmd = cmd.replace("{prompt_file}", shlex.quote(str(prompt_file)))
-    if "{prompt}" in cmd:
-        cmd = cmd.replace("{prompt}", shlex.quote(prompt))
-    return cmd
+
+def _dispatch_specialist(order_path: Path, cwd: str) -> None:
+    if not UPAGENT_RECRUITER.is_file():
+        raise ConsultFailure(f"UpAgent Recruiter is missing: {UPAGENT_RECRUITER}")
+    subprocess.run(
+        [sys.executable, str(UPAGENT_RECRUITER), "dispatch", str(order_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=CONSULT_TIMEOUT_MS / 1000 + 600,
+    )
 
 
 # --- commands -----------------------------------------------------------------
@@ -378,8 +403,6 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
     # Reuse the shared workspace + my own librarian pane if they already exist (idempotent), and
     # NEVER create a duplicate shared-services workspace or claim the Recruiter's pane.
     workspace, librarian, reused = _ensure_role_pane(LIBRARIAN_PANE_LABEL)
-    _arm_librarian(cfg, librarian)
-
     state = {
         "workspace": workspace,
         "librarian_pane": librarian,
@@ -403,20 +426,6 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
         check=False,
     )
     print(f"up: {'reused' if reused else 'created'} librarian pane {librarian} in workspace {workspace}")
-
-
-def _arm_librarian(cfg: dict, librarian: str) -> None:
-    """Define a `consult` shell function in the Librarian pane so a caller's
-    `herdr pane run <librarian> "consult <path>"` dispatches back into this engine.
-
-    The resolved roster path is baked into the function as $SPECIALIST_HUB_CONFIG so the
-    consult handler loads the SAME roster `up` did — even when the caller's environment does
-    not set it (otherwise consult would fall back to HERE/agents.yaml, a different roster)."""
-    hub = shlex.quote(str(Path(__file__).resolve()))
-    cfg_path = shlex.quote(str(cfg["config_path"]))
-    py = shlex.quote(os.environ.get("PYTHON_BIN", "python3"))
-    fn = f'consult() {{ SPECIALIST_HUB_CONFIG={cfg_path} {py} {hub} consult "$1"; }}'
-    _herdr("pane", "run", librarian, fn)
 
 
 def cmd_down(cfg: dict, args: argparse.Namespace) -> None:
@@ -453,16 +462,6 @@ class ConsultFailure(RuntimeError):
     emitted — the caller's bounded wait must never be left to hang."""
 
 
-def _wait_for_answer_path(answer_path: Path, timeout_ms: int) -> None:
-    """Wait for a Codex specialist's private answer file when agent-status never reaches done."""
-    deadline = time.monotonic() + timeout_ms / 1000
-    while time.monotonic() < deadline:
-        if answer_path.is_file():
-            return
-        time.sleep(ANSWER_POLL_INTERVAL_SECONDS)
-    raise ConsultFailure(f"timed out waiting for {answer_path} to appear")
-
-
 def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
     """Best-effort (consult_id, answer_path) from a malformed consult.json, so the Librarian can
     still leave a failure answer + emit DONE instead of stranding the caller. Returns None if the
@@ -492,13 +491,12 @@ def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> Non
 
 
 def cmd_consult(args: argparse.Namespace) -> None:
-    """Per-question handler — runs IN the Librarian pane. Route the consult to a specialist, spawn
-    it as a transient pane, wait for its answer, validate it, close the pane, signal done.
+    """Route one question into an ordinary managed UpAgent order and validate its answer.
 
-    Guarantee (mirrors the Recruiter's always-emit-ORDER-DONE): whenever the consult_id is known,
+    Guarantee: whenever the consult_id is known,
     this ALWAYS writes an answer.json (real or failure) and emits `CONSULT <id> DONE`, even on the
-    error paths — so the caller's bounded `wait output --timeout` resolves promptly rather than
-    only via timeout. Failures are still logged to stderr (fail-loud, nothing swallowed).
+    error paths — so a direct caller receives a terminal signal instead of a silent return.
+    Failures are still logged to stderr (fail-loud, nothing swallowed).
 
     This handler loads its OWN config (rather than taking a pre-loaded cfg) so that a bad roster
     fails INSIDE the recoverable block — a recoverable consult must be answerable even when the
@@ -520,7 +518,6 @@ def cmd_consult(args: argparse.Namespace) -> None:
         return
 
     consult_id = consult["consult_id"]
-    specialist_pane: str | None = None
     try:
         # Everything that can fail lives INSIDE this block, now that consult_id is known — INCLUDING
         # config load — so a bad roster / unknown specialist / herdr fault still writes a failure
@@ -542,36 +539,18 @@ def cmd_consult(args: argparse.Namespace) -> None:
 
         prompt = build_prompt(consult, location, cwd)
         prompt_file = paths(cfg)["consults"] / f"{consult_id}.prompt.txt"
-        prompt_file.write_text(prompt + "\n")
+        prompt_file.write_text(
+            prompt
+            + "\nAfter the cited answer is durable, satisfy the Recruiter delivery contract appended "
+            "to this brief and exit.\n"
+        )
 
         # Remove any stale answer.json from a prior consult at this path BEFORE launching, so the
         # only answer we can read back is the fresh one this specialist writes.
         Path(consult["answer_path"]).unlink(missing_ok=True)
 
-        # Spawn the transient specialist as a pane split off the Librarian, running in the repo.
-        split = _herdr("pane", "split", librarian, "--direction", "down", "--cwd", cwd, "--no-focus")
-        try:
-            pane_id = json.loads(split.stdout)["result"]["pane"]["pane_id"]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            raise ConsultFailure(f"herdr pane split returned unexpected output: {e}") from e
-        if not isinstance(pane_id, str) or not pane_id:
-            raise ConsultFailure(f"herdr pane split returned invalid pane_id: {pane_id!r}")
-        specialist_pane = pane_id
-
-        launch = render_launch(entry["cmd"], prompt, prompt_file)
-        _herdr("pane", "run", pane_id, launch)
-        if CODEX_CMD_MARKER in entry["cmd"]:
-            _wait_for_answer_path(Path(consult["answer_path"]), CONSULT_TIMEOUT_MS)
-        else:
-            _herdr(
-                "wait",
-                "agent-status",
-                pane_id,
-                "--status",
-                "done",
-                "--timeout",
-                str(CONSULT_TIMEOUT_MS),
-            )
+        order_path, _ = _specialist_order(cfg, consult, entry, prompt_file, librarian, cwd)
+        _dispatch_specialist(order_path, cwd)
         # The specialist must have written a valid answer.json echoing this consult_id.
         cc.load_answer(consult["answer_path"], expected_consult_id=consult_id)
     except (
@@ -580,19 +559,12 @@ def cmd_consult(args: argparse.Namespace) -> None:
         cc.ConsultError,
         OSError,
         subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
         KeyError,
         TypeError,
     ) as e:
         _write_failure_answer(consult["answer_path"], consult_id, str(e))
         sys.stderr.write(f"specialist-hub: consult {consult_id} failed: {e}\n")
-    finally:
-        if specialist_pane is not None:
-            try:
-                _herdr("pane", "close", specialist_pane, check=False)
-            except OSError as e:
-                # A fork/exec fault closing a pane must not skip the CONSULT DONE emit below.
-                sys.stderr.write(f"specialist-hub: could not close pane {specialist_pane}: {e}\n")
-
     # The go/done signal the caller waits on; the answer.json (real or failure) is the durable
     # record. Emitted on EVERY path above so a bounded caller wait always resolves.
     print(f"CONSULT {consult_id} DONE", flush=True)

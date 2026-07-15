@@ -28,7 +28,10 @@ def _write_roster(path: Path, runtime_dir: Path, repo_root: Path | None = None) 
         + "agents:\n"
         + "  - name: docs\n"
         + "    location: .claude/agents/docs.md\n"
-        + "    cmd: 'claude -p {prompt} --agent docs'\n"
+        + "    harness: claude\n"
+        + "    model: haiku\n"
+        + "    agent: docs\n"
+        + "    effort: low\n"
     )
 
 
@@ -94,12 +97,12 @@ def test_relative_specialist_location_uses_repo_root(
     assert hub._description(cfg, cfg["agents"][0]) == "Repository docs specialist."
 
 
-def _run_codex_consult(
+def _run_managed_consult(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     answer_body: dict | None,
-) -> tuple[dict, list[tuple[str, ...]], str, Path]:
-    consult_id = "consult-codex-1"
+) -> tuple[dict, dict, str, Path]:
+    consult_id = "consult-managed-1"
     answer_path = tmp_path / "private/answer.json"
     consult_path = tmp_path / "consult.json"
     consult_path.write_text(
@@ -116,25 +119,8 @@ def _run_codex_consult(
     runtime_dir = tmp_path / "runtime with spaces"
     (runtime_dir / "consults").mkdir(parents=True)
     prompt_file = runtime_dir / "consults" / f"{consult_id}.prompt.txt"
-    captured_prompt_path = tmp_path / "captured-codex-stdin.txt"
-    fake_bin = tmp_path / "fake-bin"
-    fake_bin.mkdir()
-    fake_codex = fake_bin / "codex"
-    fake_codex.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os\n"
-        "from pathlib import Path\n"
-        "import sys\n"
-        "Path(os.environ['FAKE_CODEX_PROMPT_CAPTURE']).write_text(sys.stdin.read())\n"
-        "answer = os.environ.get('FAKE_CODEX_ANSWER')\n"
-        "if answer:\n"
-        "    path = Path(os.environ['FAKE_CODEX_ANSWER_PATH'])\n"
-        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
-        "    path.write_text(answer)\n"
-    )
-    fake_codex.chmod(0o755)
     cfg = {"runtime_dir": runtime_dir, "repo_root": tmp_path}
-    calls: list[tuple[str, ...]] = []
+    orders: list[dict] = []
 
     monkeypatch.setattr(hub, "_require_herdr", lambda: None)
     monkeypatch.setattr(hub, "load_config", lambda: cfg)
@@ -144,10 +130,10 @@ def _run_codex_consult(
         lambda _cfg: {
             "python": {
                 "location": "",
-                "cmd": (
-                    "codex exec --dangerously-bypass-approvals-and-sandbox "
-                    "--skip-git-repo-check - < {prompt_file}"
-                ),
+                "harness": "codex",
+                "model": "configured-codex-model",
+                "agent": "python",
+                "effort": "medium",
             }
         },
     )
@@ -156,95 +142,66 @@ def _run_codex_consult(
         "_read_state",
         lambda _cfg: {"librarian_pane": "librarian-pane", "repo_root": str(tmp_path)},
     )
-    monkeypatch.setattr(hub, "CONSULT_TIMEOUT_MS", 2)
-    monkeypatch.setattr(hub, "ANSWER_POLL_INTERVAL_SECONDS", 0.0001)
+    def fake_dispatch(order_path: Path, cwd: str) -> None:
+        assert cwd == str(tmp_path)
+        orders.append(json.loads(order_path.read_text()))
+        if answer_body is None:
+            raise hub.subprocess.TimeoutExpired(["recruiter", "dispatch"], 1)
+        answer_path.parent.mkdir(parents=True, exist_ok=True)
+        answer_path.write_text(json.dumps(answer_body))
 
-    def fake_herdr(*args: str, check: bool = True) -> object:
-        del check
-        calls.append(args)
-        if args[:2] == ("pane", "split"):
-            return hub.subprocess.CompletedProcess(
-                args,
-                0,
-                json.dumps({"result": {"pane": {"pane_id": "codex-specialist-pane"}}}),
-                "",
-            )
-        if args[:2] == ("pane", "run"):
-            env = dict(hub.os.environ)
-            env["PATH"] = f"{fake_bin}:{env['PATH']}"
-            env["FAKE_CODEX_PROMPT_CAPTURE"] = str(captured_prompt_path)
-            env["FAKE_CODEX_ANSWER_PATH"] = str(answer_path)
-            if answer_body is not None:
-                env["FAKE_CODEX_ANSWER"] = json.dumps(answer_body)
-            return hub.subprocess.run(
-                args[3], shell=True, check=True, capture_output=True, text=True, env=env
-            )
-        if args[:2] == ("pane", "close"):
-            return hub.subprocess.CompletedProcess(args, 0, "", "")
-        raise AssertionError(f"unexpected Herdr call: {args}")
-
-    monkeypatch.setattr(hub, "_herdr", fake_herdr)
+    monkeypatch.setattr(hub, "_dispatch_specialist", fake_dispatch)
     hub.cmd_consult(hub.argparse.Namespace(consult_path=str(consult_path)))
     return (
         json.loads(answer_path.read_text()),
-        calls,
-        captured_prompt_path.read_text(),
+        orders[0],
+        prompt_file.read_text(),
         prompt_file,
     )
 
 
-def test_codex_consult_polls_valid_private_answer_and_closes_pane(
+def test_consult_routes_specialist_through_an_upagent_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     valid = {
-        "consult_id": "consult-codex-1",
+        "consult_id": "consult-managed-1",
         "answer": "Use the strict contract.",
         "citations": ["module.py:10"],
     }
 
-    answer, calls, captured_prompt, prompt_file = _run_codex_consult(
+    answer, order, prompt, prompt_file = _run_managed_consult(
         tmp_path, monkeypatch, valid
     )
 
     assert answer == valid
-    launch = next(call[3] for call in calls if call[:2] == ("pane", "run"))
-    assert launch.endswith(f"- < {hub.shlex.quote(str(prompt_file))}")
-    assert captured_prompt == prompt_file.read_text()
-    assert captured_prompt.startswith("You are the 'python' specialist answering ONE consult.")
-    assert str(prompt_file) not in captured_prompt
-    assert not any(call[:2] == ("wait", "agent-status") for call in calls)
-    assert [call for call in calls if call[:2] == ("pane", "close")] == [
-        ("pane", "close", "codex-specialist-pane")
-    ]
-    assert capsys.readouterr().out == "CONSULT consult-codex-1 DONE\n"
+    assert order["harness"] == "codex"
+    assert order["agent"] == "python"
+    assert order["requester"]["id"] == "specialist-librarian"
+    assert order["instructions_path"] == str(prompt_file)
+    assert prompt.startswith("You are the 'python' specialist answering ONE consult.")
+    assert capsys.readouterr().out == "CONSULT consult-managed-1 DONE\n"
 
 
-def test_codex_consult_rejects_malformed_private_answer_and_closes_pane(
+def test_managed_consult_rejects_malformed_private_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    malformed = {"consult_id": "consult-codex-1", "answer": "missing citations"}
+    malformed = {"consult_id": "consult-managed-1", "answer": "missing citations"}
 
-    answer, calls, _captured_prompt, _prompt_file = _run_codex_consult(
+    answer, _order, _prompt, _prompt_file = _run_managed_consult(
         tmp_path, monkeypatch, malformed
     )
 
     assert "citations" in answer["error"]
-    assert [call for call in calls if call[:2] == ("pane", "close")] == [
-        ("pane", "close", "codex-specialist-pane")
-    ]
 
 
-def test_codex_consult_timeout_writes_failure_answer_and_closes_pane(
+def test_managed_consult_timeout_writes_failure_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    answer, calls, _captured_prompt, _prompt_file = _run_codex_consult(
+    answer, _order, _prompt, _prompt_file = _run_managed_consult(
         tmp_path, monkeypatch, None
     )
 
-    assert "timed out waiting" in answer["error"]
-    assert [call for call in calls if call[:2] == ("pane", "close")] == [
-        ("pane", "close", "codex-specialist-pane")
-    ]
+    assert "timed out" in answer["error"]
 
 
 def test_runtime_dir_command_uses_roster_configuration(

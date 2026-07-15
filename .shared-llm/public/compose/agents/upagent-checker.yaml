@@ -1,0 +1,8 @@
+type: agent
+name: upagent-checker
+model: haiku
+color: yellow
+description: .shared-llm/public/layers/agents/common/upagent-checker.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/upagent-checker.md
+output: .claude/agents/upagent-checker.md

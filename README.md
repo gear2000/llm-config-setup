@@ -222,13 +222,13 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update a skill, agent definition, CLAUDE.md rule, or any shared-llm layer. Runs the full workflow:… |
 
-### Generic agents (19)
+### Generic agents (22)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agents/`. Adopt them as-is — they contain no project-specific references.
 
 | Name | Description |
 | --- | --- |
-| `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a phase-driven plan run. NOT a watchdog and NOT a live… |
+| `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a Herdr phase run. NOT a watchdog and NOT a live… |
 | `architecture` | Use when designing new modules, defining package boundaries, making architectural decisions, or… |
 | `backend` | Use when writing or modifying backend services — serverless functions, API routes, or worker… |
 | `ci-pipeline` | Use when creating or modifying CI pipeline configurations. Writes configs, validates syntax, and… |
@@ -241,12 +241,15 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `frontend` | Use when building or modifying the frontend — pages, components, auth flows, or data fetching. |
 | `monorepo-pkgs` | Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
-| `phase-evaluator` | Optional second-opinion judge for per-phase verdicts. Spawn only when the team leader wants an… |
-| `plan-watchdog` | Combined plan governance and active adherence enforcement agent. Patrols team members on a tight… |
+| `phase-evaluator` | Optional independent evaluator for one Herdr phase. The phase leader resolves its route profile and… |
+| `phase-watchdog` | Advisory phase observer managed through UpAgent that correlates phase-result, phase-leader, and… |
+| `plan-watchdog` | Optional Herdr phase plan-conformance advisor. The phase leader resolves the route and sends one… |
 | `playwright-cli` | Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend.… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
-| `team-pulse` | Tiny single-purpose heartbeat agent for teams. On a fixed interval, pings the team leader with a… |
+| `team-pulse` | Narrow mechanical result watcher for a Herdr run. The TUI agent and phase leader own orchestration;… |
+| `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
+| `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 
 ### Slash-command skills (19)
 

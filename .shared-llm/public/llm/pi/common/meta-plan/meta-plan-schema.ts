@@ -412,8 +412,8 @@ export function validateRoute(
 		}
 	}
 
-	// Optional escalation config. advisor_profile (absent ⇒ budget→human) must reference a
-	// known profile when set. Budgets (absent ⇒ engine default) must be positive integers.
+	// Optional lifecycle/escalation profiles must reference known profiles when set. Budgets
+	// (absent ⇒ engine default) must be positive integers.
 	const advisorProfile = valueIn(
 		finalizationDefaultsBlock,
 		2,
@@ -424,6 +424,20 @@ export function validateRoute(
 			issues.push(
 				issue(
 					`finalization_defaults.advisor_profile references unknown profile ${advisorProfile}`,
+				),
+			);
+		}
+	}
+	const watchdogProfile = valueIn(
+		finalizationDefaultsBlock,
+		2,
+		"watchdog_profile",
+	);
+	if (watchdogProfile !== undefined && !hasTodo(watchdogProfile)) {
+		if (!profiles.includes(watchdogProfile)) {
+			issues.push(
+				issue(
+					`finalization_defaults.watchdog_profile references unknown profile ${watchdogProfile}`,
 				),
 			);
 		}

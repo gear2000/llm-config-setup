@@ -6,11 +6,10 @@
 # proprietary lives in the kit; your real specialist names/definitions stay in your repo.
 #
 # The Librarian is one always-up pane in a `shared-services` Herdr workspace. It reads this
-# roster to route a consult to the right specialist, which it spawns as a TRANSIENT pane,
-# briefs with the question, and closes once the specialist writes its answer. No discovery
-# magic: this file IS the roster. Each entry gives the specialist a name, points at its
-# definition file, and states the FULL command that runs it — so specialists can mix
-# harnesses (Pi, Claude Code, anything that runs in a Herdr pane).
+# roster to route a consult to the right specialist. The Librarian writes an ordinary UpAgent
+# order; the Recruiter gives it a Dedicated Account Manager, starts/verifies it, and owns cleanup.
+# No discovery magic: this file IS the routing roster. Each entry gives the specialist a name,
+# definition, and explicit harness-native worker configuration.
 #
 #   just specialist-hub up          # create/attach shared-services + the Librarian pane
 #   just specialist-hub status
@@ -27,34 +26,38 @@ runtime_dir: /tmp/.herdr-specialist
 # this repository root, never from the nested roster directory.
 # repo_root: /path/to/your/repo
 
-# IMPORTANT: every `cmd` MUST contain either `{prompt_file}` or `{prompt}` so the Librarian
-# can inject the question + the answer.json contract:
-#   {prompt_file} — substituted with a path to the briefing (shell-safe for any harness).
-#   {prompt}      — substituted with the shell-quoted briefing text inline.
-# The specialist must write STRICT JSON to the answer_path named in the consult, with keys
-# `consult_id`, `answer`, and a non-empty `citations` list of `file:line` references.
+# `harness`, `model`, `agent`, and optional `effort` become a normal UpAgent order. The UpAgent
+# roster, not this file, owns executable launch templates. The specialist writes STRICT JSON to
+# the answer_path named in the consult and then the normal UpAgent result from its final brief.
 
 agents:
   - name: docs
     location: .claude/agents/docs.md        # relative = resolved from repo_root
     description: "Answers documentation / markdown / site-structure questions."
-    cmd: "claude -p {prompt} --agent docs"
+    harness: claude
+    model: haiku
+    agent: docs
+    effort: low
 
   - name: python
     location: .claude/agents/python.md
-    cmd: "pi --agent python --prompt-file {prompt_file}"
+    harness: pi
+    model: configured-provider/configured-model
+    agent: python
 
   # description is normally read from the definition file's frontmatter; set it here to override.
   - name: golang
     location: .claude/agents/golang.md
     description: "Answers Go idiom, package-layout, and concurrency questions."
-    cmd: "pi --agent golang --prompt-file {prompt_file}"
+    harness: pi
+    model: configured-provider/configured-model
+    agent: golang
 
-  # Codex has no --agent flag. `{prompt_file}` is a shell-quoted PATH, not its contents, so pass
-  # `-` as Codex's prompt argument and redirect stdin from the file. The Librarian polls this
-  # consult's private answer_path because Codex may not report agent-status=done, then applies the
-  # same strict answer validation and pane cleanup.
+  # Codex has no --agent flag; the Recruiter puts the persona and consult in instructions_path.
   - name: reviewer
     location: .claude/agents/reviewer.md
     description: "Provides an independent review with cited repository evidence."
-    cmd: "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check - < {prompt_file}"
+    harness: codex
+    model: configured-codex-model
+    agent: reviewer
+    effort: medium

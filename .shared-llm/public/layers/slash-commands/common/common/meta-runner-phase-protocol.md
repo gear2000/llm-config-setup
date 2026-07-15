@@ -66,6 +66,7 @@ finalization_defaults:
     - source: build, deploy, and runner logs
       fail_patterns: ERROR,FATAL,Traceback,uncaught
   advisor_profile: claude-low   # OPTIONAL. absent ⇒ escalation goes budget → human
+  watchdog_profile: claude-low  # OPTIONAL. absent ⇒ each phase's lead profile
   phase_pass_budget: 3          # OPTIONAL. phase re-runs before escalate (default 3)
   stage_try_budget: 3           # OPTIONAL. stage retries before escalate (default 3)
 
@@ -149,26 +150,30 @@ Every run writes a filesystem tree that is the source of truth for what happened
 
 The phase leader runs each stage by placing a **work order** to the always-up UpAgent Recruiter, which hires exactly one fresh worker for that order and releases it when the order is done. The leader never spawns a native subagent, team, or nested harness session to do stage work.
 
-The order/result contract (the exact JSON fields the leader and worker exchange) is fixed by the UpAgent `contracts.py` module. The leader writes `order.json` (required: `order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`; optional `env`), and the worker writes `result.json` (required: `order_id` echoing the order, `verdict` — one of `passed` / `failed` / `blocked`, `full_log` — the pointer to the worker's own harness transcript; optional `revisit` — a list of recognized stage ids, required non-empty when `verdict` is `failed`).
+The order/result contract (the exact JSON fields the leader and worker exchange) is fixed by the UpAgent `contracts.py` module. The leader writes `order.json` (required: `order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`; lifecycle fields: a caller-stable globally scoped `request_id` and `requester: {id, kind, address}`; optional `env`), and the worker writes `result.json` (required: `order_id` echoing the order, `verdict` — one of `passed` / `failed` / `blocked`, `full_log` — the pointer to the worker's own harness transcript; optional `revisit` — a list of recognized stage ids, required non-empty when `verdict` is `failed`).
 
 `cockpit_pane` is the id of an existing pane in the cockpit workspace to split the worker from — Herdr's `pane split` takes a source pane, not a workspace label, so the runner threads a live cockpit pane id (the phase leader's own pane) down into every order.
 
-The Recruiter is brought up once per run by `just upagent-up`. Its `shared-services` pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. The leader submits directly through the blocking `just upagent-recruit` CLI; shell pane input is never used as a queue.
+The Recruiter is brought up once per run by `just upagent-up`. Its `shared-services` pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. Each request gets a low-cost Dedicated Account Manager for semantic validation and requester communication; Python still owns facts, state transitions, pane operations, and lease fencing. The leader submits with `just upagent-request`, then waits with `just upagent-await`; shell pane input is never used as a queue.
 
 The order round-trip, all over the Herdr socket:
 
 ```text
 leader:    write pass-<p>/stages/<stage>/try-<m>/order.json  +  instructions.md  (order.cockpit_pane = the leader's cockpit pane)
-leader:    just upagent-recruit <order.json path>  # blocking direct ledger dispatch
-Recruiter: read+validate order → herdr pane split <cockpit_pane> --direction right --no-focus --cwd <worktree> [--env k=v ...]
+leader:    just upagent-request <order.json path>  # return only after verified startup
+Recruiter: persist → start/verify manager → atomically `herdr agent start` the worker
+Recruiter: verify expected process + detected harness + cwd; return manager/worker addresses
+leader:    just upagent-await <order.json path>    # Python waits; LLM does not poll
 Recruiter: write final lease-specific brief with literal order_id + one private result path
-Recruiter: run worker; race agent-status against the private result
+Recruiter: race one agent-status subscription against the private result; run one-shot LLM checks only at anomaly checkpoints
 worker:    write private result + compacted.md + handoff, then exit
 Recruiter: validate → close + verify owned worker absent → publish public result + receipt
 leader:    receive ORDER_RECEIPT → read + validate public result.json
 ```
 
-Validate the installed Herdr command surface before launch (the documented baseline is `herdr pane split <source-pane>`, `herdr pane run`, `herdr wait agent-status`, `herdr wait output`, `herdr pane read`, `herdr pane close`). Every `herdr pane split` names a source pane to split from — there is no `--workspace` flag on split. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
+At a declared work cap, the Hub changes state to `awaiting-requester` and `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The recorded requester uses the per-generation control token from `REQUEST_ACCEPTED` to authorize `extend` or `cancel`. No response during the configured grace period permits the Hub's hard stop. A manager or checker may recommend an action, but cannot execute it.
+
+Validate the installed Herdr command surface before launch (the documented baseline is `herdr agent start/get/wait`, `herdr pane get/process-info/run/read/close`, and `herdr wait agent-status`). The Hub uses one `agent start` request with direct argv; it does not split a shell and inject a launch command afterward. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
 
 **Notification follows ownership boundaries.** The worker has no Recruiter/leader/TUI addresses and sends no terminal text. Its one private result wakes the owning Recruiter job; the durable receipt wakes the phase leader; `phase-result.json` plus `PHASE_RESULT` wakes the TUI. Pane text and human toasts are observational only.
 
@@ -233,9 +238,11 @@ A meta run creates one phase leader per phase (created, then destroyed at phase 
 
 A phase leader may consult an advisor when configured. The advisor does not write files, run commands, or create agents. After writing and validating `phase-result.json`, the leader's literal last action before idle is to print `PHASE_RESULT: phase-<id> verdict=<passed|failed|blocked> pass=<n>` to its own pane (map a detailed `partial` file verdict to `blocked` in the marker).
 
-### Anomaly monitors
+### Lifecycle monitors
 
-Normal delivery is deterministic and uses no LLM monitor. An optional low-cost model may inspect a bounded status/output snapshot after the Python supervisor reports a stuck runner, cleanup failure, or malformed result. It interprets evidence and alerts the owner; it never polls continuously or advances work.
+Normal delivery is deterministic and uses no LLM polling loop. Python observes pane existence, process identity, cwd, result validity, agent status, and deadlines. At configured inactivity/anomaly checkpoints, the Dedicated Account Manager may hire one fresh low-cost checker to interpret a bounded evidence snapshot. That checker returns one typed advisory assessment and exits; it never polls continuously, advances work, or controls a pane.
+
+The TUI also requests one ordinary managed `phase-watchdog` worker per phase. It correlates the exact leader, descendant request records, and `phase-result.json`, then alerts the TUI about suspected stalls or terminal completion. It does not kill workers or decide phase outcomes. Like every other worker, it has its own Dedicated Account Manager and lease.
 
 ## Five-stage phase protocol
 

@@ -33,8 +33,9 @@
 # unescaped `{...}` that is not one of the placeholders above is a template authoring error.
 #
 # Every worker's job is the same shape: read the instructions, do the one stage, and write a
-# valid result.json (verdict + revisit + full_log pointer) before finishing — the Recruiter
-# blocks on the pane reaching agent-status `done` and then reads that file.
+# valid result.json (verdict + revisit + full_log pointer) before finishing. The Recruiter
+# races one event subscription against the lease-private result; `done` is an accelerator,
+# never the verdict or the durable completion record.
 #
 # NON-INTERACTIVE IS MANDATORY. A worker runs unattended in a pane, so every launch template
 # MUST bypass all trust/permission prompts or the worker hangs forever at a dialog (and the
@@ -54,6 +55,47 @@
 # never fires and every pi hire times out to blocked. Interactive pi sessions are
 # untouched — they keep the full extension set. Note pi has NO --agent flag: the
 # persona comes to the worker through the stage brief, not the CLI.
+
+# LLM lifecycle roles are separate from work routes. They interpret configuration and bounded
+# health evidence; Python remains the only pane/process executor. Role commands may use
+# {brief_path}, {cwd}, and {output_path}. Omitting this block uses these Claude/Haiku defaults.
+management:
+  startup_timeout_ms: 45000
+  inactivity_check_ms: 900000
+  requester_grace_ms: 300000
+  account_manager:
+    command: >-
+      claude --dangerously-skip-permissions --agent upagent-account-manager
+      --model haiku --effort low
+      "Read {brief_path}, perform that one lifecycle review, write {output_path},
+      then remain available."
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
+  checker:
+    command: >-
+      claude --dangerously-skip-permissions --agent upagent-checker
+      --model haiku --effort low
+      "Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
+
+# Optional process-detector overrides. Use these when a harness wrapper changes what Herdr reports.
+# A mismatch fails startup; the Hub never guesses that some unrelated foreground process is healthy.
+health:
+  claude:
+    expected_agent: claude
+    expected_process: claude
+  codex:
+    expected_agent: codex
+    expected_process: codex
+  pi:
+    expected_agent: pi
+    expected_process: pi
+  cursor:
+    expected_agent: cursor
+    expected_process: cursor-agent
 
 harnesses:
   claude: >-

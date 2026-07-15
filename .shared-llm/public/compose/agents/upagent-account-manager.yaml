@@ -1,0 +1,8 @@
+type: agent
+name: upagent-account-manager
+model: haiku
+color: cyan
+description: .shared-llm/public/layers/agents/common/upagent-account-manager.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/upagent-account-manager.md
+output: .claude/agents/upagent-account-manager.md

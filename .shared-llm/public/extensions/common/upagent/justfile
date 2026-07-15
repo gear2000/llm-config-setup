@@ -24,6 +24,19 @@ upagent-status:
 upagent-recruit order:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py dispatch "{{order}}"
 
+# Submit one worker asynchronously, returning only after its Dedicated Account Manager and worker
+# have both passed startup health validation. The JSON response contains their current addresses.
+upagent-request order:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py request "{{order}}"
+
+# Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
+upagent-await order:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}"
+
+# Answer the current timeout decision. Use extension_ms=0 with cancel.
+upagent-respond order control_token nonce action extension_ms:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"
+
 # Reconcile dead/expired runners using their durable lease ownership records.
 upagent-reconcile:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py reconcile

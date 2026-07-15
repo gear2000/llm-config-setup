@@ -1,54 +1,68 @@
 # UpAgent Hub — the Recruiter
 
-The UpAgent Hub is where the actual work of a phase gets done. Its always-up **Recruiter**
-takes a work order from a phase leader, hires a fresh worker for that one stage, collects the
-worker's result, and reports back. It runs entirely over the Herdr socket — no Go message hub,
-no tmux.
+The UpAgent Hub is a universal lifecycle service for LLM workers. Its caller may be a phase
+leader, TUI, Librarian, or another framework. The always-up Python **Recruiter** persists the
+request, hires a low-cost Dedicated Account Manager, atomically launches and verifies the worker,
+collects the result, and reports to the recorded requester. See [FUNDAMENTALS.md](FUNDAMENTALS.md)
+for the authority model and use-case tree.
 
 ## Topology
 
 ```
 Herdr session
-├── ws: <slug>                 the run cockpit (phase leader + one worker pane at a time + TUI)
+├── ws: <slug>                 TUI + phase leader + managed workers/watchdog
 └── ws: shared-services        always up, plan-agnostic
-    ├── recruiter  ← this module
+    ├── recruiter               deterministic Python Hub
+    ├── account managers        one conversational owner per request
+    ├── one-shot checkers       bounded anomaly interpretation
     └── librarian  (Specialist Hub — sibling module)
 ```
 
-The Recruiter pane lives in `shared-services` as a visible status surface. The phase leader
-submits through the blocking CLI, not by typing into that pane. The engine spawns each worker **into the
-cockpit** — by splitting the cockpit pane the order names (`order.cockpit_pane`) — beside the
-phase leader that ordered it, then closes it when the stage is done. (`herdr pane split` splits
-an existing pane, so the order carries a pane to split from, not a workspace label.)
+The Recruiter pane is a visible status surface, never a command queue. Requests go directly to
+the durable ledger. Manager/checker panes live in `shared-services`; a worker starts beside the
+`order.cockpit_pane` through one atomic `herdr agent start` call and is closed only by its fenced
+lease owner.
 
 ## The order → result contract (`contracts.py`)
 
 Durable files are the source of truth; terminal text is display-only.
 
-- The phase leader writes `order.json` and runs `just upagent-recruit <order.json>`. This direct,
-  blocking dispatch cannot interleave terminal keystrokes with another order.
+- The requester writes `order.json`, including a globally scoped `request_id` and
+  `requester: {id, kind, address}`, then runs `just upagent-request <order.json>`. It returns only
+  after both the manager and worker have verified startup, with their current addresses and a
+  per-generation control token.
 - The Recruiter validates and persists a copy-on-write request under
-  `$UPAGENT_HUB_DIR` (default `~/.local/state/herdr/upagent-hub`), then immediately starts a
-  per-job runner. The dispatch waits for that runner's durable receipt. The runner atomically claims
-  `active/requests/<hashed-order-id>/`, writes an authoritative lease plus a retained expiry
-  index, splits its fresh worker pane from `order.cockpit_pane` (`--cwd` the worktree, `--env`
-  any OTel vars), and runs the harness launch template for `order.harness`. Only that claim
-  owner blocks on `herdr wait agent-status <worker> --status done` and then accepts only a
-  strictly valid result file.
+  `$UPAGENT_HUB_DIR` (default `~/.local/state/herdr/upagent-hub`). One runner atomically claims
+  `active/requests/<scoped-request-id>/`, writes an authoritative generation lease, starts the
+  manager, then launches the requested harness. Health means expected foreground process,
+  detected harness, cwd, and typed manager assessment—not merely pane creation.
+- Before launch, Python checks absolute paths, required model/effort values, harness-native model
+  shape, executable presence, and (for Claude `--agent` routes) the actual persona file. Those
+  facts are given to the manager. A bad request is explained to the requester and terminalized
+  without ever creating a worker, even if the LLM mistakenly recommends approval.
 - The Recruiter appends a final lease-specific delivery contract containing one private result
   path and the literal order id. The worker does the stage and writes exactly that one private
   `result.json` (verdict `passed|failed|blocked`, a `revisit` list of stage-ids on failure,
   and a `full_log` pointer to its harness transcript) plus its `compacted.md` and handoff.
-- The job owner validates the result, closes only its recorded worker pane, verifies it is absent,
-  then publishes the public result plus `receipt.json`. `ORDER_RECEIPT` wakes the blocked leader.
+- `just upagent-await <order.json>` waits in Python for a decision point or completion; no LLM
+  loops over files. At inactivity checkpoints, a fresh cheap checker interprets one bounded pane
+  and process snapshot, reports to the manager/requester, and exits.
+- At a work cap, `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The requester may run
+  `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`.
+  Without an answer during `management.requester_grace_ms`, the Hub performs the declared hard
+  stop. Managers/checkers can recommend actions but cannot execute them.
+- The job owner validates the result, closes only its recorded worker/manager panes, verifies
+  absence, then publishes the public result plus `receipt.json`. `ORDER_RECEIPT` wakes the caller.
   If anything goes wrong it publishes a fail-loud `blocked` result/receipt. The lease records the
-  runner, leader, Recruiter, worker, workspace, token, and expiry; a small Python supervisor safely
+  requester, manager, runner, Recruiter, worker, workspace, token, generation, and expiry; a
+  small Python supervisor safely
   reconciles dead/expired owners. A request's immutable `request.json` and events are durable; its
   `state/latest.json` is the copy-on-write current view. The lease is authoritative; retained
   `active/by-expiry` entries are merely reaping indexes and must be token-checked before reuse.
 
-`route.yaml` is authoritative for which harness/model/agent runs each stage. The Recruiter only
-holds a mechanical per-harness launch template (`upagent.yaml`) — it never picks the agent.
+`route.yaml` is authoritative for which harness/model/agent runs each worker. The Recruiter only
+holds mechanical launch templates and separate configurable management-role commands in
+`upagent.yaml`; it never silently substitutes a requested worker.
 
 A direct Codex worker uses this launcher shape; it is not routed through Pi:
 
@@ -96,6 +110,7 @@ must keep (see `upagent.yaml.example` for the full rationale):
 
 ## Tests
 
-`python3 -m pytest .shared-llm/extensions/common/upagent/ -q` covers the order/result contract
-and the Recruiter's pure roster/launch-resolution logic. The Herdr-driving path is proven
-end-to-end inside a live Herdr session.
+`python3 -m pytest .shared-llm/public/extensions/common/upagent/ -q` covers contracts, typed LLM
+responses, request mailboxes, identity/lease fencing, startup health, timeout authority, roster
+resolution, and cleanup behavior. The socket-driving path is also exercised in a live Herdr
+session before release.

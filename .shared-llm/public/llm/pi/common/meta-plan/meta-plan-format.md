@@ -143,7 +143,9 @@ finalization_defaults:
   log_checks:
     - source: build, deploy, and runner logs
       fail_patterns: ERROR,FATAL,Traceback,uncaught
-  # OPTIONAL escalation config (all three may be omitted):
+  # OPTIONAL lifecycle/escalation config (all four may be omitted):
+  watchdog_profile: claude-low  # cheap profile for one phase watchdog per live leader.
+                                # Absent ⇒ use that phase's lead profile.
   advisor_profile: claude-low   # a stronger profile the controller consults when a
                                 # budget is exhausted. Absent ⇒ escalation goes straight
                                 # to the human.
@@ -194,6 +196,7 @@ route.yaml
 ├── finalization_defaults
 │   ├── green_checks
 │   ├── log_checks
+│   ├── watchdog_profile       (optional; absent ⇒ phase lead profile)
 │   ├── advisor_profile        (optional; absent ⇒ escalation → human)
 │   ├── phase_pass_budget      (optional; absent ⇒ 3)
 │   └── stage_try_budget       (optional; absent ⇒ 3)

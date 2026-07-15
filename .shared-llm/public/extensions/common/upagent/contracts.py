@@ -121,6 +121,17 @@ def parse_order(text: str) -> dict:
         not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
     ):
         raise ContractError("order.json: `env` must be a map of string->string")
+    request_id = order.get("request_id")
+    if request_id is not None and (not isinstance(request_id, str) or not request_id):
+        raise ContractError("order.json: `request_id` must be a non-empty string when present")
+    requester = order.get("requester")
+    if requester is not None:
+        if not isinstance(requester, dict):
+            raise ContractError("order.json: `requester` must be an object when present")
+        for field in ("id", "kind", "address"):
+            value = requester.get(field)
+            if not isinstance(value, str) or not value:
+                raise ContractError(f"order.json: `requester.{field}` must be a non-empty string")
     return order
 
 

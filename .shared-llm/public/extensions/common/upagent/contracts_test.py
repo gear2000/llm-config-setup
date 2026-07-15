@@ -48,6 +48,25 @@ def test_valid_order_parses() -> None:
     assert order["stage_id"] == "stage-1-implementation"
 
 
+def test_order_accepts_explicit_requester_and_request_identity() -> None:
+    order = _valid_order()
+    order["request_id"] = "req-run-a-stage-1"
+    order["requester"] = {
+        "id": "phase-leader-a",
+        "kind": "herdr-agent",
+        "address": "w1:p2",
+    }
+    parsed = contracts.parse_order(json.dumps(order))
+    assert parsed["requester"]["id"] == "phase-leader-a"
+
+
+def test_order_rejects_malformed_requester() -> None:
+    order = _valid_order()
+    order["requester"] = {"id": "phase-leader-a", "kind": "herdr-agent"}
+    with pytest.raises(ContractError, match="requester.address"):
+        contracts.parse_order(json.dumps(order))
+
+
 def test_order_missing_key_fails() -> None:
     bad = _valid_order()
     del bad["cwd"]

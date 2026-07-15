@@ -35,31 +35,33 @@ ws: <slug>                     ← the run cockpit, one screen
   ┌─────────────────────────────────────────────┐
   │  tui-agent  (top, full width)               │  top: you talk HERE
   ├──────────────────────┬──────────────────────┤
-  │  phase-leader        │  worker              │  bottom-left: leader (replaced per phase)
-  │  (bottom-left)       │  (bottom-right)      │  bottom-right: ONE worker at a time
+  │ phase-leader │ phase-watchdog │ stage worker │  one leader + its advisory watchdog
   └──────────────────────┴──────────────────────┘
 
 ws: shared-services            ← plan-agnostic · always up · peripheral
-  ├── recruiter   (UpAgent Hub)    takes a leader's order → spawns the worker INTO <slug> bottom-right
+  ├── recruiter   (UpAgent Hub)    deterministic lifecycle and durable mailboxes
+  ├── account managers              one LLM lifecycle owner per live worker request
+  ├── one-shot checkers              transient LLM evidence interpreters
   └── librarian   (Specialist Hub) routes a question → transient specialist
 ```
 
-1. The cockpit is the workspace holding this (tui-agent) pane, which stays the top, full-width row. Confirm or create it as `<slug>`. The phase-leader pane (bottom-left) is created and destroyed per phase; the worker pane (bottom-right) is created by the Recruiter, one worker at a time — so the cockpit never exceeds three panes: TUI spanning the top, leader and worker sharing the bottom row.
-2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible `shared-services` Recruiter pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; phase leaders submit through `just upagent-recruit <order.json>`, never by injecting commands into its shell. The roster still owns all pre-hardened harness launch templates.
-3. Each phase leader stamps its own live pane id into every order as `cockpit_pane`. The Recruiter splits the worker from that pane, and durably records the leader/Recruiter/worker/workspace/PID ownership under the lease. Completion flows upward one boundary at a time: worker result → Recruiter receipt → phase leader result → TUI phase event. Do not give a worker TUI or controller addresses.
+1. The cockpit is the workspace holding this (tui-agent) pane. Confirm or create it as `<slug>`. The phase leader and its phase watchdog live for one phase; stage workers are transient. Dedicated Account Managers and one-shot checkers live beside the Recruiter in `shared-services`, not in the cockpit.
+2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible `shared-services` Recruiter pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates.
+3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub creates a Dedicated Account Manager, validates configuration, atomically starts the worker, and returns `worker-healthy` only after process/agent/cwd plus LLM startup assessment agree. Completion flows worker result → account manager explanation → Recruiter receipt → requester. The worker itself receives no controller addresses.
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
-5. Do not start an LLM result poller. Normal phase completion uses the leader pane's event-driven `PHASE_RESULT` marker after the durable phase file is written; anomaly recovery checks the file on the bounded timeout. A cheap model may interpret a genuine stall/error, but it is not part of mechanical delivery.
+5. Do not start an ad-hoc LLM result poller. The Recruiter owns deterministic checks and launches fresh one-shot LLM checkers only at configured inactivity/anomaly checkpoints. The phase watchdog is a managed worker with its own Dedicated Account Manager; it correlates the leader, descendant orders, and `phase-result.json` and alerts this TUI without controlling them.
 
 ## Phase loop
 
 For each phase, in canonical order starting at `--start-phase` (respecting `--max-phases`):
 
 1. **Create one phase leader.** Maintain `<run-tree>/active-leader-panes.json` as canonical `{phase-id: pane-id}` liveness state. Before creating a leader, close any recorded/live prior pane for that phase and remove its mapping — this is unconditional on advance, timeout, failure, or backtrack. Split the tui-agent pane DOWN (`herdr pane split <tui-pane> --direction down --no-focus`), launch the validated `lead.llm_profile` + `lead.agent`, and record the new pane id.
-2. **Hand the phase to the leader.** Send exactly one `/herdr-phase --phase <phase-id> --plan <run-tree>/plan.md --route <run-tree>/route.yaml --run-root <run-tree>` invocation. The leader owns stages, Recruiter orders, stage-level backtracking, and `phase-status.md`.
-3. **Wait for the completion event, always bounded.** Use `herdr wait output <leader-pane> --match "PHASE_RESULT: <phase-id>" --timeout <ms>` and parse its `verdict=<passed|failed|blocked>` marker. Never use `agent-status=done`: a leader can become idle between turns while an order is running. On timeout, read and validate `phases/<phase-id>/phase-result.json`; proceed only if valid, otherwise mark the phase `blocked` and stop for the human.
-4. **Read `phase-result.json` for detail.** The event supplies the completion verdict; the durable file is opened for evidence, detail, or a failure investigation.
-5. **Destroy the phase leader unconditionally.** After the result/evidence handling (including timeout, escalation, and backtrack paths), close the recorded leader pane and remove its mapping. A replay always creates a fresh leader.
-6. Append a `run-status.md` line for the phase outcome (phase id, pass number, verdict, and any `revisit`) before acting on it. On every start/pass/fail/backtrack — or hourly if unchanged — delegate a minimal static HTML snapshot to a small disposable, non-stage helper. Give it only the status/result paths; it returns only the artifact path.
+2. **Request one phase watchdog.** Resolve `finalization_defaults.watchdog_profile`, falling back to this phase's lead profile. Write `<phase>/watchdog/{instructions.md,order.json}`. Its instructions name the exact leader pane, phase result path, run status path, TUI requester, and Hub request scope; it writes its own result only after the phase is terminal. Its ordinary order uses `agent: phase-watchdog`, recognized `stage_id: stage-5-finalization`, a globally scoped `request_id` containing the run slug and phase, and `requester: {id: <tui identity>, kind: herdr-agent, address: <tui pane>}`. Call `just upagent-request <order>` and require `REQUEST_ACCEPTED` with manager and worker addresses before reporting that the phase is watched.
+3. **Hand the phase to the leader.** Send exactly one `/herdr-phase --phase <phase-id> --plan <run-tree>/plan.md --route <run-tree>/route.yaml --run-root <run-tree>` invocation. The leader owns stages, Recruiter orders, stage-level backtracking, and `phase-status.md`.
+4. **Wait for authoritative completion, always bounded.** The phase watchdog alerts this TUI when the exact `phase-result.json` becomes terminal or when the leader is stranded. A `PHASE_RESULT` pane marker is an accelerator only. Never use `agent-status=done`: that marks a turn, not a phase. On the bounded deadline, read and validate `phases/<phase-id>/phase-result.json`; proceed only if valid, otherwise mark the phase `blocked` and stop for the human.
+5. **Read `phase-result.json` for detail.** The durable file supplies the verdict and evidence.
+6. **Destroy the phase leader unconditionally.** After result/evidence handling, close the recorded leader pane and remove its mapping. The watchdog finishes from the same terminal phase file and its Recruiter lifecycle cleans it up. A replay creates a fresh leader and watchdog.
+7. Append a `run-status.md` line for the phase outcome (phase id, pass number, verdict, and any `revisit`) before acting on it. On every start/pass/fail/backtrack — or hourly if unchanged — delegate a minimal static HTML snapshot to a small disposable, non-stage helper. Give it only the status/result paths; it returns only the artifact path.
 
 ## Phase-level backtracking (forward-only)
 
