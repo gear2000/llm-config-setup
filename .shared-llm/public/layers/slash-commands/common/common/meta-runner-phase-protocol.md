@@ -242,7 +242,7 @@ A phase leader may consult an advisor when configured. The advisor does not writ
 
 Normal delivery is deterministic and uses no LLM polling loop. Python observes pane existence, process identity, cwd, result validity, agent status, and deadlines. At configured inactivity/anomaly checkpoints, the Dedicated Account Manager may hire one fresh low-cost checker to interpret a bounded evidence snapshot. That checker returns one typed advisory assessment and exits; it never polls continuously, advances work, or controls a pane.
 
-The TUI also requests one ordinary managed `phase-watchdog` worker per phase. It correlates the exact leader, descendant request records, and `phase-result.json`, then alerts the TUI about suspected stalls or terminal completion. It does not kill workers or decide phase outcomes. Like every other worker, it has its own Dedicated Account Manager and lease.
+The deterministic phase controller requests one ordinary managed `phase-watchdog` worker per phase on behalf of the TUI. It holds the phase leader behind a filesystem gate until the watchdog's Dedicated Account Manager and worker are verified healthy, then releases and verifies the leader. The watchdog correlates the exact leader, descendant request records, and `phase-result.json`, then alerts the TUI about suspected stalls or terminal completion. It does not kill workers or decide phase outcomes. Like every other worker, it has its own Dedicated Account Manager and lease.
 
 ## Five-stage phase protocol
 

@@ -23,6 +23,17 @@ the durable ledger. Manager/checker panes live in `shared-services`; a worker st
 `order.cockpit_pane` through one atomic `herdr agent start` call and is closed only by its fenced
 lease owner.
 
+Phase startup has its own deterministic front door:
+
+```text
+just upagent-phase-start <frozen-route.yaml> <run-tree> <phase-id> <pass-number>
+```
+
+It starts the leader behind a gate, submits the phase watchdog through the normal Recruiter
+lifecycle, requires verified Account Manager and watchdog startup, then releases and verifies the
+leader. It returns `PHASE_STARTED` only after the complete pair is healthy. A startup failure
+closes the still-gated leader and records the cause; it never leaves an unwatched phase running.
+
 ## The order → result contract (`contracts.py`)
 
 Durable files are the source of truth; terminal text is display-only.
@@ -61,8 +72,8 @@ Durable files are the source of truth; terminal text is display-only.
   `active/by-expiry` entries are merely reaping indexes and must be token-checked before reuse.
 
 `route.yaml` is authoritative for which harness/model/agent runs each worker. The Recruiter only
-holds mechanical launch templates and separate configurable management-role commands in
-`upagent.yaml`; it never silently substitutes a requested worker.
+holds mechanical launch templates, separate phase-controller templates, and configurable
+management-role commands in `upagent.yaml`; it never silently substitutes a requested worker.
 
 A direct Codex worker uses this launcher shape; it is not routed through Pi:
 
@@ -99,6 +110,11 @@ must keep (see `upagent.yaml.example` for the full rationale):
    `herdr wait agent-status --status done` never fires and every pi hire times out to
    blocked. Workers are still full visible TUIs in panes (headless `-p` is never used);
    interactive pi sessions keep the whole extension set.
+
+The `phase_leaders:` map is deliberately separate from `harnesses:`. A phase leader is launched
+once with a controller assignment and held behind the phase-start gate; a stage worker receives a
+lease-private result contract. `upagent-phase-start` fails before creating a pane when the selected
+harness has no phase-leader template.
 
 ## Adopt it
 

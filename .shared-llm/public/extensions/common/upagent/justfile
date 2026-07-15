@@ -29,6 +29,12 @@ upagent-recruit order:
 upagent-request order:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py request "{{order}}"
 
+# Start one phase transaction. The phase leader remains behind a filesystem gate until its
+# managed phase-watchdog request has a healthy Account Manager and worker. HERDR_PANE_ID supplies
+# the owning TUI address; cwd defaults to the repository in which just is invoked.
+upagent-phase-start route run_root phase pass_number:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_controller.py "{{route}}" "{{run_root}}" "{{phase}}" "{{pass_number}}"
+
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
 upagent-await order:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}"

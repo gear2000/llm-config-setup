@@ -136,3 +136,32 @@ surfaces; pane ids may change or be reused and therefore never serve as durable 
 The LLM roles consume bounded evidence snapshots and return typed assessments. Python remains
 correct when an LLM is unavailable: it records the failure, informs the Requester, and follows
 the configured deadline policy without silently losing the request.
+
+## Use case: start one watched phase
+
+Phase startup is a single deterministic transaction, not a sequence the TUI LLM must remember:
+
+```text
+TUI
+└─ just upagent-phase-start <route> <run-root> <phase> <pass>
+   │
+   ▼
+PYTHON PHASE CONTROLLER
+├─ validates the frozen route, selected profiles, roster, paths, and owning TUI pane
+├─ starts the phase leader behind a closed filesystem gate
+├─ records the exact leader pane under the phase/pass transaction
+├─ submits one ordinary phase-watchdog order to the Recruiter Hub
+│  └─ Recruiter creates and verifies its Account Manager and watchdog worker
+├─ requires REQUEST_ACCEPTED with both verified pane addresses
+├─ opens the leader gate and verifies the expected leader process, harness, and cwd
+└─ atomically publishes PHASE_STARTED only after the complete pair is healthy
+```
+
+If validation or watchdog startup fails, the leader gate never opens and Python closes only the
+leader pane created by that transaction. A live leader recorded by a prior owner is never
+destroyed by a new start. The failure cause remains in `phase-start.json`. This makes “leader is
+running without a watchdog” an invalid state rather than something a human must notice later.
+
+The roster has separate `phase_leaders:` templates because a controller launch is not a stage
+worker launch. Python refuses a missing template instead of trimming a worker command or guessing
+how a harness should run a phase leader.

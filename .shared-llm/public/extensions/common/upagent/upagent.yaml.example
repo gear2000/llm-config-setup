@@ -97,6 +97,29 @@ health:
     expected_agent: cursor
     expected_process: cursor-agent
 
+# Phase leaders are controllers, not stage workers. The deterministic phase-start transaction
+# holds this command behind a filesystem gate, starts and verifies the phase watchdog through the
+# ordinary UpAgent lifecycle, then releases the leader. Keeping separate templates prevents the
+# controller from trying to trim a worker prompt or guess each harness's controller mode.
+phase_leaders:
+  claude: >-
+    claude --dangerously-skip-permissions --agent {agent} --model {model} --effort {effort}
+    "Read {instructions_path} and follow that phase-leader assignment."
+
+  codex: >-
+    codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+    --model {model} -c model_reasoning_effort={effort}
+    "Read {instructions_path} and follow that phase-leader assignment."
+
+  pi: >-
+    pi --approve --no-extensions -e "$HOME/.pi/agent/extensions/herdr-agent-state.ts"
+    --model {model}
+    "Read {instructions_path} and follow that phase-leader assignment."
+
+  cursor: >-
+    cursor-agent --print --model {model}
+    "Read {instructions_path} and follow that phase-leader assignment."
+
 harnesses:
   claude: >-
     claude --dangerously-skip-permissions --agent {agent} --model {model} --effort {effort}

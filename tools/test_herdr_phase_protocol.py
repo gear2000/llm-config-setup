@@ -37,8 +37,10 @@ def test_phase_dispatch_verifies_startup_then_waits_without_shell_injection() ->
 def test_tui_requests_one_managed_phase_watchdog() -> None:
     text = RUNNER.read_text()
 
-    assert "just upagent-request <order>" in text
-    assert "agent: phase-watchdog" in text
-    assert "finalization_defaults.watchdog_profile" in text
+    assert "just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>" in text
+    assert "PHASE_STARTED" in text
+    assert "state: ready" in text
+    assert "The TUI never creates a leader or watchdog pane itself." in text
+    assert "do not reproduce its pane operations manually" in text
     assert "phase-result.json" in text
     assert "Never use `agent-status=done`" in text
