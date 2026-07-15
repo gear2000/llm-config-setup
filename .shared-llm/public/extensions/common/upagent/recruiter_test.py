@@ -310,6 +310,44 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
     assert start[-3:] == ("bash", "-lc", "claude --model some-model")
 
 
+def test_start_herdr_agent_honors_downward_role_placement(monkeypatch) -> None:
+    calls = []
+
+    def fake_json(*args: str) -> dict:
+        calls.append(args)
+        if args == ("pane", "get", "leader-pane"):
+            return {"result": {"pane": {"tab_id": "tab-1"}}}
+        return {
+            "result": {
+                "agent": {
+                    "name": "manager",
+                    "pane_id": "manager-pane",
+                    "workspace_id": "workspace-1",
+                }
+            }
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+
+    recruiter._start_herdr_agent(
+        "manager",
+        _order(cockpit_pane="leader-pane"),
+        "claude --model some-model",
+        split_direction="down",
+    )
+
+    start = calls[1]
+    split_index = start.index("--split")
+    assert start[split_index + 1] == "down"
+
+
+def test_start_herdr_agent_rejects_unknown_split_direction() -> None:
+    with pytest.raises(RecruiterError, match="must be right or down"):
+        recruiter._start_herdr_agent(
+            "worker", _order(), "claude", split_direction="diagonal"
+        )
+
+
 def _result(order_id: str, verdict: str = "passed") -> dict:
     result: dict[str, object] = {
         "order_id": order_id,
@@ -1144,11 +1182,17 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         "Configuration is coherent.",
     )
     launch_orders: list[dict] = []
+    launch_directions: list[str] = []
 
     def start_manager(
-        name: str, launch_order: dict, command: str
+        name: str,
+        launch_order: dict,
+        command: str,
+        *,
+        split_direction: str = "right",
     ) -> tuple[str, str, str]:
         launch_orders.append(launch_order)
+        launch_directions.append(split_direction)
         return "manager-pane", "cockpit-workspace", name
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", start_manager)
@@ -1166,6 +1210,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     assert lease["manager_address"].startswith("upagent-manager-")
     assert lease["manager_workspace_id"] == "cockpit-workspace"
     assert launch_orders[0]["cockpit_pane"] == order["cockpit_pane"]
+    assert launch_directions == ["down"]
 
 
 def test_explicit_shared_manager_placement_uses_recruiter_pane(monkeypatch) -> None:

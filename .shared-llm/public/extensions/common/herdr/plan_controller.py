@@ -120,10 +120,29 @@ def _load_watchdog_profile(route_path: Path) -> dict[str, str]:
     defaults = _object(
         route.get("finalization_defaults"), "route.finalization_defaults"
     )
-    profile_name = _string(
-        defaults.get("watchdog_profile"),
-        "route.finalization_defaults.watchdog_profile",
-    )
+    configured_profile = defaults.get("watchdog_profile")
+    if configured_profile is None:
+        phases = _object(route.get("phases"), "route.phases")
+        if not phases:
+            raise PlanStartError(
+                "route.phases must contain a phase when watchdog_profile is omitted"
+            )
+        first_phase_name, first_phase_value = next(iter(phases.items()))
+        first_phase = _object(
+            first_phase_value, f"route.phases.{first_phase_name}"
+        )
+        lead = _object(
+            first_phase.get("lead"), f"route.phases.{first_phase_name}.lead"
+        )
+        profile_name = _string(
+            lead.get("llm_profile"),
+            f"route.phases.{first_phase_name}.lead.llm_profile",
+        )
+    else:
+        profile_name = _string(
+            configured_profile,
+            "route.finalization_defaults.watchdog_profile",
+        )
     profile = _object(profiles.get(profile_name), f"route.llm_profiles.{profile_name}")
     harness = _string(
         profile.get("harness"), f"route.llm_profiles.{profile_name}.harness"

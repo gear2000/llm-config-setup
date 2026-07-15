@@ -20,7 +20,9 @@ The Recruiter pane is a visible status surface, never a command queue. Requests 
 the durable ledger. A request's manager, worker, and short-lived checkers start beside the
 `order.cockpit_pane` through atomic `herdr agent start` calls, making the whole dedicated lifecycle
 visible in one workspace. `manager_placement.mode: shared` remains an explicit opt-in for callers
-that truly want a peripheral manager. Every pane is closed only by its fenced lease owner.
+that truly want a peripheral manager. Pane placement is role-based: workers split right, while
+managers and one-shot checkers split down, forming a mixed grid instead of a vertical strip. Every
+pane is closed only by its fenced lease owner.
 
 Phase startup has its own deterministic front door:
 
@@ -32,6 +34,8 @@ It starts the leader behind a gate, submits the phase watchdog through the norma
 lifecycle, and releases the verified leader after recording either a healthy watchdog or an
 explicit degraded warning. It returns `PHASE_STARTED` with `ready` or `ready-degraded`. Leader
 startup failures still close the gated leader; watchdog failures never freeze useful phase work.
+When `finalization_defaults.watchdog_profile` is omitted, controllers consistently reuse the
+phase leader profile rather than dropping monitoring for a configuration that older routes allow.
 
 The controller exports its receipt path to the released leader. The Recruiter inspects that
 receipt and records degraded observability when it is missing, stale, or has no watchdog address,

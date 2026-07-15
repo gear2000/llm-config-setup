@@ -30,6 +30,11 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
         "    effort: low\n"
         "finalization_defaults:\n"
         "  watchdog_profile: cheap\n"
+        "phases:\n"
+        "  phase-0:\n"
+        "    lead:\n"
+        "      llm_profile: cheap\n"
+        "      agent: phase-leader\n"
     )
     roster = tmp_path / "upagent.yaml"
     roster.write_text(
@@ -57,6 +62,30 @@ def _healthy_watchdog(_: Path, __: str) -> dict[str, object]:
         "worker_address": "watchdog-address",
         "worker_pane": "watchdog-pane",
         "worker_workspace_id": "workspace-1",
+    }
+
+
+def test_watchdog_profile_defaults_to_first_phase_lead(tmp_path: Path) -> None:
+    route = tmp_path / "route.yaml"
+    route.write_text(
+        "llm_profiles:\n"
+        "  lead:\n"
+        "    harness: claude\n"
+        "    model: leader-model\n"
+        "    effort: medium\n"
+        "finalization_defaults: {}\n"
+        "phases:\n"
+        "  phase-0:\n"
+        "    lead:\n"
+        "      llm_profile: lead\n"
+        "      agent: phase-leader\n"
+    )
+
+    assert plan_controller._load_watchdog_profile(route) == {
+        "effort": "medium",
+        "harness": "claude",
+        "model": "leader-model",
+        "name": "lead",
     }
 
 

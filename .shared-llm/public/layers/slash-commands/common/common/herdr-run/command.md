@@ -33,13 +33,13 @@ The runtime topology is one cockpit workspace plus one always-up peripheral work
 
 ```text
 ws: <slug>                     ← the run cockpit, one screen
-  ┌─────────────────────────────────────────────┐
-  │  tui-agent  │ plan-lifecycle-watchdog       │  you talk to the TUI
-  ├──────────────────────┬──────────────────────┤
-  │ phase-leader │ phase-watchdog │ stage worker │
-  ├──────────────────────┴──────────────────────┤
-  │ dedicated account managers + one-shot checks │ visible beside their request
-  └──────────────────────┴──────────────────────┘
+  ┌──────────────────────┬───────────────────────┐
+  │ tui-agent            │ plan-lifecycle-watchdog │  you talk to the TUI
+  ├──────────────────────┼───────────────────────┤
+  │ phase-leader         │ stage/observer worker   │
+  ├──────────────────────┼───────────────────────┤
+  │ account manager      │ one-shot checker        │  role-balanced grid
+  └──────────────────────┴───────────────────────┘
 
 ws: shared-services            ← plan-agnostic · always up · peripheral
   ├── recruiter   (UpAgent Hub)    deterministic lifecycle and durable mailboxes
@@ -51,6 +51,9 @@ ws: shared-services            ← plan-agnostic · always up · peripheral
 3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub creates a Dedicated Account Manager, validates configuration, atomically starts the worker, and returns `worker-healthy` only after process/agent/cwd plus LLM startup assessment agree. Completion flows worker result → account manager explanation → Recruiter receipt → requester. The worker itself receives no controller addresses.
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
 5. Do not start an ad-hoc LLM result poller. The Recruiter owns deterministic checks and launches fresh one-shot LLM checkers only at configured inactivity/anomaly checkpoints. The plan watchdog owns run-level TUI↔leader observability; each phase watchdog owns one leader↔descendants view. Both are managed workers with Dedicated Account Managers, both are advisory, and neither may close or advance a pane. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported. A watchdog-only failure returns `ready-degraded`: record the warning and continue the phase.
+6. Keep cockpit geometry deterministic and role-based. Workers split right; Account Managers,
+   one-shot checkers, and phase leaders split down. This mixed-direction layout keeps panes readable
+   while preserving atomic `herdr agent start` launches.
 
 ## Phase loop
 

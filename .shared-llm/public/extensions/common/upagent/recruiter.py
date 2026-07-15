@@ -1091,13 +1091,18 @@ def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
 
 
 def _start_herdr_agent(
-    name: str, order: dict, launch: str
+    name: str, order: dict, launch: str, *, split_direction: str = "right"
 ) -> tuple[str, str | None, str]:
     """Atomically create a named Herdr pane and start its process.
 
     ``herdr agent start`` carries argv through the socket in one request; unlike ``pane run`` it
-    cannot interleave launch keystrokes with another command in a shared shell.
+    cannot interleave launch keystrokes with another command in a shared shell. Role-specific
+    directions form a balanced grid: workers default right; managers and checkers request down.
     """
+    if split_direction not in ("right", "down"):
+        raise RecruiterError(
+            f"agent split direction must be right or down, got {split_direction!r}"
+        )
     cockpit = (
         _herdr_json("pane", "get", order["cockpit_pane"])
         .get("result", {})
@@ -1115,7 +1120,7 @@ def _start_herdr_agent(
         "--tab",
         tab_id,
         "--split",
-        "right",
+        split_direction,
         "--no-focus",
     ]
     for key, value in (order.get("env") or {}).items():
@@ -1683,7 +1688,7 @@ def _start_account_manager(
     name = _safe_agent_name("upagent-manager", request_id, generation)
     manager_order = {**order, "cockpit_pane": _manager_anchor_pane(order)}
     manager_pane, workspace_id, manager_address = _start_herdr_agent(
-        name, manager_order, command
+        name, manager_order, command, split_direction="down"
     )
     if not ledger.record_manager(
         key, token, manager_pane, manager_address, workspace_id, generation
@@ -1830,7 +1835,9 @@ def _run_one_shot_checker(
     )
     name = _safe_agent_name(f"upagent-check-{check_number}", request_id, generation)
     checker_order = {**order, "cockpit_pane": cast(str, manager["pane"])}
-    checker_pane, _, _ = _start_herdr_agent(name, checker_order, command)
+    checker_pane, _, _ = _start_herdr_agent(
+        name, checker_order, command, split_direction="down"
+    )
     try:
         _wait_for_agent_health(
             checker_pane,

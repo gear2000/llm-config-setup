@@ -101,6 +101,9 @@ PYTHON RECRUITER HUB
     the owned pane is verified absent.
 11. A Dedicated Account Manager defaults to the requester's cockpit workspace, beside its worker.
     Shared-services placement is explicit rather than an invisible default.
+12. Cockpit placement is role-balanced without weakening startup atomicity. Account Managers and
+    one-shot checkers split downward; workers split right; phase leaders split downward. Herdr
+    therefore forms readable rows and corners instead of an unbounded strip of narrow columns.
 
 ## Lifecycle states
 
