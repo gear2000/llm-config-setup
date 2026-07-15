@@ -52,8 +52,10 @@ ws: shared-services            ← plan-agnostic · always up · peripheral
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
 5. Do not start an ad-hoc LLM result poller. The Recruiter owns deterministic checks and launches fresh one-shot LLM checkers only at configured inactivity/anomaly checkpoints. The plan watchdog owns run-level TUI↔leader observability; each phase watchdog owns one leader↔descendants view. Both are managed workers with Dedicated Account Managers, both are advisory, and neither may close or advance a pane. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported. A watchdog-only failure returns `ready-degraded`: record the warning and continue the phase.
 6. Keep cockpit geometry deterministic and role-based. Workers split right; Account Managers,
-   one-shot checkers, and phase leaders split down. This mixed-direction layout keeps panes readable
-   while preserving atomic `herdr agent start` launches.
+   one-shot checkers, and phase leaders split down. After atomic startup, the Recruiter targets 28%
+   of the local horizontal split for watchdogs and 20% of the local vertical split for managers and
+   checkers. Resizing is bounded and presentation-only: report a warning if Herdr cannot resize,
+   but never fail or alter a healthy worker lifecycle because of cockpit geometry.
 
 ## Phase loop
 

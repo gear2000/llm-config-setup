@@ -22,6 +22,9 @@ the durable ledger. A request's manager, worker, and short-lived checkers start 
 visible in one workspace. `manager_placement.mode: shared` remains an explicit opt-in for callers
 that truly want a peripheral manager. Pane placement is role-based: workers split right, while
 managers and one-shot checkers split down, forming a mixed grid instead of a vertical strip. Every
+watchdog targets 28% of its local horizontal split; managers and checkers target 20% of their local
+vertical split. This bounded, best-effort resizing happens only after atomic agent startup and
+ownership recording, so an unavailable layout control warns without blocking the worker. Every
 pane is closed only by its fenced lease owner.
 
 Phase startup has its own deterministic front door:

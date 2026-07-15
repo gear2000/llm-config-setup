@@ -123,6 +123,10 @@ STATE_FILE = Path(
 ).expanduser()
 PHASE_START_RECEIPT_ENV = "UPAGENT_PHASE_START_RECEIPT"
 PHASE_START_READY_STATES = ("watchdog-ready", "ready", "ready-degraded")
+WATCHDOG_AGENTS = frozenset(("phase-watchdog", "plan-lifecycle-watchdog"))
+WATCHDOG_PANE_FRACTION = 0.28
+SUPPORT_PANE_FRACTION = 0.20
+LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
 
 
 def default_roster_path() -> str:
@@ -1039,10 +1043,22 @@ def _herdr_available() -> None:
         )
 
 
-def _herdr_json(*args: str) -> dict:
+def _herdr_json(*args: str, timeout_seconds: float | None = None) -> dict:
     """Run a herdr subcommand expected to print JSON; return the parsed object. Fail-loud."""
     _herdr_available()
-    proc = subprocess.run(["herdr", *args], capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            ["herdr", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RecruiterError(
+            f"herdr {' '.join(args)} timed out after {timeout_seconds} seconds"
+        ) from error
+    except OSError as error:
+        raise RecruiterError(f"herdr {' '.join(args)} could not run: {error}") from error
     if proc.returncode != 0:
         raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
     try:
@@ -1138,6 +1154,81 @@ def _start_herdr_agent(
     if not isinstance(address, str) or not address:
         address = name
     return pane_id, workspace_id, address
+
+
+def _layout_warning(role: str, pane_id: str, reason: str) -> None:
+    sys.stderr.write(
+        f"recruiter: {role} pane {pane_id} layout adjustment failed: {reason}; "
+        "worker lifecycle continues\n"
+    )
+
+
+def _resize_started_pane(
+    pane_id: str,
+    *,
+    split_direction: str,
+    target_fraction: float,
+    role: str,
+) -> None:
+    """Shrink a new 50/50 split without making presentation part of worker correctness.
+
+    Agent startup remains one atomic ``herdr agent start`` operation. Resizing happens afterward
+    by expanding the adjacent older pane toward the new pane. Herdr versions without layout
+    controls produce a visible warning; an optional presentation failure never strands a healthy
+    worker or changes lifecycle ownership.
+    """
+    if split_direction not in ("right", "down"):
+        raise RecruiterError(
+            f"pane resize direction must be right or down, got {split_direction!r}"
+        )
+    if not 0 < target_fraction < 0.5:
+        raise RecruiterError(
+            f"pane target fraction must be between 0 and 0.5, got {target_fraction!r}"
+        )
+    neighbor_direction = "left" if split_direction == "right" else "up"
+    try:
+        neighbor_response = _herdr_json(
+            "pane",
+            "neighbor",
+            "--direction",
+            neighbor_direction,
+            "--pane",
+            pane_id,
+            timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except RecruiterError as error:
+        _layout_warning(role, pane_id, str(error))
+        return
+    neighbor = neighbor_response.get("result", {}).get("neighbor", {})
+    neighbor_pane = (
+        neighbor.get("neighbor_pane_id") if isinstance(neighbor, dict) else None
+    )
+    if not isinstance(neighbor_pane, str) or not neighbor_pane:
+        _layout_warning(role, pane_id, "Herdr returned no adjacent pane")
+        return
+    amount = format(0.5 - target_fraction, ".2f").rstrip("0").rstrip(".")
+    try:
+        resize_response = _herdr_json(
+            "pane",
+            "resize",
+            "--pane",
+            neighbor_pane,
+            "--direction",
+            split_direction,
+            "--amount",
+            amount,
+            timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except RecruiterError as error:
+        _layout_warning(role, pane_id, str(error))
+        return
+    resize = resize_response.get("result", {}).get("resize", {})
+    if not isinstance(resize, dict) or resize.get("changed") is not True:
+        _layout_warning(role, pane_id, "Herdr did not change the split ratio")
+
+
+def _worker_pane_fraction(order: dict) -> float | None:
+    return WATCHDOG_PANE_FRACTION if order.get("agent") in WATCHDOG_AGENTS else None
 
 
 def _wait_for_agent_health(
@@ -1697,6 +1788,12 @@ def _start_account_manager(
         raise RecruiterError(
             f"lease ownership changed before manager {manager_address} was recorded"
         )
+    _resize_started_pane(
+        manager_pane,
+        split_direction="down",
+        target_fraction=SUPPORT_PANE_FRACTION,
+        role="account manager",
+    )
     try:
         health = _wait_for_agent_health(
             manager_pane,
@@ -1839,6 +1936,12 @@ def _run_one_shot_checker(
         name, checker_order, command, split_direction="down"
     )
     try:
+        _resize_started_pane(
+            checker_pane,
+            split_direction="down",
+            target_fraction=SUPPORT_PANE_FRACTION,
+            role="one-shot checker",
+        )
         _wait_for_agent_health(
             checker_pane,
             expected_agent=config.checker.expected_agent,
@@ -2049,6 +2152,14 @@ def _run_order(
         if on_worker_launched is not None:
             monitor_finalized = on_worker_launched(
                 worker_pane, workspace_id, worker_address
+            )
+        worker_fraction = _worker_pane_fraction(execution_order)
+        if worker_fraction is not None:
+            _resize_started_pane(
+                worker_pane,
+                split_direction="right",
+                target_fraction=worker_fraction,
+                role="watchdog",
             )
         # The pane address is durably owned before health validation. A failed launch can
         # therefore be cleaned without guessing, while nobody is told "running" prematurely.

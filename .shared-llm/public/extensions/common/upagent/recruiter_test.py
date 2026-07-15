@@ -348,6 +348,147 @@ def test_start_herdr_agent_rejects_unknown_split_direction() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("split_direction", "target_fraction", "neighbor_direction", "neighbor_pane", "amount"),
+    [
+        ("down", 0.20, "up", "upper-pane", "0.3"),
+        ("right", 0.28, "left", "left-pane", "0.22"),
+    ],
+)
+def test_resize_started_pane_shrinks_new_split(
+    monkeypatch,
+    split_direction: str,
+    target_fraction: float,
+    neighbor_direction: str,
+    neighbor_pane: str,
+    amount: str,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        assert kwargs == {
+            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS
+        }
+        if args[0:2] == ("pane", "neighbor"):
+            return {"result": {"neighbor": {"neighbor_pane_id": neighbor_pane}}}
+        return {"result": {"resize": {"changed": True}}}
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+
+    recruiter._resize_started_pane(
+        "new-pane",
+        split_direction=split_direction,
+        target_fraction=target_fraction,
+        role="managed role",
+    )
+
+    assert calls == [
+        (
+            "pane",
+            "neighbor",
+            "--direction",
+            neighbor_direction,
+            "--pane",
+            "new-pane",
+        ),
+        (
+            "pane",
+            "resize",
+            "--pane",
+            neighbor_pane,
+            "--direction",
+            split_direction,
+            "--amount",
+            amount,
+        ),
+    ]
+
+
+def test_resize_started_pane_warns_without_failing_lifecycle(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RecruiterError("resize unavailable")
+        ),
+    )
+
+    recruiter._resize_started_pane(
+        "watchdog-pane",
+        split_direction="right",
+        target_fraction=0.28,
+        role="watchdog",
+    )
+
+    assert "watchdog pane watchdog-pane layout adjustment failed" in capsys.readouterr().err
+
+
+def test_watchdog_worker_fraction_is_role_specific() -> None:
+    assert recruiter._worker_pane_fraction({"agent": "plan-lifecycle-watchdog"}) == 0.28
+    assert recruiter._worker_pane_fraction({"agent": "phase-watchdog"}) == 0.28
+    assert recruiter._worker_pane_fraction({"agent": "docs-writer"}) is None
+
+
+def test_herdr_json_converts_timeout_to_recruiter_error(monkeypatch) -> None:
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(
+        recruiter.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            recruiter.subprocess.TimeoutExpired("herdr", 0.1)
+        ),
+    )
+
+    with pytest.raises(RecruiterError, match="timed out after 0.1 seconds"):
+        recruiter._herdr_json("pane", "layout", timeout_seconds=0.1)
+
+
+def test_checker_cleanup_guards_layout_adjustment(tmp_path: Path, monkeypatch) -> None:
+    order = _order(cwd=str(tmp_path))
+    worker_result = tmp_path / "worker-result.json"
+    worker_result.write_text(json.dumps(_result(order["order_id"])))
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    key, _ = ledger.submit(order)
+    manager = {
+        "address": "manager-address",
+        "config": recruiter.llm_management.load_management_config(_roster()),
+        "generation": 1,
+        "pane": "manager-pane",
+    }
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args: {
+            "result": {"pane": {}}
+            if args[0:2] == ("pane", "get")
+            else {"result": {"process_info": {}}}
+        },
+    )
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        recruiter,
+        "_start_herdr_agent",
+        lambda *args, **kwargs: ("checker-pane", "workspace", "checker-address"),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_resize_started_pane",
+        lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    closed: list[str] = []
+    monkeypatch.setattr(recruiter, "_close_worker_pane", closed.append)
+
+    with pytest.raises(KeyboardInterrupt):
+        recruiter._run_one_shot_checker(
+            ledger, key, order, manager, "worker-pane", worker_result, 1
+        )
+
+    assert closed == ["checker-pane"]
+
+
 def _result(order_id: str, verdict: str = "passed") -> dict:
     result: dict[str, object] = {
         "order_id": order_id,
@@ -903,7 +1044,11 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
     private_result = tmp_path / "hub" / "missing-results-dir" / "token.json"
     instructions = tmp_path / "instructions.md"
     instructions.write_text("Do the stage.\n")
-    order = _order(result_path=str(public_result), instructions_path=str(instructions))
+    order = _order(
+        agent="plan-lifecycle-watchdog",
+        result_path=str(public_result),
+        instructions_path=str(instructions),
+    )
     order_path = tmp_path / "order.json"
     order_path.write_text(json.dumps(order))
     roster_path = tmp_path / "upagent.yaml"
@@ -923,14 +1068,29 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
     monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", lambda *args: True)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    lifecycle_events: list[str] = []
+
+    def record_worker(*args: object) -> threading.Event:
+        lifecycle_events.append("recorded")
+        return threading.Event()
+
+    def resize_worker(*args: object, **kwargs: object) -> None:
+        assert lifecycle_events == ["recorded"]
+        lifecycle_events.append("resized")
+
+    monkeypatch.setattr(recruiter, "_resize_started_pane", resize_worker)
 
     code, result, cleanup = recruiter._run_order(
-        str(order_path), str(roster_path), private_result
+        str(order_path),
+        str(roster_path),
+        private_result,
+        on_worker_launched=record_worker,
     )
 
     assert code == 0
     assert result == _result(order["order_id"])
     assert cleanup["verified_absent"] is True
+    assert lifecycle_events == ["recorded", "resized"]
 
 
 def test_completion_monitor_wakes_on_stable_malformed_result(
@@ -1183,6 +1343,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     )
     launch_orders: list[dict] = []
     launch_directions: list[str] = []
+    resize_calls: list[tuple[str, str, float, str]] = []
 
     def start_manager(
         name: str,
@@ -1196,6 +1357,16 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         return "manager-pane", "cockpit-workspace", name
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", start_manager)
+    def resize_manager(
+        pane: str, *, split_direction: str, target_fraction: float, role: str
+    ) -> None:
+        lease = json.loads(
+            (ledger.active / "requests" / key / "lease.json").read_text()
+        )
+        assert lease["manager_pane"] == pane
+        resize_calls.append((pane, split_direction, target_fraction, role))
+
+    monkeypatch.setattr(recruiter, "_resize_started_pane", resize_manager)
     monkeypatch.setattr(
         recruiter, "_wait_for_agent_health", lambda *args, **kwargs: {"healthy": True}
     )
@@ -1211,6 +1382,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     assert lease["manager_workspace_id"] == "cockpit-workspace"
     assert launch_orders[0]["cockpit_pane"] == order["cockpit_pane"]
     assert launch_directions == ["down"]
+    assert resize_calls == [("manager-pane", "down", 0.20, "account manager")]
 
 
 def test_explicit_shared_manager_placement_uses_recruiter_pane(monkeypatch) -> None:

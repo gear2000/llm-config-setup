@@ -104,6 +104,9 @@ PYTHON RECRUITER HUB
 12. Cockpit placement is role-balanced without weakening startup atomicity. Account Managers and
     one-shot checkers split downward; workers split right; phase leaders split downward. Herdr
     therefore forms readable rows and corners instead of an unbounded strip of narrow columns.
+    After atomic startup, watchdogs are reduced to 28% of their local horizontal split and support
+    panes to 20% of their local vertical split. Resizing is bounded and presentation-only: failure
+    emits a warning and never changes worker health, ownership, or lifecycle state.
 
 ## Lifecycle states
 
