@@ -59,6 +59,67 @@ def _roster() -> dict:
     }
 
 
+def _phase_order(tmp_path: Path, **over: object) -> tuple[dict, Path]:
+    """Create a conventional phase-tree order subject to the release capability."""
+    stage = tmp_path / "run/phases/phase-0/pass-1/stages/stage-1-implementation/try-1"
+    stage.mkdir(parents=True)
+    instructions = stage / "instructions.md"
+    instructions.write_text("# Worker\n")
+    return _order(
+        instructions_path=str(instructions),
+        result_path=str(stage / "result.json"),
+        **over,
+    ), tmp_path / "run/phases/phase-0/pass-1/control/phase-start.json"
+
+
+def test_phase_order_requires_controller_release_receipt(tmp_path: Path, monkeypatch) -> None:
+    order, receipt_path = _phase_order(tmp_path)
+    monkeypatch.delenv(recruiter.PHASE_START_RECEIPT_ENV, raising=False)
+
+    with pytest.raises(RecruiterError, match="not released by upagent-phase-start"):
+        recruiter.require_phase_watchdog_capability(order)
+
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "state": "watchdog-ready",
+                "phase_id": "phase-0",
+                "leader_pane": "1-1",
+                "watchdog": {"worker_pane": "watchdog-pane"},
+            }
+        )
+    )
+    monkeypatch.setenv(recruiter.PHASE_START_RECEIPT_ENV, str(receipt_path))
+    recruiter.require_phase_watchdog_capability(order)
+
+
+def test_phase_release_receipt_is_bound_to_the_leader_and_watchdog(tmp_path: Path, monkeypatch) -> None:
+    order, receipt_path = _phase_order(tmp_path)
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "state": "ready",
+                "phase_id": "phase-0",
+                "leader_pane": "some-other-pane",
+                "watchdog": {},
+            }
+        )
+    )
+    monkeypatch.setenv(recruiter.PHASE_START_RECEIPT_ENV, str(receipt_path))
+
+    with pytest.raises(RecruiterError, match="does not belong to the released leader pane"):
+        recruiter.require_phase_watchdog_capability(order)
+
+
+def test_phase_watchdog_bootstrap_order_is_exempt_from_release_receipt(tmp_path: Path, monkeypatch) -> None:
+    order, _receipt_path = _phase_order(tmp_path, agent="phase-watchdog")
+    monkeypatch.delenv(recruiter.PHASE_START_RECEIPT_ENV, raising=False)
+
+    recruiter.require_phase_watchdog_capability(order)
+
+
 def test_worker_health_requires_expected_process_agent_and_cwd(monkeypatch) -> None:
     responses = {
         ("pane", "get", "worker-pane"): {

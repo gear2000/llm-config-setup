@@ -113,6 +113,8 @@ STAGE_TIMEOUT_MS = {
 }
 # Where `up` records the resolved workspace + Recruiter pane so `status`/callers can find it.
 STATE_FILE = Path(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")).expanduser()
+PHASE_START_RECEIPT_ENV = "UPAGENT_PHASE_START_RECEIPT"
+PHASE_START_READY_STATES = ("watchdog-ready", "ready")
 
 
 def default_roster_path() -> str:
@@ -712,6 +714,53 @@ def load_roster(path: str | Path) -> dict:
 def _default_timeout_ms(stage_id: str) -> int:
     """Return the stage-specific default without duplicating stage validation."""
     return STAGE_TIMEOUT_MS.get(stage_id, DEFAULT_TIMEOUT_MS)
+
+
+def _phase_start_receipt(order: dict) -> Path | None:
+    """Return the required startup receipt for a conventional phase-tree order, if any."""
+    instructions = Path(order["instructions_path"]).expanduser().resolve()
+    for parent in (instructions.parent, *instructions.parents):
+        if not parent.name.startswith("pass-"):
+            continue
+        phase_dir = parent.parent
+        if phase_dir.parent.name != "phases" or phase_dir.name != order["phase_id"]:
+            continue
+        return parent / "control" / "phase-start.json"
+    return None
+
+
+def require_phase_watchdog_capability(order: dict) -> None:
+    """Reject phase work that was not released by the deterministic phase transaction.
+
+    A phase watchdog is itself the transaction's bootstrap order, so it is the sole exception.
+    All later stage orders inherit this receipt path from the released leader process.
+    """
+    if order.get("agent") == "phase-watchdog":
+        return
+    receipt_path = _phase_start_receipt(order)
+    if receipt_path is None:
+        return
+    provided = os.environ.get(PHASE_START_RECEIPT_ENV)
+    if provided != str(receipt_path):
+        raise RecruiterError(
+            f"phase order {order['order_id']} was not released by upagent-phase-start; "
+            f"expected {PHASE_START_RECEIPT_ENV}={receipt_path}"
+        )
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(f"phase-start receipt {receipt_path} is unreadable: {error}") from error
+    if not isinstance(receipt, dict):
+        raise RecruiterError(f"phase-start receipt {receipt_path} is not an object")
+    if receipt.get("state") not in PHASE_START_READY_STATES:
+        raise RecruiterError(f"phase-start receipt {receipt_path} is not released")
+    if receipt.get("phase_id") != order["phase_id"]:
+        raise RecruiterError(f"phase-start receipt {receipt_path} belongs to another phase")
+    if receipt.get("leader_pane") != order["cockpit_pane"]:
+        raise RecruiterError(f"phase order {order['order_id']} does not belong to the released leader pane")
+    watchdog = receipt.get("watchdog")
+    if not isinstance(watchdog, dict) or not isinstance(watchdog.get("worker_pane"), str):
+        raise RecruiterError(f"phase-start receipt {receipt_path} has no healthy watchdog address")
 
 
 def resolve_launch_command(order: dict, roster: dict) -> str:
@@ -1670,6 +1719,7 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as e:
         raise RecruiterError(f"invalid order {order_path}: {e}") from e
+    require_phase_watchdog_capability(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     if ledger.completed_result(key, order) is not None:
@@ -1853,6 +1903,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as e:
         raise RecruiterError(f"invalid order {order_path}: {e}") from e
+    require_phase_watchdog_capability(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     if ledger.completed_result(key, order) is None:
@@ -1905,6 +1956,7 @@ def cmd_request(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as error:
         raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    require_phase_watchdog_capability(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()

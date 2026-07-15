@@ -43,7 +43,7 @@
 #   claude → --dangerously-skip-permissions             (trusts cwd, incl. a fresh worktree)
 #   codex  → --dangerously-bypass-approvals-and-sandbox (with --skip-git-repo-check)
 #   pi     → --approve                                  (trusts project-local files for the run)
-#   cursor → --print                                    (non-interactive)
+#   cursor → --print --force                            (non-interactive + approve commands)
 #
 # PI WORKERS RUN INSULATED. `--no-extensions` turns off extension discovery so a broken
 # globally-installed extension can never brick orchestrated workers (a half-installed
@@ -58,7 +58,8 @@
 
 # LLM lifecycle roles are separate from work routes. They interpret configuration and bounded
 # health evidence; Python remains the only pane/process executor. Role commands may use
-# {brief_path}, {cwd}, and {output_path}. Omitting this block uses these Claude/Haiku defaults.
+# {brief_path}, {cwd}, and {output_path}. Omitting this block uses a Claude/Sonnet
+# account manager and a lightweight Claude/Haiku checker.
 management:
   startup_timeout_ms: 45000
   inactivity_check_ms: 900000
@@ -66,7 +67,7 @@ management:
   account_manager:
     command: >-
       claude --dangerously-skip-permissions --agent upagent-account-manager
-      --model haiku --effort low
+      --model sonnet --effort low
       "Read {brief_path}, perform that one lifecycle review, write {output_path},
       then remain available."
     expected_agent: claude
@@ -117,7 +118,7 @@ phase_leaders:
     "Read {instructions_path} and follow that phase-leader assignment."
 
   cursor: >-
-    cursor-agent --print --model {model}
+    cursor-agent --print --force --model {model}
     "Read {instructions_path} and follow that phase-leader assignment."
 
 harnesses:
@@ -145,6 +146,6 @@ harnesses:
     {result_path} with order_id exactly {order_id} (verdict + revisit + full_log)."
 
   cursor: >-
-    cursor-agent --print --model {model}
+    cursor-agent --print --force --model {model}
     "Read {instructions_path}; do the stage in {cwd}; write exactly one result.json to
     {result_path} with order_id exactly {order_id}."

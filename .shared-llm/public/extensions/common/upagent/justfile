@@ -35,6 +35,16 @@ upagent-request order:
 upagent-phase-start route run_root phase pass_number:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_controller.py "{{route}}" "{{run_root}}" "{{phase}}" "{{pass_number}}"
 
+# Direct plans have no phase leader; the caller sequences ready steps and human approval.
+upagent-direct-steps route:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py steps --route "{{route}}"
+
+upagent-direct-order route plan_id step_id cwd run_root tui_pane:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}"
+
+upagent-direct-apply-order route plan_id step_id cwd run_root tui_pane approval plan_artifact:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py apply-order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}" --approval "{{approval}}" --plan-artifact "{{plan_artifact}}"
+
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
 upagent-await order:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}"

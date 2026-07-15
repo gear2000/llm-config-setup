@@ -1,0 +1,8 @@
+type: agent
+name: reviewer
+model: sonnet
+color: yellow
+description: .shared-llm/public/layers/agents/common/reviewer.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/reviewer.md
+output: .claude/agents/reviewer.md

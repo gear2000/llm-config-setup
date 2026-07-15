@@ -5,7 +5,7 @@
 #   .shared-llm/public/extensions/common/specialist/
 # To adopt: import this justfile from your root justfile:
 #   import '.shared-llm/public/extensions/common/specialist/justfile'
-# then fill the roster — save agents.yaml.example as agents.yaml (in your `this_repo` config,
+# then fill the roster — save agents.yml.sample as agents.yaml (in your `this_repo` config,
 # next to hub.py) and edit it. Override the roster path with $SPECIALIST_HUB_CONFIG.
 #
 # Requires HERDR_ENV=1 (run inside Herdr) and the `herdr` CLI on PATH.

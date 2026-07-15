@@ -144,6 +144,44 @@ def test_phase_start_releases_leader_only_after_watchdog_is_healthy(
     }
 
 
+def test_phase_start_publishes_watchdog_capability_before_releasing_leader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root, route, roster = _inputs(tmp_path)
+    _started, _closed = _patch_runtime(monkeypatch)
+    observed: dict[str, object] = {}
+
+    def verify_release(gate: Path, request_id: str) -> None:
+        receipt_path = gate.with_name("phase-start.json")
+        observed.update(json.loads(receipt_path.read_text()))
+        script = gate.with_name("launch-leader.sh").read_text()
+        assert f"export {phase_controller.recruiter.PHASE_START_RECEIPT_ENV}={receipt_path}" in script
+        gate.unlink()
+
+    monkeypatch.setattr(phase_controller, "_release_leader_gate", verify_release)
+
+    phase_controller.start_phase(
+        route_path=route,
+        run_root=run_root,
+        phase_id="phase-0",
+        pass_number=1,
+        tui_pane="tui-pane",
+        cwd=tmp_path,
+        roster_path=str(roster),
+    )
+
+    assert observed["state"] == "watchdog-ready"
+    assert observed["leader_pane"] == "leader-pane"
+    assert observed["watchdog"] == {
+        "manager_address": "manager-address",
+        "manager_pane": "manager-pane",
+        "order_path": str(run_root / "phases/phase-0/pass-1/watchdog/order.json"),
+        "request_id": "sample-run.phase-0.pass-1.phase-watchdog",
+        "worker_address": "watchdog-address",
+        "worker_pane": "watchdog-pane",
+    }
+
+
 def test_watchdog_start_failure_closes_gated_leader_and_records_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

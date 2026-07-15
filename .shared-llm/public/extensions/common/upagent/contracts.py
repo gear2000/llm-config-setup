@@ -42,6 +42,8 @@ RECOGNIZED_STAGE_IDS = (
 
 # Harnesses the roster (upagent.yaml) may map a launch template for.
 KNOWN_HARNESSES = ("claude", "codex", "pi", "cursor")
+MANAGER_PLACEMENT_MODES = ("shared", "requester", "workspace")
+OPERATIONS = ("plan", "apply")
 
 # Required keys on an order.json the leader writes.
 ORDER_REQUIRED = (
@@ -132,6 +134,47 @@ def parse_order(text: str) -> dict:
             value = requester.get(field)
             if not isinstance(value, str) or not value:
                 raise ContractError(f"order.json: `requester.{field}` must be a non-empty string")
+    placement = order.get("manager_placement")
+    if placement is not None:
+        if not isinstance(placement, dict):
+            raise ContractError("order.json: `manager_placement` must be an object when present")
+        mode = placement.get("mode")
+        if mode not in MANAGER_PLACEMENT_MODES:
+            raise ContractError("order.json: `manager_placement.mode` must be one of " + ", ".join(MANAGER_PLACEMENT_MODES))
+        for field in ("workspace_id", "workspace_label", "anchor_pane"):
+            value = placement.get(field)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ContractError(f"order.json: `manager_placement.{field}` must be a non-empty string when present")
+        if mode == "workspace" and not placement.get("workspace_id") and not placement.get("workspace_label"):
+            raise ContractError("order.json: workspace manager placement needs `workspace_id` or `workspace_label`")
+        if placement.get("workspace_id") and placement.get("workspace_label"):
+            raise ContractError("order.json: manager placement may specify `workspace_id` or `workspace_label`, not both")
+    operation = order.get("operation", "plan")
+    if operation not in OPERATIONS:
+        raise ContractError("order.json: `operation` must be one of " + ", ".join(OPERATIONS))
+    if "requires_apply" in order and not isinstance(order["requires_apply"], bool):
+        raise ContractError("order.json: `requires_apply` must be a boolean when present")
+    mode = order.get("mode", "phase")
+    if mode not in ("phase", "direct"):
+        raise ContractError("order.json: `mode` must be `phase` or `direct`")
+    if mode == "direct":
+        for field in ("plan_id", "step_id"):
+            if not isinstance(order.get(field), str) or not order[field]:
+                raise ContractError(f"order.json: direct orders require a non-empty `{field}`")
+    if operation == "apply":
+        approval, artifact = order.get("approval"), order.get("plan_artifact")
+        if not isinstance(approval, dict):
+            raise ContractError("order.json: apply operation requires an `approval` object")
+        if not isinstance(artifact, dict):
+            raise ContractError("order.json: apply operation requires a `plan_artifact` object")
+        for field in ("approved_by", "approved_at", "nonce", "plan_sha256"):
+            if not isinstance(approval.get(field), str) or not approval[field]:
+                raise ContractError(f"order.json: `approval.{field}` must be a non-empty string")
+        for field in ("path", "sha256"):
+            if not isinstance(artifact.get(field), str) or not artifact[field]:
+                raise ContractError(f"order.json: `plan_artifact.{field}` must be a non-empty string")
+        if approval["plan_sha256"] != artifact["sha256"]:
+            raise ContractError("order.json: approval.plan_sha256 must match plan_artifact.sha256")
     return order
 
 

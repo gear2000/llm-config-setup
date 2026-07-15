@@ -222,7 +222,7 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update a skill, agent definition, CLAUDE.md rule, or any shared-llm layer. Runs the full workflow:… |
 
-### Generic agents (22)
+### Generic agents (26)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agents/`. Adopt them as-is — they contain no project-specific references.
 
@@ -230,6 +230,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | --- | --- |
 | `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a Herdr phase run. NOT a watchdog and NOT a live… |
 | `architecture` | Use when designing new modules, defining package boundaries, making architectural decisions, or… |
+| `aws` | AWS infrastructure and operations specialist for architecture, IAM, networking, and evidence-backed… |
 | `backend` | Use when writing or modifying backend services — serverless functions, API routes, or worker… |
 | `ci-pipeline` | Use when creating or modifying CI pipeline configurations. Writes configs, validates syntax, and… |
 | `ci-trigger` | Use when creating or managing trigger jobs on a dashboard that fronts a separate CI system,… |
@@ -239,6 +240,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `devops` | Use for infrastructure-as-code, cloud infrastructure (IAM, serverless functions, object storage),… |
 | `docs-writer` | Use when writing or updating documentation pages. Reads current code to verify accuracy, writes and… |
 | `frontend` | Use when building or modifying the frontend — pages, components, auth flows, or data fetching. |
+| `github` | GitHub specialist for repository state, issues, pull requests, Actions, and evidence-backed… |
 | `monorepo-pkgs` | Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
 | `phase-evaluator` | Optional independent evaluator for one Herdr phase. The phase leader resolves its route profile and… |
@@ -246,8 +248,10 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `plan-watchdog` | Optional Herdr phase plan-conformance advisor. The phase leader resolves the route and sends one… |
 | `playwright-cli` | Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend.… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
+| `reviewer` | Independent read-only reviewer for code, infrastructure, plans, and durable execution evidence. |
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
 | `team-pulse` | Narrow mechanical result watcher for a Herdr run. The TUI agent and phase leader own orchestration;… |
+| `terraform` | Terraform infrastructure specialist that writes and validates IaC, produces plans, and keeps apply… |
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 

@@ -424,6 +424,7 @@ def start_phase(
             f"IFS= read -r watchdog_request_id < {shlex.quote(str(gate_path))}\n"
             f"rm -f {shlex.quote(str(gate_path))}\n"
             f"[[ \"$watchdog_request_id\" == {shlex.quote(request_id)} ]]\n"
+            f"export {recruiter.PHASE_START_RECEIPT_ENV}={shlex.quote(str(receipt_path))}\n"
             f"exec bash -lc {shlex.quote(launch)}\n",
             executable=True,
         )
@@ -497,6 +498,27 @@ def start_phase(
             _write_json_atomic(watchdog_order_path, watchdog_order)
             recruiter.load_order(watchdog_order_path)
             watchdog = _request_watchdog(watchdog_order_path, roster_path)
+            watchdog_receipt = {
+                "manager_address": watchdog.get("manager_address"),
+                "manager_pane": watchdog["manager_pane"],
+                "order_path": str(watchdog_order_path),
+                "request_id": watchdog["request_id"],
+                "worker_address": watchdog.get("worker_address"),
+                "worker_pane": watchdog["worker_pane"],
+            }
+            _write_json_atomic(
+                receipt_path,
+                {
+                    "at_ns": time.time_ns(),
+                    "leader_pane": leader_pane,
+                    "pass": pass_number,
+                    "phase_id": phase_id,
+                    "state": "watchdog-ready",
+                    "tui_pane": tui_pane,
+                    "watchdog": watchdog_receipt,
+                    "workspace_id": workspace_id,
+                },
+            )
             _release_leader_gate(gate_path, request_id)
             leader_health = _leader_health(leader_pane, cwd, lead_profile, roster)
             receipt = {
@@ -507,14 +529,7 @@ def start_phase(
                 "phase_id": phase_id,
                 "state": "ready",
                 "tui_pane": tui_pane,
-                "watchdog": {
-                    "manager_address": watchdog.get("manager_address"),
-                    "manager_pane": watchdog["manager_pane"],
-                    "order_path": str(watchdog_order_path),
-                    "request_id": watchdog["request_id"],
-                    "worker_address": watchdog.get("worker_address"),
-                    "worker_pane": watchdog["worker_pane"],
-                },
+                "watchdog": watchdog_receipt,
                 "workspace_id": workspace_id,
             }
             _write_json_atomic(receipt_path, receipt)

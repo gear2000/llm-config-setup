@@ -10,7 +10,7 @@ import string
 
 ROLE_TEMPLATE_FIELDS = {"brief_path", "cwd", "output_path"}
 DEFAULT_ACCOUNT_MANAGER_COMMAND = (
-    'claude --dangerously-skip-permissions --agent upagent-account-manager --model haiku --effort low '
+    'claude --dangerously-skip-permissions --agent upagent-account-manager --model sonnet --effort low '
     '"Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available."'
 )
 DEFAULT_CHECKER_COMMAND = (
@@ -117,6 +117,9 @@ Python mechanical validation (authoritative for its stated facts):
 Decide whether the request is semantically coherent. An unsupported model, effort, persona, or
 contradictory request is `needs-requester`; any mechanical validation error must also be
 `needs-requester`; an unrecoverable unsafe request is `blocked`; otherwise it is `approved`.
+The route and roster are authoritative: do not infer that a model is review-only, coding-only, or
+otherwise restricted from its name or prior model knowledge. Reject only an explicit mechanical
+error or explicit supplied policy. For requester clarification, list concrete `requested_changes`.
 Write exactly one JSON object to `{output_path}`:
 
 ```json
@@ -124,7 +127,8 @@ Write exactly one JSON object to `{output_path}`:
   "request_id": "{request_id}",
   "generation": {generation},
   "decision": "approved|needs-requester|blocked",
-  "message": "concise explanation for the requester"
+  "message": "concise explanation for the requester",
+  "requested_changes": ["optional concrete correction or clarification"]
 }}
 ```
 """

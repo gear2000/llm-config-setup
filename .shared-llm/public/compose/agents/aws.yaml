@@ -1,0 +1,8 @@
+type: agent
+name: aws
+model: sonnet
+color: orange
+description: .shared-llm/public/layers/agents/common/aws.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/aws.md
+output: .claude/agents/aws.md

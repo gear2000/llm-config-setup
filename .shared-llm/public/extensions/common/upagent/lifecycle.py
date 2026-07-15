@@ -46,6 +46,7 @@ class ManagerDecision:
     generation: int
     decision: str
     message: str
+    requested_changes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,10 @@ def parse_manager_decision(text: str, request_id: str, generation: int) -> Manag
     if decision not in MANAGER_DECISIONS:
         raise LifecycleError(f"manager decision must be one of {', '.join(MANAGER_DECISIONS)}")
     message = _require_string(value.get("message"), "manager message")
-    return ManagerDecision(request_id, current_generation, decision, message)
+    requested_changes = value.get("requested_changes", [])
+    if not isinstance(requested_changes, list) or not all(isinstance(item, str) and item.strip() for item in requested_changes):
+        raise LifecycleError("requested_changes must be a list of non-empty strings")
+    return ManagerDecision(request_id, current_generation, decision, message, tuple(requested_changes))
 
 
 def parse_check_assessment(text: str, request_id: str, generation: int) -> CheckAssessment:

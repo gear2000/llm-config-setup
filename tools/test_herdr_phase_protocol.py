@@ -44,3 +44,4 @@ def test_tui_requests_one_managed_phase_watchdog() -> None:
     assert "do not reproduce its pane operations manually" in text
     assert "phase-result.json" in text
     assert "Never use `agent-status=done`" in text
+    assert "Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`" in text

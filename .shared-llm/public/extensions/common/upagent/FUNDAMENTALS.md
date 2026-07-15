@@ -153,7 +153,8 @@ PYTHON PHASE CONTROLLER
 ├─ submits one ordinary phase-watchdog order to the Recruiter Hub
 │  └─ Recruiter creates and verifies its Account Manager and watchdog worker
 ├─ requires REQUEST_ACCEPTED with both verified pane addresses
-├─ opens the leader gate and verifies the expected leader process, harness, and cwd
+├─ records a `watchdog-ready` receipt, then opens the leader gate with that receipt in its environment
+├─ verifies the expected leader process, harness, and cwd
 └─ atomically publishes PHASE_STARTED only after the complete pair is healthy
 ```
 
@@ -165,3 +166,11 @@ running without a watchdog” an invalid state rather than something a human mus
 The roster has separate `phase_leaders:` templates because a controller launch is not a stage
 worker launch. Python refuses a missing template instead of trimming a worker command or guessing
 how a harness should run a phase leader.
+
+The receipt is also an enforced capability, not merely a status file. A conventional phase-tree
+stage order is accepted only when its leader process inherited the exact
+`UPAGENT_PHASE_START_RECEIPT` path and that receipt binds the same phase, leader pane, and live
+watchdog address. Thus a manually-created leader may be visible, but it cannot dispatch phase
+work. Claude additionally blocks direct `/herdr-phase` pane injection before it can create that
+invalid leader. The phase-watchdog bootstrap order is the narrow exception: it is created by the
+controller before the leader is released.

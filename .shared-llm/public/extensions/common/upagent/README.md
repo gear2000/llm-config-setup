@@ -34,6 +34,11 @@ lifecycle, requires verified Account Manager and watchdog startup, then releases
 leader. It returns `PHASE_STARTED` only after the complete pair is healthy. A startup failure
 closes the still-gated leader and records the cause; it never leaves an unwatched phase running.
 
+The controller exports a receipt capability only to the released leader. The Recruiter rejects a
+conventional phase-tree stage order unless that capability names a ready receipt for the same
+phase, leader pane, and watchdog. A manually opened leader can therefore not silently perform
+phase work.
+
 ## The order → result contract (`contracts.py`)
 
 Durable files are the source of truth; terminal text is display-only.

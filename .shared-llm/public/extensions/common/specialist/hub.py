@@ -8,7 +8,7 @@ the `herdr` CLI (which talks to the running Herdr over its unix socket).
 Reads agents.yaml (next to this file, or $SPECIALIST_HUB_CONFIG): each entry names a
 specialist, points at its definition, and declares an UpAgent harness/model/agent. Executable
 launch commands remain centralized in the Recruiter roster. The engine is public; the FILLED
-roster is a destination's own `this_repo` config (template: agents.yaml.example).
+roster is a destination's own `this_repo` config (template: agents.yml.sample).
 
 Topology:
 
@@ -132,7 +132,7 @@ def load_config() -> dict:
     path can still honor its always-signal contract when the roster is bad."""
     path = default_config_path()
     if not path.is_file():
-        raise ConfigError(f"{path} not found (template: agents.yaml.example, next to this file)")
+        raise ConfigError(f"{path} not found (template: agents.yml.sample, next to this file)")
     try:
         cfg = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as e:
