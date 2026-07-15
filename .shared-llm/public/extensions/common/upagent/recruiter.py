@@ -2767,7 +2767,36 @@ def cmd_run_job(key: str, roster_path: str) -> int:
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
-        assessment = _ask_manager_about_startup(ledger, key, order, manager, evidence)
+        try:
+            assessment = _ask_manager_about_startup(
+                ledger, key, order, manager, evidence
+            )
+        except (RecruiterError, LifecycleError, OSError) as error:
+            # Python has already proved pane/process/agent/cwd health. The LLM assessment adds
+            # semantic context, but a missing or malformed advisory response must not tear down a
+            # mechanically healthy worker. Persist and surface the degraded observation instead.
+            ledger._event(
+                key,
+                "worker-startup-assessment-degraded",
+                reason=str(error),
+                worker_pane=owned_worker_pane,
+            )
+            if not ledger.mark_worker_healthy(key, token, evidence):
+                raise RecruiterError(
+                    "lease ownership changed before degraded worker health could be published"
+                ) from error
+            _notify_requester(
+                ledger,
+                key,
+                order,
+                generation,
+                "worker-healthy-degraded",
+                "Python verified the expected worker process, harness, and working directory, "
+                f"but the Account Manager startup assessment was unavailable: {error}. "
+                "The worker is continuing; do not retry solely for this advisory failure.",
+                {"assessment_error": str(error), **evidence},
+            )
+            return
         if getattr(assessment, "assessment") not in ("healthy", "completed"):
             message = getattr(assessment, "message")
             _notify_requester(

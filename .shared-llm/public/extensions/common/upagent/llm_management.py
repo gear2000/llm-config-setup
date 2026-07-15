@@ -141,6 +141,10 @@ This assessment is advisory. Python supplied bounded mechanical evidence at `{ev
 Read it and, only when useful, read the named worker pane's recent output.
 Do not create, close, interrupt, or kill any pane. Do not declare a verdict for the worker's task.
 
+The literal request id is `{request_id}` and the literal generation is `{generation}`. Copy those
+values exactly into the response. Directory names, path components, pane names, and evidence fields
+are not request ids; never derive or substitute an identity from them.
+
 Write exactly one JSON object to `{output_path}`:
 
 ```json

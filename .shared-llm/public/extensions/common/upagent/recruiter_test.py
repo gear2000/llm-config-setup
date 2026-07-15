@@ -1294,7 +1294,7 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     assert closed_panes == ["worker-pane", "manager-pane"]
 
 
-def test_codex_completion_monitor_promotes_private_result_when_agent_status_never_finishes(
+def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_result(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     result_path = tmp_path / "result.json"
@@ -1324,7 +1324,22 @@ def test_codex_completion_monitor_promotes_private_result_when_agent_status_neve
     staging_paths: list[Path] = []
     closed_panes: list[str] = []
     outcomes: list[int] = []
+    notifications: list[str] = []
     _patch_approved_manager(monkeypatch)
+    monkeypatch.setattr(
+        recruiter,
+        "_ask_manager_about_startup",
+        lambda *args: (_ for _ in ()).throw(
+            RecruiterError("assessment request_id mismatch")
+        ),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_notify_requester",
+        lambda ledger, key, order, generation, message_type, *args, **kwargs: notifications.append(
+            message_type
+        ),
+    )
 
     def fake_start(
         name: str, execution_order: dict, launch: str
@@ -1391,6 +1406,18 @@ def test_codex_completion_monitor_promotes_private_result_when_agent_status_neve
     assert json.loads(result_path.read_text()) == _result(order["order_id"])
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
     assert closed_panes == ["codex-worker-pane", "manager-pane"]
+    events = [
+        json.loads(path.read_text())
+        for path in (ledger.request_dir(key) / "events").glob("*.json")
+    ]
+    degraded = [
+        event
+        for event in events
+        if event.get("event") == "worker-startup-assessment-degraded"
+    ]
+    assert len(degraded) == 1
+    assert degraded[0]["reason"] == "assessment request_id mismatch"
+    assert "worker-healthy-degraded" in notifications
 
 
 def test_run_job_keeps_worker_result_when_status_wait_fails(

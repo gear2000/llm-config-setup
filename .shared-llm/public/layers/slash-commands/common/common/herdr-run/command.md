@@ -5,17 +5,18 @@ Run a checked `plan.md + route.yaml` pair end to end through the Herdr-native me
 ## Invocation
 
 ```text
-/herdr-run --plan <plan.md> --route <route.yaml> [--run-root <dir>] [--slug <name>] [--start-phase <N>] [--max-phases <N>]
+/herdr-run --plan <plan.md> --route <route.yaml> [--run-tree <exact-dir> | --run-root <parent-dir>] [--slug <name>] [--start-phase <N>] [--max-phases <N>]
 ```
 
 - `--plan <plan.md>` — canonical meta plan. Routing stays out of the plan body.
 - `--route <route.yaml>` — route profile with `llm_profiles`, inline `agent` names, per-phase `accuracy`, and optional `advisor_profile`/budgets.
+- `--run-tree <exact-dir>` — exact, already-created run directory containing the supplied `plan.md` and `route.yaml`. `just herdr-plan` always supplies this; use it directly and never create another dated/slug directory around it.
 - `--run-root <dir>` — optional root under which the run tree is written. Defaults to the repo's configured work-log root, or a local `./.herdr-runs/` when none is configured.
 - `--slug <name>` — optional run name. Defaults to a slug derived from the plan title.
 - `--start-phase <N>` — optional phase to start from. Default `0`.
 - `--max-phases <N>` — optional safety cap.
 
-All required flags must be present. Fail loud rather than guessing.
+`--run-tree` and `--run-root` are mutually exclusive. All required flags must be present. Fail loud rather than guessing.
 
 ## Pre-flight
 
@@ -23,7 +24,7 @@ All required flags must be present. Fail loud rather than guessing.
 2. Run `herdr pane list` to identify the current pane — this pane is the **tui-agent** (the top, full-width pane of the cockpit; the one the human talks to). Do not control Herdr from outside Herdr.
 3. Validate the installed Herdr command surface (`herdr workspace list/create`, `herdr pane list/split/run/read/close`, `herdr wait output`, `herdr wait agent-status`). Adapt only after validating any local syntax differences.
 4. Read the plan and route profile and run the same gate as `/meta-plan-check <plan.md> <route.yaml>`. If it fails, stop **before** creating any workspace and tell the user to run `/meta-plan-convert` or fix the files. The check must confirm: canonical plan shape; `llm_profiles` defined; every phase to run has `lead.llm_profile`, `lead.agent`, `merge_back_at`, and its stage entries; `stage-0-alignment` present iff `accuracy: high`; worktree branch template, green checks, and log checks configured; all referenced profiles exist; each named agent resolves; Stage 2 (and stage-0's audit when high) independent from Stage 1.
-5. Resolve `<slug>` and `<run-root>`, then create the run tree root `<run-root>/<date>/<slug>/`. Freeze the originals into it (`plan.md`, `route.yaml`, and `research.md` if present) as versioned copies, and initialize `run-status.md`. The run-tree `route.yaml` is the **single live route copy** for this run; the origin passed by `--route` is historical/read-only after this point. All mid-run route changes apply only to the run-tree copy.
+5. Resolve the run tree without guessing. With `--run-tree`, require that its resolved path is the common parent of the supplied `plan.md` and `route.yaml`, use that directory exactly, and treat those files as already frozen. Without it, resolve `<slug>` and `<run-root>`, create `<run-root>/<date>/<slug>/`, and freeze the originals into it (`plan.md`, `route.yaml`, and `research.md` if present). Initialize `run-status.md`. The run-tree `route.yaml` is the **single live route copy** for this run; the origin passed by `--route` is historical/read-only after this point. All mid-run route changes apply only to the run-tree copy.
 6. Record a Git baseline: branch/worktree identity, status, and phase-owned file manifest if the plan provides one.
 
 ## Cockpit + shared-services setup
@@ -33,7 +34,7 @@ The runtime topology is one cockpit workspace plus one always-up peripheral work
 ```text
 ws: <slug>                     ← the run cockpit, one screen
   ┌─────────────────────────────────────────────┐
-  │  tui-agent  (top, full width)               │  top: you talk HERE
+  │  tui-agent  │ plan-lifecycle-watchdog       │  you talk to the TUI
   ├──────────────────────┬──────────────────────┤
   │ phase-leader │ phase-watchdog │ stage worker │
   ├──────────────────────┴──────────────────────┤
@@ -45,11 +46,11 @@ ws: shared-services            ← plan-agnostic · always up · peripheral
   └── librarian   (Specialist Hub) routes a question → transient specialist
 ```
 
-1. The cockpit is the workspace holding this (tui-agent) pane. Confirm or create it as `<slug>`. The phase leader, phase watchdog, stage workers, their Dedicated Account Managers, and one-shot checkers live together in that cockpit; only the plan-agnostic Recruiter and Librarian remain in `shared-services`. **The TUI has no authority to create, launch, prompt, or adopt a phase leader or phase watchdog.** Its sole phase-start authority is the controller command in the phase loop below.
+1. The cockpit is the workspace holding this (tui-agent) pane. `just herdr-plan` has already created and health-checked this TUI, then asked the Recruiter to place one `plan-lifecycle-watchdog` and its Dedicated Account Manager beside it. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` or `ready-degraded`; never wait forever for monitoring. The plan watchdog observes this TUI, discovers every phase leader, and advises both sides on state transitions. **The TUI has no authority to create, launch, prompt, adopt, or replace the plan watchdog, a phase leader, or a phase watchdog.** Its sole phase-start authority is the controller command in the phase loop below. A manually started `/herdr-run` may lack a plan watchdog; record that degraded condition and continue instead of attempting an ad-hoc repair.
 2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible `shared-services` Recruiter pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates.
 3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub creates a Dedicated Account Manager, validates configuration, atomically starts the worker, and returns `worker-healthy` only after process/agent/cwd plus LLM startup assessment agree. Completion flows worker result → account manager explanation → Recruiter receipt → requester. The worker itself receives no controller addresses.
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
-5. Do not start an ad-hoc LLM result poller. The Recruiter owns deterministic checks and launches fresh one-shot LLM checkers only at configured inactivity/anomaly checkpoints. The phase watchdog is a managed worker with its own Dedicated Account Manager; it correlates the leader, descendant orders, and `phase-result.json` and alerts this TUI without controlling them. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported. A watchdog-only failure returns `ready-degraded`: record the warning and continue the phase.
+5. Do not start an ad-hoc LLM result poller. The Recruiter owns deterministic checks and launches fresh one-shot LLM checkers only at configured inactivity/anomaly checkpoints. The plan watchdog owns run-level TUI↔leader observability; each phase watchdog owns one leader↔descendants view. Both are managed workers with Dedicated Account Managers, both are advisory, and neither may close or advance a pane. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported. A watchdog-only failure returns `ready-degraded`: record the warning and continue the phase.
 
 ## Phase loop
 

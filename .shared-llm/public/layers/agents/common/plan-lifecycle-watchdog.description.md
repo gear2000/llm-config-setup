@@ -1,0 +1,1 @@
+Run-level Herdr lifecycle watchdog created by the deterministic plan launcher. It watches the TUI and all phase leaders, reports state changes and contradictions to both sides, and never controls or destroys them.

@@ -68,3 +68,5 @@ def test_checker_brief_forbids_authoritative_actions(tmp_path: Path) -> None:
     text = management.checker_brief("req-abc", 1, evidence, output)
     assert "advisory" in text.lower()
     assert "Do not create, close, interrupt, or kill" in text
+    assert "The literal request id is `req-abc`" in text
+    assert "never derive or substitute an identity" in text

@@ -23,6 +23,7 @@
 
 _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/recruiter.py"
 _SPECIALIST := justfile_directory() + "/.shared-llm/public/extensions/common/specialist/hub.py"
+_PLAN_CONTROLLER := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/plan_controller.py"
 
 # Bring up the always-up shared services (UpAgent Recruiter + Specialist Librarian,
 # each in its own role-labeled pane in the `shared-services` workspace, registered
@@ -92,13 +93,11 @@ herdr-down:
     ${PYTHON_BIN:-python3} {{_UPAGENT}} down || true
     {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
 
-# Kick off a checked plan through the Herdr-native runner with a FRESH TUI agent
-# in a fresh `<slug>` cockpit workspace — no manual harness start, no typing the
-# slash command. `dir` is the run dir holding plan.md + route.yaml; `slug` names
-# the workspace (defaults to the dir basename). The TUI agent (running /herdr-run)
-# gates the pair with the meta-plan check, finishes the cockpit layout, and drives
-# the phases; workers are hired per stage through the Recruiter, so run
-# `just herdr-up` first.
+# Kick off a checked plan through one deterministic Python transaction. It starts
+# and health-checks a FRESH TUI, then hires a sibling plan-lifecycle watchdog through
+# the Recruiter into the same cockpit. The watchdog observes the TUI and every phase
+# leader, but never controls them. A watchdog fault is reported as ready-degraded and
+# cannot stall a healthy TUI. Run `just herdr-up` first.
 #
 # The TUI is launched fully NON-INTERACTIVE (claude --dangerously-skip-permissions
 # / pi --approve) — it trusts its cwd and never blocks on a trust/permission dialog
@@ -110,25 +109,4 @@ herdr-down:
 #   just herdr-plan ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
 #   just herdr-plan ops/work-log/2026-07-12/my-feature "" pi
 herdr-plan dir slug="" harness="claude":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    dir="$(realpath "{{dir}}")"
-    plan="$dir/plan.md"; route="$dir/route.yaml"
-    [ -f "$plan" ]  || { echo "error: $plan not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
-    [ -f "$route" ] || { echo "error: $route not found (a run dir needs plan.md + route.yaml)" >&2; exit 1; }
-    slug="{{slug}}"; [ -n "$slug" ] || slug="$(basename "$dir")"
-    repo="{{invocation_directory()}}"
-    # Non-interactive launch flags per harness — a TUI that blocks on a trust or
-    # permission dialog stalls the whole run.
-    case "{{harness}}" in
-        claude) launch="claude --dangerously-skip-permissions" ;;
-        pi)     launch="pi --approve" ;;
-        *) echo "error: unknown harness '{{harness}}' (claude|pi)" >&2; exit 1 ;;
-    esac
-    out=$(herdr workspace create --label "$slug" --no-focus)
-    pane=$(echo "$out" | ${PYTHON_BIN:-python3} -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-    herdr pane rename "$pane" "tui-agent" >/dev/null 2>&1 || true
-    herdr pane run "$pane" "cd '$repo' && $launch '/herdr-run --plan $plan --route $route --slug $slug'"
-    echo "kicked off: workspace '$slug' pane $pane — $launch running /herdr-run"
-    echo "the TUI self-registers as a Herdr agent (tui-agent) — watch it on desktop or phone"
-    echo "run 'just herdr-up' first if the status table shows the shared services down"
+    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}"

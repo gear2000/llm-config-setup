@@ -88,8 +88,10 @@ PYTHON RECRUITER HUB
    detected harness, expected working directory, and a non-terminal agent state.
 6. Python records mechanical facts. An LLM interprets ambiguity but cannot override ownership,
    invent configuration, or execute an unvalidated lifecycle action.
-7. A missing or malformed LLM response becomes `needs-requester` or `blocked`; it never becomes
-   guessed success.
+7. A missing or malformed pre-launch manager decision becomes `needs-requester` or `blocked`; it
+   never becomes guessed success. After Python has mechanically proved worker process, harness, and
+   cwd health, a missing or malformed advisory startup assessment becomes `worker-healthy-degraded`
+   and the worker continues. An advisory bookkeeping fault may not destroy a proven healthy worker.
 8. The Requester owns continue/extend/cancel decisions. The Hub may act without a response only
    for valid terminal completion, proven orphan recovery, or a declared hard deadline after its
    grace period.
@@ -138,6 +140,30 @@ surfaces; pane ids may change or be reused and therefore never serve as durable 
 The LLM roles consume bounded evidence snapshots and return typed assessments. Python remains
 correct when an LLM is unavailable: it records the failure, informs the Requester, and follows
 the configured deadline policy without silently losing the request.
+
+## Use case: start one watched plan
+
+Plan-level monitoring is created by the deterministic launcher, not remembered by the TUI:
+
+```text
+just herdr-plan <run-dir>
+└─ PYTHON PLAN CONTROLLER
+   ├─ takes an exclusive run-start lock
+   ├─ creates and health-checks the TUI in a fresh cockpit
+   ├─ writes control/plan-start.json with the TUI address
+   └─ submits one plan-lifecycle-watchdog order to the Recruiter
+      ├─ Dedicated Account Manager lives beside the TUI
+      └─ plan watchdog lives beside the TUI
+         ├─ watches the TUI and durable run state
+         ├─ discovers each managed or unmanaged phase leader
+         └─ sends advisory state changes to both the TUI and current leader
+```
+
+The plan watchdog does not replace the per-phase watchdog. It connects orchestration levels: the
+plan watchdog watches TUI-to-leader handoff for the whole run, while each phase watchdog watches
+one leader and its descendants. Neither has destructive authority. A plan-watchdog startup fault
+is atomically recorded as `ready-degraded` and sent to the healthy TUI; it cannot freeze or cancel
+the run. A TUI startup fault is terminal because no run owner exists.
 
 ## Use case: start one watched phase
 
