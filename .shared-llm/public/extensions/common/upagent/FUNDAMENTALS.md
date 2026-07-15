@@ -171,6 +171,6 @@ The receipt is also an enforced capability, not merely a status file. A conventi
 stage order is accepted only when its leader process inherited the exact
 `UPAGENT_PHASE_START_RECEIPT` path and that receipt binds the same phase, leader pane, and live
 watchdog address. Thus a manually-created leader may be visible, but it cannot dispatch phase
-work. Claude additionally blocks direct `/herdr-phase` pane injection before it can create that
-invalid leader. The phase-watchdog bootstrap order is the narrow exception: it is created by the
-controller before the leader is released.
+work. The phase-watchdog bootstrap order is the narrow exception: it is created by the controller
+before the leader is released. This boundary is harness-neutral; TUI and phase-leader prompts must
+also treat the controller as mandatory and report a failed start rather than improvising panes.

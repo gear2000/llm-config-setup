@@ -40,8 +40,18 @@ def test_tui_requests_one_managed_phase_watchdog() -> None:
     assert "just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>" in text
     assert "PHASE_STARTED" in text
     assert "state: ready" in text
-    assert "The TUI never creates a leader or watchdog pane itself." in text
+    assert "The TUI has no authority to create, launch, prompt, or adopt a phase leader or phase watchdog." in text
     assert "do not reproduce its pane operations manually" in text
     assert "phase-result.json" in text
     assert "Never use `agent-status=done`" in text
     assert "Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`" in text
+    assert "This is mandatory, not guidance." in text
+    assert "Do not send `/herdr-phase` to any pane yourself." in text
+
+
+def test_phase_leader_fails_closed_without_a_controller_watchdog_receipt() -> None:
+    text = PROTOCOL.read_text()
+
+    assert "Require controller ownership before doing any phase work." in text
+    assert "$UPAGENT_PHASE_START_RECEIPT" in text
+    assert "A manually created leader is not allowed to repair or adopt itself" in text

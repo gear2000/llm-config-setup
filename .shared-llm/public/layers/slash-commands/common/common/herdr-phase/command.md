@@ -17,8 +17,9 @@ All four flags are required. Fail loud on any missing or unreadable path.
 ## Pre-flight
 
 1. Verify `HERDR_ENV=1`, else stop: `ERROR: /herdr-phase must run inside a Herdr-managed pane.`
-2. Confirm `just upagent-up` has persisted a live Recruiter in `/tmp/.upagent/recruiter.json` (or `UPAGENT_STATE`). The pane is a visible status surface, not a command mailbox. Determine this leader's OWN pane id — the `cockpit_pane` stamped on every order — from `$HERDR_PANE_ID` (or `herdr pane current`). Do **not** infer it from UI focus.
-3. Validate this phase's route entry:
+2. **Require controller ownership before doing any phase work.** `$UPAGENT_PHASE_START_RECEIPT` must name a readable `phase-start.json`. Read it and require: `state` is `watchdog-ready` or `ready`; its `phase_id` equals `--phase`; its `leader_pane` equals this leader's exact `$HERDR_PANE_ID`; and it contains watchdog `manager_pane` and `worker_pane` addresses. If any check fails, stop immediately. Do not create a worktree, write an order, request a worker, create a watchdog, or continue the phase. Print `PHASE_START_VIOLATION: <reason>` so the TUI can report the failed start. A manually created leader is not allowed to repair or adopt itself; only the controller may create the leader/watchdog pair.
+3. Confirm `just upagent-up` has persisted a live Recruiter in `/tmp/.upagent/recruiter.json` (or `UPAGENT_STATE`). The pane is a visible status surface, not a command mailbox. Determine this leader's OWN pane id — the `cockpit_pane` stamped on every order — from `$HERDR_PANE_ID` (or `herdr pane current`). Do **not** infer it from UI focus.
+4. Validate this phase's route entry:
    - `lead.llm_profile` and `lead.agent` present;
    - `accuracy` is `medium` (default) or `high`; if `high`, `stage-0-alignment` is present, else it is absent;
    - all five base stage entries exist; each stage has `llm_profile` and `agent`;
@@ -27,9 +28,9 @@ All four flags are required. Fail loud on any missing or unreadable path.
    - each referenced profile exists and each named agent resolves in its harness/project context;
    - each profile's `model` is the harness-native id shape — claude: alias or full name (paired with `effort`); codex: bare model id such as `gpt-5.6-sol` (paired with `effort`, passed as `model_reasoning_effort`); pi: `provider/id[:thinking]` (the `:thinking` suffix is pi's effort). A `provider/…` model on a claude/codex profile, or a bare id on a pi profile, is a route error — fail loud, do not guess a translation;
    - Stage 2 (and, when high, stage-0's audit) is independent from Stage 1.
-4. Determine the current **pass** number: count existing `pass-<p>/` dirs under `phases/<phase-id>/` and use the next one (start at `pass-1`). Read `phase-status.md` if it exists to see where a prior pass left off.
-5. Run the pre-flight dependency/import safety check before any code stage (see the shared phase protocol). On a confirmed circular dependency, write a `blocked` `phase-result.json` and stop.
-6. Create or select the temporary worktree branch from the route template and record its path, branch, and base commit. This path is the `cwd` on every stage order.
+5. Determine the current **pass** number: count existing `pass-<p>/` dirs under `phases/<phase-id>/` and use the next one (start at `pass-1`). Read `phase-status.md` if it exists to see where a prior pass left off.
+6. Run the pre-flight dependency/import safety check before any code stage (see the shared phase protocol). On a confirmed circular dependency, write a `blocked` `phase-result.json` and stop.
+7. Create or select the temporary worktree branch from the route template and record its path, branch, and base commit. This path is the `cwd` on every stage order.
 
 ## Stage execution — one work order per stage
 
