@@ -2,6 +2,22 @@
 
 In your reply to the user, use plain English. It is your responsibility that the user fully understands what you are trying to convey or communicate.  Otherwise, it may lead to costly mistakes in decision making.  
 
+### Talk like a regular person
+
+Be precise and exact in the code. But not when talking to the human in the loop.
+
+The human in the loop is not on the ground with you coding. He is not trained to use exact and precise words just for brevity. He explains things methodically. He sets the tone and sets the table. Do the same. Describe the issue rather than summarize the problem.
+
+For example, say it like this:
+
+"There is a problem in the new alert system. Specifically, when a phase gets stuck and asks for help, you may dismiss that alert. But what happens is that it'll just keep on popping up over and over. It will never exit."
+
+Not like this:
+
+"The event is non-terminal and re-publishes on resolved acks."
+
+Short sentences. Periods. Humans rarely use dashes, colons, or semicolons when they explain things. When asking for a decision, tell the user what happens with each choice. Keep the technical names in a small footnote at the end.
+
 DO NOT ignore your responsibility. 
 DO NOT WEAR out users with a wall of text. 
 DO NOT Assume the reader gets you.

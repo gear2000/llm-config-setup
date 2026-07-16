@@ -103,14 +103,14 @@ PYTHON RECRUITER HUB
     Shared-services placement is explicit rather than an invisible default.
 12. Cockpit placement is role-separated without weakening startup atomicity. The `control` tab
     holds the TUI and current phase leader, `workers` holds active stage workers, and `oversight`
-    holds Account Managers, watchdogs, and one-shot checkers. Role tabs are created lazily by
+    holds opt-in Account Managers and one-shot checkers. Role tabs are created lazily by
     moving the first live agent pane itself, so there are no placeholder shells. A cross-process
     workspace lock prevents concurrent hires from creating duplicate role tabs. Placement
     completes before the pane address is published. Within a role tab, workers split right and
     support roles split downward. All layout calls are bounded and presentation-only: failure
     leaves the healthy agent in its source tab, emits a warning, and never changes worker health,
     ownership, or lifecycle state.
-13. A watchdog's own `result.json` is not completion authority. Its order names a durable terminal
+13. (Legacy runs only.) A watchdog's own `result.json` is not completion authority. Its order names a durable terminal
     record owned by the plan or phase controller. If the watchdog writes a result before that
     record is terminal, the Hub archives the premature result, keeps the lifecycle open, and tells
     the same watchdog to resume. Only the matching durable terminal record permits cleanup.
@@ -157,9 +157,9 @@ The LLM roles consume bounded evidence snapshots and return typed assessments. P
 correct when an LLM is unavailable: it records the failure, informs the Requester, and follows
 the configured deadline policy without silently losing the request.
 
-## Use case: start one watched plan
+## Use case: start one plan
 
-Plan-level monitoring is created by the deterministic launcher, not remembered by the TUI:
+Plan startup is one deterministic transaction; liveness comes from blocking awaits, not observers:
 
 ```text
 just herdr-plan <run-dir>
@@ -168,12 +168,9 @@ just herdr-plan <run-dir>
    ├─ creates and health-checks the TUI in a fresh cockpit
    ├─ names the TUI/leader tab `control`
    ├─ writes control/plan-start.json with the TUI address
-   └─ submits one plan-lifecycle-watchdog order to the Recruiter
-      ├─ Dedicated Account Manager lives beside the TUI
-      └─ plan watchdog lives beside the TUI
-         ├─ watches the TUI and durable run state
-         ├─ discovers each managed or unmanaged phase leader
-         └─ sends advisory state changes to both the TUI and current leader
+   └─ writes control/plan-start.json (watchdog block: `not-configured` by design)
+   ...
+   TUI per phase: upagent-phase-start → blocking upagent-phase-await loop
    ...
    └─ TUI writes the final run-status.md
       └─ just herdr-plan-finish <run-dir> succeeded|stopped
@@ -188,20 +185,20 @@ The cockpit tabs appear as their roles become active:
 plan workspace
 ├─ control     TUI + current phase leader
 ├─ workers     active stage UpAgent workers
-└─ oversight   Account Managers + plan/phase watchdogs + one-shot checkers
+└─ oversight   opt-in Account Managers + one-shot checkers
 ```
 
-The plan watchdog does not replace the per-phase watchdog. It connects orchestration levels: the
-plan watchdog watches TUI-to-leader handoff for the whole run, while each phase watchdog watches
-one leader and its descendants. Neither has destructive authority. A plan-watchdog startup fault
-is atomically recorded as `ready-degraded` and sent to the healthy TUI; it cannot freeze or cancel
-the run. A TUI startup fault is terminal because no run owner exists.
+There is no standing watchdog at either level. The TUI's blocking `upagent-phase-await` and the
+leader's blocking `upagent-await`/`upagent-await-any` reconcile durable state against live Herdr
+state every sweep; contradictions surface as typed `leader-missing`/`leader-stalled` events, quiet
+surfaces as `inactivity-checkpoint`, and urgent unacknowledged events escalate to the human via
+`herdr notification`. A TUI startup fault is terminal because no run owner exists.
 
 Quiet panes, a completed LLM turn, or the watchdog deciding that its current check is done cannot
 end this lifecycle. The plan controller requires the final run summary before it publishes the
-terminal marker. The phase watchdog uses the matching `phase-result.json` as its terminal gate.
+terminal marker.
 
-## Use case: start one watched phase
+## Use case: start one phase
 
 Phase startup is a single deterministic transaction, not a sequence the TUI LLM must remember:
 
@@ -214,12 +211,9 @@ PYTHON PHASE CONTROLLER
 ├─ validates the frozen route, selected profiles, roster, paths, and owning TUI pane
 ├─ starts the phase leader behind a closed filesystem gate
 ├─ records the exact leader pane under the phase/pass transaction
-├─ submits one ordinary phase-watchdog order to the Recruiter Hub
-│  └─ Recruiter creates and verifies its Account Manager and watchdog worker
-├─ attempts REQUEST_ACCEPTED with both verified pane addresses
-├─ records `watchdog-ready` or an explicit degraded warning, then opens the leader gate
+├─ opens the leader gate once the durable receipt records its identity
 ├─ verifies the expected leader process, harness, and cwd
-└─ atomically publishes PHASE_STARTED as `ready` or `ready-degraded`
+└─ atomically publishes PHASE_STARTED as `ready` (watchdog block: `not-configured`)
 ```
 
 Leader validation failures still keep the gate closed and close only the leader created by that
@@ -233,8 +227,9 @@ worker launch. Python refuses a missing template instead of trimming a worker co
 how a harness should run a phase leader.
 
 The receipt is an observability record, not a work capability. The Recruiter inspects conventional
-phase-tree orders and durably records a `phase-watchdog-degraded` event when the receipt or live
-watchdog address is absent, but it still accepts the work. This prevents monitoring infrastructure
+phase-tree orders and durably records a `phase-watchdog-degraded` event when the receipt is
+missing or stale (legacy runs; a `not-configured` watchdog block is by design, never degraded),
+but it still accepts the work. This prevents monitoring infrastructure
 from freezing the plan. The TUI prompt remains harness-neutral and treats the controller as the
 mandatory normal path; a stale or mistaken client can continue degraded instead of hanging.
 

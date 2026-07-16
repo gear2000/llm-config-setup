@@ -1,4 +1,5 @@
-"""Unit tests for deterministic TUI + plan-watchdog startup."""
+# pyright: reportMissingImports=false
+"""Unit tests for deterministic TUI startup (coordination v2: no standing plan watchdog)."""
 
 from __future__ import annotations
 
@@ -52,41 +53,6 @@ def _healthy_tui(**_: object) -> dict[str, object]:
     }
 
 
-def _healthy_watchdog(_: Path, __: str) -> dict[str, object]:
-    return {
-        "manager_address": "manager-address",
-        "manager_pane": "manager-pane",
-        "manager_workspace_id": "workspace-1",
-        "request_id": "sample-run.plan-watchdog.workspace-1",
-        "state": "running",
-        "worker_address": "watchdog-address",
-        "worker_pane": "watchdog-pane",
-        "worker_workspace_id": "workspace-1",
-    }
-
-
-def test_watchdog_profile_defaults_to_first_phase_lead(tmp_path: Path) -> None:
-    route = tmp_path / "route.yaml"
-    route.write_text(
-        "llm_profiles:\n"
-        "  lead:\n"
-        "    harness: claude\n"
-        "    model: leader-model\n"
-        "    effort: medium\n"
-        "finalization_defaults: {}\n"
-        "phases:\n"
-        "  phase-0:\n"
-        "    lead:\n"
-        "      llm_profile: lead\n"
-        "      agent: phase-leader\n"
-    )
-
-    assert plan_controller._load_watchdog_profile(route) == {
-        "effort": "medium",
-        "harness": "claude",
-        "model": "leader-model",
-        "name": "lead",
-    }
 
 
 def test_tui_launch_names_exact_run_tree_and_verifies_health(
@@ -161,12 +127,11 @@ def test_tui_metadata_failure_closes_created_pane(
     assert calls == [("pane", "close", "orphan-pane")]
 
 
-def test_starts_tui_and_managed_watchdog_in_same_cockpit(
+def test_starts_tui_without_a_watchdog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, roster = _inputs(tmp_path)
     monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
-    monkeypatch.setattr(plan_controller, "_request_watchdog", _healthy_watchdog)
 
     receipt = plan_controller.start_plan(
         run_dir=run_dir,
@@ -178,26 +143,10 @@ def test_starts_tui_and_managed_watchdog_in_same_cockpit(
 
     assert receipt["state"] == "ready"
     assert receipt["tui"]["pane_id"] == "tui-pane"
-    assert receipt["watchdog"]["manager_pane"] == "manager-pane"
-    assert receipt["watchdog"]["worker_pane"] == "watchdog-pane"
+    assert receipt["watchdog"]["state"] == "not-configured"
+    assert not (run_dir / "plan-watchdog").exists()
     persisted = json.loads((run_dir / "control/plan-start.json").read_text())
     assert persisted == receipt
-    order = json.loads((run_dir / "plan-watchdog/order.json").read_text())
-    assert order["agent"] == "plan-lifecycle-watchdog"
-    assert order["cockpit_pane"] == "tui-pane"
-    assert order["manager_placement"] == {
-        "anchor_pane": "tui-pane",
-        "mode": "requester",
-    }
-    assert order["mode"] == "direct"
-    assert order["plan_id"] == "sample-run"
-    assert order["step_id"] == "plan-watchdog"
-    assert order["requester"]["address"] == "tui-pane"
-    assert order["watchdog_terminal"] == {
-        "identity": "sample-run",
-        "kind": "plan",
-        "path": str(run_dir / "control/run-terminal.json"),
-    }
     with pytest.raises(PlanStartError, match="startup artifacts already exist"):
         plan_controller.start_plan(
             run_dir=run_dir,
@@ -257,68 +206,22 @@ def test_finish_plan_rejects_a_non_object_start_receipt(tmp_path: Path) -> None:
         )
 
 
-def test_watchdog_failure_is_visible_but_does_not_fail_tui(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_dir, roster = _inputs(tmp_path)
-    messages: list[tuple[str, str]] = []
-    monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
-    monkeypatch.setattr(
-        plan_controller,
-        "_request_watchdog",
-        lambda order, roster: (_ for _ in ()).throw(PlanStartError("bad profile")),
+def test_legacy_degraded_receipt_is_still_finishable(tmp_path: Path) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    (control / "plan-start.json").write_text(
+        json.dumps({"slug": "sample-run", "state": "ready-degraded", "watchdog": {"state": "unavailable"}})
     )
-    monkeypatch.setattr(
-        plan_controller,
-        "_notify_tui",
-        lambda pane, message: messages.append((pane, message)) or None,
-    )
+    (run_dir / "run-status.md").write_text("# Complete\n")
+    phase_result = run_dir / "phases/phase-0/phase-result.json"
+    phase_result.parent.mkdir(parents=True)
+    phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
 
-    receipt = plan_controller.start_plan(
-        run_dir=run_dir,
-        slug="sample-run",
-        tui_harness="claude",
-        repo=tmp_path,
-        roster_path=str(roster),
-    )
+    marker = plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
-    assert receipt["state"] == "ready-degraded"
-    assert receipt["tui"]["pane_id"] == "tui-pane"
-    assert receipt["watchdog"]["state"] == "unavailable"
-    assert messages == [
-        (
-            "tui-pane",
-            "PLAN_WATCHDOG_UNAVAILABLE: bad profile. Continue the run; do not wait for monitoring.",
-        )
-    ]
-
-
-def test_bad_watchdog_profile_degrades_after_tui_is_healthy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_dir, roster = _inputs(tmp_path)
-    (run_dir / "route.yaml").write_text(
-        "llm_profiles: {}\nfinalization_defaults:\n  watchdog_profile: missing\n"
-    )
-    messages: list[str] = []
-    monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
-    monkeypatch.setattr(
-        plan_controller,
-        "_notify_tui",
-        lambda pane, message: messages.append(message) or None,
-    )
-
-    receipt = plan_controller.start_plan(
-        run_dir=run_dir,
-        slug="sample-run",
-        tui_harness="claude",
-        repo=tmp_path,
-        roster_path=str(roster),
-    )
-
-    assert receipt["state"] == "ready-degraded"
-    assert "route.llm_profiles.missing must be an object" in receipt["reason"]
-    assert messages and messages[0].startswith("PLAN_WATCHDOG_UNAVAILABLE:")
+    assert marker["plan_id"] == "sample-run"
+    assert marker["state"] == "succeeded"
 
 
 def test_tui_failure_is_terminal_and_durable(
@@ -345,19 +248,15 @@ def test_tui_failure_is_terminal_and_durable(
     assert receipt["reason"] == "no TUI process"
 
 
-def test_workspace_mismatch_degrades_and_notifies_tui(
+def test_start_plan_never_touches_agent_panes_for_notification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, roster = _inputs(tmp_path)
-    wrong = _healthy_watchdog(run_dir, str(roster))
-    wrong["worker_workspace_id"] = "other-workspace"
-    messages: list[str] = []
     monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
-    monkeypatch.setattr(plan_controller, "_request_watchdog", lambda *_: wrong)
     monkeypatch.setattr(
-        plan_controller,
-        "_notify_tui",
-        lambda pane, message: messages.append(message) or None,
+        plan_controller.recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail("startup must not inject into panes"),
     )
 
     receipt = plan_controller.start_plan(
@@ -368,24 +267,4 @@ def test_workspace_mismatch_degrades_and_notifies_tui(
         roster_path=str(roster),
     )
 
-    assert receipt["state"] == "ready-degraded"
-    assert "did not start in the TUI workspace" in messages[0]
-    assert messages[0].startswith("PLAN_WATCHDOG_DEGRADED:")
-    assert receipt["watchdog"]["state"] == "ready-misplaced"
-    assert receipt["watchdog"]["worker_pane"] == "watchdog-pane"
-
-
-def test_tui_notification_uses_idle_checked_atomic_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str, int]] = []
-    monkeypatch.setattr(
-        plan_controller.recruiter,
-        "_submit_agent_prompt",
-        lambda target, message, idle_timeout_ms: calls.append(
-            (target, message, idle_timeout_ms)
-        ),
-    )
-
-    assert plan_controller._notify_tui("tui-pane", "Watchdog unavailable") is None
-    assert calls == [("tui-pane", "Watchdog unavailable", 5_000)]
+    assert receipt["state"] == "ready"

@@ -2,10 +2,11 @@
 """Deterministic phase startup for the Herdr meta-runner.
 
 The TUI supplies durable run inputs; this controller owns the mechanical transition from
-"no phase" to "healthy leader with healthy-or-degraded watchdog evidence". The phase leader is
-held behind a filesystem gate while the watchdog's ordinary UpAgent request is attempted. A
-watchdog failure is recorded but does not block the leader. A terminal startup receipt is
-published only after the leader process itself is healthy.
+"no phase" to "healthy leader". The phase leader is held behind a filesystem gate until the
+durable phase-start receipt records its identity, then released and health-checked.
+Coordination v2 creates no standing watchdog: the owner blocks in `upagent-phase-await`
+on the receipt this controller writes. A terminal startup receipt is published only after
+the leader process itself is healthy.
 """
 
 from __future__ import annotations
@@ -38,7 +39,6 @@ if _recruiter_spec is None or _recruiter_spec.loader is None:
 recruiter = cast(Any, importlib.util.module_from_spec(_recruiter_spec))
 _recruiter_spec.loader.exec_module(recruiter)
 
-PHASE_WATCHDOG_TIMEOUT_MS = 10 * 60 * 60 * 1000
 STARTUP_TIMEOUT_MS = 45_000
 PHASE_LEADER_TEMPLATE_FIELDS = (
     "agent",
@@ -336,55 +336,6 @@ def _verify_gated_leader(pane_id: str, script_path: Path) -> None:
         )
 
 
-def _request_watchdog(order_path: Path, roster_path: str) -> dict[str, object]:
-    command = [
-        sys.executable,
-        str(HERE / "recruiter.py"),
-        "--roster",
-        roster_path,
-        "request",
-        str(order_path),
-    ]
-    process = subprocess.run(command, capture_output=True, text=True)
-    if process.returncode != 0:
-        detail = (
-            process.stderr.strip()
-            or process.stdout.strip()
-            or f"exit {process.returncode}"
-        )
-        raise PhaseStartError(f"phase watchdog startup failed: {detail}")
-    marker = next(
-        (
-            line
-            for line in process.stdout.splitlines()
-            if line.startswith("REQUEST_ACCEPTED ")
-        ),
-        None,
-    )
-    if marker is None:
-        raise PhaseStartError(
-            f"phase watchdog did not reach healthy startup: {process.stdout.strip()}"
-        )
-    try:
-        response = json.loads(marker.removeprefix("REQUEST_ACCEPTED "))
-    except json.JSONDecodeError as error:
-        raise PhaseStartError(
-            f"phase watchdog returned malformed startup evidence: {error}"
-        ) from error
-    if not isinstance(response, dict) or response.get("state") != "running":
-        raise PhaseStartError("phase watchdog startup response is not a running object")
-    for field in (
-        "manager_pane",
-        "manager_workspace_id",
-        "worker_pane",
-        "worker_workspace_id",
-        "request_id",
-    ):
-        if not isinstance(response.get(field), str) or not response[field]:
-            raise PhaseStartError(f"phase watchdog startup response has no {field}")
-    return response
-
-
 def _leader_health(
     pane_id: str, cwd: Path, profile: dict[str, str], roster: dict[str, Any]
 ) -> dict[str, object]:
@@ -420,7 +371,7 @@ def start_phase(
     cwd: Path,
     roster_path: str,
 ) -> dict[str, object]:
-    """Start one leader/watchdog pair and return only after both are mechanically healthy."""
+    """Start one verified leader. Coordination v2 creates no standing phase watchdog."""
     if os.environ.get("HERDR_ENV") != "1":
         raise PhaseStartError(
             "phase startup must run inside a Herdr-managed pane (HERDR_ENV=1)"
@@ -433,30 +384,25 @@ def start_phase(
     if pass_number <= 0:
         raise PhaseStartError("pass must be a positive integer")
     if not run_root.is_absolute() or not run_root.is_dir():
-        raise PhaseStartError(
-            f"run_root must be an existing absolute directory: {run_root}"
-        )
+        raise PhaseStartError(f"run_root must be an existing absolute directory: {run_root}")
     if not cwd.is_absolute() or not cwd.is_dir():
         raise PhaseStartError(f"cwd must be an existing absolute directory: {cwd}")
     plan_path = run_root / "plan.md"
     if not plan_path.is_file():
         raise PhaseStartError(f"frozen run plan does not exist: {plan_path}")
+
     route = _load_route(route_path, phase_id)
     roster = recruiter.load_roster(roster_path)
     slug = run_root.name
     control_dir = run_root / "phases" / phase_id / f"pass-{pass_number}" / "control"
-    watchdog_dir = control_dir.parent / "watchdog"
     receipt_path = control_dir / "phase-start.json"
+    # Historical filename kept for launch-template compatibility; it gates on the receipt.
     gate_path = control_dir / "watchdog-ready.fifo"
     script_path = control_dir / "launch-leader.sh"
     leader_instructions = control_dir / "leader-instructions.md"
-    watchdog_instructions = watchdog_dir / "instructions.md"
-    watchdog_order_path = watchdog_dir / "order.json"
-    watchdog_result_path = watchdog_dir / "result.json"
     active_path = run_root / "active-leader-panes.json"
     lock_path = run_root / "phases" / phase_id / ".phase-start.lock"
-    request_id = f"{slug}.{phase_id}.pass-{pass_number}.phase-watchdog"
-    order_id = f"{slug}-{phase_id}-pass-{pass_number}-phase-watchdog"
+    release_token = f"{slug}.{phase_id}.pass-{pass_number}.phase-start"
 
     with _exclusive_phase_start(lock_path):
         if receipt_path.is_file():
@@ -468,20 +414,10 @@ def start_phase(
                 ) from error
             if isinstance(existing, dict) and existing.get("state") == "ready":
                 leader_pane = existing.get("leader_pane")
-                watchdog = existing.get("watchdog")
-                watchdog_pane = (
-                    watchdog.get("worker_pane") if isinstance(watchdog, dict) else None
-                )
-                live = _live_panes()
-                if (
-                    isinstance(leader_pane, str)
-                    and leader_pane in live
-                    and isinstance(watchdog_pane, str)
-                    and watchdog_pane in live
-                ):
+                if isinstance(leader_pane, str) and leader_pane in _live_panes():
                     return cast(dict[str, object], existing)
                 raise PhaseStartError(
-                    "phase-start receipt says ready but its leader/watchdog pair is no longer fully live"
+                    "phase-start receipt says ready but its leader is no longer live"
                 )
             raise PhaseStartError(
                 f"phase start already has non-ready state at {receipt_path}"
@@ -495,11 +431,7 @@ def start_phase(
             )
         if prior is not None:
             _set_active_leader(active_path, phase_id, None)
-        if (
-            watchdog_order_path.exists()
-            or watchdog_result_path.exists()
-            or gate_path.exists()
-        ):
+        if gate_path.exists():
             raise PhaseStartError(
                 f"phase-start artifacts already exist under {control_dir.parent}"
             )
@@ -518,15 +450,13 @@ def start_phase(
             f"```text\n{leader_command}\n```\n",
         )
         lead_profile = cast(dict[str, str], lead["profile"])
-        launch = _resolve_leader_launch(
-            roster, phase_id, lead, cwd, leader_instructions
-        )
+        launch = _resolve_leader_launch(roster, phase_id, lead, cwd, leader_instructions)
         _write_text_atomic(
             script_path,
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            f"IFS= read -r watchdog_request_id < {shlex.quote(str(gate_path))}\n"
+            f"IFS= read -r phase_release_token < {shlex.quote(str(gate_path))}\n"
             f"rm -f {shlex.quote(str(gate_path))}\n"
-            f'[[ "$watchdog_request_id" == {shlex.quote(request_id)} ]]\n'
+            f'[[ "$phase_release_token" == {shlex.quote(release_token)} ]]\n'
             f"export {recruiter.PHASE_START_RECEIPT_ENV}={shlex.quote(str(receipt_path))}\n"
             f"exec bash -lc {shlex.quote(launch)}\n",
             executable=True,
@@ -535,21 +465,6 @@ def start_phase(
         ready = False
         try:
             _create_leader_gate(gate_path)
-            _write_text_atomic(
-                watchdog_instructions,
-                "# Phase watchdog assignment\n\n"
-                f"Watch phase `{phase_id}` pass `{pass_number}` for TUI pane `{tui_pane}`.\n\n"
-                f"- Leader pane: written into `{receipt_path}` after startup validation.\n"
-                f"- Phase startup receipt: `{receipt_path}`; do not diagnose the gated leader before state is `ready`.\n"
-                f"- Authoritative phase result: `{run_root / 'phases' / phase_id / 'phase-result.json'}`; "
-                f"accept only a result whose pass is `{pass_number}`.\n"
-                f"- Run status: `{run_root / 'run-status.md'}`.\n"
-                f"- Descendant orders: `{run_root / 'phases' / phase_id / f'pass-{pass_number}' / 'stages'}`.\n"
-                "- Durable UpAgent state: `$UPAGENT_HUB_DIR` or its documented default.\n\n"
-                "Use bounded waits and evidence snapshots. Pane silence or `done` is advisory, never a verdict. "
-                "Do not close, interrupt, or advance any pane. Finish only when the matching phase result is terminal "
-                "or when specific durable and visible evidence supports a blocked watchdog result.\n",
-            )
             _write_json_atomic(
                 receipt_path,
                 {
@@ -560,15 +475,15 @@ def start_phase(
                     "tui_pane": tui_pane,
                 },
             )
-        except (PhaseStartError, OSError):
-            gate_path.unlink(missing_ok=True)
-            raise
-        try:
             leader_pane, workspace_id = _start_gated_leader(
                 _safe_name(slug, phase_id, pass_number), tui_pane, cwd, script_path
             )
             _verify_gated_leader(leader_pane, script_path)
             _set_active_leader(active_path, phase_id, leader_pane)
+            watchdog_receipt: dict[str, object] = {
+                "reason": "coordination v2: phase-await owns delivery and reconciliation; no standing watchdog is created",
+                "state": "not-configured",
+            }
             _write_json_atomic(
                 receipt_path,
                 {
@@ -578,95 +493,11 @@ def start_phase(
                     "phase_id": phase_id,
                     "state": "leader-gated",
                     "tui_pane": tui_pane,
-                    "workspace_id": workspace_id,
-                },
-            )
-            watchdog_profile = cast(dict[str, str], route["watchdog"]["profile"])
-            watchdog_order: dict[str, object] = {
-                "agent": "phase-watchdog",
-                "cockpit_pane": leader_pane,
-                "cwd": str(cwd),
-                "effort": watchdog_profile["effort"],
-                "harness": watchdog_profile["harness"],
-                "instructions_path": str(watchdog_instructions),
-                "manager_placement": {
-                    "anchor_pane": leader_pane,
-                    "mode": "requester",
-                },
-                "model": watchdog_profile["model"],
-                "order_id": order_id,
-                "phase_id": phase_id,
-                "request_id": request_id,
-                "requester": {
-                    "address": tui_pane,
-                    "id": f"tui:{tui_pane}",
-                    "kind": "herdr-agent",
-                },
-                "result_path": str(watchdog_result_path),
-                "stage_id": "stage-5-finalization",
-                "timeout_ms": PHASE_WATCHDOG_TIMEOUT_MS,
-                "watchdog_terminal": {
-                    "identity": phase_id,
-                    "kind": "phase",
-                    "path": str(
-                        run_root / "phases" / phase_id / "phase-result.json"
-                    ),
-                },
-            }
-            _write_json_atomic(watchdog_order_path, watchdog_order)
-            watchdog_ready = False
-            try:
-                recruiter.load_order(watchdog_order_path)
-                watchdog = _request_watchdog(watchdog_order_path, roster_path)
-                if (
-                    watchdog["manager_workspace_id"] != workspace_id
-                    or watchdog["worker_workspace_id"] != workspace_id
-                ):
-                    raise PhaseStartError(
-                        "phase watchdog manager/worker did not start in the leader workspace"
-                    )
-            except (
-                PhaseStartError,
-                recruiter.ContractError,
-                recruiter.RecruiterError,
-                OSError,
-                subprocess.SubprocessError,
-            ) as watchdog_error:
-                watchdog_receipt: dict[str, object] = {
-                    "order_path": str(watchdog_order_path),
-                    "reason": str(watchdog_error),
-                    "request_id": request_id,
-                    "state": "unavailable",
-                }
-            else:
-                watchdog_ready = True
-                watchdog_receipt = {
-                    "manager_address": watchdog.get("manager_address"),
-                    "manager_pane": watchdog["manager_pane"],
-                    "manager_workspace_id": watchdog["manager_workspace_id"],
-                    "order_path": str(watchdog_order_path),
-                    "request_id": watchdog["request_id"],
-                    "state": "ready",
-                    "worker_address": watchdog.get("worker_address"),
-                    "worker_pane": watchdog["worker_pane"],
-                    "worker_workspace_id": watchdog["worker_workspace_id"],
-                }
-            _write_json_atomic(
-                receipt_path,
-                {
-                    "at_ns": time.time_ns(),
-                    "leader_pane": leader_pane,
-                    "pass": pass_number,
-                    "phase_id": phase_id,
-                    "state": "watchdog-ready"
-                    if watchdog_ready
-                    else "watchdog-degraded",
-                    "tui_pane": tui_pane,
                     "watchdog": watchdog_receipt,
                     "workspace_id": workspace_id,
                 },
             )
-            _release_leader_gate(gate_path, request_id)
+            _release_leader_gate(gate_path, release_token)
             leader_health = _leader_health(leader_pane, cwd, lead_profile, roster)
             receipt = {
                 "at_ns": time.time_ns(),
@@ -674,7 +505,7 @@ def start_phase(
                 "leader_pane": leader_pane,
                 "pass": pass_number,
                 "phase_id": phase_id,
-                "state": "ready" if watchdog_ready else "ready-degraded",
+                "state": "ready",
                 "tui_pane": tui_pane,
                 "watchdog": watchdog_receipt,
                 "workspace_id": workspace_id,
@@ -704,12 +535,17 @@ def start_phase(
             raise
         finally:
             if not ready:
+                gate_path.unlink(missing_ok=True)
                 if leader_pane is not None:
-                    recruiter._close_worker_pane(leader_pane)
+                    try:
+                        recruiter._close_worker_pane(leader_pane)
+                    except (recruiter.RecruiterError, OSError, subprocess.SubprocessError) as close_error:
+                        # Never let cleanup mask the startup error that got us here.
+                        sys.stderr.write(
+                            f"phase-start cleanup: could not close gated leader {leader_pane}: {close_error}\n"
+                        )
                     if _active_leaders(active_path).get(phase_id) == leader_pane:
                         _set_active_leader(active_path, phase_id, None)
-                gate_path.unlink(missing_ok=True)
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="upagent-phase-start")

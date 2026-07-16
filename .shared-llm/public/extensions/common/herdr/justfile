@@ -94,10 +94,10 @@ herdr-down:
     {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
 
 # Kick off a checked plan through one deterministic Python transaction. It starts
-# and health-checks a FRESH TUI, then hires a sibling plan-lifecycle watchdog through
-# the Recruiter into the same cockpit. The watchdog observes the TUI and every phase
-# leader, but never controls them. A watchdog fault is reported as ready-degraded and
-# cannot stall a healthy TUI. Run `just herdr-up` first.
+# and health-checks a FRESH TUI — nothing else. There is no standing plan watchdog:
+# the TUI hears every phase condition as the typed return of its blocking
+# `upagent-phase-await`, and urgent unacknowledged events escalate to the human via
+# `herdr notification`. Run `just herdr-up` first.
 #
 # The TUI is launched fully NON-INTERACTIVE (claude --dangerously-skip-permissions
 # / pi --approve) — it trusts its cwd and never blocks on a trust/permission dialog
@@ -111,7 +111,7 @@ herdr-down:
 herdr-plan dir slug="" harness="claude":
     ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}"
 
-# Publish the plan's durable terminal fact after run-status.md is complete. This is the only
-# signal that permits the managed plan watchdog to write its result and be cleaned up.
+# Publish the plan's durable terminal fact after run-status.md is complete. It is the run's
+# only terminal authority (and lets any in-flight legacy watchdog retire safely).
 herdr-plan-finish dir state slug="":
     ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}"

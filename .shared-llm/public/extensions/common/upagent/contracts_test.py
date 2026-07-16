@@ -284,3 +284,153 @@ def test_advisor_decision_unknown_fails() -> None:
 def test_result_without_decision_ok() -> None:
     # decision is optional — a normal (non-advisor) result omits it.
     assert "decision" not in contracts.parse_result(json.dumps(_valid_result()))
+
+
+# --- coordination v2: typed events, owner commands, acknowledgements ---------
+
+
+def _valid_event(**over) -> dict:
+    base = {
+        "schema_version": contracts.COORDINATION_SCHEMA_VERSION,
+        "event_id": "evt-1",
+        "sequence": 1,
+        "occurred_at": "2026-07-16T00:00:00Z",
+        "run_id": "sample-run",
+        "phase_id": "phase-0",
+        "kind": "needs-input",
+        "terminal": False,
+        "severity": "attention",
+        "summary": "which db?",
+        "ack_required": True,
+    }
+    base.update(over)
+    return base
+
+
+def test_valid_event_parses() -> None:
+    event = contracts.parse_event(json.dumps(_valid_event()))
+    assert event["kind"] == "needs-input"
+
+
+def test_event_rejects_wrong_schema_version() -> None:
+    with pytest.raises(ContractError, match="schema_version"):
+        contracts.parse_event(json.dumps(_valid_event(schema_version=99)))
+
+
+def test_event_rejects_unknown_kind() -> None:
+    with pytest.raises(ContractError, match="unknown kind"):
+        contracts.parse_event(json.dumps(_valid_event(kind="vibes")))
+
+
+def test_blocked_event_is_terminal() -> None:
+    # A blocked phase ends its attempt; the owner decides and replays as a fresh pass.
+    assert contracts.EVENT_KINDS["blocked"] is True
+    event = contracts.parse_event(json.dumps(_valid_event(kind="blocked", terminal=True)))
+    assert event["terminal"] is True
+
+
+def test_event_terminal_flag_must_match_kind() -> None:
+    with pytest.raises(ContractError, match="terminal"):
+        contracts.parse_event(json.dumps(_valid_event(kind="completed", terminal=False)))
+
+
+def test_event_sequence_must_be_positive_integer() -> None:
+    with pytest.raises(ContractError, match="sequence"):
+        contracts.parse_event(json.dumps(_valid_event(sequence=0)))
+    with pytest.raises(ContractError, match="sequence"):
+        contracts.parse_event(json.dumps(_valid_event(sequence=True)))
+
+
+def test_event_run_and_phase_identity_are_enforced() -> None:
+    text = json.dumps(_valid_event())
+    with pytest.raises(ContractError, match="run_id"):
+        contracts.parse_event(text, expected_run_id="another-run")
+    with pytest.raises(ContractError, match="phase_id"):
+        contracts.parse_event(text, expected_phase_id="phase-9")
+
+
+def test_event_order_requires_increasing_sequence() -> None:
+    first = _valid_event(sequence=2)
+    second = _valid_event(event_id="evt-2", sequence=2)
+    with pytest.raises(ContractError, match="must exceed"):
+        contracts.validate_event_order(first, second)
+
+
+def test_event_order_terminal_blocks_same_generation_followers() -> None:
+    done = _valid_event(kind="completed", terminal=True)
+    late = _valid_event(event_id="evt-2", sequence=2)
+    with pytest.raises(ContractError, match="terminal"):
+        contracts.validate_event_order(done, late)
+    fresh = _valid_event(event_id="evt-3", sequence=2, generation=2)
+    assert contracts.validate_event_order(done, fresh) is fresh
+
+
+def _valid_command(**over) -> dict:
+    base = {
+        "schema_version": contracts.COORDINATION_SCHEMA_VERSION,
+        "command_id": "cmd-1",
+        "run_id": "sample-run",
+        "action": "continue",
+        "issued_by": "tui:w1:p1",
+    }
+    base.update(over)
+    return base
+
+
+def test_valid_command_parses() -> None:
+    # Forward contract: nothing consumes owner commands yet, but the shape is pinned.
+    command = contracts.parse_phase_command(json.dumps(_valid_command()))
+    assert command["action"] == "continue"
+
+
+def test_command_rejects_unknown_action() -> None:
+    with pytest.raises(ContractError, match="action"):
+        contracts.parse_phase_command(json.dumps(_valid_command(action="reboot")))
+
+
+def test_command_extend_requires_extension_ms() -> None:
+    with pytest.raises(ContractError, match="extension_ms"):
+        contracts.parse_phase_command(
+            json.dumps(_valid_command(action="extend-soft-timeout"))
+        )
+    ok = contracts.parse_phase_command(
+        json.dumps(_valid_command(action="extend-soft-timeout", extension_ms=60_000))
+    )
+    assert ok["extension_ms"] == 60_000
+
+
+def test_command_run_identity_is_enforced() -> None:
+    with pytest.raises(ContractError, match="run_id"):
+        contracts.parse_phase_command(
+            json.dumps(_valid_command()), expected_run_id="another-run"
+        )
+
+
+def test_valid_ack_parses_and_identity_is_enforced() -> None:
+    ack = {
+        "event_id": "evt-1",
+        "state": "acknowledged",
+        "actor": "owner",
+        "occurred_at": "2026-07-16T00:00:00Z",
+    }
+    assert contracts.parse_ack(json.dumps(ack))["state"] == "acknowledged"
+    with pytest.raises(ContractError, match="event_id"):
+        contracts.parse_ack(json.dumps(ack), expected_event_id="evt-9")
+
+
+def test_ack_rejects_unknown_state() -> None:
+    ack = {
+        "event_id": "evt-1",
+        "state": "seen",
+        "actor": "owner",
+        "occurred_at": "2026-07-16T00:00:00Z",
+    }
+    with pytest.raises(ContractError, match="state"):
+        contracts.parse_ack(json.dumps(ack))
+
+
+def test_ack_transitions_move_forward_only() -> None:
+    assert contracts.validate_ack_transition(None, "published") == "published"
+    assert contracts.validate_ack_transition("published", "resolved") == "resolved"
+    with pytest.raises(ContractError, match="regress"):
+        contracts.validate_ack_transition("resolved", "acknowledged")

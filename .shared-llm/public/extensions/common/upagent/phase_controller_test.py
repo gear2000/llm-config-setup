@@ -1,4 +1,4 @@
-"""Unit tests for the deterministic leader + phase-watchdog startup transaction."""
+"""Unit tests for deterministic phase-leader startup (coordination v2: no standing watchdog)."""
 
 from __future__ import annotations
 
@@ -95,20 +95,6 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
     )
     monkeypatch.setattr(
         phase_controller,
-        "_request_watchdog",
-        lambda order, roster: {
-            "manager_address": "manager-address",
-            "manager_pane": "manager-pane",
-            "manager_workspace_id": "workspace-1",
-            "request_id": "sample-run.phase-0.pass-1.phase-watchdog",
-            "state": "running",
-            "worker_address": "watchdog-address",
-            "worker_pane": "watchdog-pane",
-            "worker_workspace_id": "workspace-1",
-        },
-    )
-    monkeypatch.setattr(
-        phase_controller,
         "_leader_health",
         lambda pane, cwd, profile, roster: {"healthy": True, "pane_id": pane},
     )
@@ -120,7 +106,7 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
     return started, closed
 
 
-def test_phase_start_releases_leader_only_after_watchdog_is_healthy(
+def test_phase_start_releases_verified_leader_without_a_watchdog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_root, route, roster = _inputs(tmp_path)
@@ -137,36 +123,18 @@ def test_phase_start_releases_leader_only_after_watchdog_is_healthy(
     )
 
     control = run_root / "phases/phase-0/pass-1/control"
-    order = json.loads((control.parent / "watchdog/order.json").read_text())
     assert started == ["phase-leader-sample-run-phase-0-p1"]
     assert closed == []
     assert not (control / "watchdog-ready.fifo").exists()
     assert receipt["state"] == "ready"
-    assert receipt["watchdog"]["manager_pane"] == "manager-pane"
-    assert receipt["watchdog"]["worker_pane"] == "watchdog-pane"
-    assert order["cockpit_pane"] == "leader-pane"
-    assert order["requester"] == {
-        "address": "tui-pane",
-        "id": "tui:tui-pane",
-        "kind": "herdr-agent",
-    }
-    assert order["agent"] == "phase-watchdog"
-    assert order["model"] == "cheap-model"
-    assert order["manager_placement"] == {
-        "anchor_pane": "leader-pane",
-        "mode": "requester",
-    }
-    assert order["watchdog_terminal"] == {
-        "identity": "phase-0",
-        "kind": "phase",
-        "path": str(run_root / "phases/phase-0/phase-result.json"),
-    }
+    assert receipt["watchdog"]["state"] == "not-configured"
+    assert not (control.parent / "watchdog").exists()
     assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
         "phase-0": "leader-pane"
     }
 
 
-def test_phase_start_publishes_watchdog_capability_before_releasing_leader(
+def test_phase_start_publishes_receipt_before_releasing_leader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_root, route, roster = _inputs(tmp_path)
@@ -195,53 +163,37 @@ def test_phase_start_publishes_watchdog_capability_before_releasing_leader(
         roster_path=str(roster),
     )
 
-    assert observed["state"] == "watchdog-ready"
+    assert observed["state"] == "leader-gated"
     assert observed["leader_pane"] == "leader-pane"
-    assert observed["watchdog"] == {
-        "manager_address": "manager-address",
-        "manager_pane": "manager-pane",
-        "manager_workspace_id": "workspace-1",
-        "order_path": str(run_root / "phases/phase-0/pass-1/watchdog/order.json"),
-        "request_id": "sample-run.phase-0.pass-1.phase-watchdog",
-        "state": "ready",
-        "worker_address": "watchdog-address",
-        "worker_pane": "watchdog-pane",
-        "worker_workspace_id": "workspace-1",
-    }
+    assert observed["watchdog"]["state"] == "not-configured"
 
 
-def test_watchdog_start_failure_releases_leader_in_degraded_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_root, route, roster = _inputs(tmp_path)
-    _started, closed = _patch_runtime(monkeypatch)
-    monkeypatch.setattr(
-        phase_controller,
-        "_request_watchdog",
-        lambda order, roster: (_ for _ in ()).throw(
-            PhaseStartError("watchdog rejected")
-        ),
+def test_not_configured_watchdog_receipt_is_not_degraded(tmp_path: Path) -> None:
+    pass_dir = tmp_path / "run" / "phases" / "phase-0" / "pass-1"
+    control = pass_dir / "control"
+    control.mkdir(parents=True)
+    (control / "phase-start.json").write_text(
+        json.dumps(
+            {
+                "leader_pane": "leader-pane",
+                "pass": 1,
+                "phase_id": "phase-0",
+                "state": "ready",
+                "watchdog": {"state": "not-configured"},
+            }
+        )
     )
-
-    receipt = phase_controller.start_phase(
-        route_path=route,
-        run_root=run_root,
-        phase_id="phase-0",
-        pass_number=1,
-        tui_pane="tui-pane",
-        cwd=tmp_path,
-        roster_path=str(roster),
-    )
-
-    control = run_root / "phases/phase-0/pass-1/control"
-    assert receipt["state"] == "ready-degraded"
-    assert receipt["watchdog"]["state"] == "unavailable"
-    assert receipt["watchdog"]["reason"] == "watchdog rejected"
-    assert closed == []
-    assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
-        "phase-0": "leader-pane"
+    stage_dir = pass_dir / "stages" / "stage-1-implementation" / "try-1"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / "instructions.md").write_text("Do the stage.\n")
+    order = {
+        "agent": "backend",
+        "cockpit_pane": "leader-pane",
+        "instructions_path": str(stage_dir / "instructions.md"),
+        "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
+        "phase_id": "phase-0",
     }
-    assert not (control / "watchdog-ready.fifo").exists()
+    assert phase_controller.recruiter.phase_watchdog_warning(order) is None
 
 
 def test_missing_phase_leader_template_fails_before_creating_a_pane(
@@ -415,3 +367,70 @@ def test_public_roster_has_controller_template_for_every_worker_harness() -> Non
     )
 
     assert set(roster["phase_leaders"]) == set(roster["harnesses"])
+
+
+def test_leader_start_failure_closes_the_gated_leader_and_reports_the_real_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: cleanup used to crash on an undefined helper, hiding the startup
+    error and leaking both the half-started leader pane and its active mapping."""
+    run_root, route, roster = _inputs(tmp_path)
+    _started, closed = _patch_runtime(monkeypatch)
+    monkeypatch.setattr(
+        phase_controller,
+        "_leader_health",
+        lambda pane, cwd, profile, roster: (_ for _ in ()).throw(
+            PhaseStartError("leader never became healthy")
+        ),
+    )
+
+    with pytest.raises(PhaseStartError, match="leader never became healthy"):
+        phase_controller.start_phase(
+            route_path=route,
+            run_root=run_root,
+            phase_id="phase-0",
+            pass_number=1,
+            tui_pane="tui-pane",
+            cwd=tmp_path,
+            roster_path=str(roster),
+        )
+
+    control = run_root / "phases/phase-0/pass-1/control"
+    receipt = json.loads((control / "phase-start.json").read_text())
+    assert receipt["state"] == "failed"
+    assert "leader never became healthy" in receipt["reason"]
+    assert closed == ["leader-pane"]
+    assert not (control / "watchdog-ready.fifo").exists()
+    assert json.loads((run_root / "active-leader-panes.json").read_text()) == {}
+
+
+def test_leader_close_failure_during_cleanup_does_not_mask_the_startup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root, route, roster = _inputs(tmp_path)
+    _patch_runtime(monkeypatch)
+    monkeypatch.setattr(
+        phase_controller,
+        "_leader_health",
+        lambda pane, cwd, profile, roster: (_ for _ in ()).throw(
+            PhaseStartError("leader never became healthy")
+        ),
+    )
+    monkeypatch.setattr(
+        phase_controller.recruiter,
+        "_close_worker_pane",
+        lambda pane: (_ for _ in ()).throw(
+            phase_controller.recruiter.RecruiterError("close transport down")
+        ),
+    )
+
+    with pytest.raises(PhaseStartError, match="leader never became healthy"):
+        phase_controller.start_phase(
+            route_path=route,
+            run_root=run_root,
+            phase_id="phase-0",
+            pass_number=1,
+            tui_pane="tui-pane",
+            cwd=tmp_path,
+            roster_path=str(roster),
+        )

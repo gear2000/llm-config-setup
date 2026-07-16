@@ -58,9 +58,14 @@
 
 # LLM lifecycle roles are separate from work routes. They interpret configuration and bounded
 # health evidence; Python remains the only pane/process executor. Role commands may use
-# {brief_path}, {cwd}, and {output_path}. Omitting this block uses a Claude/Sonnet
-# account manager and a lightweight Claude/Haiku checker.
+# {brief_path}, {cwd}, and {output_path}.
+#
+# mode: direct (default) — NO standing Dedicated Account Manager LLM per request. Python
+# fail-loud validates before launch, owns lease/monitor/timeout mechanics, and publishes
+# durable requester events consumed by upagent-await / upagent-await-any. The
+# account_manager block below is used only if mode is flipped to `dedicated`.
 management:
+  mode: direct
   startup_timeout_ms: 45000
   inactivity_check_ms: 900000
   requester_grace_ms: 300000

@@ -85,7 +85,9 @@ Runtime files live in one directory (default `/tmp/.herdr-specialist`): `state.j
       `.shared-llm/this_repo/extensions/common/specialist/agents.yaml` — put your copy here for
       zero-config discovery;
    3. else `agents.yaml` beside the engine (the kit's own adoption).
-4. Every specialist has explicit `harness`, `model`, `agent`, and optional `effort`. Executable
-   commands live only in the UpAgent roster. `hub.py` fails loud on legacy `cmd`-only entries.
+4. Every new specialist should have explicit `harness`, `model`, `agent`, and optional `effort`.
+   Executable commands live only in the UpAgent roster. `hub.py` still normalizes retired
+   direct-Claude `cmd` entries in memory so older destination-owned rosters can boot; migrate
+   those rosters to the explicit fields when you touch them.
 
 Requires `HERDR_ENV=1` (run inside Herdr) and the `herdr` CLI on PATH.

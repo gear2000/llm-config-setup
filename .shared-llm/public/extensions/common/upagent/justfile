@@ -29,11 +29,22 @@ upagent-recruit order:
 upagent-request order:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py request "{{order}}"
 
-# Start one phase transaction. The phase leader remains behind a filesystem gate until its
-# managed phase-watchdog request has a healthy Account Manager and worker. HERDR_PANE_ID supplies
-# the owning TUI address; cwd defaults to the repository in which just is invoked.
+# Start one phase transaction. The phase leader remains behind a filesystem gate until
+# its durable receipt records the leader identity; coordination v2 creates no standing watchdog.
 upagent-phase-start route run_root phase pass_number:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_controller.py "{{route}}" "{{run_root}}" "{{phase}}" "{{pass_number}}"
+
+# Block until one typed phase event is available for the owner. Re-run with after=<last sequence>.
+upagent-phase-await receipt after='0' timeout_ms='600000':
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_await.py wait --receipt "{{receipt}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
+
+# Acknowledge one delivered phase event.
+upagent-phase-ack receipt event_id state='acknowledged':
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_await.py ack --receipt "{{receipt}}" --event-id "{{event_id}}" --state "{{state}}"
+
+# Publish a typed phase event into the owner journal.
+upagent-phase-publish receipt kind summary:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_await.py publish --receipt "{{receipt}}" --kind "{{kind}}" --summary "{{summary}}"
 
 # Direct plans have no phase leader; the caller sequences ready steps and human approval.
 upagent-direct-steps route:
@@ -48,6 +59,10 @@ upagent-direct-apply-order route plan_id step_id cwd run_root tui_pane approval 
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
 upagent-await order:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}"
+
+# Block until any watched request moves; prints one AWAIT_EVENT tagged with request_id.
+upagent-await-any timeout_ms cursor +orders:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await-any --timeout-ms "{{timeout_ms}}" --cursor "{{cursor}}" {{orders}}
 
 # Answer the current timeout decision. Use extension_ms=0 with cancel.
 upagent-respond order control_token nonce action extension_ms:

@@ -1,8 +1,0 @@
-type: agent
-name: plan-lifecycle-watchdog
-model: haiku
-color: orange
-description: .shared-llm/public/layers/agents/common/plan-lifecycle-watchdog.description.md
-inputs:
-  - .shared-llm/public/layers/agents/common/plan-lifecycle-watchdog.md
-output: .claude/agents/plan-lifecycle-watchdog.md

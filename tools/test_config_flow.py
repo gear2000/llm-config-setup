@@ -420,9 +420,10 @@ def test_global_routes_by_scope_and_excludes_do_star_from_cc(tmp_path: Path) -> 
     assert (cc / "qa/SKILL.md").exists()
     assert (pi / "qa/SKILL.md").exists()
 
-    # do-* workflow commands reach pi (and codex) but NOT cc.
+    # do-* workflow commands reach Pi only: not cc, not codex.
     assert (pi / "do-plan-and-grill/SKILL.md").exists()
     assert not (cc / "do-plan-and-grill").exists(), "do-* must not land in Claude Code home"
+    assert not (codex / "do-plan-and-grill").exists(), "do-* must not land in Codex home"
 
     # Claude-scoped cc-* command reaches cc only.
     assert (cc / "cc-plan-and-grill/SKILL.md").exists()

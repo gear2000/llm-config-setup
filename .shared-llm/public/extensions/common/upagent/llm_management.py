@@ -31,6 +31,10 @@ class ManagementRole:
     timeout_ms: int
 
 
+# How each request lifecycle is owned.
+MANAGEMENT_MODES = ("direct", "dedicated")
+
+
 @dataclass(frozen=True)
 class ManagementConfig:
     account_manager: ManagementRole
@@ -38,6 +42,7 @@ class ManagementConfig:
     startup_timeout_ms: int
     inactivity_check_ms: int
     requester_grace_ms: int
+    mode: str = "direct"
 
 
 def _positive_int(value: object, field: str, default: int) -> int:
@@ -74,12 +79,16 @@ def load_management_config(roster: dict) -> ManagementConfig:
     raw = roster.get("management", {})
     if not isinstance(raw, dict):
         raise ManagementConfigError("management must be an object")
+    mode = raw.get("mode", "direct")
+    if mode not in MANAGEMENT_MODES:
+        raise ManagementConfigError("management.mode must be one of " + ", ".join(MANAGEMENT_MODES))
     return ManagementConfig(
         account_manager=_role(raw.get("account_manager"), "account_manager", DEFAULT_ACCOUNT_MANAGER_COMMAND),
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
         startup_timeout_ms=_positive_int(raw.get("startup_timeout_ms"), "startup_timeout_ms", 45_000),
         inactivity_check_ms=_positive_int(raw.get("inactivity_check_ms"), "inactivity_check_ms", 900_000),
         requester_grace_ms=_positive_int(raw.get("requester_grace_ms"), "requester_grace_ms", 300_000),
+        mode=mode,
     )
 
 

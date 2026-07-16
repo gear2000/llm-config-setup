@@ -17,7 +17,7 @@ All four flags are required. Fail loud on any missing or unreadable path.
 ## Pre-flight
 
 1. Verify `HERDR_ENV=1`, else stop: `ERROR: /herdr-phase must run inside a Herdr-managed pane.`
-2. **Inspect controller ownership without making monitoring a work gate.** When `$UPAGENT_PHASE_START_RECEIPT` names a readable `phase-start.json`, record whether it is `ready` with watchdog addresses or `ready-degraded` with a warning. If the variable or receipt is missing or mismatched, append `phase-watchdog: unavailable — <reason>` to `phase-status.md` and continue the phase; the Recruiter will record the same degraded event on each order. Do not create, adopt, or repair a watchdog yourself. Monitoring failure must never become an infinite wait or prevent plan work.
+2. **Inspect controller ownership without making monitoring a work gate.** When `$UPAGENT_PHASE_START_RECEIPT` names a readable `phase-start.json`, record its state (`ready`; the `watchdog` block reads `not-configured` by design — the TUI's blocking `upagent-phase-await` on that same receipt owns liveness, and this leader publishes to its journal via `upagent-phase-publish`). If the variable or receipt is missing or mismatched, append `phase-monitoring: degraded — <reason>` to `phase-status.md` and continue the phase. Do not create, adopt, or repair a watchdog yourself — none exists to repair. Monitoring failure must never become an infinite wait or prevent plan work.
 3. Confirm `just upagent-up` has persisted a live Recruiter in `/tmp/.upagent/recruiter.json` (or `UPAGENT_STATE`). The pane is a visible status surface, not a command mailbox. Determine this leader's OWN pane id — the `cockpit_pane` stamped on every order — from `$HERDR_PANE_ID` (or `herdr pane current`). Do **not** infer it from UI focus.
 4. Validate this phase's route entry:
    - `lead.llm_profile` and `lead.agent` present;
@@ -47,6 +47,15 @@ leader:    read + validate pass-<p>/stages/<stage-id>/try-<m>/result.json
 
 The public result file is the source of truth; the durable receipt is its wake-up record. `upagent-request` and `upagent-await` call the filesystem ledger directly, so shell keystrokes cannot interleave and no LLM file-polling watchdog is needed. Save the `control_token` from `REQUEST_ACCEPTED`. If `upagent-await` returns `REQUESTER_DECISION_REQUIRED`, inspect the evidence and use `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`; then call `upagent-await` again after an extension. Only this recorded requester may make that decision. `ORDER ... DONE` pane text is display-only and MUST NOT drive a verdict.
 
+
+With **more than one order in flight** (stage-0 sequences, an advisor beside a worker), do not stack single awaits — block once over the whole set:
+
+```text
+just upagent-await-any <timeout-ms> <cursor-json> <order.json> [<order.json> ...]
+```
+
+It returns one `AWAIT_EVENT <json>` tagged with the `request_id` that moved: a terminal receipt (`completed`/`failed`/`blocked`), a `decision-required` work cap, a `worker-warning`/`advisory` mailbox message, or `await-heartbeat` on quiet expiry. Echo the returned `cursor` back on the next call so handled messages never replay, and drop terminal orders from the set before re-awaiting. Requester notifications are durable mailbox events consumed by these awaits — nothing is ever pasted into this leader's pane.
+
 `order.json` carries the contract fields (`order_id`, globally scoped `request_id`, `requester: {id, kind, address}`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `effort`, `cwd`, `instructions_path`, public `result_path`, `cockpit_pane`, optional `env`). Build `request_id` from the run slug, phase, pass, stage, and try; never use a phase-local name. Set the requester address to this leader's exact Herdr agent name or pane. The Recruiter creates a Dedicated Account Manager, validates its startup, creates a lease-private result path, atomically launches the worker, and proves its process/agent/cwd before reporting healthy. The worker writes only the private result. The Recruiter validates it, closes and verifies the owned panes, then publishes the public `result_path` and `receipt.json` atomically under the lease fence. Its lease records requester, manager, runner, worker, workspace, generation, control token, and expiry so the standing Python supervisor can reconcile an orphan without guessing ownership. The worker's `full_log` points to its harness transcript; it is not the result transport.
 
 The Recruiter-generated final worker brief includes a copy-pasteable result template and its destination. The Recruiter MUST replace the two values below with the literal `order_id` and literal absolute `result_path` (the lease-private path); angle-bracket text is a protocol-writing marker, never text that may appear in a generated instruction. The worker MUST write exactly one result at that path and MUST copy the stated `order_id` exactly. It MUST NOT invent, generate, replace, or otherwise alter the order id.
@@ -70,6 +79,17 @@ Every generated `instructions.md` also includes this terminal instruction: after
 A missing or malformed `result.json`, or a Recruiter error, is treated as a `blocked` stage — never silently retried as if passed.
 
 Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. On a retry that re-investigates the same unresolved failure signature, the leader additionally requires a live Specialist Hub Librarian consult before the worker forms a new hypothesis: provide the failure signature and prior ruled-out work, and require the worker to record the consult id and answer/error path in `result.json`. Reading static specialist docs is not a substitute. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes, then exits its session.
+
+## Talking to the TUI — typed events, never pane text
+
+The TUI waits inside `upagent-phase-await` on this phase's `phase-start.json` receipt. When this leader needs the owner before it can advance, it publishes one typed event into the phase journal instead of printing a plea into scrollback:
+
+```text
+just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT needs-input "<one-line question + evidence path>"
+just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT blocked "<what cannot advance and why>"
+```
+
+The TUI's blocking await returns that event as its next turn — no idle-wait, no pane injection, no watchdog relay. Terminal outcomes still travel through `phase-result.json`; do not double-publish them. `blocked` is terminal: publishing it ends this attempt, so write `phase-result.json` with verdict `blocked` immediately after — the owner decides and replays as a fresh pass. There is no owner→leader answer channel yet (the command contract exists but nothing consumes it), so a question that must be answered before work can continue is a `blocked`, never a `needs-input`.
 
 ## Stage-0-alignment (accuracy: high only)
 
@@ -126,4 +146,4 @@ Only write `passed` when every required stage passed and Stage 5 cleanup, green 
 5. `result.json` / `phase-result.json` are the source of truth; pane scrollback is evidence only.
 6. Forward-only: replay forward on `revisit`; never revert merged history from this phase — escalate a true revert to the TUI.
 7. Do not close the worker pane until its evidence is persisted; do not reset shared/main branches without checking for unrelated changes and asking the human.
-8. The Dedicated Account Manager interprets misconfiguration and anomalies, but only the Hub executes lifecycle actions and only this requester authorizes extension/cancellation before the hard-deadline grace expires.
+8. Only the Hub executes lifecycle actions, and only this requester authorizes extension/cancellation before the hard-deadline grace expires. In the default direct lifecycle there is no Dedicated Account Manager; a roster may opt into `management.mode: dedicated`.

@@ -1754,15 +1754,14 @@ def _global_home_dirs() -> dict[str, Path]:
 
 def _global_targets_for(scope: str, name: str) -> set[str]:
     """Harness tokens a slash-command skill routes to, from its recipe scope.
-    Mirrors install-global.sh's slash_skill_bases: common goes to pi+codex, and
-    also to cc UNLESS it's a do-* workflow command (cc has cc-* counterparts)."""
+    Common goes to every harness unless it is a do-* workflow command; do-* is Pi-only
+    because Claude has cc-* counterparts and Codex does not run the Pi workflow front doors."""
     if scope == "claude":
         return {"cc"}
     if scope == "common":
-        targets = {"pi", "codex"}
-        if not name.startswith("do-"):
-            targets.add("cc")
-        return targets
+        if name.startswith("do-"):
+            return {"pi"}
+        return {"cc", "pi", "codex"}
     if scope == "codex":
         return {"codex"}
     if scope == "pi":

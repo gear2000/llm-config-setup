@@ -243,10 +243,12 @@ function isLocalOnly(host: string): boolean {
 // implementation in the kit, at
 // .shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html — skills paste
 // it verbatim, and this extension READS that same file at serve time, so the two
-// can never drift. The path is resolved relative to THIS module's directory via
-// import.meta.url; Node ESM resolves import.meta.url to the module's realpath,
-// so the read works identically whether the extension is loaded from the repo
-// or through its ~/.pi/agent/extensions/ symlink.
+// can never drift. The module path is realpath-resolved EXPLICITLY: pi loads
+// extensions at their symlink location (~/.pi/agent/extensions/do-planish.ts),
+// where import.meta.url does NOT follow the link — walking ../../../ from there
+// lands on a nonexistent ~/common/… path. fs.realpathSync follows the symlink
+// back into the kit, so the read works identically whether the extension is
+// loaded from the repo or through its ~/.pi/agent/extensions/ symlink.
 //
 // Injected into every page planish serves: the grill page embeds it, and a
 // reviewed plan.html gets it appended unless the file already carries its own
@@ -254,7 +256,7 @@ function isLocalOnly(host: string): boolean {
 // Copy Feedback, and pastes the block into the TUI. No answer boxes, no
 // Submit buttons, no POST back to the agent.
 const CANONICAL_TOOLKIT_PATH = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
+  path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))),
   "../../../common/common/toolkits/annotation-toolkit.html",
 );
 

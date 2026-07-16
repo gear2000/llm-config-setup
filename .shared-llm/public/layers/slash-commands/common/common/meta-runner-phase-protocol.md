@@ -66,7 +66,7 @@ finalization_defaults:
     - source: build, deploy, and runner logs
       fail_patterns: ERROR,FATAL,Traceback,uncaught
   advisor_profile: claude-low   # OPTIONAL. absent ⇒ escalation goes budget → human
-  watchdog_profile: claude-low  # OPTIONAL. absent ⇒ each phase's lead profile
+  watchdog_profile: claude-low  # OPTIONAL, legacy. Parsed for route compatibility; no standing watchdog is hired.
   phase_pass_budget: 3          # OPTIONAL. phase re-runs before escalate (default 3)
   stage_try_budget: 3           # OPTIONAL. stage retries before escalate (default 3)
 
@@ -154,7 +154,7 @@ The order/result contract (the exact JSON fields the leader and worker exchange)
 
 `cockpit_pane` is the id of an existing pane in the cockpit workspace to split the worker from — Herdr's `pane split` takes a source pane, not a workspace label, so the runner threads a live cockpit pane id (the phase leader's own pane) down into every order.
 
-The Recruiter is brought up once per run by `just upagent-up`. Its `shared-services` pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. Each request gets a low-cost Dedicated Account Manager for semantic validation and requester communication; Python still owns facts, state transitions, pane operations, and lease fencing. The leader submits with `just upagent-request`, then waits with `just upagent-await`; shell pane input is never used as a queue.
+The Recruiter is brought up once per run by `just upagent-up`. Its `shared-services` pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. Each request uses direct Python-owned lifecycle by default; optional dedicated Account Managers remain available by roster opt-in. Python owns facts, state transitions, pane operations, durable requester mailboxes, and lease fencing. The leader submits with `just upagent-request`, then waits with `just upagent-await` or `just upagent-await-any`; shell pane input is never used as a queue.
 
 The order round-trip, all over the Herdr socket:
 
@@ -175,7 +175,7 @@ At a declared work cap, the Hub changes state to `awaiting-requester` and `upage
 
 Validate the installed Herdr command surface before launch (the documented baseline is `herdr agent start/get/wait`, `herdr pane get/process-info/run/read/close`, and `herdr wait agent-status`). The Hub uses one `agent start` request with direct argv; it does not split a shell and inject a launch command afterward. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
 
-**Notification follows ownership boundaries.** The worker has no Recruiter/leader/TUI addresses and sends no terminal text. Its one private result wakes the owning Recruiter job; the durable receipt wakes the phase leader; `phase-result.json` plus `PHASE_RESULT` wakes the TUI. Pane text and human toasts are observational only.
+**Notification follows ownership boundaries.** The worker has no Recruiter/leader/TUI addresses and sends no terminal text. Its one private result wakes the owning Recruiter job; the durable receipt wakes the phase leader through its blocking `upagent-await`/`upagent-await-any`; `phase-result.json` wakes the TUI through its blocking `upagent-phase-await`. Pane text and human toasts are observational only.
 
 **Workers are terminal and non-delegating.** A hired worker does its one stage, writes its result/compacted/handoff, and then actually exits its harness session; stopping at an idle interactive prompt is not done. It must not create further agents, teams, panes, nested harness sessions, or advisors. If it needs more help it returns `blocked` with the decision needed, and the leader decides the next move. A worker may consult the Specialist Hub Librarian for repo knowledge through the same files-plus-signal pattern as an order; that is a question, not delegation.
 
@@ -240,9 +240,9 @@ A phase leader may consult an advisor when configured. The advisor does not writ
 
 ### Lifecycle monitors
 
-Normal delivery is deterministic and uses no LLM polling loop. Python observes pane existence, process identity, cwd, result validity, agent status, and deadlines. At configured inactivity/anomaly checkpoints, the Dedicated Account Manager may hire one fresh low-cost checker to interpret a bounded evidence snapshot. That checker returns one typed advisory assessment and exits; it never polls continuously, advances work, or controls a pane.
+Normal delivery is deterministic and uses no LLM polling loop. Python observes pane existence, process identity, cwd, result validity, agent status, and deadlines. At configured inactivity/anomaly checkpoints, the Recruiter may hire one fresh low-cost checker to interpret a bounded evidence snapshot. That checker returns one typed advisory assessment and exits; it never polls continuously, advances work, or controls a pane.
 
-The deterministic phase controller requests one ordinary managed `phase-watchdog` worker per phase on behalf of the TUI. It holds the phase leader behind a filesystem gate until the watchdog's Dedicated Account Manager and worker are verified healthy, then releases and verifies the leader. The watchdog correlates the exact leader, descendant request records, and `phase-result.json`, then alerts the TUI about suspected stalls or terminal completion. It does not kill workers or decide phase outcomes. Like every other worker, it has its own Dedicated Account Manager and lease.
+The deterministic phase controller starts the phase leader behind a filesystem gate, releases it once the durable `phase-start.json` receipt exists, and health-checks it. There is **no standing phase watchdog** (the receipt's `watchdog` block reads `not-configured` by design): the TUI blocks inside `upagent-phase-await` on that receipt, whose deterministic reconciliation correlates the exact leader, descendant request records, and `phase-result.json` — returning typed `completed`/`blocked`/`leader-missing`/`leader-stalled`/`inactivity-checkpoint` events. Fresh one-shot checkers interpret ambiguous inactivity evidence and exit; urgent unacknowledged events escalate to the human via `herdr notification`.
 
 ## Five-stage phase protocol
 

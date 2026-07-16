@@ -39,17 +39,18 @@ def test_phase_dispatch_verifies_startup_then_waits_without_shell_injection() ->
     assert "per-order result watchdog" not in text
 
 
-def test_tui_requests_one_managed_phase_watchdog() -> None:
+def test_tui_runs_one_managed_phase_start_without_a_watchdog() -> None:
     text = RUNNER.read_text()
 
     assert "just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>" in text
     assert "PHASE_STARTED" in text
-    assert "state: ready-degraded" in text
-    assert "manager and watchdog panes are in the same cockpit workspace" in text
+    assert "`state: ready-degraded` receipt is equally continuable" in text
+    assert "`not-configured` by design" in text
     assert (
-        "The TUI has no authority to create, launch, prompt, adopt, or replace the plan watchdog, "
-        "a phase leader, or a phase watchdog." in text
+        "The TUI has no authority to create, launch, prompt, adopt, or replace a "
+        "watchdog agent or a phase leader." in text
     )
+    assert "never create a standing watchdog agent" in text
     assert "do not reproduce its pane operations manually" in text
     assert "phase-result.json" in text
     assert "Never use `agent-status=done`" in text
@@ -68,21 +69,24 @@ def test_tui_final_message_is_short_and_unambiguous() -> None:
     assert "Those details belong only in `run-status.md`" in text
 
 
-def test_plan_launcher_owns_tui_and_plan_watchdog_startup() -> None:
+def test_plan_launcher_owns_tui_startup_and_never_hires_a_watchdog() -> None:
     runner = RUNNER.read_text()
     launcher = HERDR_JUSTFILE.read_text()
     controller = PLAN_CONTROLLER.read_text()
 
-    assert "plan-lifecycle-watchdog" in runner
+    assert "There is no standing plan watchdog" in launcher
+    assert "herdr notification" in launcher
+    assert "there is no standing plan-lifecycle-watchdog" in runner
+    assert "escalate to the human through `herdr notification`" in runner
     assert (
-        "The TUI has no authority to create, launch, prompt, adopt, or replace the plan watchdog"
-        in runner
+        "The TUI has no authority to create, launch, prompt, adopt, or replace a "
+        "watchdog agent or a phase leader." in runner
     )
-    assert "record that degraded condition and continue" in runner
     assert "plan_controller.py" in launcher
     assert 'herdr pane run "$pane"' not in launcher
     assert "--run-tree" in controller
-    assert 'recruiter._submit_agent_prompt(pane_id, message, idle_timeout_ms=5_000)' in controller
+    assert "_submit_agent_prompt" not in controller
+    assert "plan-lifecycle-watchdog" not in controller
     assert 'recruiter._herdr("agent", "send"' not in controller
 
 
@@ -92,3 +96,29 @@ def test_phase_leader_continues_degraded_without_a_controller_watchdog_receipt()
     assert "Inspect controller ownership without making monitoring a work gate." in text
     assert "$UPAGENT_PHASE_START_RECEIPT" in text
     assert "Monitoring failure must never become an infinite wait or prevent plan work." in text
+
+
+
+def test_tui_waits_inside_phase_await_not_pane_watching() -> None:
+    text = RUNNER.read_text()
+
+    assert "just upagent-phase-await" in text
+    assert "just upagent-phase-ack" in text
+    assert "re-await with `after=<that event's sequence>`" in text
+    assert "`await-heartbeat` | no | Quiet and healthy: re-await immediately and silently" in text
+    assert "`leader-missing`" in text
+    assert "`leader-stalled`" in text
+    assert "`inactivity-checkpoint`" in text
+    assert "An unacknowledged actionable event is redelivered by the next await" in text
+    assert "a `PHASE_RESULT` pane marker is display-only" in text
+
+
+def test_leader_publishes_typed_events_and_multiplexes_awaits() -> None:
+    text = PROTOCOL.read_text()
+
+    assert "just upagent-await-any" in text
+    assert "just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT needs-input" in text
+    assert "just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT blocked" in text
+    assert "AWAIT_EVENT" in text
+    assert "Echo the returned `cursor` back on the next call" in text
+    assert "nothing is ever pasted into this leader's pane" in text

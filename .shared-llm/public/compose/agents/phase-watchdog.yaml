@@ -1,8 +1,0 @@
-type: agent
-name: phase-watchdog
-model: haiku
-color: yellow
-description: .shared-llm/public/layers/agents/common/phase-watchdog.description.md
-inputs:
-  - .shared-llm/public/layers/agents/common/phase-watchdog.md
-output: .claude/agents/phase-watchdog.md

@@ -906,6 +906,8 @@ def phase_watchdog_warning(order: dict) -> str | None:
             f"order requester is {order['cockpit_pane']}. Continuing degraded"
         )
     watchdog = receipt.get("watchdog")
+    if isinstance(watchdog, dict) and watchdog.get("state") == "not-configured":
+        return None
     if not isinstance(watchdog, dict) or not isinstance(
         watchdog.get("worker_pane"), str
     ):
@@ -1929,6 +1931,7 @@ def _notify_requester(
     message: str,
     detail: dict | None = None,
 ) -> None:
+    """Publish one durable requester event. Delivery is the requester's await."""
     request_id = lifecycle.request_identity(order)
     address = lifecycle.requester_address(order)
     ledger.publish_requester(key, request_id, generation, message_type, message, detail)
@@ -1936,21 +1939,6 @@ def _notify_requester(
         lifecycle.RequestMailbox(address.address).publish(
             request_id, generation, message_type, message, detail
         )
-        return
-    try:
-        _submit_agent_prompt(
-            address.address,
-            f"UPAGENT {request_id} {message_type}: {message}",
-            idle_timeout_ms=250,
-        )
-    except RecruiterError as error:
-        ledger._event(
-            key, "requester-delivery-failed", address=address.address, reason=str(error)
-        )
-        sys.stderr.write(
-            f"recruiter: requester notification failed for {request_id}: {error}\n"
-        )
-
 
 def _manager_anchor_pane(order: dict) -> str:
     """Resolve where the dedicated manager belongs.
@@ -2017,6 +2005,25 @@ def _manager_anchor_pane(order: dict) -> str:
     if not isinstance(anchor, str):
         raise RecruiterError(f"manager placement workspace {workspace_id} has no pane")
     return anchor
+
+
+def _direct_manager(config: object, order: dict, generation: int = 1) -> dict[str, object]:
+    """Default direct lifecycle owner: no standing manager LLM pane."""
+    request_id = lifecycle.request_identity(order)
+    return {
+        "address": None,
+        "config": config,
+        "decision": lifecycle.ManagerDecision(
+            request_id=request_id,
+            generation=generation,
+            decision="approved",
+            message="Direct lifecycle: Python mechanical validation gates launch; no dedicated Account Manager was created.",
+        ),
+        "generation": generation,
+        "health": None,
+        "pane": None,
+        "workspace_id": None,
+    }
 
 
 def _start_account_manager(
@@ -2202,7 +2209,8 @@ def _run_one_shot_checker(
         config.checker, brief_path, order["cwd"], output_path
     )
     name = _safe_agent_name(f"upagent-check-{check_number}", request_id, generation)
-    checker_order = {**order, "cockpit_pane": cast(str, manager["pane"])}
+    checker_anchor = manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
+    checker_order = {**order, "cockpit_pane": cast(str, checker_anchor)}
     checker_pane, _, _ = _start_herdr_agent(
         name,
         checker_order,
@@ -2241,13 +2249,14 @@ def _run_one_shot_checker(
         confidence=getattr(assessment, "confidence"),
         recommended_action=getattr(assessment, "recommended_action"),
     )
-    with suppress(RecruiterError):
-        _submit_agent_prompt(
-            cast(str, manager["address"]),
-            f"Check {check_number} assessed worker {worker_pane} as "
-            f"{getattr(assessment, 'assessment')}: {getattr(assessment, 'message')}",
-            idle_timeout_ms=config.account_manager.timeout_ms,
-        )
+    if manager["address"] is not None:
+        with suppress(RecruiterError):
+            _submit_agent_prompt(
+                cast(str, manager["address"]),
+                f"Check {check_number} assessed worker {worker_pane} as "
+                f"{getattr(assessment, 'assessment')}: {getattr(assessment, 'message')}",
+                idle_timeout_ms=config.account_manager.timeout_ms,
+            )
     if getattr(assessment, "assessment") not in ("healthy", "completed"):
         _notify_requester(
             ledger,
@@ -2294,12 +2303,13 @@ def _await_requester_timeout_decision(
         f"authorize an extension or cancellation within {config.requester_grace_ms} ms. "
         f"Response command: {command}"
     )
-    with suppress(RecruiterError):
-        _submit_agent_prompt(
-            cast(str, manager["address"]),
-            message,
-            idle_timeout_ms=config.account_manager.timeout_ms,
-        )
+    if manager["address"] is not None:
+        with suppress(RecruiterError):
+            _submit_agent_prompt(
+                cast(str, manager["address"]),
+                message,
+                idle_timeout_ms=config.account_manager.timeout_ms,
+            )
     _notify_requester(
         ledger,
         key,
@@ -2957,6 +2967,88 @@ def cmd_await(order_path: str) -> int:
     )
 
 
+
+_AWAIT_ANY_VERDICT_KINDS = {"passed": "completed", "failed": "failed", "blocked": "blocked"}
+
+
+def _mailbox_messages(ledger: JobLedger, key: str) -> list[tuple[int, dict]]:
+    messages_dir = ledger.requester_mailbox(key).messages
+    messages: list[tuple[int, dict]] = []
+    paths = sorted(messages_dir.glob("[0-9]*-*.json")) if messages_dir.is_dir() else []
+    for path in paths:
+        try:
+            sequence = int(path.name.split("-", 1)[0])
+            payload = json.loads(path.read_text())
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(f"mailbox message {path} is unreadable: {error}") from error
+        if isinstance(payload, dict):
+            messages.append((sequence, payload))
+    return messages
+
+
+def _emit_await_event(kind: str, request_id: str | None, summary: str, cursor: dict, **detail: object) -> int:
+    event: dict[str, object] = {
+        "at_ns": time.time_ns(),
+        "cursor": cursor,
+        "kind": kind,
+        "request_id": request_id,
+        "summary": summary,
+    }
+    event.update(detail)
+    print(f"AWAIT_EVENT {json.dumps(event, sort_keys=True)}", flush=True)
+    return 0
+
+
+def cmd_await_any(order_paths: list[str], timeout_ms: int, cursor_json: str = "{}", poll_seconds: float = HEALTH_PROBE_SECONDS) -> int:
+    if not order_paths:
+        raise RecruiterError("await-any requires at least one order path")
+    try:
+        cursor_value = json.loads(cursor_json) if cursor_json else {}
+    except json.JSONDecodeError as error:
+        raise RecruiterError(f"await-any cursor is not valid JSON: {error}") from error
+    if not isinstance(cursor_value, dict) or not all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) for k, v in cursor_value.items()):
+        raise RecruiterError("await-any cursor must be a JSON object of request_id -> integer")
+    cursor: dict[str, int] = dict(cursor_value)
+    ledger = JobLedger()
+    watched: list[tuple[str, dict, str, str]] = []
+    seen: set[str] = set()
+    for path in order_paths:
+        try:
+            order = load_order(path)
+        except ContractError as error:
+            raise RecruiterError(f"invalid order {path}: {error}") from error
+        key = ledger.key_for_order(order)
+        if not ledger.request_dir(key).is_dir():
+            raise RecruiterError(f"request {lifecycle.request_identity(order)} has not been submitted")
+        request_id = lifecycle.request_identity(order)
+        if request_id in seen:
+            raise RecruiterError(f"await-any lists request {request_id} more than once")
+        seen.add(request_id)
+        watched.append((path, order, key, request_id))
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        states: dict[str, str] = {}
+        for path, order, key, request_id in watched:
+            state = ledger.state(key)
+            states[request_id] = str(state.get("state"))
+            if state.get("state") == "awaiting-requester":
+                return _emit_await_event("decision-required", request_id, f"Request {request_id} reached a work cap; the owner must extend or cancel.", cursor, decision_nonce=state.get("decision_nonce"), order_path=path, terminal=False, timeout_number=state.get("timeout_number"))
+            if state.get("state") in ("finished", "cleanup-failed"):
+                receipt = ledger.completed_receipt(key, order)
+                verdict = str(receipt.get("verdict"))
+                kind = _AWAIT_ANY_VERDICT_KINDS.get(verdict, "failed")
+                return _emit_await_event(kind, request_id, f"Request {request_id} is terminal: verdict={verdict}.", cursor, order_path=path, receipt=receipt, terminal=True)
+            for sequence, payload in _mailbox_messages(ledger, key):
+                if sequence <= cursor.get(request_id, 0):
+                    continue
+                cursor[request_id] = sequence
+                message_type = str(payload.get("type", ""))
+                kind = "worker-warning" if ("warning" in message_type or "failed" in message_type) else "advisory"
+                return _emit_await_event(kind, request_id, str(payload.get("message", message_type)), cursor, detail=payload.get("detail", {}), message_type=message_type, order_path=path, sequence=sequence, terminal=False)
+        if time.monotonic() >= deadline:
+            return _emit_await_event("await-heartbeat", None, "Quiet and healthy: no watched request moved within the bounded wait; re-await.", cursor, states=states, terminal=False)
+        time.sleep(poll_seconds)
+
 def cmd_respond(
     order_path: str,
     control_token: str,
@@ -3045,15 +3137,18 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     mechanical_validation = inspect_worker_configuration(order, roster)
 
     try:
-        manager = _start_account_manager(
-            ledger,
-            key,
-            token,
-            order,
-            roster,
-            generation,
-            mechanical_validation,
-        )
+        if management_config.mode == "dedicated":
+            manager = _start_account_manager(
+                ledger,
+                key,
+                token,
+                order,
+                roster,
+                generation,
+                mechanical_validation,
+            )
+        else:
+            manager = _direct_manager(management_config, order, generation)
     except (RecruiterError, ManagementConfigError, LifecycleError, OSError) as error:
         _notify_requester(
             ledger,
@@ -3094,7 +3189,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         result = _write_blocked_result(
             order, f"account manager: {message}", worker_result_path
         )
-        manager_cleanup = _close_worker_pane(cast(str, manager["pane"]))
+        manager_cleanup = (
+            _close_worker_pane(cast(str, manager["pane"]))
+            if manager["pane"] is not None
+            else {"status": "not-created", "worker_pane": None, "verified_absent": True}
+        )
         cleanup = {
             "manager": manager_cleanup,
             "status": "not-created",
@@ -3195,6 +3294,21 @@ def cmd_run_job(key: str, roster_path: str) -> int:
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
+        if manager["pane"] is None:
+            if not ledger.mark_worker_healthy(key, token, evidence):
+                raise RecruiterError(
+                    "lease ownership changed before worker health could be published"
+                )
+            _notify_requester(
+                ledger,
+                key,
+                order,
+                generation,
+                "worker-healthy",
+                "Python verified the expected worker process, harness, and working directory (direct lifecycle; no manager assessment).",
+                evidence,
+            )
+            return
         try:
             assessment = _ask_manager_about_startup(
                 ledger, key, order, manager, evidence
@@ -3264,7 +3378,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         finish_monitor_before_cleanup,
     )
     try:
-        manager_cleanup = _close_worker_pane(cast(str, manager["pane"]))
+        manager_cleanup = (
+            _close_worker_pane(cast(str, manager["pane"]))
+            if manager["pane"] is not None
+            else {"status": "not-created", "worker_pane": None, "verified_absent": True}
+        )
     except RecruiterError as error:
         result = _write_blocked_result(
             order,
@@ -3460,6 +3578,12 @@ def main(argv: list[str] | None = None) -> int:
         "await", help="wait for completion or an owner decision point"
     )
     p_await.add_argument("order", help="path to order.json")
+    p_await_any = sub.add_parser(
+        "await-any", help="block until any watched request moves; print one tagged AWAIT_EVENT"
+    )
+    p_await_any.add_argument("orders", nargs="+", help="paths to order.json files")
+    p_await_any.add_argument("--timeout-ms", type=int, default=600_000)
+    p_await_any.add_argument("--cursor", default="{}")
     p_respond = sub.add_parser(
         "respond", help="authorize extension or cancellation as the requester"
     )
@@ -3494,6 +3618,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_request(args.order, args.roster)
         if args.command == "await":
             return cmd_await(args.order)
+        if args.command == "await-any":
+            return cmd_await_any(args.orders, args.timeout_ms, args.cursor)
         if args.command == "respond":
             extension_ms = args.extension_ms if args.action == "extend" else None
             if args.action == "cancel" and args.extension_ms != 0:

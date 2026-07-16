@@ -97,6 +97,55 @@ def test_relative_specialist_location_uses_repo_root(
     assert hub._description(cfg, cfg["agents"][0]) == "Repository docs specialist."
 
 
+def test_legacy_cmd_roster_is_normalized_from_compose_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    recipe = repo_root / ".shared-llm/this_repo/compose/agents/adversarial-evaluator.yaml"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text("type: agent\nname: adversarial-evaluator\nmodel: sonnet\n")
+    roster = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    roster.parent.mkdir(parents=True)
+    roster.write_text(
+        "runtime_dir: " + str(tmp_path / "runtime") + "\n"
+        "agents:\n"
+        "  - name: adversarial-evaluator\n"
+        "    location: .claude/agents/adversarial-evaluator.md\n"
+        "    cmd: \"claude -p {prompt} --dangerously-skip-permissions --agent adversarial-evaluator\"\n"
+    )
+    monkeypatch.setenv("SPECIALIST_HUB_CONFIG", str(roster))
+
+    cfg = hub.load_config()
+
+    assert cfg["agents"][0]["harness"] == "claude"
+    assert cfg["agents"][0]["agent"] == "adversarial-evaluator"
+    assert cfg["agents"][0]["model"] == "sonnet"
+
+
+def test_legacy_cmd_roster_uses_empty_model_when_compose_recipe_omits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    roster = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    roster.parent.mkdir(parents=True)
+    roster.write_text(
+        "runtime_dir: " + str(tmp_path / "runtime") + "\n"
+        "agents:\n"
+        "  - name: missing-recipe\n"
+        "    location: .claude/agents/missing-recipe.md\n"
+        "    cmd: \"claude -p {prompt} --dangerously-skip-permissions --agent missing-recipe\"\n"
+    )
+    monkeypatch.setenv("SPECIALIST_HUB_CONFIG", str(roster))
+
+    cfg = hub.load_config()
+
+    assert cfg["agents"][0]["harness"] == "claude"
+    assert cfg["agents"][0]["agent"] == "missing-recipe"
+    assert cfg["agents"][0]["model"] == ""
+
+
 def _run_managed_consult(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

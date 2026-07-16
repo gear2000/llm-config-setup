@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Deterministically start a Herdr TUI and its run-level lifecycle watchdog.
 
-The launcher, rather than the TUI prompt, owns this startup transaction.  A TUI is not
-reported as started until its harness process is healthy.  The plan watchdog is then hired
-through the ordinary UpAgent lifecycle into the same cockpit.  Watchdog failure is durable and
-visible but deliberately degraded: monitoring must never prevent a healthy plan from running.
+The launcher, rather than the TUI prompt, owns this startup transaction. A TUI is not
+reported as started until its harness process is healthy.
+
+Coordination v2 creates no standing plan-lifecycle watchdog. The TUI blocks inside
+`upagent-phase-await` for every phase it runs, and urgent unacknowledged events escalate
+to the human via `herdr notification`. The plan-start receipt keeps a `watchdog` block as
+`not-configured` so older readers continue to work.
 """
 
 from __future__ import annotations
@@ -17,7 +20,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 import time
 from typing import Any, cast, Iterator
@@ -37,8 +39,6 @@ recruiter = cast(Any, importlib.util.module_from_spec(_recruiter_spec))
 _recruiter_spec.loader.exec_module(recruiter)
 
 STARTUP_TIMEOUT_MS = 45_000
-WATCHDOG_REQUEST_TIMEOUT_SECONDS = 180
-PLAN_WATCHDOG_TIMEOUT_MS = 10 * 60 * 60 * 1000
 TUI_LAUNCHES = {
     "claude": (
         "claude --dangerously-skip-permissions",
@@ -106,65 +106,6 @@ def _string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise PlanStartError(f"{field} must be a non-empty string")
     return value
-
-
-def _load_watchdog_profile(route_path: Path) -> dict[str, str]:
-    if not route_path.is_absolute() or not route_path.is_file():
-        raise PlanStartError(f"route must be an existing absolute file: {route_path}")
-    try:
-        route = yaml.safe_load(route_path.read_text())
-    except (OSError, yaml.YAMLError) as error:
-        raise PlanStartError(
-            f"route {route_path} is unreadable or invalid YAML: {error}"
-        ) from error
-    route = _object(route, "route")
-    profiles = _object(route.get("llm_profiles"), "route.llm_profiles")
-    defaults = _object(
-        route.get("finalization_defaults"), "route.finalization_defaults"
-    )
-    configured_profile = defaults.get("watchdog_profile")
-    if configured_profile is None:
-        phases = _object(route.get("phases"), "route.phases")
-        if not phases:
-            raise PlanStartError(
-                "route.phases must contain a phase when watchdog_profile is omitted"
-            )
-        first_phase_name, first_phase_value = next(iter(phases.items()))
-        first_phase = _object(
-            first_phase_value, f"route.phases.{first_phase_name}"
-        )
-        lead = _object(
-            first_phase.get("lead"), f"route.phases.{first_phase_name}.lead"
-        )
-        profile_name = _string(
-            lead.get("llm_profile"),
-            f"route.phases.{first_phase_name}.lead.llm_profile",
-        )
-    else:
-        profile_name = _string(
-            configured_profile,
-            "route.finalization_defaults.watchdog_profile",
-        )
-    profile = _object(profiles.get(profile_name), f"route.llm_profiles.{profile_name}")
-    harness = _string(
-        profile.get("harness"), f"route.llm_profiles.{profile_name}.harness"
-    )
-    if harness not in recruiter.KNOWN_HARNESSES:
-        raise PlanStartError(
-            f"route.llm_profiles.{profile_name}.harness must be one of "
-            + ", ".join(recruiter.KNOWN_HARNESSES)
-        )
-    return {
-        "effort": _string(
-            profile.get("effort", "low"),
-            f"route.llm_profiles.{profile_name}.effort",
-        ),
-        "harness": harness,
-        "model": _string(
-            profile.get("model"), f"route.llm_profiles.{profile_name}.model"
-        ),
-        "name": profile_name,
-    }
 
 
 def _safe_name(value: str) -> str:
@@ -250,57 +191,6 @@ def _create_tui(
         "pane_id": pane_id,
         "workspace_id": workspace_id,
     }
-
-
-def _request_watchdog(order_path: Path, roster_path: str) -> dict[str, object]:
-    command = [
-        sys.executable,
-        str(UPAGENT_DIR / "recruiter.py"),
-        "--roster",
-        roster_path,
-        "request",
-        str(order_path),
-    ]
-    process = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=WATCHDOG_REQUEST_TIMEOUT_SECONDS,
-    )
-    if process.returncode != 0:
-        detail = (
-            process.stderr.strip() or process.stdout.strip() or str(process.returncode)
-        )
-        raise PlanStartError(f"plan watchdog startup failed: {detail}")
-    marker = next(
-        (
-            line
-            for line in process.stdout.splitlines()
-            if line.startswith("REQUEST_ACCEPTED ")
-        ),
-        None,
-    )
-    if marker is None:
-        raise PlanStartError(
-            f"plan watchdog did not reach healthy startup: {process.stdout.strip()}"
-        )
-    try:
-        response = json.loads(marker.removeprefix("REQUEST_ACCEPTED "))
-    except json.JSONDecodeError as error:
-        raise PlanStartError(
-            f"plan watchdog returned malformed startup evidence: {error}"
-        ) from error
-    if not isinstance(response, dict) or response.get("state") != "running":
-        raise PlanStartError("plan watchdog startup response is not a running object")
-    return cast(dict[str, object], response)
-
-
-def _notify_tui(pane_id: str, message: str) -> str | None:
-    try:
-        recruiter._submit_agent_prompt(pane_id, message, idle_timeout_ms=5_000)
-    except (OSError, recruiter.RecruiterError) as error:
-        return str(error)
-    return None
 
 
 def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, object]:
@@ -439,13 +329,8 @@ def _start_plan_locked(
         raise PlanStartError(f"route not found: {route_path}")
 
     control_dir = run_dir / "control"
-    watchdog_dir = run_dir / "plan-watchdog"
     receipt_path = control_dir / "plan-start.json"
-    order_path = watchdog_dir / "order.json"
-    instructions_path = watchdog_dir / "instructions.md"
-    result_path = watchdog_dir / "result.json"
-    terminal_path = control_dir / "run-terminal.json"
-    if receipt_path.exists() or order_path.exists() or result_path.exists():
+    if receipt_path.exists():
         raise PlanStartError(
             f"plan startup artifacts already exist under {run_dir}; use a fresh run directory"
         )
@@ -480,147 +365,19 @@ def _start_plan_locked(
         )
         raise
 
-    tui_pane = cast(str, tui["pane_id"])
-    workspace_id = cast(str, tui["workspace_id"])
-    request_id = f"{_safe_name(slug)}.plan-watchdog.{workspace_id}"
-    order_id = f"{_safe_name(slug)}-plan-watchdog-{workspace_id}"
-    watchdog: dict[str, object] | None = None
-    try:
-        profile = _load_watchdog_profile(route_path)
-        _write_text_atomic(
-            instructions_path,
-            "# Plan lifecycle watchdog assignment\n\n"
-            f"Watch the Herdr plan run `{slug}` on behalf of TUI pane `{tui_pane}`.\n\n"
-            f"- Cockpit workspace: `{workspace_id}`\n"
-            f"- Durable run directory: `{run_dir}`\n"
-            f"- Plan-start receipt: `{receipt_path}`\n"
-            f"- Authoritative plan terminal marker: `{terminal_path}`\n"
-            f"- Active leader map: `{run_dir / 'active-leader-panes.json'}`\n"
-            f"- Phase records: `{run_dir / 'phases'}`\n\n"
-            "First resolve your own current Herdr address and send PLAN_WATCHDOG_READY to the TUI. "
-            "Then monitor the TUI and every phase leader in this workspace. Prefer phase-start receipts "
-            "and active-leader-panes.json; also inspect newly appearing cockpit panes so a manually "
-            "launched, unmanaged leader is not invisible. When a leader appears, send it one short "
-            "introduction and tell the TUI which leader you observed. When phase-result.json becomes "
-            "terminal, an UpAgent requester outbox has an unacknowledged lifecycle message, or a "
-            "TUI/leader is idle, done, missing, or contradicted by durable state, send a "
-            "concise evidence-based advisory to the TUI and affected leader. Wait until the target agent is "
-            "idle, resolve its current pane with `herdr agent get`, and submit the advisory atomically with "
-            "`herdr pane run`; never paste unsubmitted text with `herdr agent send`, and never send a shell "
-            "command. Alert only on state transitions so you do not spam. Never "
-            "create, interrupt, close, or advance an agent. Pane silence and agent status are evidence, not "
-            "a verdict. Use bounded waits. The only completion authority is the exact plan terminal marker "
-            "listed above. Do not write your result merely because panes are quiet, a turn is done, or you "
-            "believe your current check is complete. Continue monitoring until that marker exists and matches "
-            f"plan id `{slug}`.\n",
-        )
-        order: dict[str, object] = {
-            "agent": "plan-lifecycle-watchdog",
-            "cockpit_pane": tui_pane,
-            "cwd": str(repo),
-            "effort": profile["effort"],
-            "harness": profile["harness"],
-            "instructions_path": str(instructions_path),
-            "manager_placement": {
-                "anchor_pane": tui_pane,
-                "mode": "requester",
-            },
-            "mode": "direct",
-            "model": profile["model"],
-            "order_id": order_id,
-            "phase_id": "plan",
-            "plan_id": slug,
-            "request_id": request_id,
-            "requester": {
-                "address": tui_pane,
-                "id": f"tui:{tui_pane}",
-                "kind": "herdr-agent",
-            },
-            "result_path": str(result_path),
-            "stage_id": "stage-5-finalization",
-            "step_id": "plan-watchdog",
-            "timeout_ms": PLAN_WATCHDOG_TIMEOUT_MS,
-            "watchdog_terminal": {
-                "identity": slug,
-                "kind": "plan",
-                "path": str(terminal_path),
-            },
-        }
-        _write_json_atomic(order_path, order)
-        recruiter.load_order(order_path)
-        watchdog = _request_watchdog(order_path, roster_path)
-        if (
-            watchdog.get("manager_workspace_id") != workspace_id
-            or watchdog.get("worker_workspace_id") != workspace_id
-        ):
-            raise PlanStartError(
-                "plan watchdog manager/worker did not start in the TUI workspace"
-            )
-    except (
-        OSError,
-        PlanStartError,
-        recruiter.ContractError,
-        recruiter.RecruiterError,
-        subprocess.SubprocessError,
-    ) as error:
-        warning = str(error)
-        watchdog_running = watchdog is not None
-        notice = (
-            "PLAN_WATCHDOG_DEGRADED: "
-            if watchdog_running
-            else "PLAN_WATCHDOG_UNAVAILABLE: "
-        )
-        notification_error = _notify_tui(
-            tui_pane,
-            notice + warning + ". Continue the run; do not wait for monitoring.",
-        )
-        watchdog_receipt: dict[str, object] = {
-            "order_path": str(order_path),
-            "state": "ready-misplaced" if watchdog_running else "unavailable",
-        }
-        if watchdog_running:
-            watchdog_receipt.update(
-                {
-                    "manager_address": watchdog.get("manager_address"),
-                    "manager_pane": watchdog.get("manager_pane"),
-                    "manager_workspace_id": watchdog.get("manager_workspace_id"),
-                    "request_id": watchdog.get("request_id"),
-                    "worker_address": watchdog.get("worker_address"),
-                    "worker_pane": watchdog.get("worker_pane"),
-                    "worker_workspace_id": watchdog.get("worker_workspace_id"),
-                }
-            )
-        receipt: dict[str, object] = {
-            "at_ns": time.time_ns(),
-            "reason": warning,
-            "run_dir": str(run_dir),
-            "slug": slug,
-            "state": "ready-degraded",
-            "tui": tui,
-            "watchdog": watchdog_receipt,
-        }
-        if notification_error is not None:
-            receipt["notification_error"] = notification_error
-    else:
-        receipt = {
-            "at_ns": time.time_ns(),
-            "run_dir": str(run_dir),
-            "slug": slug,
-            "state": "ready",
-            "tui": tui,
-            "watchdog": {
-                "manager_address": watchdog.get("manager_address"),
-                "manager_pane": watchdog.get("manager_pane"),
-                "order_path": str(order_path),
-                "request_id": watchdog.get("request_id"),
-                "state": "ready",
-                "worker_address": watchdog.get("worker_address"),
-                "worker_pane": watchdog.get("worker_pane"),
-            },
-        }
+    receipt: dict[str, object] = {
+        "at_ns": time.time_ns(),
+        "run_dir": str(run_dir),
+        "slug": slug,
+        "state": "ready",
+        "tui": tui,
+        "watchdog": {
+            "reason": "coordination v2: phase-await owns delivery and reconciliation; no standing watchdog is created",
+            "state": "not-configured",
+        },
+    }
     _write_json_atomic(receipt_path, receipt)
     return receipt
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="herdr-plan-start")

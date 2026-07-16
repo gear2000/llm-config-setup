@@ -717,6 +717,14 @@ def _cleanup(worker_pane: str | None = "worker-pane") -> dict:
 
 
 def _patch_approved_manager(monkeypatch) -> None:
+    import dataclasses
+
+    real_load = recruiter.llm_management.load_management_config
+    monkeypatch.setattr(
+        recruiter.llm_management,
+        "load_management_config",
+        lambda roster: dataclasses.replace(real_load(roster), mode="dedicated"),
+    )
     monkeypatch.setattr(
         recruiter,
         "_start_account_manager",
@@ -2331,3 +2339,148 @@ def test_blocked_result_write_failure_leaves_request_nonterminal_and_silent(
     )
     assert not Path(order["result_path"]).exists()
     assert "DONE" not in capsys.readouterr().out
+
+
+# --- coordination v2: direct lifecycle default and multiplexed awaits --------
+
+
+def test_direct_lifecycle_runs_job_without_an_account_manager(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The default mode hires no standing manager LLM; Python owns the lifecycle."""
+    result_path = tmp_path / "result.json"
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+
+    def no_manager(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("direct mode must not start an account manager")
+
+    monkeypatch.setattr(recruiter, "_start_account_manager", no_manager)
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", no_manager)
+    worker_result_paths: list[Path] = []
+
+    def fake_start(
+        name: str, execution_order: dict, launch: str, **kwargs: object
+    ) -> tuple[str, str, str]:
+        worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
+        return "worker-pane", "cockpit", name
+
+    def wait(*args: object) -> bool:
+        worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        worker_result_paths[0].write_text(
+            json.dumps(_result(order["order_id"], verdict="passed"))
+        )
+        return True
+
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 0
+
+    output = capsys.readouterr()
+    assert f"ORDER {order['order_id']} DONE" in output.out
+    assert json.loads(result_path.read_text())["verdict"] == "passed"
+    healthy = [
+        payload
+        for _, payload in recruiter._mailbox_messages(ledger, key)
+        if payload.get("type") == "worker-healthy"
+    ]
+    assert healthy and "direct lifecycle" in healthy[0]["message"]
+
+
+def test_await_any_reports_terminal_receipt_tagged_with_request(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    assert ledger.finalize(
+        key, token, order, _result(order["order_id"]), cleanup=_cleanup(), exit_code=0
+    )
+
+    assert recruiter.cmd_await_any([str(order_path)], timeout_ms=1_000) == 0
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    assert line.startswith("AWAIT_EVENT ")
+    event = json.loads(line.removeprefix("AWAIT_EVENT "))
+    assert event["kind"] == "completed"
+    assert event["terminal"] is True
+    assert event["request_id"] == recruiter.lifecycle.request_identity(order)
+    assert event["receipt"]["verdict"] == "passed"
+
+
+def test_await_any_delivers_each_mailbox_message_once_via_cursor(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    key, _ = ledger.submit(order)
+    request_id = recruiter.lifecycle.request_identity(order)
+    ledger.publish_requester(key, request_id, 1, "worker-warning", "worker looks slow")
+
+    assert recruiter.cmd_await_any([str(order_path)], timeout_ms=1_000) == 0
+    first = json.loads(
+        capsys.readouterr().out.strip().splitlines()[-1].removeprefix("AWAIT_EVENT ")
+    )
+    assert first["kind"] == "worker-warning"
+    assert first["terminal"] is False
+    assert first["cursor"] == {request_id: first["sequence"]}
+
+    # Echoing the cursor back means the handled message never replays.
+    assert (
+        recruiter.cmd_await_any(
+            [str(order_path)],
+            timeout_ms=50,
+            cursor_json=json.dumps(first["cursor"]),
+            poll_seconds=0.01,
+        )
+        == 0
+    )
+    second = json.loads(
+        capsys.readouterr().out.strip().splitlines()[-1].removeprefix("AWAIT_EVENT ")
+    )
+    assert second["kind"] == "await-heartbeat"
+
+
+def test_await_any_rejects_duplicates_bad_cursor_and_unsubmitted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+
+    with pytest.raises(recruiter.RecruiterError, match="has not been submitted"):
+        recruiter.cmd_await_any([str(order_path)], timeout_ms=50)
+
+    ledger.submit(order)
+    with pytest.raises(recruiter.RecruiterError, match="more than once"):
+        recruiter.cmd_await_any([str(order_path), str(order_path)], timeout_ms=50)
+    with pytest.raises(recruiter.RecruiterError, match="cursor"):
+        recruiter.cmd_await_any([str(order_path)], timeout_ms=50, cursor_json="[1]")
+    with pytest.raises(recruiter.RecruiterError, match="at least one"):
+        recruiter.cmd_await_any([], timeout_ms=50)

@@ -48,14 +48,14 @@ ws: shared-services            ← plan-agnostic · always up · peripheral
   └── librarian   (Specialist Hub) routes a question → transient specialist
 ```
 
-1. The cockpit is the workspace holding this (tui-agent) pane. `just herdr-plan` has already created and health-checked this TUI, then asked the Recruiter to place one `plan-lifecycle-watchdog` and its Dedicated Account Manager beside it. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` or `ready-degraded`; never wait forever for monitoring. The plan watchdog observes this TUI, discovers every phase leader, and advises both sides on state transitions. **The TUI has no authority to create, launch, prompt, adopt, or replace the plan watchdog, a phase leader, or a phase watchdog.** Its sole phase-start authority is the controller command in the phase loop below. A manually started `/herdr-run` may lack a plan watchdog; record that degraded condition and continue instead of attempting an ad-hoc repair.
+1. The cockpit is the workspace holding this (tui-agent) pane. `just herdr-plan` has already created and health-checked this TUI. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` (its `watchdog` block says `not-configured` by design — there is no standing plan-lifecycle-watchdog in coordination v2; a legacy run may still show `ready-degraded`, which is equally continuable). Liveness does not come from an observer agent: this TUI hears every phase condition — completion, blocked, crash, stall, quiet — as the typed return value of its own blocking `upagent-phase-await` call, and urgent unacknowledged events additionally escalate to the human through `herdr notification`. **The TUI has no authority to create, launch, prompt, adopt, or replace a watchdog agent or a phase leader.** Its sole phase-start authority is the controller command in the phase loop below; never attempt an ad-hoc monitoring repair.
 2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible `shared-services` Recruiter pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates.
-3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub creates a Dedicated Account Manager, validates configuration, atomically starts the worker, and returns `worker-healthy` only after process/agent/cwd plus LLM startup assessment agree. Completion flows worker result → account manager explanation → Recruiter receipt → requester. The worker itself receives no controller addresses.
+3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub defaults to direct lifecycle: Python validates configuration, atomically starts the worker, returns `worker-healthy` after process/agent/cwd proof, and publishes durable requester mailbox events consumed by `upagent-await` / `upagent-await-any`. A roster may opt into `management.mode: dedicated` for the historical Account Manager pane. The worker itself receives no controller addresses.
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
-5. Do not start an ad-hoc LLM result poller. The Recruiter owns deterministic checks and launches fresh one-shot LLM checkers only at configured inactivity/anomaly checkpoints. The plan watchdog owns run-level TUI↔leader observability; each phase watchdog owns one leader↔descendants view. Both are managed workers with Dedicated Account Managers, both are advisory, and neither may close or advance a pane. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported. A watchdog-only failure returns `ready-degraded`: record the warning and continue the phase.
+5. Do not start an ad-hoc LLM result poller, and never create a standing watchdog agent. Observability is layered deterministically: the blocking awaits (`upagent-phase-await` here, `upagent-await`/`upagent-await-any` in the leader) reconcile durable state against live Herdr state every sweep and return `leader-missing`/`leader-stalled`/`inactivity-checkpoint` events; the Recruiter launches fresh **one-shot** LLM checkers only at configured inactivity/anomaly checkpoints; urgent unacknowledged events escalate to the human via `herdr notification`. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported.
 6. Keep cockpit geometry deterministic and role-based. The launcher names the TUI tab `control`;
    phase leaders stay there. The Recruiter moves active stage workers to `workers` and Account
-   Managers, watchdogs, and one-shot checkers to `oversight` before publishing their addresses.
+   Managers (opt-in) and one-shot checkers to `oversight` before publishing their addresses.
    Role tabs are created lazily from the first live pane, not with empty placeholder shells.
    Workers split right; support roles split down. Resizing is bounded and presentation-only:
    report a warning and leave the agent in its source tab if Herdr cannot move or resize it, but
@@ -65,12 +65,37 @@ ws: shared-services            ← plan-agnostic · always up · peripheral
 
 For each phase, in canonical order starting at `--start-phase` (respecting `--max-phases`):
 
-1. **Start one complete phase transaction.** Run exactly `just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>` from the TUI pane. This is mandatory, not guidance. Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`, launch an LLM, or `just upagent-request` yourself for phase startup. Do not send `/herdr-phase` to any pane yourself. Those actions create an unmanaged phase and are a protocol violation. Python validates the route and roster, starts the leader behind a filesystem gate, creates the watchdog order, records whether the watchdog is healthy or unavailable, releases and health-checks the leader, updates `active-leader-panes.json`, and atomically writes `<phase>/pass-<n>/control/phase-start.json`.
-2. **Require a terminal startup response, never a perfect watchdog.** Continue after `PHASE_STARTED` with a live `leader_pane`. `state: ready` includes watchdog `manager_pane` + `worker_pane`; verify the manager and watchdog panes are in the same cockpit workspace as the leader and TUI using the receipt's workspace ids. Surface those pane addresses in the TUI status instead of hiding them. `state: ready-degraded` includes the explicit watchdog failure and is allowed to continue. Any command failure or missing leader means the phase never started; report the recorded cause and stop. The controller closes a gated leader on leader-start failure, but never destroys a previously owned live leader.
+1. **Start one complete phase transaction.** Run exactly `just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>` from the TUI pane. This is mandatory, not guidance. Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`, launch an LLM, or `just upagent-request` yourself for phase startup. Do not send `/herdr-phase` to any pane yourself. Those actions create an unmanaged phase and are a protocol violation. Python validates the route and roster, starts the leader behind a filesystem gate, releases and health-checks the leader, updates `active-leader-panes.json`, and atomically writes `<phase>/pass-<n>/control/phase-start.json`.
+2. **Require a terminal startup response.** Continue after `PHASE_STARTED` with a live `leader_pane` and `state: ready` (the receipt's `watchdog` block is `not-configured` by design; a legacy `state: ready-degraded` receipt is equally continuable). Any command failure or missing leader means the phase never started; report the recorded cause and stop. The controller closes a gated leader on leader-start failure, but never destroys a previously owned live leader.
 3. **The controller hands the phase to the leader.** The gated launch carries exactly one `/herdr-phase --phase <phase-id> --plan <run-tree>/plan.md --route <run-tree>/route.yaml --run-root <run-tree>` assignment. The leader owns stages, Recruiter orders, stage-level backtracking, and `phase-status.md`.
-4. **Wait for authoritative completion, always bounded.** The phase watchdog alerts this TUI when the exact `phase-result.json` becomes terminal or when the leader is stranded. A `PHASE_RESULT` pane marker is an accelerator only. Never use `agent-status=done`: that marks a turn, not a phase. On the bounded deadline, read and validate `phases/<phase-id>/phase-result.json`; proceed only if valid, otherwise mark the phase `blocked` and stop for the human.
-5. **Read `phase-result.json` for detail.** The durable file supplies the verdict and evidence.
-6. **Destroy the phase leader unconditionally.** After result/evidence handling, close the recorded leader pane and remove its mapping. The watchdog finishes from the same terminal phase file and its Recruiter lifecycle cleans it up. A replay creates a fresh leader and watchdog.
+4. **Wait inside the deterministic await — never by watching panes.** After `PHASE_STARTED`, block in exactly one repeated command:
+
+   ```bash
+   just upagent-phase-await <run-tree>/phases/<phase-id>/pass-<n>/control/phase-start.json <after> [timeout-ms]
+   ```
+
+   This is plain Python — no LLM turns are burned while blocked. It multiplexes the phase event journal, the leader's typed publications, the authoritative `phase-result.json`, and live Herdr state, then prints exactly one typed JSON event. Handle that event by `kind`, acknowledge it only after parsing (`just upagent-phase-ack <receipt> <event_id>`), and re-await with `after=<that event's sequence>` after every nonterminal event. An unacknowledged actionable event is redelivered by the next await, so a lost turn replays instead of disappearing. Never use `agent-status=done`: that marks a turn, not a phase. Never derive a verdict from pane scrollback; a `PHASE_RESULT` pane marker is display-only.
+
+   | `kind` | terminal | TUI action |
+   |---|---|---|
+   | `completed` | yes | Validate `phases/<phase-id>/phase-result.json`, ack, record in `run-status.md`, advance. |
+   | `failed` | yes | Ack; apply phase-level backtracking from the event/result `revisit` list. |
+   | `blocked` | yes | The attempt is over. Read the evidence paths and `phase-result.json`, ack, destroy the leader, then decide: replay the phase as a fresh pass with the answer baked into its inputs, or stop for the human. |
+   | `needs-input` | no | Advisory only until the owner-command channel lands: note the question in `run-status.md`; ack; re-await. A leader that cannot continue without the answer publishes `blocked` instead. |
+   | `decision-required` | no | A descendant hit a work cap: `just upagent-respond … extend/cancel`; ack; re-await. |
+   | `worker-warning` | no | Note in `run-status.md`; act only if it changes phase risk; ack; re-await. |
+   | `leader-missing` | no | Verify the recorded evidence; clean up the dead leader mapping and replay the phase as a new pass, or stop for the human. |
+   | `leader-stalled` | no | Durable state contradicts live status: inspect once; if truly stranded treat like `leader-missing`, else ack and re-await. |
+   | `inactivity-checkpoint` | no | Quiet too long: request one bounded checker/inspection; ack; re-await. |
+   | `advisory` | no | Read the observer evidence; act only when it changes risk; ack; re-await. |
+   | `startup-ready` / `startup-degraded` | no | Record observability state; re-await. |
+   | `soft-timeout` | no | Extend or cancel within the decision window; ack; re-await. |
+   | `hard-timeout` | yes | Enforced stop: record the enforcement evidence; treat the phase as failed. |
+   | `cancelled` | yes | Record who cancelled and why; stop or replay per authority. |
+   | `await-heartbeat` | no | Quiet and healthy: re-await immediately and silently — never narrate heartbeats to the human. |
+
+5. **Read `phase-result.json` for detail.** The durable file supplies the verdict and evidence; the event is the wake-up, not the record.
+6. **Destroy the phase leader unconditionally.** After result/evidence handling, close the recorded leader pane and remove its mapping. A replay creates a fresh leader and a fresh `phase-start.json` receipt for the new pass's await.
 7. Append a `run-status.md` line for the phase outcome (phase id, pass number, verdict, and any `revisit`) before acting on it. On every start/pass/fail/backtrack — or hourly if unchanged — delegate a minimal static HTML snapshot to a small disposable, non-stage helper. Give it only the status/result paths; it returns only the artifact path.
 
 ## Phase-level backtracking (forward-only)
@@ -114,9 +139,9 @@ just herdr-plan-finish <exact-run-tree> succeeded
 Use `stopped` instead of `succeeded` for any non-successful terminal outcome. This command is
 mandatory and must run before you wait for support panes to close or print the final message. Do
 not write `control/run-terminal.json` yourself. If the command fails, report that exact lifecycle
-failure and do not claim the workspace is safe to close. The plan watchdog is deliberately unable
-to retire until this durable marker exists; quiet panes, completed turns, and its own opinion are
-never completion authority.
+failure and do not claim the workspace is safe to close. The marker is the run's only terminal
+authority (any in-flight legacy watchdog also retires from it); quiet panes and completed turns
+are never completion authority.
 
 Keep the final TUI message deliberately short. After writing the durable summary, wait a bounded
 interval for every managed run pane except this TUI to close. Then use exactly one of these forms:

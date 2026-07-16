@@ -269,3 +269,204 @@ def load_result(path: str | Path, expected_order_id: str | None = None) -> dict:
     if not p.is_file():
         raise ContractError(f"result.json not found: {p}")
     return parse_result(p.read_text(), expected_order_id)
+
+
+# ---------------------------------------------------------------------------
+# Coordination v2 contracts — typed lifecycle events, owner commands, and acks.
+# ---------------------------------------------------------------------------
+
+COORDINATION_SCHEMA_VERSION = 1
+
+EVENT_KINDS: dict[str, bool] = {
+    "startup-ready": False,
+    "startup-degraded": False,
+    "progress": False,
+    "advisory": False,
+    "needs-input": False,
+    # A blocked phase ends its attempt: the owner decides, then replays as a fresh pass.
+    "blocked": True,
+    "worker-warning": False,
+    "worker-missing": False,
+    "leader-missing": False,
+    "leader-stalled": False,
+    "inactivity-checkpoint": False,
+    "decision-required": False,
+    "soft-timeout": False,
+    "hard-timeout": True,
+    "completed": True,
+    "failed": True,
+    "cancelled": True,
+    "await-heartbeat": False,
+}
+EVENT_SEVERITIES = ("info", "attention", "urgent")
+COMMAND_ACTIONS = (
+    "continue",
+    "provide-input",
+    "inspect",
+    "extend-soft-timeout",
+    "retry-startup",
+    "cancel",
+    "acknowledge-only",
+)
+ACK_STATES = ("published", "returned-to-owner", "acknowledged", "resolved")
+EVENT_REQUIRED = ("event_id", "run_id", "kind", "summary", "occurred_at")
+
+
+def parse_event(
+    text: str,
+    *,
+    expected_run_id: str | None = None,
+    expected_phase_id: str | None = None,
+) -> dict:
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ContractError(f"event: not valid JSON: {e}") from e
+    if not isinstance(event, dict):
+        raise ContractError("event: must be a JSON object")
+    version = event.get("schema_version")
+    if version != COORDINATION_SCHEMA_VERSION:
+        raise ContractError(
+            f"event: schema_version must be {COORDINATION_SCHEMA_VERSION} (got {version!r})"
+        )
+    for key in EVENT_REQUIRED:
+        _require_str(event, key, "event")
+    kind = event["kind"]
+    if kind not in EVENT_KINDS:
+        raise ContractError(
+            f"event: unknown kind {kind!r}; expected one of {', '.join(sorted(EVENT_KINDS))}"
+        )
+    terminal = event.get("terminal")
+    if not isinstance(terminal, bool):
+        raise ContractError("event: `terminal` must be a boolean")
+    if terminal != EVENT_KINDS[kind]:
+        raise ContractError(
+            f"event: kind {kind!r} must have terminal={EVENT_KINDS[kind]} (got {terminal})"
+        )
+    sequence = event.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+        raise ContractError("event: `sequence` must be a positive integer")
+    severity = event.get("severity", "info")
+    if severity not in EVENT_SEVERITIES:
+        raise ContractError(
+            f"event: severity {severity!r} must be one of {', '.join(EVENT_SEVERITIES)}"
+        )
+    if expected_run_id is not None and event["run_id"] != expected_run_id:
+        raise ContractError(
+            f"event: run_id {event['run_id']!r} does not match expected {expected_run_id!r}"
+        )
+    phase_id = event.get("phase_id")
+    if phase_id is not None and (not isinstance(phase_id, str) or not phase_id):
+        raise ContractError("event: `phase_id` must be a non-empty string when present")
+    if expected_phase_id is not None and phase_id != expected_phase_id:
+        raise ContractError(
+            f"event: phase_id {phase_id!r} does not match expected {expected_phase_id!r}"
+        )
+    request_id = event.get("request_id")
+    if request_id is not None and (not isinstance(request_id, str) or not request_id):
+        raise ContractError("event: `request_id` must be a non-empty string when present")
+    generation = event.get("generation")
+    if generation is not None and (
+        isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0
+    ):
+        raise ContractError("event: `generation` must be a positive integer when present")
+    ack_required = event.get("ack_required", False)
+    if not isinstance(ack_required, bool):
+        raise ContractError("event: `ack_required` must be a boolean")
+    evidence = event.get("evidence", [])
+    if not isinstance(evidence, list) or not all(isinstance(item, dict) for item in evidence):
+        raise ContractError("event: `evidence` must be a list of objects")
+    dedupe_key = event.get("dedupe_key")
+    if dedupe_key is not None and (not isinstance(dedupe_key, str) or not dedupe_key):
+        raise ContractError("event: `dedupe_key` must be a non-empty string when present")
+    return event
+
+
+def validate_event_order(previous: dict | None, current: dict) -> dict:
+    if previous is None:
+        return current
+    if current["sequence"] <= previous["sequence"]:
+        raise ContractError(
+            f"event order: sequence {current['sequence']} must exceed {previous['sequence']}"
+        )
+    if previous.get("terminal"):
+        prev_gen = previous.get("generation", 1)
+        cur_gen = current.get("generation", 1)
+        if cur_gen <= prev_gen:
+            raise ContractError(
+                "event order: terminal event "
+                f"{previous['event_id']!r} (generation {prev_gen}) cannot be followed by "
+                f"{current['event_id']!r} (generation {cur_gen})"
+            )
+    return current
+
+
+def parse_phase_command(text: str, *, expected_run_id: str | None = None) -> dict:
+    try:
+        command = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ContractError(f"command: not valid JSON: {e}") from e
+    if not isinstance(command, dict):
+        raise ContractError("command: must be a JSON object")
+    version = command.get("schema_version")
+    if version != COORDINATION_SCHEMA_VERSION:
+        raise ContractError(
+            f"command: schema_version must be {COORDINATION_SCHEMA_VERSION} (got {version!r})"
+        )
+    for key in ("command_id", "run_id", "action", "issued_by"):
+        _require_str(command, key, "command")
+    if command["action"] not in COMMAND_ACTIONS:
+        raise ContractError(
+            f"command: action {command['action']!r} must be one of {', '.join(COMMAND_ACTIONS)}"
+        )
+    if expected_run_id is not None and command["run_id"] != expected_run_id:
+        raise ContractError(
+            f"command: run_id {command['run_id']!r} does not match expected {expected_run_id!r}"
+        )
+    in_response_to = command.get("in_response_to")
+    if in_response_to is not None and (not isinstance(in_response_to, str) or not in_response_to):
+        raise ContractError("command: `in_response_to` must be a non-empty string when present")
+    detail = command.get("detail")
+    if detail is not None and not isinstance(detail, dict):
+        raise ContractError("command: `detail` must be an object when present")
+    extension_ms = command.get("extension_ms")
+    if command["action"] == "extend-soft-timeout":
+        if isinstance(extension_ms, bool) or not isinstance(extension_ms, int) or extension_ms <= 0:
+            raise ContractError(
+                "command: extend-soft-timeout requires a positive integer `extension_ms`"
+            )
+    return command
+
+
+def parse_ack(text: str, *, expected_event_id: str | None = None) -> dict:
+    try:
+        ack = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ContractError(f"ack: not valid JSON: {e}") from e
+    if not isinstance(ack, dict):
+        raise ContractError("ack: must be a JSON object")
+    for key in ("event_id", "state", "actor", "occurred_at"):
+        _require_str(ack, key, "ack")
+    if ack["state"] not in ACK_STATES:
+        raise ContractError(
+            f"ack: state {ack['state']!r} must be one of {', '.join(ACK_STATES)}"
+        )
+    if expected_event_id is not None and ack["event_id"] != expected_event_id:
+        raise ContractError(
+            f"ack: event_id {ack['event_id']!r} does not match expected {expected_event_id!r}"
+        )
+    return ack
+
+
+def validate_ack_transition(previous_state: str | None, new_state: str) -> str:
+    if new_state not in ACK_STATES:
+        raise ContractError(f"ack: state {new_state!r} must be one of {', '.join(ACK_STATES)}")
+    if previous_state is None:
+        return new_state
+    if previous_state not in ACK_STATES:
+        raise ContractError(f"ack: unknown previous state {previous_state!r}")
+    if ACK_STATES.index(new_state) < ACK_STATES.index(previous_state):
+        raise ContractError(
+            f"ack: state may not regress from {previous_state!r} to {new_state!r}"
+        )
+    return new_state

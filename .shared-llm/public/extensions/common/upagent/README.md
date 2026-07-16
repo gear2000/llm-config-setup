@@ -2,7 +2,7 @@
 
 The UpAgent Hub is a universal lifecycle service for LLM workers. Its caller may be a phase
 leader, TUI, Librarian, or another framework. The always-up Python **Recruiter** persists the
-request, hires a low-cost Dedicated Account Manager, atomically launches and verifies the worker,
+request, uses Python-owned direct lifecycle by default, atomically launches and verifies the worker,
 collects the result, and reports to the recorded requester. See [FUNDAMENTALS.md](FUNDAMENTALS.md)
 for the authority model and use-case tree.
 
@@ -10,7 +10,7 @@ for the authority model and use-case tree.
 
 ```
 Herdr session
-├── ws: <slug>                 TUI + leader + workers/watchdog + their managers/checkers
+├── ws: <slug>                 TUI + leader + workers (+ opt-in managers / one-shot checkers)
 └── ws: shared-services        always up, plan-agnostic
     ├── recruiter               deterministic Python Hub
     └── librarian  (Specialist Hub — sibling module)
@@ -33,17 +33,18 @@ Phase startup has its own deterministic front door:
 just upagent-phase-start <frozen-route.yaml> <run-tree> <phase-id> <pass-number>
 ```
 
-It starts the leader behind a gate, submits the phase watchdog through the normal Recruiter
-lifecycle, and releases the verified leader after recording either a healthy watchdog or an
-explicit degraded warning. It returns `PHASE_STARTED` with `ready` or `ready-degraded`. Leader
-startup failures still close the gated leader; watchdog failures never freeze useful phase work.
-When `finalization_defaults.watchdog_profile` is omitted, controllers consistently reuse the
-phase leader profile rather than dropping monitoring for a configuration that older routes allow.
+It starts the leader behind a gate, releases it once the durable `phase-start.json` receipt
+exists, and health-checks it. It returns `PHASE_STARTED` with `ready`; the receipt's `watchdog`
+block reads `not-configured` by design — coordination v2 has **no standing watchdog**. The owner
+blocks in `just upagent-phase-await <receipt>` which returns one typed event per call (`completed`,
+`blocked`, `needs-input`, `leader-missing`, `leader-stalled`, `inactivity-checkpoint`,
+`await-heartbeat`, …). Urgent unacknowledged events escalate to the human via `herdr notification`.
+Leader startup failures still close the gated leader.
 
 The controller exports its receipt path to the released leader. The Recruiter inspects that
-receipt and records degraded observability when it is missing, stale, or has no watchdog address,
-but accepts the stage order. The warning is included in modern startup responses and stored in the
-durable request ledger.
+receipt and records degraded observability when it is missing or stale (a `not-configured`
+watchdog block is by design, never degraded), but accepts the stage order. The warning is
+included in modern startup responses and stored in the durable request ledger.
 
 ## The order → result contract (`contracts.py`)
 

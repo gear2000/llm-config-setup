@@ -127,6 +127,56 @@ def _repo_root_from_roster(path: Path) -> Path:
     raise ConfigError(f"could not find a repository root above roster {path}: no .git marker")
 
 
+def _model_from_compose(repo_root: Path, agent_name: str) -> str | None:
+    """Read an agent model from the repo's compose recipe during legacy roster migration."""
+    for recipe in (
+        repo_root / ".shared-llm/this_repo/compose/agents" / f"{agent_name}.yaml",
+        repo_root / ".shared-llm/public/compose/agents" / f"{agent_name}.yaml",
+    ):
+        if not recipe.is_file():
+            continue
+        try:
+            data = yaml.safe_load(recipe.read_text()) or {}
+        except yaml.YAMLError as e:
+            raise ConfigError(f"{recipe} is not valid YAML: {e}") from e
+        model = data.get("model") if isinstance(data, dict) else None
+        if isinstance(model, str) and model:
+            return model
+    return None
+
+
+def _legacy_agent_from_cmd(cmd: object, default: str) -> str:
+    """Extract `--agent <name>` from the retired direct Claude command format."""
+    if not isinstance(cmd, str) or not cmd:
+        return default
+    parts = cmd.split()
+    for idx, part in enumerate(parts):
+        if part == "--agent" and idx + 1 < len(parts) and parts[idx + 1]:
+            return parts[idx + 1]
+    return default
+
+
+def _normalize_legacy_agent(repo_root: Path, agent: dict) -> None:
+    """Upgrade the retired `cmd:` Specialist roster shape in memory.
+
+    Old destination-owned rosters listed direct Claude commands. The current hub routes all work
+    through UpAgent, so it needs harness/model/agent fields. If the matching compose recipe omits a
+    model because routing chooses it later, keep model as an empty string; UpAgent accepts that.
+    """
+    if not agent.get("cmd"):
+        return
+    name = agent.get("name")
+    if not isinstance(name, str) or not name:
+        return
+    cmd = agent["cmd"]
+    if not isinstance(cmd, str) or not cmd.strip().startswith("claude "):
+        return
+    agent.setdefault("harness", "claude")
+    agent.setdefault("agent", _legacy_agent_from_cmd(cmd, name))
+    model = _model_from_compose(repo_root, name)
+    agent.setdefault("model", model or "")
+
+
 def load_config() -> dict:
     """Read + validate the roster. Raises ConfigError (catchable) on any problem, so the consult
     path can still honor its always-signal contract when the roster is bad."""
@@ -140,17 +190,6 @@ def load_config() -> dict:
     agents = cfg.get("agents")
     if not isinstance(agents, list) or not agents:
         raise ConfigError(f"{path} must have a non-empty 'agents:' list")
-    for a in agents:
-        if not isinstance(a, dict):
-            raise ConfigError(f"every agent entry must be an object: {a!r}")
-        for key in ("name", "harness", "model", "agent"):
-            if not isinstance(a.get(key), str) or not a[key]:
-                raise ConfigError(f"every agent needs a non-empty '{key}': {a}")
-        if a["harness"] not in ("claude", "codex", "pi", "cursor"):
-            raise ConfigError(f"agent {a['name']!r} has unsupported harness {a['harness']!r}")
-        if "effort" in a and (not isinstance(a["effort"], str) or not a["effort"]):
-            raise ConfigError(f"agent {a['name']!r} effort must be a non-empty string")
-
     config_path = path.resolve()
     repo_root = cfg.get("repo_root")
     cfg["repo_root"] = (
@@ -158,6 +197,26 @@ def load_config() -> dict:
         if repo_root is None
         else _resolve_path(repo_root, config_path.parent, "repo_root")
     )
+    for a in agents:
+        if not isinstance(a, dict):
+            raise ConfigError(f"every agent entry must be an object: {a!r}")
+        _normalize_legacy_agent(cfg["repo_root"], a)
+        for key in ("name", "harness", "agent"):
+            if not isinstance(a.get(key), str) or not a[key]:
+                extra = (
+                    "; legacy cmd-only entries must either add harness/agent or be a "
+                    "recognizable direct Claude command"
+                    if a.get("cmd")
+                    else ""
+                )
+                raise ConfigError(f"every agent needs a non-empty '{key}': {a}{extra}")
+        if not isinstance(a.get("model"), str):
+            raise ConfigError(f"every agent needs a string 'model' (may be empty): {a}")
+        if a["harness"] not in ("claude", "codex", "pi", "cursor"):
+            raise ConfigError(f"agent {a['name']!r} has unsupported harness {a['harness']!r}")
+        if "effort" in a and (not isinstance(a["effort"], str) or not a["effort"]):
+            raise ConfigError(f"agent {a['name']!r} effort must be a non-empty string")
+
     runtime_dir = _resolve_path(cfg.get("runtime_dir", DEFAULT_RUNTIME), cfg["repo_root"], "runtime_dir")
     cfg["runtime_dir"] = runtime_dir
     cfg["config_path"] = config_path
