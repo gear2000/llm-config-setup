@@ -44,6 +44,10 @@ RECOGNIZED_STAGE_IDS = (
 KNOWN_HARNESSES = ("claude", "codex", "pi", "cursor")
 MANAGER_PLACEMENT_MODES = ("shared", "requester", "workspace")
 OPERATIONS = ("plan", "apply")
+WATCHDOG_KINDS = {
+    "phase-watchdog": "phase",
+    "plan-lifecycle-watchdog": "plan",
+}
 
 # Required keys on an order.json the leader writes.
 ORDER_REQUIRED = (
@@ -161,6 +165,37 @@ def parse_order(text: str) -> dict:
         for field in ("plan_id", "step_id"):
             if not isinstance(order.get(field), str) or not order[field]:
                 raise ContractError(f"order.json: direct orders require a non-empty `{field}`")
+    expected_watchdog_kind = WATCHDOG_KINDS.get(order["agent"])
+    if expected_watchdog_kind is not None:
+        terminal = order.get("watchdog_terminal")
+        if not isinstance(terminal, dict):
+            raise ContractError(
+                "order.json: watchdog orders require a `watchdog_terminal` object"
+            )
+        kind = terminal.get("kind")
+        if kind != expected_watchdog_kind:
+            raise ContractError(
+                "order.json: `watchdog_terminal.kind` must be "
+                f"{expected_watchdog_kind!r} for agent {order['agent']!r}"
+            )
+        path = terminal.get("path")
+        if not isinstance(path, str) or not path or not Path(path).is_absolute():
+            raise ContractError(
+                "order.json: `watchdog_terminal.path` must be an absolute path"
+            )
+        identity = terminal.get("identity")
+        if not isinstance(identity, str) or not identity:
+            raise ContractError(
+                "order.json: `watchdog_terminal.identity` must be a non-empty string"
+            )
+        expected_identity = (
+            order.get("plan_id") if kind == "plan" else order.get("phase_id")
+        )
+        if identity != expected_identity:
+            raise ContractError(
+                "order.json: `watchdog_terminal.identity` must match "
+                f"{('plan_id' if kind == 'plan' else 'phase_id')}"
+            )
     if operation == "apply":
         approval, artifact = order.get("approval"), order.get("plan_artifact")
         if not isinstance(approval, dict):

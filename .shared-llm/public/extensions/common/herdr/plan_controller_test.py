@@ -190,6 +190,11 @@ def test_starts_tui_and_managed_watchdog_in_same_cockpit(
     assert order["plan_id"] == "sample-run"
     assert order["step_id"] == "plan-watchdog"
     assert order["requester"]["address"] == "tui-pane"
+    assert order["watchdog_terminal"] == {
+        "identity": "sample-run",
+        "kind": "plan",
+        "path": str(run_dir / "control/run-terminal.json"),
+    }
     with pytest.raises(PlanStartError, match="startup artifacts already exist"):
         plan_controller.start_plan(
             run_dir=run_dir,
@@ -197,6 +202,55 @@ def test_starts_tui_and_managed_watchdog_in_same_cockpit(
             tui_harness="claude",
             repo=tmp_path,
             roster_path=str(roster),
+        )
+
+
+def test_finish_plan_writes_the_terminal_marker_only_after_summary_exists(
+    tmp_path: Path,
+) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    (control / "plan-start.json").write_text(
+        json.dumps({"slug": "sample-run", "state": "ready"})
+    )
+
+    with pytest.raises(PlanStartError, match="run summary not found"):
+        plan_controller.finish_plan(
+            run_dir=run_dir, slug="sample-run", state="succeeded"
+        )
+
+    (run_dir / "run-status.md").write_text("# Complete\n")
+    with pytest.raises(PlanStartError, match="missing phase result"):
+        plan_controller.finish_plan(
+            run_dir=run_dir, slug=None, state="succeeded"
+        )
+
+    phase_result = run_dir / "phases/phase-0/phase-result.json"
+    phase_result.parent.mkdir(parents=True)
+    phase_result.write_text(
+        json.dumps({"phase_id": "phase-0", "verdict": "passed"})
+    )
+    marker = plan_controller.finish_plan(
+        run_dir=run_dir, slug=None, state="succeeded"
+    )
+
+    assert marker["plan_id"] == "sample-run"
+    assert marker["state"] == "succeeded"
+    assert marker["summary_path"] == str(run_dir / "run-status.md")
+    assert json.loads((control / "run-terminal.json").read_text()) == marker
+
+
+def test_finish_plan_rejects_a_non_object_start_receipt(tmp_path: Path) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    (run_dir / "run-status.md").write_text("# Complete\n")
+    (control / "plan-start.json").write_text("[]\n")
+
+    with pytest.raises(PlanStartError, match="must be an object"):
+        plan_controller.finish_plan(
+            run_dir=run_dir, slug=None, state="stopped"
         )
 
 

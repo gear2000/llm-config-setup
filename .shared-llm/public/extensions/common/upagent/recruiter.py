@@ -45,6 +45,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -127,6 +128,7 @@ WATCHDOG_AGENTS = frozenset(("phase-watchdog", "plan-lifecycle-watchdog"))
 WATCHDOG_PANE_FRACTION = 0.28
 SUPPORT_PANE_FRACTION = 0.20
 LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
+WATCHDOG_CONTINUATION_TIMEOUT_MS = 120_000
 
 
 def default_roster_path() -> str:
@@ -1517,6 +1519,77 @@ def _write_blocked_result(
     return load_result(path, expected_order_id=order["order_id"])
 
 
+def _watchdog_terminal_reason(order: dict, result: dict) -> str | None:
+    """Return why a watchdog result is premature, or None when its durable gate is terminal."""
+    if order.get("agent") not in WATCHDOG_AGENTS:
+        return None
+    terminal = order["watchdog_terminal"]
+    path = Path(terminal["path"])
+    if not path.is_file():
+        return f"authoritative {terminal['kind']} terminal record does not exist: {path}"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ContractError(
+            f"authoritative {terminal['kind']} terminal record {path} is invalid: {error}"
+        ) from error
+    if not isinstance(value, dict):
+        raise ContractError(
+            f"authoritative {terminal['kind']} terminal record {path} must be an object"
+        )
+    identity = terminal["identity"]
+    if terminal["kind"] == "plan":
+        if value.get("plan_id") != identity:
+            raise ContractError(
+                f"plan terminal record {path} does not match plan {identity!r}"
+            )
+        if value.get("state") not in ("succeeded", "stopped"):
+            return f"plan terminal record {path} is not terminal"
+        summary_path = value.get("summary_path")
+        if (
+            not isinstance(summary_path, str)
+            or not Path(summary_path).is_absolute()
+            or not Path(summary_path).is_file()
+        ):
+            raise ContractError(
+                f"plan terminal record {path} has no existing absolute summary_path"
+            )
+        return None
+    if value.get("phase_id") != identity:
+        raise ContractError(
+            f"phase terminal record {path} does not match phase {identity!r}"
+        )
+    if value.get("verdict") not in ("passed", "partial", "blocked", "failed"):
+        return f"phase terminal record {path} is not terminal"
+    return None
+
+
+def _archive_premature_watchdog_result(path: Path, number: int) -> Path:
+    archive_dir = path.parent / "premature-results"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archived = archive_dir / f"{number:04d}-{time.time_ns()}.json"
+    os.replace(path, archived)
+    for directory in {path.parent, archive_dir}:
+        directory_fd = os.open(directory, os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    return archived
+
+
+def _may_preserve_worker_result(
+    order: dict, result: dict, *, startup_validated: bool
+) -> bool:
+    """A wait fault may preserve only a semantically terminal worker result."""
+    if not startup_validated:
+        return False
+    try:
+        return _watchdog_terminal_reason(order, result) is None
+    except ContractError:
+        return False
+
+
 # --- commands ----------------------------------------------------------------
 
 
@@ -1572,11 +1645,20 @@ def _start_completion_monitor(
                     # A stable malformed file is terminal worker output, not an absence to wait
                     # on for hours. Wake the owner; its strict load produces the blocked reason.
                     finalized.set()
-                    return
+                    while finalized.is_set() and not stop.wait(
+                        COMPLETION_MONITOR_POLL_SECONDS
+                    ):
+                        pass
+                    invalid_signature = None
+                    continue
                 stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
                 continue
             finalized.set()
-            return
+            while finalized.is_set() and not stop.wait(
+                COMPLETION_MONITOR_POLL_SECONDS
+            ):
+                pass
+            invalid_signature = None
 
     thread = threading.Thread(
         target=monitor, name=f"upagent-monitor-{order['order_id'][:24]}", daemon=True
@@ -2170,11 +2252,15 @@ def _run_order(
             on_worker_healthy(health)
         startup_validated = True
         wait_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+        wait_deadline = time.monotonic() + wait_ms / 1000
         timeout_number = 0
+        premature_number = 0
         while True:
             try:
-                _wait_for_agent_status(worker_pane, wait_ms, monitor_finalized)
-                break
+                remaining_ms = max(
+                    1, math.ceil((wait_deadline - time.monotonic()) * 1000)
+                )
+                _wait_for_agent_status(worker_pane, remaining_ms, monitor_finalized)
             except AgentWaitTimeout:
                 timeout_number += 1
                 if on_timeout is None:
@@ -2184,19 +2270,43 @@ def _run_order(
                     raise AgentWaitTimeout(
                         f"worker {worker_pane} exceeded its cap and no extension was authorized"
                     )
-                wait_ms = extension_ms
+                wait_deadline = time.monotonic() + extension_ms / 1000
+                continue
 
-        # Invalid aliases are a worker contract failure, not a repair.
-        result = load_result(worker_result_path, expected_order_id=order_id)
+            # Invalid aliases are a worker contract failure, not a repair.
+            result = load_result(worker_result_path, expected_order_id=order_id)
+            premature_reason = _watchdog_terminal_reason(order, result)
+            if premature_reason is None:
+                break
+            premature_number += 1
+            archived = _archive_premature_watchdog_result(
+                worker_result_path, premature_number
+            )
+            if monitor_finalized is not None:
+                monitor_finalized.clear()
+            sys.stderr.write(
+                f"recruiter: watchdog {order_id} produced premature result; "
+                f"archived {archived}: {premature_reason}\n"
+            )
+            _submit_agent_prompt(
+                worker_address,
+                "WATCHDOG_CONTINUE: Your result was not accepted because "
+                f"{premature_reason}. Resume monitoring now. Do not write another result "
+                "until the authoritative terminal record exists and matches this assignment.",
+                idle_timeout_ms=WATCHDOG_CONTINUATION_TIMEOUT_MS,
+            )
     except (RecruiterError, ContractError, KeyError, TypeError, OSError) as e:
         # A filesystem failure writing the fallback propagates.  Without a valid result, the
         # caller must not publish terminal state or DONE.
         try:
-            load_result(worker_result_path, expected_order_id=order_id)
-            existing_result = True
+            existing_result = load_result(
+                worker_result_path, expected_order_id=order_id
+            )
         except ContractError:
-            existing_result = False
-        preserve_existing = existing_result and startup_validated
+            existing_result = None
+        preserve_existing = existing_result is not None and _may_preserve_worker_result(
+            order, existing_result, startup_validated=startup_validated
+        )
         result = _write_blocked_result(
             order, str(e), worker_result_path, preserve_valid=preserve_existing
         )
@@ -2451,7 +2561,13 @@ def _spawn_job(key: str, roster_path: str) -> subprocess.Popen:
         "run-job",
         key,
     ]
-    return subprocess.Popen(command, start_new_session=True)
+    return subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def cmd_dispatch(order_path: str, roster_path: str) -> int:

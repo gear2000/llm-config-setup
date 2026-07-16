@@ -156,6 +156,11 @@ def test_phase_start_releases_leader_only_after_watchdog_is_healthy(
         "anchor_pane": "leader-pane",
         "mode": "requester",
     }
+    assert order["watchdog_terminal"] == {
+        "identity": "phase-0",
+        "kind": "phase",
+        "path": str(run_root / "phases/phase-0/phase-result.json"),
+    }
     assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
         "phase-0": "leader-pane"
     }

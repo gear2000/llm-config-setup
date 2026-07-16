@@ -150,6 +150,52 @@ def test_order_positive_timeout_ms_is_valid() -> None:
     assert contracts.parse_order(json.dumps(order))["timeout_ms"] == 1
 
 
+@pytest.mark.parametrize(
+    ("agent", "kind"),
+    [
+        ("plan-lifecycle-watchdog", "plan"),
+        ("phase-watchdog", "phase"),
+    ],
+)
+def test_watchdog_order_requires_a_matching_durable_terminal_gate(
+    agent: str, kind: str
+) -> None:
+    order = _valid_order()
+    order["agent"] = agent
+
+    with pytest.raises(ContractError, match="watchdog_terminal"):
+        contracts.parse_order(json.dumps(order))
+
+    order["watchdog_terminal"] = {
+        "identity": "sample-run" if kind == "plan" else "phase-0",
+        "kind": kind,
+        "path": "/tmp/sample-run/control/run-terminal.json"
+        if kind == "plan"
+        else "/tmp/sample-run/phases/phase-0/phase-result.json",
+    }
+    if kind == "plan":
+        order["mode"] = "direct"
+        order["plan_id"] = "sample-run"
+        order["step_id"] = "plan-watchdog"
+
+    parsed = contracts.parse_order(json.dumps(order))
+
+    assert parsed["watchdog_terminal"]["kind"] == kind
+
+
+def test_watchdog_terminal_gate_rejects_wrong_kind_identity_and_relative_path() -> None:
+    order = _valid_order()
+    order["agent"] = "phase-watchdog"
+    order["watchdog_terminal"] = {
+        "identity": "another-phase",
+        "kind": "plan",
+        "path": "relative/phase-result.json",
+    }
+
+    with pytest.raises(ContractError, match="kind"):
+        contracts.parse_order(json.dumps(order))
+
+
 def test_not_json_fails() -> None:
     with pytest.raises(ContractError, match="not valid JSON"):
         contracts.parse_order("{not json")

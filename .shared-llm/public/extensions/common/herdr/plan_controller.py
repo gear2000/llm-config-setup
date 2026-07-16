@@ -51,6 +51,7 @@ TUI_LAUNCHES = {
         "pi",
     ),
 }
+PLAN_TERMINAL_STATES = ("succeeded", "stopped")
 
 
 class PlanStartError(RuntimeError):
@@ -286,6 +287,100 @@ def _notify_tui(pane_id: str, message: str) -> str | None:
     return None
 
 
+def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, object]:
+    """Publish the durable plan terminal fact that authorizes watchdog cleanup."""
+    if not run_dir.is_absolute() or not run_dir.is_dir():
+        raise PlanStartError(
+            f"run dir must be an existing absolute directory: {run_dir}"
+        )
+    if state not in PLAN_TERMINAL_STATES:
+        raise PlanStartError(
+            "plan terminal state must be one of " + ", ".join(PLAN_TERMINAL_STATES)
+        )
+    summary_path = run_dir / "run-status.md"
+    if not summary_path.is_file():
+        raise PlanStartError(f"run summary not found: {summary_path}")
+    receipt_path = run_dir / "control/plan-start.json"
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except FileNotFoundError as error:
+        raise PlanStartError(f"plan-start receipt not found: {receipt_path}") from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise PlanStartError(f"plan-start receipt is invalid: {error}") from error
+    if not isinstance(receipt, dict):
+        raise PlanStartError("plan-start receipt must be an object")
+    receipt_slug = receipt.get("slug")
+    if not isinstance(receipt_slug, str) or not receipt_slug:
+        raise PlanStartError("plan-start receipt has no valid slug")
+    if slug and receipt_slug != slug:
+        raise PlanStartError(
+            f"plan-start receipt does not belong to plan {slug!r}"
+        )
+    if receipt.get("state") not in ("ready", "ready-degraded"):
+        raise PlanStartError(
+            "plan-start receipt is not in a finishable ready state"
+        )
+    plan_id = slug or receipt_slug
+    if state == "succeeded":
+        route_path = run_dir / "route.yaml"
+        try:
+            route = yaml.safe_load(route_path.read_text())
+        except FileNotFoundError as error:
+            raise PlanStartError(f"route not found: {route_path}") from error
+        except (OSError, yaml.YAMLError) as error:
+            raise PlanStartError(f"route is invalid: {error}") from error
+        route = _object(route, "route")
+        phases = _object(route.get("phases"), "route.phases")
+        if not phases:
+            raise PlanStartError("route.phases must contain at least one phase")
+        for phase_id in phases:
+            if not isinstance(phase_id, str) or not phase_id:
+                raise PlanStartError("route.phases keys must be non-empty strings")
+            phase_result_path = run_dir / "phases" / phase_id / "phase-result.json"
+            try:
+                phase_result = json.loads(phase_result_path.read_text())
+            except FileNotFoundError as error:
+                raise PlanStartError(
+                    f"successful plan is missing phase result: {phase_result_path}"
+                ) from error
+            except (OSError, json.JSONDecodeError) as error:
+                raise PlanStartError(
+                    f"phase result {phase_result_path} is invalid: {error}"
+                ) from error
+            if (
+                not isinstance(phase_result, dict)
+                or phase_result.get("phase_id") != phase_id
+                or phase_result.get("verdict") != "passed"
+            ):
+                raise PlanStartError(
+                    f"successful plan requires a passed matching phase result: {phase_result_path}"
+                )
+    marker_path = run_dir / "control/run-terminal.json"
+    marker: dict[str, object] = {
+        "at_ns": time.time_ns(),
+        "plan_id": plan_id,
+        "state": state,
+        "summary_path": str(summary_path),
+    }
+    if marker_path.exists():
+        try:
+            existing = json.loads(marker_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise PlanStartError(f"existing plan terminal marker is invalid: {error}") from error
+        if (
+            not isinstance(existing, dict)
+            or existing.get("plan_id") != plan_id
+            or existing.get("state") != state
+            or existing.get("summary_path") != str(summary_path)
+        ):
+            raise PlanStartError(
+                "existing plan terminal marker conflicts with requested outcome"
+            )
+        return cast(dict[str, object], existing)
+    _write_json_atomic(marker_path, marker)
+    return marker
+
+
 def start_plan(
     *,
     run_dir: Path,
@@ -333,6 +428,7 @@ def _start_plan_locked(
     order_path = watchdog_dir / "order.json"
     instructions_path = watchdog_dir / "instructions.md"
     result_path = watchdog_dir / "result.json"
+    terminal_path = control_dir / "run-terminal.json"
     if receipt_path.exists() or order_path.exists() or result_path.exists():
         raise PlanStartError(
             f"plan startup artifacts already exist under {run_dir}; use a fresh run directory"
@@ -382,6 +478,7 @@ def _start_plan_locked(
             f"- Cockpit workspace: `{workspace_id}`\n"
             f"- Durable run directory: `{run_dir}`\n"
             f"- Plan-start receipt: `{receipt_path}`\n"
+            f"- Authoritative plan terminal marker: `{terminal_path}`\n"
             f"- Active leader map: `{run_dir / 'active-leader-panes.json'}`\n"
             f"- Phase records: `{run_dir / 'phases'}`\n\n"
             "First resolve your own current Herdr address and send PLAN_WATCHDOG_READY to the TUI. "
@@ -396,8 +493,10 @@ def _start_plan_locked(
             "`herdr pane run`; never paste unsubmitted text with `herdr agent send`, and never send a shell "
             "command. Alert only on state transitions so you do not spam. Never "
             "create, interrupt, close, or advance an agent. Pane silence and agent status are evidence, not "
-            "a verdict. Use bounded waits. Finish only when the run has a terminal durable summary, the TUI "
-            "explicitly ends the watch, or the TUI is gone and you have reported a blocked result.\n",
+            "a verdict. Use bounded waits. The only completion authority is the exact plan terminal marker "
+            "listed above. Do not write your result merely because panes are quiet, a turn is done, or you "
+            "believe your current check is complete. Continue monitoring until that marker exists and matches "
+            f"plan id `{slug}`.\n",
         )
         order: dict[str, object] = {
             "agent": "plan-lifecycle-watchdog",
@@ -425,6 +524,11 @@ def _start_plan_locked(
             "stage_id": "stage-5-finalization",
             "step_id": "plan-watchdog",
             "timeout_ms": PLAN_WATCHDOG_TIMEOUT_MS,
+            "watchdog_terminal": {
+                "identity": slug,
+                "kind": "plan",
+                "path": str(terminal_path),
+            },
         }
         _write_json_atomic(order_path, order)
         recruiter.load_order(order_path)
@@ -513,9 +617,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--harness", default="claude", choices=tuple(TUI_LAUNCHES))
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--roster", default=recruiter.default_roster_path())
+    parser.add_argument("--finish-state", choices=PLAN_TERMINAL_STATES)
     args = parser.parse_args(argv)
     run_dir = args.run_dir.expanduser().resolve()
     try:
+        if args.finish_state is not None:
+            result = finish_plan(
+                run_dir=run_dir,
+                slug=args.slug,
+                state=args.finish_state,
+            )
+            print(f"PLAN_FINISHED {json.dumps(result, sort_keys=True)}", flush=True)
+            return 0
         result = start_plan(
             run_dir=run_dir,
             slug=args.slug or run_dir.name,

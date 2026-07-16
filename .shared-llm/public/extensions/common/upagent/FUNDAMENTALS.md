@@ -107,6 +107,13 @@ PYTHON RECRUITER HUB
     After atomic startup, watchdogs are reduced to 28% of their local horizontal split and support
     panes to 20% of their local vertical split. Resizing is bounded and presentation-only: failure
     emits a warning and never changes worker health, ownership, or lifecycle state.
+13. A watchdog's own `result.json` is not completion authority. Its order names a durable terminal
+    record owned by the plan or phase controller. If the watchdog writes a result before that
+    record is terminal, the Hub archives the premature result, keeps the lifecycle open, and tells
+    the same watchdog to resume. Only the matching durable terminal record permits cleanup.
+14. Detached job runners inherit no request command pipes. A caller receives the mechanically
+    verified `REQUEST_ACCEPTED` response when startup finishes; a background runner cannot keep a
+    captured stdout or stderr descriptor open and turn healthy startup into a false timeout.
 
 ## Lifecycle states
 
@@ -163,6 +170,12 @@ just herdr-plan <run-dir>
          ├─ watches the TUI and durable run state
          ├─ discovers each managed or unmanaged phase leader
          └─ sends advisory state changes to both the TUI and current leader
+   ...
+   └─ TUI writes the final run-status.md
+      └─ just herdr-plan-finish <run-dir> succeeded|stopped
+         ├─ atomically writes control/run-terminal.json
+         ├─ authorizes the watchdog's final result
+         └─ Recruiter closes only the owned watchdog and Account Manager panes
 ```
 
 The plan watchdog does not replace the per-phase watchdog. It connects orchestration levels: the
@@ -170,6 +183,10 @@ plan watchdog watches TUI-to-leader handoff for the whole run, while each phase 
 one leader and its descendants. Neither has destructive authority. A plan-watchdog startup fault
 is atomically recorded as `ready-degraded` and sent to the healthy TUI; it cannot freeze or cancel
 the run. A TUI startup fault is terminal because no run owner exists.
+
+Quiet panes, a completed LLM turn, or the watchdog deciding that its current check is done cannot
+end this lifecycle. The plan controller requires the final run summary before it publishes the
+terminal marker. The phase watchdog uses the matching `phase-result.json` as its terminal gate.
 
 ## Use case: start one watched phase
 

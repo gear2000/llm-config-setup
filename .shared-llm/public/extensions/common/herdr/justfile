@@ -110,3 +110,8 @@ herdr-down:
 #   just herdr-plan ops/work-log/2026-07-12/my-feature "" pi
 herdr-plan dir slug="" harness="claude":
     ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}"
+
+# Publish the plan's durable terminal fact after run-status.md is complete. This is the only
+# signal that permits the managed plan watchdog to write its result and be cleaned up.
+herdr-plan-finish dir state slug="":
+    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}"

@@ -605,6 +605,13 @@ def start_phase(
                 "result_path": str(watchdog_result_path),
                 "stage_id": "stage-5-finalization",
                 "timeout_ms": PHASE_WATCHDOG_TIMEOUT_MS,
+                "watchdog_terminal": {
+                    "identity": phase_id,
+                    "kind": "phase",
+                    "path": str(
+                        run_root / "phases" / phase_id / "phase-result.json"
+                    ),
+                },
             }
             _write_json_atomic(watchdog_order_path, watchdog_order)
             watchdog_ready = False

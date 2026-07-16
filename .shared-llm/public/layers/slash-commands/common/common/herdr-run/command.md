@@ -101,6 +101,19 @@ This is a Ralph-style forward loop. Nothing already produced is discarded to go 
 
 When every in-scope phase has a passing `phase-result.json` (or the human has resolved a STOP), write a final `run-status.md` summary: the phase order actually run, passes and backtracks per phase with reasons, the run tree root, and the overall verdict. The run tree under `<run-root>/<date>/<slug>/` is the durable record.
 
+After that summary exists, you **MUST** publish the terminal lifecycle fact through the controller:
+
+```bash
+just herdr-plan-finish <exact-run-tree> succeeded
+```
+
+Use `stopped` instead of `succeeded` for any non-successful terminal outcome. This command is
+mandatory and must run before you wait for support panes to close or print the final message. Do
+not write `control/run-terminal.json` yourself. If the command fails, report that exact lifecycle
+failure and do not claim the workspace is safe to close. The plan watchdog is deliberately unable
+to retire until this durable marker exists; quiet panes, completed turns, and its own opinion are
+never completion authority.
+
 Keep the final TUI message deliberately short. After writing the durable summary, wait a bounded
 interval for every managed run pane except this TUI to close. Then use exactly one of these forms:
 

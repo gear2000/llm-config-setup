@@ -1048,6 +1048,14 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
         agent="plan-lifecycle-watchdog",
         result_path=str(public_result),
         instructions_path=str(instructions),
+        mode="direct",
+        plan_id="sample-run",
+        step_id="plan-watchdog",
+        watchdog_terminal={
+            "identity": "sample-run",
+            "kind": "plan",
+            "path": str(tmp_path / "control/run-terminal.json"),
+        },
     )
     order_path = tmp_path / "order.json"
     order_path.write_text(json.dumps(order))
@@ -1058,6 +1066,19 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
         name: str, execution_order: dict, launch: str
     ) -> tuple[str, str, str]:
         assert private_result.parent.is_dir()
+        terminal_path = Path(order["watchdog_terminal"]["path"])
+        terminal_path.parent.mkdir(parents=True)
+        summary_path = tmp_path / "run-status.md"
+        summary_path.write_text("# Complete\n")
+        terminal_path.write_text(
+            json.dumps(
+                {
+                    "plan_id": "sample-run",
+                    "state": "succeeded",
+                    "summary_path": str(summary_path),
+                }
+            )
+        )
         private_result.write_text(json.dumps(_result(order["order_id"])))
         return "worker-pane", "cockpit", name
 
@@ -1108,6 +1129,193 @@ def test_completion_monitor_wakes_on_stable_malformed_result(
     stop.set()
     thread.join(timeout=0.5)
     assert not thread.is_alive()
+
+
+def test_completion_monitor_can_resume_after_a_premature_result(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "private-result.json"
+    order = _order()
+    stop, ready, thread = recruiter._start_completion_monitor(
+        order, result_path, 1_000
+    )
+
+    result_path.write_text(json.dumps(_result(order["order_id"])))
+    assert ready.wait(timeout=0.5)
+    result_path.unlink()
+    ready.clear()
+    time.sleep(0.1)
+    assert thread.is_alive()
+
+    result_path.write_text(json.dumps(_result(order["order_id"])))
+    assert ready.wait(timeout=0.5)
+    stop.set()
+    thread.join(timeout=0.5)
+    assert not thread.is_alive()
+
+
+def test_watchdog_terminal_gate_requires_durable_matching_plan_marker(
+    tmp_path: Path,
+) -> None:
+    marker_path = tmp_path / "control/run-terminal.json"
+    order = _order(
+        agent="plan-lifecycle-watchdog",
+        mode="direct",
+        plan_id="sample-run",
+        step_id="plan-watchdog",
+        watchdog_terminal={
+            "identity": "sample-run",
+            "kind": "plan",
+            "path": str(marker_path),
+        },
+    )
+    result = _result(order["order_id"])
+
+    assert "does not exist" in recruiter._watchdog_terminal_reason(order, result)
+
+    marker_path.parent.mkdir()
+    summary_path = tmp_path / "run-status.md"
+    summary_path.write_text("# Complete\n")
+    marker_path.write_text(
+        json.dumps(
+            {
+                "plan_id": "sample-run",
+                "state": "succeeded",
+                "summary_path": str(summary_path),
+            }
+        )
+    )
+    assert recruiter._watchdog_terminal_reason(order, result) is None
+
+
+def test_wait_fault_never_preserves_a_premature_watchdog_result(
+    tmp_path: Path,
+) -> None:
+    marker_path = tmp_path / "control/run-terminal.json"
+    order = _order(
+        agent="plan-lifecycle-watchdog",
+        mode="direct",
+        plan_id="sample-run",
+        step_id="plan-watchdog",
+        watchdog_terminal={
+            "identity": "sample-run",
+            "kind": "plan",
+            "path": str(marker_path),
+        },
+    )
+    result = _result(order["order_id"])
+
+    assert not recruiter._may_preserve_worker_result(
+        order, result, startup_validated=True
+    )
+
+    marker_path.parent.mkdir()
+    marker_path.write_text("not json")
+    assert not recruiter._may_preserve_worker_result(
+        order, result, startup_validated=True
+    )
+
+
+def test_run_order_keeps_watchdog_alive_after_premature_self_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_result = tmp_path / "hub/results/token.json"
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Watch the plan.\n")
+    marker_path = tmp_path / "run/control/run-terminal.json"
+    order = _order(
+        agent="plan-lifecycle-watchdog",
+        cwd=str(tmp_path),
+        instructions_path=str(instructions),
+        result_path=str(tmp_path / "public-result.json"),
+        mode="direct",
+        plan_id="sample-run",
+        step_id="plan-watchdog",
+        watchdog_terminal={
+            "identity": "sample-run",
+            "kind": "plan",
+            "path": str(marker_path),
+        },
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text('harnesses:\n  claude: "worker write:{result_path}"\n')
+    finalized = threading.Event()
+    prompts: list[str] = []
+    waits = 0
+
+    def fake_start(*args: object) -> tuple[str, str, str]:
+        private_result.parent.mkdir(parents=True, exist_ok=True)
+        private_result.write_text(json.dumps(_result(order["order_id"])))
+        finalized.set()
+        return "watchdog-pane", "cockpit", "watchdog-address"
+
+    def fake_wait(*args: object) -> bool:
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path = tmp_path / "run-status.md"
+            summary_path.write_text("# Complete\n")
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "plan_id": "sample-run",
+                        "state": "succeeded",
+                        "summary_path": str(summary_path),
+                    }
+                )
+            )
+            private_result.write_text(json.dumps(_result(order["order_id"])))
+            finalized.set()
+        return False
+
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+    )
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", fake_wait)
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda target, message, idle_timeout_ms: prompts.append(message),
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    code, result, cleanup = recruiter._run_order(
+        str(order_path),
+        str(roster_path),
+        private_result,
+        on_worker_launched=lambda *args: finalized,
+    )
+
+    assert code == 0
+    assert result == _result(order["order_id"])
+    assert cleanup["verified_absent"] is True
+    assert waits == 2
+    assert len(prompts) == 1
+    assert "Resume monitoring" in prompts[0]
+    assert len(list((private_result.parent / "premature-results").glob("*.json"))) == 1
+
+
+def test_spawn_job_detaches_all_standard_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setattr(
+        recruiter.subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    recruiter._spawn_job("request-key", "roster.yaml")
+
+    assert calls[0][1] == {
+        "stdin": recruiter.subprocess.DEVNULL,
+        "stdout": recruiter.subprocess.DEVNULL,
+        "stderr": recruiter.subprocess.DEVNULL,
+        "start_new_session": True,
+    }
 
 
 def test_recruit_completed_order_emits_done_without_spawning(
