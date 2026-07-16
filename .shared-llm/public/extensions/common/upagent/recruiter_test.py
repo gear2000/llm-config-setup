@@ -277,8 +277,9 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
 def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
     calls = []
 
-    def fake_json(*args: str) -> dict:
+    def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
+        assert kwargs == {}
         if args == ("pane", "get", "leader-pane"):
             return {
                 "result": {"pane": {"tab_id": "tab-1", "workspace_id": "workspace-1"}}
@@ -313,8 +314,9 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
 def test_start_herdr_agent_honors_downward_role_placement(monkeypatch) -> None:
     calls = []
 
-    def fake_json(*args: str) -> dict:
+    def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
+        assert kwargs == {}
         if args == ("pane", "get", "leader-pane"):
             return {"result": {"pane": {"tab_id": "tab-1"}}}
         return {
@@ -346,6 +348,177 @@ def test_start_herdr_agent_rejects_unknown_split_direction() -> None:
         recruiter._start_herdr_agent(
             "worker", _order(), "claude", split_direction="diagonal"
         )
+
+
+def test_place_started_agent_creates_role_tab_from_the_live_pane(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        assert kwargs == {
+            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS
+        }
+        if args[:2] == ("tab", "list"):
+            return {
+                "result": {
+                    "tabs": [
+                        {
+                            "label": "control",
+                            "tab_id": "control-tab",
+                            "workspace_id": "workspace-1",
+                        }
+                    ]
+                }
+            }
+        if args[:2] == ("pane", "move"):
+            return {
+                "result": {
+                    "move_result": {
+                        "changed": True,
+                        "pane": {
+                            "pane_id": "worker-pane",
+                            "tab_id": "workers-tab",
+                            "workspace_id": "workspace-1",
+                        },
+                    }
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+
+    pane = recruiter._place_started_agent_in_role_tab(
+        "worker-pane", "workspace-1", "workers", split_direction="right"
+    )
+
+    assert pane == "worker-pane"
+    assert calls[-1] == (
+        "pane",
+        "move",
+        "worker-pane",
+        "--new-tab",
+        "--workspace",
+        "workspace-1",
+        "--label",
+        "workers",
+        "--no-focus",
+    )
+
+
+def test_place_started_agent_joins_existing_role_tab(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        assert kwargs == {
+            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS
+        }
+        if args[:2] == ("tab", "list"):
+            return {
+                "result": {
+                    "tabs": [
+                        {
+                            "label": "oversight",
+                            "tab_id": "oversight-tab",
+                            "workspace_id": "workspace-1",
+                        }
+                    ]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {
+                "result": {
+                    "panes": [
+                        {
+                            "pane_id": "manager-pane",
+                            "tab_id": "oversight-tab",
+                            "workspace_id": "workspace-1",
+                        }
+                    ]
+                }
+            }
+        if args[:2] == ("pane", "move"):
+            return {
+                "result": {
+                    "move_result": {
+                        "changed": True,
+                        "pane": {
+                            "pane_id": "watchdog-pane",
+                            "tab_id": "oversight-tab",
+                            "workspace_id": "workspace-1",
+                        },
+                    }
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+
+    recruiter._place_started_agent_in_role_tab(
+        "watchdog-pane", "workspace-1", "oversight", split_direction="down"
+    )
+
+    assert calls[-1] == (
+        "pane",
+        "move",
+        "watchdog-pane",
+        "--tab",
+        "oversight-tab",
+        "--split",
+        "down",
+        "--target-pane",
+        "manager-pane",
+        "--no-focus",
+    )
+
+
+def test_tab_placement_failure_keeps_the_started_agent_alive(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, ...]] = []
+    closed: list[str] = []
+
+    def fake_json(*args: str) -> dict:
+        calls.append(args)
+        if args == ("pane", "get", "leader-pane"):
+            return {
+                "result": {
+                    "pane": {
+                        "tab_id": "control-tab",
+                        "workspace_id": "workspace-1",
+                    }
+                }
+            }
+        if args[:2] == ("agent", "start"):
+            return {
+                "result": {
+                    "agent": {
+                        "name": "worker",
+                        "pane_id": "worker-pane",
+                        "workspace_id": "workspace-1",
+                    }
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(
+        recruiter,
+        "_place_started_agent_in_role_tab",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RecruiterError("tab placement failed")
+        ),
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", closed.append)
+
+    started = recruiter._start_herdr_agent(
+        "worker",
+        _order(cockpit_pane="leader-pane"),
+        "claude",
+        tab_role="workers",
+    )
+
+    assert started == ("worker-pane", "workspace-1", "worker")
+    assert closed == []
+    assert "tab placement failed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -426,10 +599,45 @@ def test_resize_started_pane_warns_without_failing_lifecycle(
     assert "watchdog pane watchdog-pane layout adjustment failed" in capsys.readouterr().err
 
 
+def test_resize_started_pane_is_a_quiet_noop_for_first_pane_in_role_tab(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {
+            "result": {
+                "neighbor": {
+                    "layout": {"panes": [{"pane_id": "only-pane"}]},
+                    "pane_id": "only-pane",
+                }
+            }
+        },
+    )
+
+    recruiter._resize_started_pane(
+        "only-pane",
+        split_direction="down",
+        target_fraction=0.20,
+        role="account manager",
+    )
+
+    assert capsys.readouterr().err == ""
+
+
 def test_watchdog_worker_fraction_is_role_specific() -> None:
     assert recruiter._worker_pane_fraction({"agent": "plan-lifecycle-watchdog"}) == 0.28
     assert recruiter._worker_pane_fraction({"agent": "phase-watchdog"}) == 0.28
     assert recruiter._worker_pane_fraction({"agent": "docs-writer"}) is None
+
+
+def test_worker_tab_role_separates_active_work_from_oversight() -> None:
+    assert recruiter._worker_tab_role({"agent": "docs-writer"}) == "workers"
+    assert (
+        recruiter._worker_tab_role({"agent": "plan-lifecycle-watchdog"})
+        == "oversight"
+    )
+    assert recruiter._worker_tab_role({"agent": "phase-watchdog"}) == "oversight"
 
 
 def test_herdr_json_converts_timeout_to_recruiter_error(monkeypatch) -> None:
@@ -879,7 +1087,11 @@ def test_run_order_honors_authorized_extension_after_timeout(
     monkeypatch.setattr(
         recruiter,
         "_start_herdr_agent",
-        lambda name, execution_order, launch: ("worker-pane", "cockpit", name),
+        lambda name, execution_order, launch, **kwargs: (
+            "worker-pane",
+            "cockpit",
+            name,
+        ),
     )
     monkeypatch.setattr(
         recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
@@ -925,7 +1137,9 @@ def test_run_order_blocks_result_when_startup_assessment_rejects_it(
     roster_path = tmp_path / "upagent.yaml"
     roster_path.write_text('harnesses:\n  claude: "worker write:{result_path}"\n')
 
-    def start(name: str, execution_order: dict, launch: str) -> tuple[str, str, str]:
+    def start(
+        name: str, execution_order: dict, launch: str, **kwargs: object
+    ) -> tuple[str, str, str]:
         private_result.parent.mkdir(parents=True, exist_ok=True)
         private_result.write_text(json.dumps(_result(order["order_id"])))
         return "worker-pane", "cockpit", name
@@ -1063,7 +1277,7 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
     roster_path.write_text('harnesses:\n  claude: "worker write:{result_path}"\n')
 
     def fake_start(
-        name: str, execution_order: dict, launch: str
+        name: str, execution_order: dict, launch: str, **kwargs: object
     ) -> tuple[str, str, str]:
         assert private_result.parent.is_dir()
         terminal_path = Path(order["watchdog_terminal"]["path"])
@@ -1245,7 +1459,7 @@ def test_run_order_keeps_watchdog_alive_after_premature_self_verdict(
     prompts: list[str] = []
     waits = 0
 
-    def fake_start(*args: object) -> tuple[str, str, str]:
+    def fake_start(*args: object, **kwargs: object) -> tuple[str, str, str]:
         private_result.parent.mkdir(parents=True, exist_ok=True)
         private_result.write_text(json.dumps(_result(order["order_id"])))
         finalized.set()
@@ -1497,7 +1711,11 @@ def test_worker_ownership_is_recorded_before_startup_health_is_reported(
     monkeypatch.setattr(
         recruiter,
         "_start_herdr_agent",
-        lambda name, execution_order, launch: ("worker-pane", "cockpit", name),
+        lambda name, execution_order, launch, **kwargs: (
+            "worker-pane",
+            "cockpit",
+            name,
+        ),
     )
 
     def on_worker(
@@ -1551,6 +1769,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     )
     launch_orders: list[dict] = []
     launch_directions: list[str] = []
+    launch_tabs: list[str | None] = []
     resize_calls: list[tuple[str, str, float, str]] = []
 
     def start_manager(
@@ -1559,9 +1778,11 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         command: str,
         *,
         split_direction: str = "right",
+        tab_role: str | None = None,
     ) -> tuple[str, str, str]:
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)
+        launch_tabs.append(tab_role)
         return "manager-pane", "cockpit-workspace", name
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", start_manager)
@@ -1590,6 +1811,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     assert lease["manager_workspace_id"] == "cockpit-workspace"
     assert launch_orders[0]["cockpit_pane"] == order["cockpit_pane"]
     assert launch_directions == ["down"]
+    assert launch_tabs == ["oversight"]
     assert resize_calls == [("manager-pane", "down", 0.20, "account manager")]
 
 
@@ -1653,7 +1875,7 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     _patch_approved_manager(monkeypatch)
 
     def fake_start(
-        name: str, execution_order: dict, launch: str
+        name: str, execution_order: dict, launch: str, **kwargs: object
     ) -> tuple[str, str, str]:
         staging_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         worker_launched.set()
@@ -1767,7 +1989,7 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     )
 
     def fake_start(
-        name: str, execution_order: dict, launch: str
+        name: str, execution_order: dict, launch: str, **kwargs: object
     ) -> tuple[str, str, str]:
         assert launch.startswith(
             "codex exec --dangerously-bypass-approvals-and-sandbox"
@@ -1866,7 +2088,7 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
     _patch_approved_manager(monkeypatch)
 
     def fake_start(
-        name: str, execution_order: dict, launch: str
+        name: str, execution_order: dict, launch: str, **kwargs: object
     ) -> tuple[str, str, str]:
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name

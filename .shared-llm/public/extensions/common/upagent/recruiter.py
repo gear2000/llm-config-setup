@@ -129,6 +129,8 @@ WATCHDOG_PANE_FRACTION = 0.28
 SUPPORT_PANE_FRACTION = 0.20
 LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
 WATCHDOG_CONTINUATION_TIMEOUT_MS = 120_000
+COCKPIT_TAB_ROLES = frozenset(("workers", "oversight"))
+COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 
 
 def default_roster_path() -> str:
@@ -1108,8 +1110,166 @@ def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
     return f"{prefix}-{compact[:40]}-g{generation}"
 
 
+@contextmanager
+def _exclusive_workspace_layout(workspace_id: str) -> Iterator[None]:
+    key = hashlib.sha256(workspace_id.encode()).hexdigest()
+    lock_path = JobLedger().root / "layout-locks" / f"{key}.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stream = lock_path.open("a+", encoding="utf-8")
+    except OSError as error:
+        raise RecruiterError(
+            f"could not open cockpit layout lock for workspace {workspace_id}: {error}"
+        ) from error
+    with stream:
+        deadline = time.monotonic() + COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= deadline:
+                    raise RecruiterError(
+                        f"cockpit layout lock for workspace {workspace_id} timed out"
+                    ) from error
+                time.sleep(HEALTH_PROBE_SECONDS)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            except OSError as error:
+                raise RecruiterError(
+                    f"could not release cockpit layout lock for workspace {workspace_id}: {error}"
+                ) from error
+
+
+def _place_started_agent_in_role_tab(
+    pane_id: str,
+    workspace_id: str,
+    tab_role: str,
+    *,
+    split_direction: str,
+) -> str:
+    """Move a live agent into one uniquely labeled role tab before publishing its address."""
+    if tab_role not in COCKPIT_TAB_ROLES:
+        raise RecruiterError(
+            f"cockpit tab role must be one of {', '.join(sorted(COCKPIT_TAB_ROLES))}"
+        )
+    with _exclusive_workspace_layout(workspace_id):
+        tabs = (
+            _herdr_json(
+                "tab",
+                "list",
+                "--workspace",
+                workspace_id,
+                timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+            )
+            .get("result", {})
+            .get("tabs", [])
+        )
+        matches = [
+            tab
+            for tab in tabs
+            if isinstance(tab, dict) and tab.get("label") == tab_role
+        ]
+        if len(matches) > 1:
+            raise RecruiterError(
+                f"workspace {workspace_id} has multiple tabs labeled {tab_role!r}"
+            )
+        if matches:
+            tab_id = matches[0].get("tab_id")
+            if not isinstance(tab_id, str) or not tab_id:
+                raise RecruiterError(
+                    f"workspace {workspace_id} {tab_role!r} tab has no tab_id"
+                )
+            panes = (
+                _herdr_json(
+                    "pane",
+                    "list",
+                    "--workspace",
+                    workspace_id,
+                    timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+                )
+                .get("result", {})
+                .get("panes", [])
+            )
+            current = next(
+                (
+                    pane
+                    for pane in panes
+                    if isinstance(pane, dict) and pane.get("pane_id") == pane_id
+                ),
+                None,
+            )
+            if isinstance(current, dict) and current.get("tab_id") == tab_id:
+                return pane_id
+            target = next(
+                (
+                    pane.get("pane_id")
+                    for pane in panes
+                    if isinstance(pane, dict)
+                    and pane.get("tab_id") == tab_id
+                    and isinstance(pane.get("pane_id"), str)
+                ),
+                None,
+            )
+            if not isinstance(target, str) or not target:
+                raise RecruiterError(
+                    f"workspace {workspace_id} {tab_role!r} tab has no target pane"
+                )
+            response = _herdr_json(
+                "pane",
+                "move",
+                pane_id,
+                "--tab",
+                tab_id,
+                "--split",
+                split_direction,
+                "--target-pane",
+                target,
+                "--no-focus",
+                timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+            )
+        else:
+            response = _herdr_json(
+                "pane",
+                "move",
+                pane_id,
+                "--new-tab",
+                "--workspace",
+                workspace_id,
+                "--label",
+                tab_role,
+                "--no-focus",
+                timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+            )
+        move = response.get("result", {}).get("move_result", {})
+        moved_pane = move.get("pane", {}) if isinstance(move, dict) else {}
+        moved_id = moved_pane.get("pane_id") if isinstance(moved_pane, dict) else None
+        moved_workspace = (
+            moved_pane.get("workspace_id") if isinstance(moved_pane, dict) else None
+        )
+        if (
+            not isinstance(move, dict)
+            or move.get("changed") is not True
+            or not isinstance(moved_id, str)
+            or not moved_id
+            or moved_workspace != workspace_id
+        ):
+            raise RecruiterError(
+                f"Herdr did not place agent pane {pane_id} in {tab_role!r} tab"
+            )
+        return moved_id
+
+
 def _start_herdr_agent(
-    name: str, order: dict, launch: str, *, split_direction: str = "right"
+    name: str,
+    order: dict,
+    launch: str,
+    *,
+    split_direction: str = "right",
+    tab_role: str | None = None,
 ) -> tuple[str, str | None, str]:
     """Atomically create a named Herdr pane and start its process.
 
@@ -1155,6 +1315,23 @@ def _start_herdr_agent(
     address = agent.get("name") if isinstance(agent, dict) else None
     if not isinstance(address, str) or not address:
         address = name
+    if tab_role is not None:
+        if workspace_id is None:
+            _layout_warning(
+                tab_role,
+                pane_id,
+                f"agent {name!r} has no workspace_id for tab placement",
+            )
+        else:
+            try:
+                pane_id = _place_started_agent_in_role_tab(
+                    pane_id,
+                    workspace_id,
+                    tab_role,
+                    split_direction=split_direction,
+                )
+            except RecruiterError as error:
+                _layout_warning(tab_role, pane_id, str(error))
     return pane_id, workspace_id, address
 
 
@@ -1206,6 +1383,10 @@ def _resize_started_pane(
         neighbor.get("neighbor_pane_id") if isinstance(neighbor, dict) else None
     )
     if not isinstance(neighbor_pane, str) or not neighbor_pane:
+        layout = neighbor.get("layout", {}) if isinstance(neighbor, dict) else {}
+        panes = layout.get("panes", []) if isinstance(layout, dict) else []
+        if isinstance(panes, list) and len(panes) == 1:
+            return
         _layout_warning(role, pane_id, "Herdr returned no adjacent pane")
         return
     amount = format(0.5 - target_fraction, ".2f").rstrip("0").rstrip(".")
@@ -1231,6 +1412,10 @@ def _resize_started_pane(
 
 def _worker_pane_fraction(order: dict) -> float | None:
     return WATCHDOG_PANE_FRACTION if order.get("agent") in WATCHDOG_AGENTS else None
+
+
+def _worker_tab_role(order: dict) -> str:
+    return "oversight" if order.get("agent") in WATCHDOG_AGENTS else "workers"
 
 
 def _wait_for_agent_health(
@@ -1861,7 +2046,11 @@ def _start_account_manager(
     name = _safe_agent_name("upagent-manager", request_id, generation)
     manager_order = {**order, "cockpit_pane": _manager_anchor_pane(order)}
     manager_pane, workspace_id, manager_address = _start_herdr_agent(
-        name, manager_order, command, split_direction="down"
+        name,
+        manager_order,
+        command,
+        split_direction="down",
+        tab_role="oversight",
     )
     if not ledger.record_manager(
         key, token, manager_pane, manager_address, workspace_id, generation
@@ -2015,7 +2204,11 @@ def _run_one_shot_checker(
     name = _safe_agent_name(f"upagent-check-{check_number}", request_id, generation)
     checker_order = {**order, "cockpit_pane": cast(str, manager["pane"])}
     checker_pane, _, _ = _start_herdr_agent(
-        name, checker_order, command, split_direction="down"
+        name,
+        checker_order,
+        command,
+        split_direction="down",
+        tab_role="oversight",
     )
     try:
         _resize_started_pane(
@@ -2228,8 +2421,9 @@ def _run_order(
         management_config = llm_management.load_management_config(roster)
         request_id = lifecycle.request_identity(order)
         worker_name = _safe_agent_name("upagent", request_id, 1)
+        worker_tab = _worker_tab_role(execution_order)
         worker_pane, workspace_id, worker_address = _start_herdr_agent(
-            worker_name, execution_order, launch
+            worker_name, execution_order, launch, tab_role=worker_tab
         )
         if on_worker_launched is not None:
             monitor_finalized = on_worker_launched(

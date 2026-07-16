@@ -101,12 +101,15 @@ PYTHON RECRUITER HUB
     the owned pane is verified absent.
 11. A Dedicated Account Manager defaults to the requester's cockpit workspace, beside its worker.
     Shared-services placement is explicit rather than an invisible default.
-12. Cockpit placement is role-balanced without weakening startup atomicity. Account Managers and
-    one-shot checkers split downward; workers split right; phase leaders split downward. Herdr
-    therefore forms readable rows and corners instead of an unbounded strip of narrow columns.
-    After atomic startup, watchdogs are reduced to 28% of their local horizontal split and support
-    panes to 20% of their local vertical split. Resizing is bounded and presentation-only: failure
-    emits a warning and never changes worker health, ownership, or lifecycle state.
+12. Cockpit placement is role-separated without weakening startup atomicity. The `control` tab
+    holds the TUI and current phase leader, `workers` holds active stage workers, and `oversight`
+    holds Account Managers, watchdogs, and one-shot checkers. Role tabs are created lazily by
+    moving the first live agent pane itself, so there are no placeholder shells. A cross-process
+    workspace lock prevents concurrent hires from creating duplicate role tabs. Placement
+    completes before the pane address is published. Within a role tab, workers split right and
+    support roles split downward. All layout calls are bounded and presentation-only: failure
+    leaves the healthy agent in its source tab, emits a warning, and never changes worker health,
+    ownership, or lifecycle state.
 13. A watchdog's own `result.json` is not completion authority. Its order names a durable terminal
     record owned by the plan or phase controller. If the watchdog writes a result before that
     record is terminal, the Hub archives the premature result, keeps the lifecycle open, and tells
@@ -163,6 +166,7 @@ just herdr-plan <run-dir>
 └─ PYTHON PLAN CONTROLLER
    ├─ takes an exclusive run-start lock
    ├─ creates and health-checks the TUI in a fresh cockpit
+   ├─ names the TUI/leader tab `control`
    ├─ writes control/plan-start.json with the TUI address
    └─ submits one plan-lifecycle-watchdog order to the Recruiter
       ├─ Dedicated Account Manager lives beside the TUI
@@ -176,6 +180,15 @@ just herdr-plan <run-dir>
          ├─ atomically writes control/run-terminal.json
          ├─ authorizes the watchdog's final result
          └─ Recruiter closes only the owned watchdog and Account Manager panes
+```
+
+The cockpit tabs appear as their roles become active:
+
+```text
+plan workspace
+├─ control     TUI + current phase leader
+├─ workers     active stage UpAgent workers
+└─ oversight   Account Managers + plan/phase watchdogs + one-shot checkers
 ```
 
 The plan watchdog does not replace the per-phase watchdog. It connects orchestration levels: the

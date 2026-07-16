@@ -101,6 +101,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
             "result": {
                 "root_pane": {
                     "pane_id": "tui-pane",
+                    "tab_id": "control-tab",
                     "workspace_id": "workspace-1",
                 }
             }
@@ -124,6 +125,8 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     )
 
     assert tui["workspace_id"] == "workspace-1"
+    assert tui["control_tab_id"] == "control-tab"
+    assert ("tab", "rename", "control-tab", "control") in calls
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
 

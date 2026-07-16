@@ -52,6 +52,7 @@ TUI_LAUNCHES = {
     ),
 }
 PLAN_TERMINAL_STATES = ("succeeded", "stopped")
+CONTROL_TAB_LABEL = "control"
 
 
 class PlanStartError(RuntimeError):
@@ -188,6 +189,7 @@ def _create_tui(
     result = response.get("result", {})
     root_pane = result.get("root_pane", {}) if isinstance(result, dict) else {}
     pane_id = root_pane.get("pane_id") if isinstance(root_pane, dict) else None
+    tab_id = root_pane.get("tab_id") if isinstance(root_pane, dict) else None
     workspace_id = (
         root_pane.get("workspace_id") if isinstance(root_pane, dict) else None
     )
@@ -198,15 +200,28 @@ def _create_tui(
     try:
         if not isinstance(pane_id, str) or not pane_id:
             raise PlanStartError("herdr workspace create returned no root pane_id")
-        if not isinstance(workspace_id, str) or not workspace_id:
+        if (
+            not isinstance(workspace_id, str)
+            or not workspace_id
+            or not isinstance(tab_id, str)
+            or not tab_id
+        ):
             pane = (
                 recruiter._herdr_json("pane", "get", pane_id)
                 .get("result", {})
                 .get("pane", {})
             )
-            workspace_id = pane.get("workspace_id") if isinstance(pane, dict) else None
+            if not isinstance(workspace_id, str) or not workspace_id:
+                workspace_id = (
+                    pane.get("workspace_id") if isinstance(pane, dict) else None
+                )
+            if not isinstance(tab_id, str) or not tab_id:
+                tab_id = pane.get("tab_id") if isinstance(pane, dict) else None
         if not isinstance(workspace_id, str) or not workspace_id:
             raise PlanStartError(f"TUI pane {pane_id} has no workspace_id")
+        if not isinstance(tab_id, str) or not tab_id:
+            raise PlanStartError(f"TUI pane {pane_id} has no tab_id")
+        recruiter._herdr("tab", "rename", tab_id, CONTROL_TAB_LABEL)
         recruiter._herdr("pane", "rename", pane_id, "tui-agent")
         recruiter._herdr("pane", "run", pane_id, command)
         health = recruiter._wait_for_agent_health(
@@ -230,6 +245,7 @@ def _create_tui(
             detail += f"; startup cleanup also failed: {cleanup_error}"
         raise PlanStartError(detail) from error
     return {
+        "control_tab_id": tab_id,
         "health": health,
         "pane_id": pane_id,
         "workspace_id": workspace_id,
