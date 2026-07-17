@@ -227,11 +227,13 @@ worker launch. Python refuses a missing template instead of trimming a worker co
 how a harness should run a phase leader.
 
 The receipt is an observability record, not a work capability. The Recruiter inspects conventional
-phase-tree orders and durably records a `phase-watchdog-degraded` event when the receipt is
+phase-tree orders and durably records a `phase-receipt-degraded` event when the receipt is
 missing or stale (legacy runs; a `not-configured` watchdog block is by design, never degraded),
-but it still accepts the work. This prevents monitoring infrastructure
-from freezing the plan. The TUI prompt remains harness-neutral and treats the controller as the
-mandatory normal path; a stale or mistaken client can continue degraded instead of hanging.
+but it still accepts the work. A missing receipt is announced once per phase pass — the first
+order atomically claims a marker beside the receipt path and later orders record quietly. This
+prevents monitoring infrastructure from freezing the plan and keeps the pane readable. The TUI
+prompt remains harness-neutral and treats the controller as the mandatory normal path; a stale
+or mistaken client can continue degraded instead of hanging.
 
 Every compatibility rejection with a usable `order_id` and `result_path` writes a terminal
 `blocked` result before emitting the old `ORDER … DONE` marker. Modern requesters receive typed

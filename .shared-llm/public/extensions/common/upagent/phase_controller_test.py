@@ -193,7 +193,7 @@ def test_not_configured_watchdog_receipt_is_not_degraded(tmp_path: Path) -> None
         "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
         "phase_id": "phase-0",
     }
-    assert phase_controller.recruiter.phase_watchdog_warning(order) is None
+    assert phase_controller.recruiter.phase_receipt_warning(order) is None
 
 
 def test_missing_phase_leader_template_fails_before_creating_a_pane(

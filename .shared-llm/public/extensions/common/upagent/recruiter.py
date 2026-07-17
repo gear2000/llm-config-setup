@@ -871,12 +871,13 @@ def _phase_start_receipt(order: dict) -> Path | None:
     return None
 
 
-def phase_watchdog_warning(order: dict) -> str | None:
-    """Describe degraded phase observability without blocking useful stage work.
+def phase_receipt_warning(order: dict) -> str | None:
+    """Describe degraded phase coordination without blocking useful stage work.
 
-    The phase watchdog is advisory. Its bootstrap order and non-phase orders need no receipt.
-    Conventional phase orders are still inspected so the warning can be persisted and returned
-    to their requester, but a missing or stale receipt never becomes a work-stopping gate.
+    The check is advisory. Non-phase orders (and the legacy watchdog bootstrap order) need no
+    receipt. Conventional phase orders are still inspected so the warning can be persisted and
+    returned to their requester, but a missing or stale receipt never becomes a work-stopping
+    gate: the order runs either way.
     """
     if order.get("agent") == "phase-watchdog":
         return None
@@ -885,8 +886,10 @@ def phase_watchdog_warning(order: dict) -> str | None:
         return None
     if not receipt_path.is_file():
         return (
-            f"phase order {order['order_id']} has no managed phase watchdog; "
-            f"missing {receipt_path}. Continuing with degraded observability"
+            f"phase order {order['order_id']} has no phase-start receipt; missing "
+            f"{receipt_path}. The phase kickoff (just upagent-phase-start) never ran for "
+            "this pass, so phase coordination events are not active for this order. "
+            "Work continues"
         )
     try:
         receipt = json.loads(receipt_path.read_text())
@@ -917,13 +920,49 @@ def phase_watchdog_warning(order: dict) -> str | None:
     return None
 
 
-def _record_phase_watchdog_warning(
+def _record_phase_receipt_warning(
     ledger: JobLedger, key: str, order: dict
-) -> str | None:
-    warning = phase_watchdog_warning(order)
-    if warning is not None:
-        ledger._event(key, "phase-watchdog-degraded", warning=warning)
-    return warning
+) -> tuple[str | None, bool]:
+    """Persist any degraded-coordination warning and decide whether to announce it.
+
+    The warning lands in every affected order's ledger so receipts stay complete, but a missing
+    phase-start receipt is announced once per phase pass: the first announcer atomically claims
+    a marker beside where the receipt belongs, and later orders in the same pass stay quiet.
+    Other degraded reasons are rare per-order conditions and always announce.
+    """
+    warning = phase_receipt_warning(order)
+    if warning is None:
+        return None, False
+    ledger._event(key, "phase-receipt-degraded", warning=warning)
+    announce = True
+    receipt_path = _phase_start_receipt(order)
+    if receipt_path is not None and not receipt_path.is_file():
+        announce = _claim_pass_warning_marker(receipt_path.parent, order["order_id"])
+    return warning, announce
+
+
+def _claim_pass_warning_marker(control_dir: Path, order_id: str) -> bool:
+    """Atomically claim the one missing-receipt announcement allowed per phase pass.
+
+    Returns True for the first claimant. When the marker cannot be persisted at all, warn
+    anyway; a repeated warning beats a silently lost one.
+    """
+    marker = control_dir / "phase-start-missing.warned.json"
+    try:
+        control_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(
+                {"first_order_id": order_id, "announced_at_ns": time.time_ns()}, handle
+            )
+    except OSError:
+        pass
+    return True
 
 
 def _reject_legacy_order(order_path: str, reason: str) -> None:
@@ -2560,8 +2599,8 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         return 1
     ledger = JobLedger()
     key, _created = ledger.submit(order)
-    warning = _record_phase_watchdog_warning(ledger, key, order)
-    if warning is not None:
+    warning, announce = _record_phase_receipt_warning(ledger, key, order)
+    if warning is not None and announce:
         print(
             f"ORDER {order['order_id']} DEGRADED {json.dumps({'warning': warning})}",
             flush=True,
@@ -2787,8 +2826,8 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
         raise RecruiterError(f"invalid order {order_path}: {e}") from e
     ledger = JobLedger()
     key, _created = ledger.submit(order)
-    warning = _record_phase_watchdog_warning(ledger, key, order)
-    if warning is not None:
+    warning, announce = _record_phase_receipt_warning(ledger, key, order)
+    if warning is not None and announce:
         print(
             f"REQUEST_DEGRADED {json.dumps({'request_id': lifecycle.request_identity(order), 'warning': warning}, sort_keys=True)}",
             flush=True,
@@ -2872,7 +2911,7 @@ def cmd_request(order_path: str, roster_path: str) -> int:
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
     key, _ = ledger.submit(order)
-    warning = _record_phase_watchdog_warning(ledger, key, order)
+    warning, _announce = _record_phase_receipt_warning(ledger, key, order)
     existing = ledger.completed_result(key, order)
     if existing is not None:
         receipt = ledger.completed_receipt(key, order)

@@ -42,9 +42,11 @@ blocks in `just upagent-phase-await <receipt>` which returns one typed event per
 Leader startup failures still close the gated leader.
 
 The controller exports its receipt path to the released leader. The Recruiter inspects that
-receipt and records degraded observability when it is missing or stale (a `not-configured`
-watchdog block is by design, never degraded), but accepts the stage order. The warning is
-included in modern startup responses and stored in the durable request ledger.
+receipt and records a `phase-receipt-degraded` event when it is missing or stale (a
+`not-configured` watchdog block is by design, never degraded), but accepts the stage order. A
+missing receipt means the phase kickoff (`just upagent-phase-start`) never ran for that pass;
+the warning says so plainly, is announced once per phase pass instead of once per order, and is
+stored in the durable request ledger and modern startup responses.
 
 ## The order → result contract (`contracts.py`)
 

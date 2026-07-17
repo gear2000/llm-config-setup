@@ -80,8 +80,8 @@ def test_phase_order_without_controller_receipt_is_degraded_not_rejected(
     order, receipt_path = _phase_order(tmp_path)
     monkeypatch.delenv(recruiter.PHASE_START_RECEIPT_ENV, raising=False)
 
-    warning = recruiter.phase_watchdog_warning(order)
-    assert "has no managed phase watchdog" in warning
+    warning = recruiter.phase_receipt_warning(order)
+    assert "has no phase-start receipt" in warning
 
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_text(
@@ -95,7 +95,7 @@ def test_phase_order_without_controller_receipt_is_degraded_not_rejected(
         )
     )
     monkeypatch.setenv(recruiter.PHASE_START_RECEIPT_ENV, str(receipt_path))
-    assert recruiter.phase_watchdog_warning(order) is None
+    assert recruiter.phase_receipt_warning(order) is None
 
 
 def test_invalid_phase_release_receipt_becomes_a_degraded_warning(
@@ -115,7 +115,7 @@ def test_invalid_phase_release_receipt_becomes_a_degraded_warning(
     )
     monkeypatch.setenv(recruiter.PHASE_START_RECEIPT_ENV, str(receipt_path))
 
-    assert "belongs to leader some-other-pane" in recruiter.phase_watchdog_warning(
+    assert "belongs to leader some-other-pane" in recruiter.phase_receipt_warning(
         order
     )
 
@@ -126,10 +126,10 @@ def test_phase_watchdog_bootstrap_order_is_exempt_from_release_receipt(
     order, _receipt_path = _phase_order(tmp_path, agent="phase-watchdog")
     monkeypatch.delenv(recruiter.PHASE_START_RECEIPT_ENV, raising=False)
 
-    assert recruiter.phase_watchdog_warning(order) is None
+    assert recruiter.phase_receipt_warning(order) is None
 
 
-def test_legacy_recruit_without_watchdog_starts_degraded_instead_of_stalling(
+def test_legacy_recruit_without_receipt_starts_degraded_instead_of_stalling(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     order, _receipt_path = _phase_order(tmp_path)
@@ -155,7 +155,57 @@ def test_legacy_recruit_without_watchdog_starts_degraded_instead_of_stalling(
         json.loads(path.read_text())
         for path in (ledger.request_dir(key) / "events").glob("*.json")
     ]
-    assert any(event["event"] == "phase-watchdog-degraded" for event in events)
+    assert any(event["event"] == "phase-receipt-degraded" for event in events)
+
+
+def test_missing_receipt_announcement_prints_once_per_phase_pass(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Every degraded order records its ledger event, but the pane sees one warning per pass."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.delenv(recruiter.PHASE_START_RECEIPT_ENV, raising=False)
+    monkeypatch.setattr(
+        recruiter.subprocess, "Popen", lambda command, **kwargs: None
+    )
+
+    def submit(stage_id: str, pass_name: str, try_name: str) -> tuple[dict, str]:
+        stage = tmp_path / f"run/phases/phase-0/{pass_name}/stages/{stage_id}/{try_name}"
+        stage.mkdir(parents=True, exist_ok=True)
+        instructions = stage / "instructions.md"
+        instructions.write_text("# Worker\n")
+        order = _order(
+            order_id=f"phase-0.{stage_id}.{pass_name}.{try_name}",
+            stage_id=stage_id,
+            instructions_path=str(instructions),
+            result_path=str(stage / "result.json"),
+        )
+        order_path = stage / "order.json"
+        order_path.write_text(json.dumps(order))
+        assert recruiter.cmd_recruit(str(order_path), "roster.yaml") == 0
+        return order, capsys.readouterr().out
+
+    _first_order, first = submit("stage-1-implementation", "pass-1", "try-1")
+    assert "DEGRADED" in first
+    assert "has no phase-start receipt" in first
+
+    quiet_order, second = submit("stage-2-adversarial-audit", "pass-1", "try-1")
+    assert "DEGRADED" not in second
+
+    _retry_order, third = submit("stage-1-implementation", "pass-1", "try-2")
+    assert "DEGRADED" not in third
+
+    # The quiet order still carries the durable degraded event for its receipt.
+    ledger = recruiter.JobLedger()
+    key = ledger.key_for_order(quiet_order)
+    events = [
+        json.loads(path.read_text())
+        for path in (ledger.request_dir(key) / "events").glob("*.json")
+    ]
+    assert any(event["event"] == "phase-receipt-degraded" for event in events)
+
+    # A fresh pass gets its own single announcement.
+    _fresh_order, fresh = submit("stage-1-implementation", "pass-2", "try-1")
+    assert "DEGRADED" in fresh
 
 
 def test_legacy_recruit_rejection_writes_blocked_result_and_terminal_marker(
