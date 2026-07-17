@@ -21,20 +21,20 @@ All four flags are required. Fail loud on any missing or unreadable path.
 3. Confirm `just upagent-up` has persisted a live Recruiter in `/tmp/.upagent/recruiter.json` (or `UPAGENT_STATE`). The pane is a visible status surface, not a command mailbox. Determine this leader's OWN pane id — the `cockpit_pane` stamped on every order — from `$HERDR_PANE_ID` (or `herdr pane current`). Do **not** infer it from UI focus.
 4. Validate this phase's route entry:
    - `lead.llm_profile` and `lead.agent` present;
-   - `accuracy` is `medium` (default) or `high`; if `high`, `stage-0-alignment` is present, else it is absent;
+   - `accuracy` is `medium` (default), `high`, or `max`; if `high` or `max`, `stage-0-alignment` is present, else it is absent; if `max`, stage-2 also names `second_llm_profile` referencing a profile on a different harness or model than the primary auditor;
    - all five base stage entries exist; each stage has `llm_profile` and `agent`;
    - `merge_back_at` is Stage 3, Stage 4, or Stage 5;
    - worktree branch template, green checks, and log checks configured;
    - each referenced profile exists and each named agent resolves in its harness/project context;
    - each profile's `model` is the harness-native id shape — claude: alias or full name (paired with `effort`); codex: bare model id such as `gpt-5.6-sol` (paired with `effort`, passed as `model_reasoning_effort`); pi: `provider/id[:thinking]` (the `:thinking` suffix is pi's effort). A `provider/…` model on a claude/codex profile, or a bare id on a pi profile, is a route error — fail loud, do not guess a translation;
-   - Stage 2 (and, when high, stage-0's audit) is independent from Stage 1.
+   - Stage 2 (and, when high or max, stage-0's audit) is independent from Stage 1.
 5. Determine the current **pass** number: count existing `pass-<p>/` dirs under `phases/<phase-id>/` and use the next one (start at `pass-1`). Read `phase-status.md` if it exists to see where a prior pass left off.
 6. Run the pre-flight dependency/import safety check before any code stage (see the shared phase protocol). On a confirmed circular dependency, write a `blocked` `phase-result.json` and stop.
 7. Create or select the temporary worktree branch from the route template and record its path, branch, and base commit. This path is the `cwd` on every stage order.
 
 ## Stage execution — one work order per stage
 
-The leader runs the phase's stages in order — `stage-1` … `stage-5` for `accuracy: medium`, and `stage-0-alignment` first for `accuracy: high`. For each stage it places exactly one work order to the Recruiter and reads back the worker's `result.json`:
+The leader runs the phase's stages in order — `stage-1` … `stage-5` for `accuracy: medium`, with `stage-0-alignment` first for `accuracy: high` and `max` (and, under `max`, a doubled stage-2 audit — see the five-stage lifecycle below). For each stage it places exactly one work order to the Recruiter and reads back the worker's `result.json`:
 
 ```text
 leader:    write pass-<p>/stages/<stage-id>/try-<m>/order.json + instructions.md   (order.cockpit_pane = this leader's pane)
@@ -76,6 +76,8 @@ Use only `passed`, `failed`, or `blocked` for `result.json.verdict`; a failed re
 
 Every generated `instructions.md` also includes this terminal instruction: after `result.json`, `compacted.md`, and the handoff are durably written, exit the session. Do not stop at an idle prompt and wait for another instruction.
 
+When a stage's route profile sets `scope_leash: true`, the leader copies the scope-discipline block from `.shared-llm/public/llm/pi/common/meta-plan/scope-leash.md` into that stage's `instructions.md` verbatim, before the result template. The flag on the profile decides; the leader never applies or skips the leash by model name.
+
 A missing or malformed `result.json`, or a Recruiter error, is treated as a `blocked` stage — never silently retried as if passed.
 
 Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. On a retry that re-investigates the same unresolved failure signature, the leader additionally requires a live Specialist Hub Librarian consult before the worker forms a new hypothesis: provide the failure signature and prior ruled-out work, and require the worker to record the consult id and answer/error path in `result.json`. Reading static specialist docs is not a substitute. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes, then exits its session.
@@ -93,9 +95,9 @@ just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT blocked "<what cannot ad
 
 The TUI's blocking await returns that event as its next turn — no idle-wait, no pane injection, no watchdog relay. Terminal outcomes still travel through `phase-result.json`; do not double-publish them. `blocked` is terminal: publishing it ends this attempt, so write `phase-result.json` with verdict `blocked` immediately after — the owner decides and replays as a fresh pass. There is no owner→leader answer channel yet (the command contract exists but nothing consumes it), so a question that must be answered before work can continue is a `blocked`, never a `needs-input`.
 
-## Stage-0-alignment (accuracy: high only)
+## Stage-0-alignment (accuracy: high or max)
 
-When `accuracy: high`, before Stage 1 the leader orchestrates a sequence of **three separate non-delegating workers** — it does not hand this to one delegating agent:
+When `accuracy` is `high` or `max`, before Stage 1 the leader orchestrates a sequence of **three separate non-delegating workers** — it does not hand this to one delegating agent:
 
 1. **mini-research** order — research this phase against the original `research.md`.
 2. **mini-plan** order — draft a mini-plan for this phase against the original `plan.md`.
@@ -108,7 +110,7 @@ Misaligned ⇒ loop stage-0 (redo the mini-plan) within the stage-try budget. Un
 The leader runs the shared five-stage worktree lifecycle, ordering one worker per stage:
 
 1. **Stage 1 — implementation** on the temporary worktree branch (unit tests + code, TDD loop, no goal cheating).
-2. **Stage 2 — adversarial audit** of Stage 1 on the same branch, including the hard gate for **unused intake / accepted-but-ignored inputs**. A verification-passed audit outcome advances; its worker `result.json` still uses the enum `verdict=passed`. Blocking findings return `verdict=failed`, `revisit=[stage-1-implementation]` with the raw findings; non-blocking notes are recorded. Stage 2 must be run by a worker independent from Stage 1.
+2. **Stage 2 — adversarial audit** of Stage 1 on the same branch, including the hard gate for **unused intake / accepted-but-ignored inputs**. A verification-passed audit outcome advances; its worker `result.json` still uses the enum `verdict=passed`. Blocking findings return `verdict=failed`, `revisit=[stage-1-implementation]` with the raw findings; non-blocking notes are recorded. Stage 2 must be run by a worker independent from Stage 1. Under `accuracy: max` the leader places TWO independent stage-2 orders — the primary `llm_profile` and the route's `second_llm_profile` (a different harness or model) — and blocks over both with `upagent-await-any`. Both must return `passed` to advance. On disagreement, consult `finalization_defaults.advisor_profile` as the judge when set (its `result.json.decision`: `continue` accepts the work, `loop` replays stage-1 with both sets of findings, `stop-ask-human` gives the phase up); with no advisor, write `phase-result.json` verdict `blocked` for the human. Each auditor's order reuses the stage-2 `stage_id` with its own try and order id, and both results are recorded in `phase-status.md`.
 3. **Stage 3 — integration/acceptance seams**; merge the worktree back to main here iff `merge_back_at` selects Stage 3.
 4. **Stage 4 — upstream DAG verification**; merge here iff `merge_back_at` selects Stage 4 (or run from main if already merged at Stage 3).
 5. **Stage 5 — finalization**: merge if not already merged, verify main, run green checks, inspect logs for hidden failures, destroy the temporary worktree/branch, and write final evidence. Stage 5 always runs.

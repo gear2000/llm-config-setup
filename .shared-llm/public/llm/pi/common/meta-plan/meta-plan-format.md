@@ -116,23 +116,16 @@ llm_profiles:
 #   - `effort` is OPTIONAL. At order time the phase leader resolves it to `medium` when the
 #     profile omits it, so launch templates can always substitute `{effort}`.
 #
-# Recommended default profiles (as of 2026-07 — revisit as models move):
-#   implementation (stage-1):       codex  gpt-5.6-terra       effort medium
-#   adversarial audit (stage-2):    claude opus (Opus 4.8)     effort high (max for critical phases)
-#   advisor / lead / high-judgment: codex gpt-5.6-sol effort high,
-#                                   or claude fable (Fable 5) effort medium,
-#                                   or claude opus effort max
-#   planning (outside runs):        Claude Code or Codex directly; through pi use
-#                                   openai-codex/gpt-5.6-sol:medium|high, anthropic opus at
-#                                   max, or fable at low|medium
+# Recommended default profiles: copy the job slots from route-defaults.yaml (same
+# directory) into llm_profiles. The slots map jobs — implementer, auditor, second_auditor,
+# judge, advisor — to editable harness/model/effort values. Nothing is hardwired in code;
+# swap the values in that one file as models move.
 #
-# GPT-5.6 OVERPRODUCTION GUARDRAIL. The 5.6 family (terra especially) tends to write far
-# more code and far more tests than a stage needs. Every stage brief for a worker routed
-# to ANY gpt-5.6 model MUST carry an explicit scope-discipline instruction: implement only
-# what the stage requires, no speculative abstractions or extra features, tests
-# proportionate to the change (cover the contract, not every permutation), prefer
-# extending existing files over spawning new ones. Route authors: flag it on the profile;
-# phase leaders: put it in the brief (see /herdr-phase).
+# scope_leash (OPTIONAL, per profile): true means every stage brief routed to this profile
+# MUST carry the scope-discipline block from scope-leash.md (same directory) verbatim —
+# it reins in models that write far more code and tests than a stage needs. Route authors
+# set the flag on the profile; phase leaders copy the block into the brief (see
+# /herdr-phase). The flag decides who gets the leash — the rule itself names no model.
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
@@ -156,6 +149,8 @@ phases:
   phase-0:
     accuracy: medium            # OPTIONAL. medium (default) = stages 1–5.
                                 # high = add stage-0-alignment before stage-1 (see below).
+                                # max = high + a second stage-2 auditor on a different
+                                # harness or model (second_llm_profile, see below).
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
@@ -171,6 +166,9 @@ phases:
       stage-2-adversarial-audit:
         llm_profile: pi-default
         agent: adversarial-evaluator
+        # second_llm_profile goes here ONLY when accuracy: max — a second independent
+        # auditor on a different harness or model; both must clear the work:
+        #   second_llm_profile: claude-low
       stage-3-integration-acceptance-seams:
         llm_profile: claude-low
         agent: qa
@@ -202,15 +200,15 @@ route.yaml
 │   └── stage_try_budget       (optional; absent ⇒ 3)
 └── phases
     └── phase-N
-        ├── accuracy: medium | high            (optional; absent ⇒ medium)
+        ├── accuracy: medium | high | max      (optional; absent ⇒ medium)
         ├── merge_back_at: stage-3-integration-acceptance-seams | stage-4-upstream-dag-verification | stage-5-finalization
         ├── lead
         │   ├── llm_profile
         │   └── agent
         └── stages
-            ├── stage-0-alignment              (required iff accuracy: high; forbidden otherwise)
+            ├── stage-0-alignment              (required iff accuracy: high or max; forbidden otherwise)
             ├── stage-1-implementation
-            ├── stage-2-adversarial-audit
+            ├── stage-2-adversarial-audit      (+ second_llm_profile iff accuracy: max)
             ├── stage-3-integration-acceptance-seams
             ├── stage-4-upstream-dag-verification
             └── stage-5-finalization
@@ -237,15 +235,19 @@ Every route phase has the same five base stage ids:
 4. `stage-4-upstream-dag-verification` — dependent build/deploy/test verification; merge here only when `merge_back_at` is this stage.
 5. `stage-5-finalization` — merge if not already merged, verify main, destroy the temporary worktree/branch, run green checks, inspect logs for hidden failures, and record evidence.
 
-### Accuracy: `medium` (default) vs `high`
+### Accuracy: `medium` (default) vs `high` vs `max`
 
 Each phase optionally sets `accuracy:`. Absent or `medium` runs the five base stages above — unchanged behavior. `high` additionally requires a pre-code alignment stage that runs **before** stage-1:
 
 1. `stage-0-alignment` — a fresh worker does mini-research for this phase against the original research, drafts a mini-plan against the original plan, then an **independent** audit checks the mini-plan against the big plan. Misaligned ⇒ redo the mini-plan; unreconcilable ⇒ `BLOCKED` (escalates). It is versioned, never overwritten.
 
-`stage-0-alignment` is **required iff** `accuracy: high` and **forbidden** otherwise. Its audit reviewer must be independent from `stage-1-implementation` (same rule as Stage 2 — by profile, agent, harness, model family, or persona).
+`stage-0-alignment` is **required iff** `accuracy: high` or `max` and **forbidden** otherwise. Its audit reviewer must be independent from `stage-1-implementation` (same rule as Stage 2 — by profile, agent, harness, model family, or persona).
+
+`max` keeps the full `high` ladder and doubles the stage-2 audit. The stage-2 route entry additionally names `second_llm_profile` — a second independent reviewer that must use a **different harness or model** than the primary auditor. Both reviewers must clear the work. When they disagree, the leader consults `finalization_defaults.advisor_profile` as the judge when set; with no advisor the phase goes to the human as `blocked`. `second_llm_profile` is required iff `accuracy: max` and forbidden otherwise.
 
 Stage 2 must be independent from Stage 1 by profile, agent, harness, model family, or persona.
+
+**Choosing a gear is always the plan author's call — nothing escalates automatically.** As a rule of thumb only: `fast` is not an accuracy value but the no-phase lane (one worker straight through the Recruiter, see the one-shot flow in /herdr-run) for small chores; `medium` is the everyday default; `high` earns its extra alignment stage on unfamiliar or intricate work; `max` is worth considering for auth, destructive infrastructure, migrations, cross-service contracts, or a phase already on its second failed pass.
 
 ### Escalation budgets (optional)
 

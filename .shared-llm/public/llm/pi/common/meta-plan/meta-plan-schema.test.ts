@@ -267,6 +267,109 @@ async function main() {
 			badAccuracy.issues.some((i) => i.message.includes("accuracy must be one of")),
 	);
 
+	// --- accuracy: max (dual stage-2 audit) ---
+	const withMax = (route: string, stage2Extra: string): string =>
+		route
+			.replace(
+				"  phase-0:\n    merge_back_at:",
+				"  phase-0:\n    accuracy: max\n    merge_back_at:",
+			)
+			.replace(
+				"    stages:\n      stage-1-implementation:",
+				`    stages:\n${independentStage0}      stage-1-implementation:`,
+			)
+			.replace(
+				"      stage-2-adversarial-audit:\n        llm_profile: pi-default\n        agent: adversarial-evaluator\n",
+				`      stage-2-adversarial-audit:\n        llm_profile: pi-default\n        agent: adversarial-evaluator\n${stage2Extra}`,
+			);
+
+	const maxOk = validateRunnable(
+		canonicalPlan,
+		withMax(validRoute, "        second_llm_profile: claude-low\n"),
+	);
+	check(
+		"accuracy: max with a different-harness second auditor passes",
+		maxOk.ok,
+		maxOk.issues.map((i) => i.message).join("; "),
+	);
+
+	const maxNoSecond = validateRunnable(canonicalPlan, withMax(validRoute, ""));
+	check(
+		"accuracy: max without second_llm_profile fails",
+		!maxNoSecond.ok &&
+			maxNoSecond.issues.some((i) =>
+				i.message.includes("second_llm_profile is required when accuracy: max"),
+			),
+	);
+
+	const maxSameFamily = validateRunnable(
+		canonicalPlan,
+		withMax(validRoute, "        second_llm_profile: pi-default\n"),
+	);
+	check(
+		"accuracy: max with a same-harness-and-model second auditor fails",
+		!maxSameFamily.ok &&
+			maxSameFamily.issues.some((i) =>
+				i.message.includes("different harness or model"),
+			),
+	);
+
+	const secondUnderHigh = validateRunnable(
+		canonicalPlan,
+		withHighStage0(validRoute, independentStage0).replace(
+			"      stage-2-adversarial-audit:\n        llm_profile: pi-default\n        agent: adversarial-evaluator\n",
+			"      stage-2-adversarial-audit:\n        llm_profile: pi-default\n        agent: adversarial-evaluator\n        second_llm_profile: claude-low\n",
+		),
+	);
+	check(
+		"second_llm_profile under accuracy: high fails",
+		!secondUnderHigh.ok &&
+			secondUnderHigh.issues.some((i) =>
+				i.message.includes("only allowed when accuracy: max"),
+			),
+	);
+
+	const maxUnknownSecond = validateRunnable(
+		canonicalPlan,
+		withMax(validRoute, "        second_llm_profile: nonexistent\n"),
+	);
+	check(
+		"accuracy: max with an unknown second profile fails",
+		!maxUnknownSecond.ok &&
+			maxUnknownSecond.issues.some((i) =>
+				i.message.includes("references unknown profile nonexistent"),
+			),
+	);
+
+	// --- per-profile scope leash flag ---
+	const leashOk = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  claude-low:\n    harness: claude\n    model: configured-claude-model\n    effort: low",
+			"  claude-low:\n    harness: claude\n    model: configured-claude-model\n    effort: low\n    scope_leash: true",
+		),
+	);
+	check(
+		"scope_leash: true on a profile passes",
+		leashOk.ok,
+		leashOk.issues.map((i) => i.message).join("; "),
+	);
+
+	const leashJunk = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  claude-low:\n    harness: claude\n    model: configured-claude-model\n    effort: low",
+			"  claude-low:\n    harness: claude\n    model: configured-claude-model\n    effort: low\n    scope_leash: always",
+		),
+	);
+	check(
+		"scope_leash with a non-boolean value fails",
+		!leashJunk.ok &&
+			leashJunk.issues.some((i) =>
+				i.message.includes("scope_leash must be true or false"),
+			),
+	);
+
 	const stage0NotIndependent = validateRunnable(
 		canonicalPlan,
 		withHighStage0(

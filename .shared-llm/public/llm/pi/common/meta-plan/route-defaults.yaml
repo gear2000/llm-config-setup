@@ -1,0 +1,46 @@
+# route-defaults.yaml — swappable job-slot defaults for route.yaml authors.
+#
+# HOW TO USE: copy the slots you need into your route.yaml under `llm_profiles:`
+# (rename them however you like) and point each stage's `llm_profile` at them.
+# This file is a REFERENCE, not config that code reads — nothing in the kit keys
+# on a model name. When models move, edit the values here once and new routes
+# pick them up.
+#
+# scope_leash: true means every stage brief routed to that profile must carry the
+# scope-discipline block from scope-leash.md (same directory) verbatim. Set it on
+# any model that tends to write far more code and tests than a stage needs.
+#
+# Slot → stage mapping:
+#   implementer     → stage-1-implementation
+#   auditor         → stage-2-adversarial-audit
+#   second_auditor  → stage-2 second reviewer (accuracy: max only) — keep it on a
+#                     different harness or model than auditor; the schema enforces this
+#   judge           → resolves auditor disagreement in the max gear
+#   advisor         → budget-exhaustion consult (finalization_defaults.advisor_profile)
+
+job_slots:
+  implementer:
+    harness: codex
+    model: gpt-5.6-terra
+    effort: medium
+    scope_leash: true
+
+  auditor:
+    harness: claude
+    model: opus
+    effort: high
+
+  second_auditor:
+    harness: codex
+    model: gpt-5.6-sol
+    effort: high
+
+  judge:
+    harness: claude
+    model: fable
+    effort: medium
+
+  advisor:
+    harness: codex
+    model: gpt-5.6-sol
+    effort: high

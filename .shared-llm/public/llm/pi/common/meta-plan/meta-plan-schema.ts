@@ -52,7 +52,7 @@ const STAGE_0_ID = "stage-0-alignment";
 // distinct so stage-0 is recognized-but-conditional rather than always-required.
 const RECOGNIZED_STAGE_IDS = [STAGE_0_ID, ...STAGE_IDS] as const;
 
-const ACCURACY_LEVELS = ["medium", "high"] as const;
+const ACCURACY_LEVELS = ["medium", "high", "max"] as const;
 
 const MERGE_BACK_STAGE_IDS = [
 	"stage-3-integration-acceptance-seams",
@@ -410,6 +410,16 @@ export function validateRoute(
 					issue(`llm_profiles.${profile}.${key} is missing or unresolved`),
 				);
 		}
+		// Optional per-profile scope leash: when true, the phase leader must copy the
+		// scope-leash brief block into every stage brief routed to this profile.
+		const leash = valueIn(block, 4, "scope_leash");
+		if (leash !== undefined && leash !== "true" && leash !== "false") {
+			issues.push(
+				issue(
+					`llm_profiles.${profile}.scope_leash must be true or false (got ${leash})`,
+				),
+			);
+		}
 	}
 
 	// Optional lifecycle/escalation profiles must reference known profiles when set. Budgets
@@ -560,7 +570,10 @@ export function validateRoute(
 				),
 			);
 		}
-		const isHighAccuracy = accuracy === "high";
+		// high and max both require the pre-code alignment stage; max additionally
+		// requires a second stage-2 reviewer from a different harness or model.
+		const needsAlignment = accuracy === "high" || accuracy === "max";
+		const isMaxAccuracy = accuracy === "max";
 
 		const stagesBlock = indentedBlock(phaseBlock ?? "", 4, "stages");
 		if (!stagesBlock) issues.push(issue(`${phase}.stages is required`));
@@ -575,15 +588,15 @@ export function validateRoute(
 				);
 			}
 		}
-		// stage-0-alignment is allowed ONLY under accuracy: high.
-		if (!isHighAccuracy && stageChildren.includes(STAGE_0_ID)) {
+		// stage-0-alignment is allowed ONLY under accuracy: high or max.
+		if (!needsAlignment && stageChildren.includes(STAGE_0_ID)) {
 			issues.push(
 				issue(
-					`${phase}.${STAGE_0_ID} is only allowed when accuracy: high`,
+					`${phase}.${STAGE_0_ID} is only allowed when accuracy: high or max`,
 				),
 			);
 		}
-		const requiredStages = isHighAccuracy
+		const requiredStages = needsAlignment
 			? [STAGE_0_ID, ...STAGE_IDS]
 			: [...STAGE_IDS];
 		let stage0Profile = "";
@@ -592,6 +605,7 @@ export function validateRoute(
 		let stage1Agent = "";
 		let stage2Profile = "";
 		let stage2Agent = "";
+		let stage2SecondProfile: string | undefined;
 		for (const stage of requiredStages) {
 			const stageBlock = indentedBlock(stagesBlock ?? "", 6, stage);
 			if (!stageBlock) {
@@ -623,6 +637,7 @@ export function validateRoute(
 			if (stage === "stage-2-adversarial-audit") {
 				stage2Profile = stageProfile ?? "";
 				stage2Agent = stageAgent ?? "";
+				stage2SecondProfile = valueIn(stageBlock, 8, "second_llm_profile");
 			}
 		}
 		const resolveHarnessModel = (profileName: string) => {
@@ -652,12 +667,52 @@ export function validateRoute(
 		}
 		// stage-0's mini-plan audit must not be the same reviewer as the implementer.
 		if (
-			isHighAccuracy &&
+			needsAlignment &&
 			notIndependent(stage1Profile, stage1Agent, stage0Profile, stage0Agent)
 		) {
 			issues.push(
 				issue(
 					`${phase}.${STAGE_0_ID} must be independent from stage-1-implementation`,
+				),
+			);
+		}
+		// The max gear doubles the stage-2 audit: a second reviewer from a different
+		// harness or model must also clear the work (a judge resolves disagreement).
+		if (isMaxAccuracy) {
+			if (hasTodo(stage2SecondProfile)) {
+				issues.push(
+					issue(
+						`${phase}.stage-2-adversarial-audit.second_llm_profile is required when accuracy: max`,
+					),
+				);
+			} else if (!profiles.includes(stage2SecondProfile!)) {
+				issues.push(
+					issue(
+						`${phase}.stage-2-adversarial-audit.second_llm_profile references unknown profile ${stage2SecondProfile}`,
+					),
+				);
+			} else {
+				const primary = resolveHarnessModel(stage2Profile);
+				const second = resolveHarnessModel(stage2SecondProfile!);
+				if (
+					primary !== undefined &&
+					second !== undefined &&
+					primary === second
+				) {
+					issues.push(
+						issue(
+							`${phase}.stage-2-adversarial-audit.second_llm_profile must use a different harness or model than the primary auditor`,
+						),
+					);
+				}
+			}
+		} else if (
+			stage2SecondProfile !== undefined &&
+			!hasTodo(stage2SecondProfile)
+		) {
+			issues.push(
+				issue(
+					`${phase}.stage-2-adversarial-audit.second_llm_profile is only allowed when accuracy: max`,
 				),
 			);
 		}
