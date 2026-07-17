@@ -2639,6 +2639,100 @@ def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
     )
 
 
+def test_completion_ping_fires_only_past_the_threshold() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def spy(order_id: str, verdict: str) -> None:
+        calls.append((order_id, verdict))
+
+    assert not recruiter._maybe_notify_completion(1_000, 600_000, "o1", "passed", spy)
+    assert calls == []
+    assert recruiter._maybe_notify_completion(600_000, 600_000, "o1", "passed", spy)
+    assert calls == [("o1", "passed")]
+    # Zero disables the ping entirely, however long the wait was.
+    assert not recruiter._maybe_notify_completion(9_999_999, 0, "o1", "failed", spy)
+    assert calls == [("o1", "passed")]
+
+
+def test_await_threads_the_ping_threshold_through(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    assert ledger.finalize(
+        key, token, order, _result(order["order_id"]), cleanup=_cleanup(), exit_code=0
+    )
+
+    seen: list[tuple[int, str, str]] = []
+
+    def spy(waited_ms: float, threshold_ms: int, order_id: str, verdict: str, **_: object) -> bool:
+        seen.append((threshold_ms, order_id, verdict))
+        return False
+
+    monkeypatch.setattr(recruiter, "_maybe_notify_completion", spy)
+
+    assert recruiter.cmd_await(str(order_path), notify_after_ms=123) == 0
+
+    assert seen == [(123, order["order_id"], "passed")]
+    assert "ORDER_RECEIPT" in capsys.readouterr().out
+
+
+def test_verify_builds_an_independent_reviewer_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The optional second opinion points a fresh reviewer at the finished work."""
+    result_path = tmp_path / "result.json"
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    result_path.write_text(json.dumps(_result(order["order_id"], verdict="passed")))
+
+    dispatched: list[str] = []
+
+    def fake_dispatch(path: str, roster: str) -> int:
+        dispatched.append(path)
+        return 0
+
+    monkeypatch.setattr(recruiter, "cmd_dispatch", fake_dispatch)
+
+    assert recruiter.cmd_verify(str(order_path), "roster.yaml", model="some-model") == 0
+
+    assert len(dispatched) == 1
+    verify_order = json.loads(Path(dispatched[0]).read_text())
+    assert verify_order["order_id"] == f"{order['order_id']}.verify"
+    assert verify_order["stage_id"] == "stage-2-adversarial-audit"
+    assert verify_order["agent"] == "reviewer"
+    assert verify_order["cwd"] == order["cwd"]
+    brief = Path(verify_order["instructions_path"]).read_text()
+    assert order["result_path"] in brief
+    assert "Adversarially check" in brief
+    # The reviewer order must itself satisfy the order contract.
+    recruiter.load_order(dispatched[0])
+
+
+def test_verify_refuses_an_unfinished_order(tmp_path: Path) -> None:
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(tmp_path / "missing-result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+
+    with pytest.raises(recruiter.ContractError):
+        recruiter.cmd_verify(str(order_path), "roster.yaml")
+
+
 def test_rescue_advice_survives_a_broken_filesystem(
     tmp_path: Path, monkeypatch
 ) -> None:

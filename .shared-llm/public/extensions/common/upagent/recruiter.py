@@ -3069,8 +3069,45 @@ def cmd_request(order_path: str, roster_path: str) -> int:
     )
 
 
-def cmd_await(order_path: str) -> int:
-    """Block in Python until a request is terminal or needs an owner decision."""
+def _notify_order_completion(order_id: str, verdict: str) -> None:
+    """Best-effort human ping via herdr notification; never raises."""
+    command = [
+        "herdr",
+        "notification",
+        "show",
+        "Herdr order finished",
+        "--body",
+        f"{order_id} finished with verdict {verdict}",
+        "--sound",
+        "request",
+    ]
+    try:
+        subprocess.run(command, check=False, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _maybe_notify_completion(
+    waited_ms: float,
+    threshold_ms: int,
+    order_id: str,
+    verdict: str,
+    notify: Callable[[str, str], None] = _notify_order_completion,
+) -> bool:
+    """Ping the human when a long one-shot finishes. threshold_ms <= 0 disables."""
+    if threshold_ms <= 0 or waited_ms < threshold_ms:
+        return False
+    notify(order_id, verdict)
+    return True
+
+
+def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
+    """Block in Python until a request is terminal or needs an owner decision.
+
+    When the wait outlives ``notify_after_ms`` (default ten minutes; 0 disables), the
+    terminal receipt also pings the human via ``herdr notification`` so nobody babysits
+    a pane for a long one-shot.
+    """
     try:
         order = load_order(order_path)
     except ContractError as error:
@@ -3081,7 +3118,8 @@ def cmd_await(order_path: str) -> int:
         raise RecruiterError(
             f"request {lifecycle.request_identity(order)} has not been submitted"
         )
-    deadline = time.monotonic() + (
+    started = time.monotonic()
+    deadline = started + (
         order.get("timeout_ms", _default_timeout_ms(order["stage_id"])) / 1000
         + LEASE_GRACE_SECONDS
     )
@@ -3102,11 +3140,86 @@ def cmd_await(order_path: str) -> int:
         if state.get("state") in ("finished", "cleanup-failed"):
             receipt = ledger.completed_receipt(key, order)
             print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
+            _maybe_notify_completion(
+                (time.monotonic() - started) * 1000,
+                notify_after_ms,
+                order["order_id"],
+                str(receipt["verdict"]),
+            )
             return 0 if receipt["verdict"] == "passed" else 1
         time.sleep(HEALTH_PROBE_SECONDS)
     raise RecruiterError(
         f"request {lifecycle.request_identity(order)} exceeded its await window"
     )
+
+
+def cmd_verify(
+    order_path: str,
+    roster_path: str,
+    harness: str = "claude",
+    model: str = "",
+    agent: str = "reviewer",
+    effort: str = "low",
+) -> int:
+    """Hire one independent reviewer to poke holes in a finished order's result.
+
+    Nothing calls this automatically — it is the optional second opinion for the
+    one-shot flow. The reviewer gets the original brief, the finished result, and the
+    work directory, and writes an ordinary result.json: ``passed`` when the claims
+    hold, ``failed`` with concrete findings when they do not.
+    """
+    original = load_order(order_path)
+    result = load_result(
+        original["result_path"], expected_order_id=original["order_id"]
+    )
+    base = Path(original["result_path"]).expanduser()
+    verify_id = f"{original['order_id']}.verify"
+    instructions_path = base.with_name("verify-instructions.md")
+    verify_result_path = base.with_name("verify-result.json")
+    brief = f"""# Independent verification of a finished order
+
+You are an independent reviewer. Another worker claims it finished this job:
+
+- Original brief: {original["instructions_path"]}
+- Claimed result (verdict `{result["verdict"]}`): {original["result_path"]}
+- Work directory: {original["cwd"]}
+
+Adversarially check the claims against the actual work. Read the code and evidence;
+do not take the result's word for anything. Look for half-done work, silent failures,
+scope creep, and claims without evidence.
+
+Write exactly one JSON object to `{verify_result_path}`:
+
+```json
+{{
+  "order_id": "{verify_id}",
+  "verdict": "passed",
+  "full_log": "<your transcript path or session id>",
+  "reason": "one-line summary; on failed, the concrete findings worst-first"
+}}
+```
+
+Use `passed` when the original claims hold, `failed` when they do not (include
+`"revisit": ["{original["stage_id"]}"]`). Then exit the session.
+"""
+    _write_text_atomic(instructions_path, brief)
+    verify_order = {
+        "order_id": verify_id,
+        "request_id": f"{lifecycle.request_identity(original)}.verify",
+        "phase_id": original["phase_id"],
+        "stage_id": "stage-2-adversarial-audit",
+        "harness": harness,
+        "model": model,
+        "agent": agent,
+        "effort": effort,
+        "cwd": original["cwd"],
+        "instructions_path": str(instructions_path),
+        "result_path": str(verify_result_path),
+        "cockpit_pane": original["cockpit_pane"],
+    }
+    verify_order_path = base.with_name("verify-order.json")
+    JobLedger._write_json(verify_order_path, verify_order)
+    return cmd_dispatch(str(verify_order_path), roster_path)
 
 
 
@@ -3762,6 +3875,20 @@ def main(argv: list[str] | None = None) -> int:
         "await", help="wait for completion or an owner decision point"
     )
     p_await.add_argument("order", help="path to order.json")
+    p_await.add_argument(
+        "--notify-after-ms",
+        type=int,
+        default=600_000,
+        help="ping the human when the wait outlives this (default 10 minutes; 0 disables)",
+    )
+    p_verify = sub.add_parser(
+        "verify", help="hire one independent reviewer against a finished order's result"
+    )
+    p_verify.add_argument("order", help="path to the FINISHED order.json")
+    p_verify.add_argument("--harness", default="claude")
+    p_verify.add_argument("--model", default="")
+    p_verify.add_argument("--agent", default="reviewer")
+    p_verify.add_argument("--effort", default="low")
     p_await_any = sub.add_parser(
         "await-any", help="block until any watched request moves; print one tagged AWAIT_EVENT"
     )
@@ -3801,7 +3928,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "request":
             return cmd_request(args.order, args.roster)
         if args.command == "await":
-            return cmd_await(args.order)
+            return cmd_await(args.order, args.notify_after_ms)
+        if args.command == "verify":
+            return cmd_verify(
+                args.order,
+                args.roster,
+                harness=args.harness,
+                model=args.model,
+                agent=args.agent,
+                effort=args.effort,
+            )
         if args.command == "await-any":
             return cmd_await_any(args.orders, args.timeout_ms, args.cursor)
         if args.command == "respond":

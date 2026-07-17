@@ -57,8 +57,14 @@ upagent-direct-apply-order route plan_id step_id cwd run_root tui_pane approval 
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py apply-order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}" --approval "{{approval}}" --plan-artifact "{{plan_artifact}}"
 
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
-upagent-await order:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}"
+# Waits past notify_after_ms also ping the human via herdr notification (0 disables).
+upagent-await order notify_after_ms='600000':
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}" --notify-after-ms "{{notify_after_ms}}"
+
+# Optional second opinion on a finished one-shot: hire one independent reviewer against
+# its result. Off by default — nothing runs this automatically.
+upagent-verify order *args:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py verify "{{order}}" {{args}}
 
 # Block until any watched request moves; prints one AWAIT_EVENT tagged with request_id.
 upagent-await-any timeout_ms cursor +orders:
