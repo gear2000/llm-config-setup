@@ -11,7 +11,7 @@
 
 # memsearch plugin — local per-developer session index/state (PID lock file +
 # auto-generated session logs embedding this machine's absolute $HOME paths).
-# Never committed; same convention as jiffy-rewrite-2026.
+# Never committed.
 /.memsearch/
 
 # Local planish config — machine-specific (dir layout + hostname). The tracked
