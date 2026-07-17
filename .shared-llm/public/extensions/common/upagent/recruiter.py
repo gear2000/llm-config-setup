@@ -950,6 +950,10 @@ def _claim_pass_warning_marker(control_dir: Path, order_id: str) -> bool:
     marker = control_dir / "phase-start-missing.warned.json"
     try:
         control_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Includes a plain file squatting on the control-dir path: no marker home, warn anyway.
+        return True
+    try:
         fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
