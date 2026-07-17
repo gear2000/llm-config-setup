@@ -6,9 +6,9 @@
  * to a reviewer agent via FIFO and shows a structured table to the
  * human for approval — instead of showing the raw command.
  *
- * Falls through to iac-guard's normal dialog when no plan output
- * has been captured yet (e.g. agent skipped plan and went straight
- * to apply).
+ * When no plan output has been captured yet (e.g. the agent skipped
+ * plan and went straight to apply), this extension does not intercept
+ * and the command proceeds ungated.
  *
  * FIFOs:
  *   ~/.pi/tf-review-request.fifo   — extension writes raw plan → agent reads
@@ -32,8 +32,8 @@ let lastPlanOutput = "";
 
 // ─── Terraform destructive check (inlined to avoid cross-repo import) ────────
 //
-// The full classifier lives in iac-guard.ts (classifyCommand). We only need the
-// terraform apply/destroy tier here — iac-guard gates everything else.
+// We only classify the terraform/tofu apply-or-destroy tier here; other IaC
+// commands are not this extension's business.
 function isTerraformDestructive(command: string): boolean {
   const cmd = command.trim().toLowerCase();
   return (
@@ -131,7 +131,7 @@ export default function (pi: ExtensionAPI) {
     // Only intercept terraform apply / destroy
     if (!isTerraformDestructive(command)) return;
 
-    // No plan output yet — fall through so iac-guard shows its normal dialog
+    // No plan output yet — do not intercept; the command proceeds ungated.
     if (!lastPlanOutput) return;
 
     // Send plan to reviewer agent; get back a structured table
@@ -152,7 +152,7 @@ export default function (pi: ExtensionAPI) {
       const isAbsent =
         msg.includes("timed out") ||
         (err as NodeJS.ErrnoException).code === "ENXIO";
-      if (isAbsent) return; // reviewer not running — fall through to iac-guard's dialog
+      if (isAbsent) return; // reviewer not running — do not intercept; the command proceeds
       throw err; // unexpected error — propagate loud
     }
 

@@ -1,11 +1,11 @@
 # Pi launch group module (hub + builder; requires tmux) — imported by the root justfile.
 
-# Start the codex/iac-verifier socket hub detached in tmux (idempotent).
+# Start the codex reviewer socket hub detached in tmux (idempotent).
 hub:
     tmux has-session -t pi-hub 2>/dev/null || tmux new-session -d -s pi-hub 'pi -e ~/.pi/extensions/codex-reviewer-hub.ts'
     @echo "pi-hub up — tmux attach -t pi-hub to watch"
 
-# Launch a builder Pi (iac-guard auto-loads; the hub must be up for gray-zone verdicts).
+# Launch a builder Pi.
 builder:
     pi
 

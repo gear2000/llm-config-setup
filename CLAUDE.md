@@ -34,7 +34,7 @@ This kit started as Claude-only tooling — snippets of markdown composed into a
 The guiding principle: **things that can be decomposed into reusable layers are layered and composed; things that cannot be meaningfully decomposed are kept as whole, directly-edited pieces** instead of being forced into the layering model.
 
 - **Layered** — prose lives in `.shared-llm/public/layers/` and is concatenated by `.shared-llm/public/compose/` recipes into `CLAUDE.md`, `AGENTS.md`, and skill files.
-- **Whole pieces** — runtime code and settings aren't decomposable prose, so they stay intact: `.shared-llm/public/llm/pi/common/` (Pi extensions like `context-workflow.ts` / `iac-guard.ts`, the `memsearch/` dir, agent persona files like `doc-reviewer.md` / `pr-reviewer.md`) is symlinked whole into `~/.pi/`; `.shared-llm/public/llm/claude/common/` (Claude Code hooks, statusline, settings templates) is copied whole into `~/.claude/`. Neither is ever concatenated into an output file.
+- **Whole pieces** — runtime code and settings aren't decomposable prose, so they stay intact: `.shared-llm/public/llm/pi/common/` (Pi extensions like `context-workflow.ts` / `tf-approve.ts`, the `memsearch/` dir, agent persona files like `doc-reviewer.md` / `pr-reviewer.md`) is symlinked whole into `~/.pi/`; `.shared-llm/public/llm/claude/common/` (Claude Code hooks, statusline, settings templates) is copied whole into `~/.claude/`. Neither is ever concatenated into an output file.
 
 ---
 

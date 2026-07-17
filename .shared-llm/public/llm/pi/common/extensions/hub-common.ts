@@ -6,9 +6,8 @@
  * each hub supplies its own per-connection handler, because the request schema
  * and dispatch differ between document reviews and PR reviews.
  *
- * The legacy codex-reviewer-hub.ts (now the iac-guard hub) is intentionally NOT
- * refactored onto this helper — it stays standalone so the IaC approval gate is
- * zero-risk.
+ * The legacy codex-reviewer-hub.ts is intentionally NOT refactored onto this
+ * helper — it stays standalone so its dispatch path carries zero refactor risk.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";

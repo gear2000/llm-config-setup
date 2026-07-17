@@ -91,9 +91,6 @@ test:
     ${PYTHON_BIN:-python3} -m pytest tools/ .shared-llm/public/extensions/common/ -q
     node --experimental-strip-types .shared-llm/public/llm/pi/common/meta-plan/meta-plan-schema.test.ts
 
-test-iac-guard:
-    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/iac-guard.test.ts
-
 test-memsearch:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/memsearch.test.ts
 

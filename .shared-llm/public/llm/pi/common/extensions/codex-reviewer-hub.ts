@@ -2,10 +2,9 @@
  * codex-reviewer-hub — Unix socket dispatch for adversarial code review
  *
  * Listens on a Unix socket. Receives JSON dispatch requests from Claude Code
- * (or any local caller, e.g. the iac-guard gate). Spawns the requested sub-agent
- * via pi-subagents — defaults to the builtin reviewer; pass "agent" to run another
- * (e.g. iac-verifier). Writes error content to the output path if the sub-agent
- * fails or times out.
+ * (or any local caller). Spawns the requested sub-agent via pi-subagents —
+ * defaults to the builtin reviewer; pass "agent" to run another. Writes error
+ * content to the output path if the sub-agent fails or times out.
  *
  * Usage: pi -e ~/.pi/extensions/codex-reviewer-hub.ts
  *   or:  pi -e ~/.pi/extensions/codex-reviewer-hub.ts --socket /custom/path.sock
@@ -26,7 +25,7 @@ interface DispatchRequest {
   handoff: string;
   output: string;
   timeout_ms?: number;
-  agent?: string; // which sub-agent to run (default: reviewer). Lets one socket serve iac-verifier etc.
+  agent?: string; // which sub-agent to run (default: reviewer). Lets one socket serve several agents.
 }
 
 interface DispatchResponse {

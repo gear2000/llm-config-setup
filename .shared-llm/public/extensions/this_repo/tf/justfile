@@ -1,20 +1,20 @@
 # Terraform workflow module — imported by the root justfile.
 # Extensions (auto-loaded from ~/.pi/agent/extensions/): tf-implement.ts,
-#   tf-approve.ts, iac-guard.ts, do-planish.ts
+#   tf-approve.ts, do-planish.ts
 # Agent:      ~/.pi/agents/tf-reviewer.md
 
 # Load a plan and run the implement loop (write reviewed terraform until approved).
 tf-implement plan:
     TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts
 
-# Human-gated terraform apply/destroy with agent-distilled plan table
+# Terraform apply/destroy with the agent-distilled plan table (tf-approve).
 tf-approve:
-    pi -e ~/.pi/agent/extensions/iac-guard.ts -e ~/.pi/agent/extensions/tf-approve.ts
+    pi -e ~/.pi/agent/extensions/tf-approve.ts
 
-# Full workflow: plan + implement reviewed code, then human-gated apply
+# Full workflow: plan + implement reviewed code, then the plan-table apply
 tf-auto plan:
     TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts && \
-    pi -e ~/.pi/agent/extensions/iac-guard.ts -e ~/.pi/agent/extensions/tf-approve.ts
+    pi -e ~/.pi/agent/extensions/tf-approve.ts
 
 # Start the terraform reviewer (Claude Code) — run before tf-implement or tf-approve
 tf-reviewer-cc:

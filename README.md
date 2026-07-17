@@ -379,14 +379,12 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 - `extensions/do-planish.ts` — The Pi-native standalone `/do-planish` planner. This is a TypeScript extension/register command, not a markdown skill: it adds browser-backed `planish_grill` and `planish_submit_plan` tools and writes `plan.md` + `plan.html` for review (`planish_submit_plan` auto-freezes each changed submit as `plan-v<k>.*` — plans never mutate in place). The pages are annotation-only — sticky notes → Copy Feedback → paste the block back into the TUI; the tools serve the page and return immediately (no in-page submit, nothing blocks). URLs honor the `host:` field of `.planish.yaml` (remote/Tailscale sessions). The standalone `/cc-planish` Claude Code skill is the markdown port of this planner (same `.planish.yaml` contract). Use `/do-plan-and-grill` or `/cc-plan-and-grill` for workflow-suite planning.
 - `extensions/context-workflow.ts` — A Pi extension that wraps a structured write→test→review→fix→verify loop. Symlinked into `~/.pi/agent/extensions/` (auto-loaded by the Pi agent on startup).
-- `extensions/iac-guard.ts` — A Pi extension that **gates destructive infrastructure commands**. It hooks `tool_call` (before a command runs) and inspects `terraform` / `tofu` / `aws` / `kubectl`: read/create operations run freely; destroys (`destroy` / `delete` / `terminate`) **always require human approval** via the native confirm dialog; gray-zone updates/replaces are judged by the `iac-verifier` agent. Fail-closed — any ambiguity, missing UI, or unavailable verifier falls back to human approval. Symlinked into `~/.pi/agent/extensions/` (auto-loaded). See the policy tables at the top of the file to tune which verbs are allow/ask/gray.
 - `extensions/memsearch/` — A directory Pi extension (`index.ts` + `collection.ts`) that gives Pi memory over the **same shared store** Claude Code builds: per-project daily markdown logs under `<git-root>/.memsearch/memory/<YYYY-MM-DD>.md`, indexed into a per-project Milvus collection. The collection name is derived to **exactly match** memsearch's `derive-collection.sh`, so Pi and Claude converge on the same collection per repo.
   - **Recall — full parity.** Same shared store, same `memsearch` CLI Claude uses: a model-callable `memory_search` tool + `/recall <query>` return ranked hits from past sessions, `memory_expand` + `/recall-expand <hash>` open the full section, and on `session_start` it injects a one-line "memory available" hint.
   - **Capture — deliberately NOT full parity.** On `agent_end` it writes **deterministic** third-person notes (what the user asked, which tools the agent used, a clipped agent reply) — **lighter than Claude's and the memsearch codex reference plugin's default**, which run an LLM to summarize the turn. The deterministic path is chosen so capture never makes a blocking nested LLM call. It appends the notes (with a `<!-- session: turn: transcript: -->` anchor) to today's daily log synchronously (the markdown is the source of truth), then runs `memsearch index` in a detached child. If the Milvus Lite single-writer lock is contended (Claude indexing the same store at the same time), the child retries that condition only; on exhaustion it **fails loud** — writes to `~/.pi/agent/memsearch-index.log` and drops an `<!-- index-deferred: <ISO> reason=lock -->` breadcrumb in the daily md — and the next `session_start` re-index catches it up. Non-lock errors fail loud immediately. Nothing is lost because the markdown is already written.
   - Symlinked as a directory into `~/.pi/agent/extensions/` (auto-loaded; Pi loads `index.ts`, with `collection.ts` riding along as an imported helper). `collection.ts` holds just the derivation (Node built-ins only) so it can be unit-tested (`memsearch.test.ts`, golden value `ms_my_project_a26ceb5d` for the example path `/home/user/code/my-project`). Needs the `memsearch` CLI on `PATH` or `uvx` (ONNX embeddings, no API key); if neither is present it no-ops silently.
 - `extensions/codex-reviewer-hub.ts`, `extensions/doc-review-hub.ts`, `extensions/pr-review-hub.ts` — Pi extensions that each listen on a Unix socket and dispatch a sub-agent request: adversarial code review, document review, and PR/branch review respectively. `extensions/hub-common.ts` is the shared socket/dispatch helper they import. The hub extensions are symlinked into `~/.pi/extensions/` (loaded when Pi is launched with `-e`).
 - `agents/codex-reviewer.md`, `agents/doc-reviewer.md`, `agents/pr-reviewer.md` — The system prompts for the review agents invoked by the hub extensions. Symlinked into `~/.pi/agents/`.
-- `agents/iac-verifier.md` — The system prompt for the gray-zone verifier the `iac-guard` gate consults (judges an update/apply's blast radius → ALLOW or ASK). Symlinked into `~/.pi/agents/`.
 - `third-party-extensions.txt` — Pinned manifest of **third-party** Pi extensions, one `pi install` source per line. `tools/install-pi-extensions.sh` reads it and installs each via `pi install` (skipping any already present), so the set reproduces on any machine with one command. `just pi-extensions` runs that installer.
 - `THIRD-PARTY-EXTENSIONS.md` — The per-extension reference: what each one does, its runtime deps, and the own-vs-third-party rule below.
 - `settings.template.json` — A starter Pi settings file (provider, model, thinking level). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten. Its `packages` array starts empty — the installer fills it.
@@ -410,13 +408,11 @@ just pi-extensions   # installs the pinned THIRD-PARTY extensions via `pi instal
 **Launching (requires `tmux`):**
 
 ```bash
-just hub         # start the socket hub in tmux (serves the review sub-agent sockets + iac-verifier verdicts)
-just builder     # launch a builder Pi (iac-guard auto-loads)
+just hub         # start the socket hub in tmux (serves the review sub-agent sockets)
+just builder     # launch a builder Pi
 just pi-status   # show hub + socket state
 just pi-clean    # stop the hub, remove stale sockets
 ```
-
-The `iac-guard` gate auto-loads in every Pi session. The hub only needs to be running for the gray-zone verifier path — if it is down, the gate fails closed to human approval.
 
 If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), the global step leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks that resolve into this repo family.
 
@@ -426,14 +422,14 @@ Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/nod
 
 ## Terraform workflow (Pi)
 
-A small group of `just` recipes drives a reviewed terraform loop on Pi, gated by `iac-guard`:
+A small group of `just` recipes drives a reviewed terraform loop on Pi:
 
 ```bash
 just tf-reviewer-cc          # start the terraform reviewer (Claude Code) — run first
 just tf-reviewer-pi          # or the reviewer on Pi
 just tf-implement <plan>     # load a plan and write reviewed terraform until approved
-just tf-approve              # human-gated apply/destroy with an agent-distilled plan table
-just tf-auto <plan>          # implement, then human-gated apply
+just tf-approve              # apply/destroy with an agent-distilled plan table
+just tf-auto <plan>          # implement, then the plan-table apply
 just tf-reviewer-down        # stop the reviewer
 ```
 
