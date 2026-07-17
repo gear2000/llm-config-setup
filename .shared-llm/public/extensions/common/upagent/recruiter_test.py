@@ -3029,3 +3029,73 @@ def test_ensure_role_pane_separate_mode_reuses_shared_services(
     )
 
     assert (workspace, pane, reused) == ("ws-old", "p1", True)
+
+
+def _consult_shaped_order(tmp_path: Path, **over) -> str:
+    order = _order(
+        order_id="specialist-consult-fake-1",
+        phase_id="specialist-consult",
+        stage_id="stage-5-finalization",
+        **over,
+    )
+    path = tmp_path / "consult-order.json"
+    path.write_text(json.dumps(order))
+    return str(path)
+
+
+def _issue_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    state_file = tmp_path / "recruiter-state.json"
+    state_file.write_text(json.dumps({"consult_token": token}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_file)
+
+
+def test_consult_shaped_orders_without_the_issued_token_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker that hand-writes Librarian-identity paperwork must be turned away at the door,
+    with the real consult command named."""
+    _issue_token(tmp_path, monkeypatch, "issued-token")
+    order_path = _consult_shaped_order(tmp_path)
+
+    with pytest.raises(RecruiterError, match="specialist-hub consult"):
+        recruiter.cmd_dispatch(order_path, str(tmp_path / "unused-roster.yaml"))
+
+
+def test_consult_orders_stamped_with_the_issued_token_pass_the_door(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _issue_token(tmp_path, monkeypatch, "issued-token")
+    order = json.loads(
+        Path(_consult_shaped_order(tmp_path, consult_token="issued-token")).read_text()
+    )
+
+    recruiter._reject_unbrokered_consult(order)  # must not raise
+
+
+def test_consult_orders_are_tolerated_when_no_token_was_ever_issued(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pre-token `up` state has nothing to verify against; enforcement waits for the next up."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "absent-state.json")
+    order = json.loads(Path(_consult_shaped_order(tmp_path)).read_text())
+
+    recruiter._reject_unbrokered_consult(order)  # must not raise
+
+
+def test_ordinary_stage_orders_never_hit_the_consult_door(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _issue_token(tmp_path, monkeypatch, "issued-token")
+
+    recruiter._reject_unbrokered_consult(_order())  # must not raise
+
+
+def test_recruit_pane_door_is_sealed() -> None:
+    """The pane shell's recruit() must refuse and name the real doors, never hire."""
+    stub = recruiter.SEALED_RECRUIT_DOOR_STUB
+    assert stub.startswith("recruit() {")
+    assert "sealed" in stub
+    assert "just upagent-request" in stub
+    assert "just specialist-hub consult" in stub
+    assert "return 2" in stub
+    assert "recruiter.py" not in stub and ".py" not in stub  # nothing executable baked in

@@ -59,6 +59,18 @@ or a timeout (only possible when the consult_id was unrecoverable) — as a fail
 Codex is no longer a special case. The Recruiter's generic lease-private result monitor handles
 harnesses whose Herdr status lags, while the same strict answer contract applies to all specialists.
 
+Two guarantees make the broker visible and unforgeable:
+
+- **Live sidebar state.** While a consult routes, the Librarian's sidebar entry flips to
+  `working` (naming the consult and specialist) and returns to `idle` with a served tally —
+  so an idle-looking Librarian during heavy consulting means consults are bypassing it, not
+  that it is unused.
+- **Brokered-only consults.** The Recruiter issues a `consult_token` at its `up`; the
+  Librarian stamps it on every order it authors. The Recruiter refuses any consult-shaped
+  order (a `specialist-consult` phase/order id or a `specialist-librarian` requester) without
+  the current token — a hand-written imitation of the Librarian's paperwork fails loudly with
+  the correct door named.
+
 `consult.json` and `answer.json` are validated fail-loud by `contracts_consult.py`
 (`load_consult` / `load_answer`): required keys and a `consult_id` echo check that rejects a stale
 answer. A **success** answer needs a **non-empty `citations` list of `file:line` references** — a

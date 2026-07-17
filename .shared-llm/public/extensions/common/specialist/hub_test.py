@@ -485,3 +485,79 @@ def test_roster_caps_each_specialist_to_one_brief_line(
     assert "second line" not in out
     assert len(essayist_line) < 260
     assert essayist_line.endswith("...")
+
+
+def test_specialist_orders_carry_the_recruiter_consult_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Librarian stamps the Recruiter-issued token so brokered consults are verifiable."""
+    recruiter_state = tmp_path / "recruiter.json"
+    recruiter_state.write_text(json.dumps({"consult_token": "issued-token"}))
+    monkeypatch.setenv("UPAGENT_STATE", str(recruiter_state))
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    roster = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    _write_roster(roster, tmp_path / "runtime", repo_root)
+    monkeypatch.setenv("SPECIALIST_HUB_CONFIG", str(roster))
+    cfg = hub.load_config()
+    hub.paths(cfg)["consults"].mkdir(parents=True, exist_ok=True)
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("brief\n")
+    consult = {
+        "consult_id": "c-tok-1",
+        "specialist": "docs",
+        "question": "q",
+        "answer_path": str(tmp_path / "answer.json"),
+    }
+    entry = {"name": "docs", "harness": "claude", "model": "haiku", "agent": "docs"}
+
+    order_path, _ = hub._specialist_order(cfg, consult, entry, prompt_file, "w1:p1", str(repo_root))
+
+    assert json.loads(order_path.read_text())["consult_token"] == "issued-token"
+
+
+def test_specialist_orders_omit_the_token_when_recruiter_never_issued_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_STATE", str(tmp_path / "absent-recruiter.json"))
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    roster = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    _write_roster(roster, tmp_path / "runtime", repo_root)
+    monkeypatch.setenv("SPECIALIST_HUB_CONFIG", str(roster))
+    cfg = hub.load_config()
+    hub.paths(cfg)["consults"].mkdir(parents=True, exist_ok=True)
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("brief\n")
+    consult = {
+        "consult_id": "c-tok-2",
+        "specialist": "docs",
+        "question": "q",
+        "answer_path": str(tmp_path / "answer.json"),
+    }
+    entry = {"name": "docs", "harness": "claude", "model": "haiku", "agent": "docs"}
+
+    order_path, _ = hub._specialist_order(cfg, consult, entry, prompt_file, "w1:p1", str(repo_root))
+
+    assert "consult_token" not in json.loads(order_path.read_text())
+
+
+def test_consult_flips_the_librarian_sidebar_working_then_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Librarian pane must show the truth: working while a consult routes, idle with a
+    served tally after — so a bypassed Librarian is distinguishable from a busy one."""
+    reports: list[tuple[str, ...]] = []
+    monkeypatch.setattr(hub, "_herdr", lambda *a, **k: reports.append(a))
+
+    _run_managed_consult(tmp_path, monkeypatch, {
+        "consult_id": "consult-managed-1",
+        "answer": "the contract",
+        "citations": ["src/x.py:1"],
+    })
+
+    states = [(a[a.index("--state") + 1], a[a.index("--message") + 1]) for a in reports if "--state" in a]
+    assert states[0][0] == "working"
+    assert "consult-managed-1" in states[0][1]
+    assert states[-1][0] == "idle"
+    assert "consult(s) served" in states[-1][1]

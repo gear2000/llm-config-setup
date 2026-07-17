@@ -133,6 +133,11 @@ def parse_order(text: str) -> dict:
     request_id = order.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not request_id):
         raise ContractError("order.json: `request_id` must be a non-empty string when present")
+    # Optional `consult_token`: the Librarian stamps the Recruiter-issued token on the consult
+    # orders it brokers; the Recruiter refuses consult-shaped orders that lack the current one.
+    consult_token = order.get("consult_token")
+    if consult_token is not None and (not isinstance(consult_token, str) or not consult_token):
+        raise ContractError("order.json: `consult_token` must be a non-empty string when present")
     requester = order.get("requester")
     if requester is not None:
         if not isinstance(requester, dict):

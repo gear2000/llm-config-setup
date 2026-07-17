@@ -2695,6 +2695,45 @@ def _run_order(
     return (1 if fell_back else 0), result, cleanup
 
 
+def _issued_consult_token() -> str | None:
+    """The consult token this Recruiter issued at `up` (from its own STATE_FILE), or None when
+    none was issued (state absent, corrupt, or written by a pre-token `up`)."""
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    token = state.get("consult_token") if isinstance(state, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+def _reject_unbrokered_consult(order: dict) -> None:
+    """Specialist consults must arrive brokered by the Librarian, which stamps the
+    Recruiter-issued consult token on every order it authors. A consult-shaped order without
+    the current token is a hand-written imitation — a worker that read the hub's files and
+    forged the Librarian's identity — and is refused with the correct door named. No token
+    issued (a pre-token `up` state) means there is nothing to verify against, so enforcement
+    waits for the next `up`."""
+    requester = order.get("requester")
+    requester_id = requester.get("id") if isinstance(requester, dict) else None
+    consult_shaped = (
+        order.get("phase_id") == "specialist-consult"
+        or str(order.get("order_id", "")).startswith("specialist-consult-")
+        or requester_id == "specialist-librarian"
+    )
+    if not consult_shaped:
+        return
+    issued = _issued_consult_token()
+    if issued is None:
+        return
+    if order.get("consult_token") != issued:
+        raise RecruiterError(
+            f"order {order.get('order_id')!r} is consult-shaped but was not brokered by the "
+            "Librarian (missing or stale consult token). Never hand-write specialist-consult "
+            "orders or inject them into panes — write a consult.json and run "
+            "`just specialist-hub consult <consult.json>`."
+        )
+
+
 def cmd_recruit(order_path: str, roster_path: str) -> int:
     """Submit an order and return immediately; its claimed job owns the blocking lifecycle.
 
@@ -2706,6 +2745,7 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     except ContractError as e:
         _reject_legacy_order(order_path, f"invalid order {order_path}: {e}")
         return 1
+    _reject_unbrokered_consult(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -2933,6 +2973,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as e:
         raise RecruiterError(f"invalid order {order_path}: {e}") from e
+    _reject_unbrokered_consult(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -3016,6 +3057,7 @@ def cmd_request(order_path: str, roster_path: str) -> int:
         order = load_order(order_path)
     except ContractError as error:
         raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    _reject_unbrokered_consult(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
@@ -3749,6 +3791,17 @@ def _find_services_workspace(workspaces_resp: dict) -> dict | None:
 RECRUITER_PANE_LABEL = "recruiter"
 LIBRARIAN_PANE_LABEL = "librarian"
 
+# The Recruiter pane's shell used to arm a working `recruit()` function — a side door that let
+# any agent hire by injecting text into the pane. It is sealed: the stub refuses loudly and
+# names the real doors. Sealing takes effect per pane at arm time, so a pane armed before this
+# change keeps its old function until the next `up`.
+SEALED_RECRUIT_DOOR_STUB = (
+    "recruit() { echo 'recruit door sealed: pane text is not a message queue. Submit orders "
+    "with `just upagent-request <order.json>` (verified startup) or `just upagent-recruit "
+    "<order.json>` (blocking dispatch); specialist consults go through `just specialist-hub "
+    "consult <consult.json>`.' >&2; return 2; }"
+)
+
 
 def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, bool]:
     """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the single services
@@ -3828,14 +3881,16 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     """Ensure the services workspace + an armed Recruiter pane. Idempotent.
 
     Default is the unified `herdr` workspace (services and every run's tabs share it);
-    `--separate-workspaces` restores the dedicated `shared-services` workspace. The pane remains
-    a visible status/compatibility surface; normal phase leaders request/await directly through
-    the CLI and durable ledger. A legacy ``recruit`` shell function remains for manual use, but
-    its output is never a completion contract. The resolved roster is baked into that function.
-    Persists workspace, mode, pane, roster, and supervisor ownership to STATE_FILE.
+    `--separate-workspaces` restores the dedicated `shared-services` workspace. The pane is a
+    visible status surface ONLY; requesters submit through the CLI and durable ledger. The
+    pane's `recruit()` function is armed as a sealed stub that refuses and names the real
+    doors — pane text is not a message queue. `up` also issues a fresh `consult_token` that
+    the Librarian stamps on the orders it brokers; consult-shaped orders without it are
+    refused at submission. Persists workspace, mode, pane, roster, token, and supervisor
+    ownership to STATE_FILE.
     """
-    # Validate the roster up front so a missing/bad roster fails loudly at bring-up, not silently
-    # at the first hire (the armed recruit() bakes this path in).
+    # Validate the roster up front so a missing/bad roster fails loudly at bring-up, not
+    # silently at the first hire.
     load_roster(roster_path)
     workspace_label = (
         SHARED_SERVICES_WORKSPACE if separate_workspaces else UNIFIED_WORKSPACE_LABEL
@@ -3857,13 +3912,9 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
         except RecruiterError as error:
             _layout_warning("services", recruiter_pane, str(error))
 
-    # Bake the resolved roster into the armed function so every hire uses the right roster.
-    # shlex.quote every interpolated token so paths with spaces/metacharacters can't break arming.
-    arm = (
-        f"recruit() {{ {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} "
-        f'--roster {shlex.quote(roster_path)} recruit "$1"; }}'
-    )
-    _herdr("pane", "run", recruiter_pane, arm)
+    # Arm the sealed stub (replacing any previously armed working function in this shell) so
+    # pane-injected `recruit <path>` text can never hire again.
+    _herdr("pane", "run", recruiter_pane, SEALED_RECRUIT_DOOR_STUB)
 
     supervisor_token = uuid.uuid4().hex
     state = {
@@ -3873,6 +3924,9 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
         "recruiter_pane": recruiter_pane,
         "roster": roster_path,
         "supervisor_token": supervisor_token,
+        # Issued fresh per `up`; the Librarian reads it from this state file and stamps it on
+        # every consult order it brokers. See _reject_unbrokered_consult.
+        "consult_token": uuid.uuid4().hex,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     JobLedger._write_json(STATE_FILE, state)

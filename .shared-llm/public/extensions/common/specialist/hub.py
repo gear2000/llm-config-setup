@@ -522,6 +522,61 @@ def _label_services_tab(workspace_id: str, pane_id: str) -> None:
         sys.stderr.write(f"specialist-hub: could not label the services tab: {e}\n")
 
 
+def _report_librarian_state(pane: str, agent_state: str, message: str) -> None:
+    """Best-effort sidebar truth for the Librarian pane — `working` while a consult routes,
+    `idle` with a served tally after — so the TUI distinguishes a working Librarian from a
+    bypassed one. Status display must never break the consult contract."""
+    try:
+        _herdr(
+            "pane",
+            "report-agent",
+            pane,
+            "--source",
+            "specialist-librarian",
+            "--agent",
+            "librarian",
+            "--state",
+            agent_state,
+            "--message",
+            message,
+            check=False,
+        )
+    except OSError as e:
+        sys.stderr.write(f"specialist-hub: could not update librarian sidebar state: {e}\n")
+
+
+def _report_librarian_idle(cfg: dict) -> None:
+    """Refresh the Librarian sidebar to idle with a served tally. Silent no-op when the hub
+    state is missing (consult before `up`)."""
+    try:
+        state = _read_state(cfg)
+    except ConsultFailure:
+        return
+    served = len(list(paths(cfg)["consults"].glob("*.upagent-result.json")))
+    _report_librarian_state(
+        state["librarian_pane"],
+        "idle",
+        f"{served} consult(s) served — send consults with 'just specialist-hub consult "
+        "<consult.json>'; never paste text into this pane",
+    )
+
+
+def _recruiter_consult_token() -> str | None:
+    """The consult token the Recruiter issued at its `up` (read from the Recruiter's own state
+    file). The Librarian stamps it on every order it authors so the Recruiter can tell a
+    brokered consult from a hand-written imitation. None when the Recruiter state or token is
+    absent (older Recruiter `up`); the stamp is then simply omitted."""
+    state_path = Path(
+        os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")
+    ).expanduser()
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    token = state.get("consult_token") if isinstance(state, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
 # --- specialist briefing ------------------------------------------------------
 
 
@@ -574,6 +629,9 @@ def _specialist_order(
         "cockpit_pane": librarian,
         "timeout_ms": CONSULT_TIMEOUT_MS,
     }
+    token = _recruiter_consult_token()
+    if token is not None:
+        order["consult_token"] = token
     result_path.unlink(missing_ok=True)
     document = json.dumps(order, indent=2, sort_keys=True) + "\n"
     temporary = order_path.with_name(f".{order_path.name}.{os.getpid()}.tmp")
@@ -786,6 +844,7 @@ def cmd_consult(args: argparse.Namespace) -> None:
         return
 
     consult_id = consult["consult_id"]
+    cfg: dict | None = None
     try:
         # Everything that can fail lives INSIDE this block, now that consult_id is known — INCLUDING
         # config load — so a bad roster / unknown specialist / herdr fault still writes a failure
@@ -799,6 +858,9 @@ def cmd_consult(args: argparse.Namespace) -> None:
 
         state = _read_state(cfg)
         librarian = state["librarian_pane"]
+        _report_librarian_state(
+            librarian, "working", f"consult {consult_id} -> {specialist}: routing to a managed specialist"
+        )
         cwd = consult.get("cwd", state["repo_root"])
 
         location = entry.get("location") or "(no definition file)"
@@ -833,6 +895,8 @@ def cmd_consult(args: argparse.Namespace) -> None:
     ) as e:
         _write_failure_answer(consult["answer_path"], consult_id, str(e))
         sys.stderr.write(f"specialist-hub: consult {consult_id} failed: {e}\n")
+    if cfg is not None:
+        _report_librarian_idle(cfg)
     # The go/done signal the caller waits on; the answer.json (real or failure) is the durable
     # record. Emitted on EVERY path above so a bounded caller wait always resolves.
     print(f"CONSULT {consult_id} DONE", flush=True)
