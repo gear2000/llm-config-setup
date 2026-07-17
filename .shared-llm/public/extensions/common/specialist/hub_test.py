@@ -35,6 +35,15 @@ def _write_roster(path: Path, runtime_dir: Path, repo_root: Path | None = None) 
     )
 
 
+def test_librarian_sidebar_label_names_the_consult_door(tmp_path: Path) -> None:
+    """The pane label must not present the Librarian as a live idle agent."""
+    message = hub._librarian_status_message(4)
+    assert "broker mailbox" in message
+    assert "just specialist-hub consult" in message
+    assert "never paste" in message
+    assert "4 specialists indexed" in message
+
+
 def test_missing_repo_root_uses_roster_ancestor_from_nested_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

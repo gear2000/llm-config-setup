@@ -80,6 +80,8 @@ A missing or malformed `result.json`, or a Recruiter error, is treated as a `blo
 
 Before ordering a stage that has a prior same-role handoff, the leader points the worker at the latest `phases/<phase-id>/handoffs/<role>-vN.md`. On a retry that re-investigates the same unresolved failure signature, the leader additionally requires a live Specialist Hub Librarian consult before the worker forms a new hypothesis: provide the failure signature and prior ruled-out work, and require the worker to record the consult id and answer/error path in `result.json`. Reading static specialist docs is not a substitute. Every worker writes its handoff, `compacted.md`, and `result.json` before its pane closes, then exits its session.
 
+Consults travel through the Specialist Hub CLI, never through pane text. Whenever a brief requires or permits a consult, the leader writes these exact mechanics into `instructions.md`: write the question to a `consult.json` file (fields per the specialist README), run `just specialist-hub consult <that file>`, and read the answer or the always-written failure from the referenced `answer.json` after the `CONSULT <id> DONE` sentinel. A brief MUST NOT tell a worker to deliver a consult with `herdr pane run`, `herdr pane send-text`, or any other pane injection: the Librarian pane is a broker mailbox holding a plain shell, so pasted prose lands in bash and is silently lost with no error back to the sender.
+
 ## Talking to the TUI — typed events, never pane text
 
 The TUI waits inside `upagent-phase-await` on this phase's `phase-start.json` receipt. When this leader needs the owner before it can advance, it publishes one typed event into the phase journal instead of printing a plea into scrollback:

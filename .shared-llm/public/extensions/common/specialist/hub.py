@@ -451,6 +451,18 @@ def _dispatch_specialist(order_path: Path, cwd: str) -> None:
     )
 
 
+def _librarian_status_message(agent_count: int) -> str:
+    """The honest sidebar label: the Librarian is a broker mailbox, never a chat pane.
+
+    Workers read this label in the TUI. It must name the real consult door so nobody
+    pastes a question into the pane, where a plain shell would eat it.
+    """
+    return (
+        f"broker mailbox ({agent_count} specialists indexed) — send consults with "
+        "'just specialist-hub consult <consult.json>'; never paste text into this pane"
+    )
+
+
 # --- commands -----------------------------------------------------------------
 
 
@@ -481,7 +493,7 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
         "--state",
         "idle",
         "--message",
-        f"{len(cfg['agents'])} specialists indexed",
+        _librarian_status_message(len(cfg["agents"])),
         check=False,
     )
     print(f"up: {'reused' if reused else 'created'} librarian pane {librarian} in workspace {workspace}")
