@@ -1,0 +1,17 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.assets",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "aws_s3_bucket.untouched",
+      "change": { "actions": ["no-op"] }
+    },
+    {
+      "address": "data.aws_caller_identity.current",
+      "change": { "actions": ["read"] }
+    }
+  ]
+}

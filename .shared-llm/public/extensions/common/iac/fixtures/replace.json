@@ -1,0 +1,21 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_instance.web",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "aws_iam_role.runner",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "aws_s3_bucket.assets",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "local_file.readme",
+      "change": { "actions": ["create"] }
+    }
+  ]
+}

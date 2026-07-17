@@ -151,6 +151,10 @@ phases:
                                 # high = add stage-0-alignment before stage-1 (see below).
                                 # max = high + a second stage-2 auditor on a different
                                 # harness or model (second_llm_profile, see below).
+    # kind: iac                 # OPTIONAL. Marks a terraform layer phase: the same
+                                # ladder with IaC meanings (see "IaC phases" below).
+    # parallel_group: hotfix    # OPTIONAL escape hatch. Phases sharing a token may be
+                                # started together; absent = strictly sequential.
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
@@ -201,6 +205,8 @@ route.yaml
 └── phases
     └── phase-N
         ├── accuracy: medium | high | max      (optional; absent ⇒ medium)
+        ├── kind: iac                          (optional; marks a terraform layer phase)
+        ├── parallel_group: <token>            (optional; phases sharing it may start together)
         ├── merge_back_at: stage-3-integration-acceptance-seams | stage-4-upstream-dag-verification | stage-5-finalization
         ├── lead
         │   ├── llm_profile
@@ -246,6 +252,12 @@ Each phase optionally sets `accuracy:`. Absent or `medium` runs the five base st
 `max` keeps the full `high` ladder and doubles the stage-2 audit. The stage-2 route entry additionally names `second_llm_profile` — a second independent reviewer that must use a **different harness or model** than the primary auditor. Both reviewers must clear the work. When they disagree, the leader consults `finalization_defaults.advisor_profile` as the judge when set; with no advisor the phase goes to the human as `blocked`. `second_llm_profile` is required iff `accuracy: max` and forbidden otherwise.
 
 Stage 2 must be independent from Stage 1 by profile, agent, harness, model family, or persona.
+
+### IaC phases (`kind: iac`)
+
+One terraform layer runs as one ordinary phase; the ladder is reused with IaC meanings. Stage-1 writes the terraform (stage workers stay plan-only: `fmt`, `validate`, `init`, `plan`, `show` — never apply). Stage-2 is the adversarial review of the terraform, best on a different model family. Stage-3 runs init and plan, saves the plan artifact, runs `terraform show -json` over it, and builds the approval table (`just iac-plan-table`; replace is broken out because it destroys and recreates). The leader then publishes a `decision-required` event tagged `iac-approval` and waits on durable answer files. The TUI shows the human the table verbatim, collects the typed destroy total when it is above zero, writes the SHA-bound approval file, performs the apply itself with the saved artifact, and writes the apply receipt (see /herdr-run). Stage-4 is that approved apply, recorded from the receipt. Stage-5 finalizes as usual.
+
+IaC layers run strictly in order because a later layer's plan is only truthful after the earlier layer's apply. `parallel_group` is the explicit per-run escape hatch for genuinely independent stacks (urgent fixes) — the human owns that risk.
 
 **Choosing a gear is always the plan author's call — nothing escalates automatically.** As a rule of thumb only: `fast` is not an accuracy value but the no-phase lane (one worker straight through the Recruiter, see the one-shot flow in /herdr-run) for small chores; `medium` is the everyday default; `high` earns its extra alignment stage on unfamiliar or intricate work; `max` is worth considering for auth, destructive infrastructure, migrations, cross-service contracts, or a phase already on its second failed pass.
 

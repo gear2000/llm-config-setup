@@ -3222,7 +3222,6 @@ Use `passed` when the original claims hold, `failed` when they do not (include
     return cmd_dispatch(str(verify_order_path), roster_path)
 
 
-
 _AWAIT_ANY_VERDICT_KINDS = {"passed": "completed", "failed": "failed", "blocked": "blocked"}
 
 

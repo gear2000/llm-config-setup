@@ -82,7 +82,7 @@ For each phase, in canonical order starting at `--start-phase` (respecting `--ma
    | `failed` | yes | Ack; apply phase-level backtracking from the event/result `revisit` list. |
    | `blocked` | yes | The attempt is over. Read the evidence paths and `phase-result.json`, ack, destroy the leader, then decide: replay the phase as a fresh pass with the answer baked into its inputs, or stop for the human. |
    | `needs-input` | no | Advisory only until the owner-command channel lands: note the question in `run-status.md`; ack; re-await. A leader that cannot continue without the answer publishes `blocked` instead. |
-   | `decision-required` | no | A descendant hit a work cap: `just upagent-respond … extend/cancel`; ack; re-await. |
+   | `decision-required` | no | `requested_action: iac-approval` ⇒ run the IaC approval and apply flow (below). Otherwise a descendant hit a work cap: `just upagent-respond … extend/cancel`; ack; re-await. |
    | `worker-warning` | no | Note in `run-status.md`; act only if it changes phase risk; ack; re-await. |
    | `leader-missing` | no | Verify the recorded evidence; clean up the dead leader mapping and replay the phase as a new pass, or stop for the human. |
    | `leader-stalled` | no | Durable state contradicts live status: inspect once; if truly stranded treat like `leader-missing`, else ack and re-await. |
@@ -121,6 +121,19 @@ stop-ask-human → the TUI halts and surfaces status to the human
 
 - The advisor is hired like any worker — placed as an order to the Recruiter on `advisor_profile`, reading `run-status.md`, writing no code and running no commands. A phase-level advisor order sets `phase_id` to the failing phase, but its `stage_id` must still be a **recognized** stage id (the order contract rejects anything outside the six) — a phase has a `phase_id`, not a `stage_id`, so there is nothing "phase" to reuse. Use the fixed convention `stage-5-finalization` (the whole-phase judgment stage) as the `stage_id`; never write a `phase_id` into `stage_id`, and there is no `stage_id: "advisor"`. The TUI knows it placed an advisor order and reads `result.json.decision`. The TUI stays small: it never performs the hard evaluation itself when an advisor is configured.
 - The advisor worker writes a normal `result.json` with `verdict: passed` **plus** the optional `decision` field, one of the exact tokens `continue`, `loop`, or `stop-ask-human` (the contract's `ADVISOR_DECISIONS`). The TUI reads `result.json.decision`, not a special verdict: `continue` accepts the phase as good enough and advances; `loop` grants another pass (reset/extend the budget); `stop-ask-human` halts and surfaces to the human.
+
+## IaC approval and apply (kind: iac phases)
+
+A `decision-required` event tagged `iac-approval` means one terraform layer finished planning and needs the human before anything is applied. The TUI runs this flow itself; the apply is never delegated:
+
+1. Read the event's evidence paths: the rendered table and the saved plan artifact. Print the table to the human VERBATIM — never summarize it away.
+2. Collect the decision. When the table shows "Destroy total to confirm: N" with N above zero, the human approves by typing that exact number; any other answer is a decline. A zero-destroy plan accepts a plain yes.
+3. Write `<pass-dir>/iac/approval.json`: `{"approved": true|false, "plan_sha256": "<sha256 of the plan artifact>", "destroy_total_confirmed": <n>, "by": "human", "at": "<ISO timestamp>"}`. The sha binds the approval to the exact artifact — a re-planned file invalidates it and the leader will re-ask.
+4. On approval, apply DIRECTLY in this pane with the saved artifact — `terraform apply <artifact> 2>&1 | tee <pass-dir>/iac/apply.log` (tofu likewise) — then write `<pass-dir>/iac/apply-receipt.json`: `{"command": "<what ran>", "exit_code": <n>, "log_path": "<pass-dir>/iac/apply.log", "plan_sha256": "<same sha>", "applied_at": "<ISO timestamp>"}`. The receipt is the paper trail; the leader validates it and records stage-4 from it.
+5. Ack the event and re-await. The leader sees the durable files and finishes the phase.
+6. On decline, write the approval file with `approved: false`, ack, and expect the phase to end `blocked`.
+
+IaC layers run strictly in order — a later layer's plan is only truthful after the earlier layer's apply. Phases sharing a route `parallel_group` token are the explicit escape hatch (urgent fixes on genuinely independent stacks) and may be started together; the human owns that risk.
 
 ## Forward-only — no revert automation
 

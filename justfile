@@ -16,6 +16,7 @@ default:
 import '.shared-llm/public/extensions/common/upagent/justfile'
 import '.shared-llm/public/extensions/common/specialist/justfile'
 import '.shared-llm/public/extensions/common/herdr/justfile'
+import '.shared-llm/public/extensions/common/iac/justfile'
 import '.shared-llm/public/extensions/this_repo/pi-hub/justfile'
 import '.shared-llm/public/extensions/this_repo/tf/justfile'
 

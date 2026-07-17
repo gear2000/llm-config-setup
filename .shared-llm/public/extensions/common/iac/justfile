@@ -1,0 +1,13 @@
+# IaC module (plan-table builder) — imported by the root justfile:
+#   import '.shared-llm/public/extensions/common/iac/justfile'
+#
+# Paths anchor on `{{justfile_directory()}}` (the ROOT justfile's dir — in an imported
+# module that is the repo root, NOT this file's dir). Run recipes from the repo, not
+# from inside this module directory.
+#
+# Render the human approval table from `terraform show -json <planfile>` output
+# (tofu speaks the same format). Pass --json for the machine shape, which also
+# carries confirm_destroy_total — the number the human types to approve destroys.
+
+iac-plan-table show_json *args:
+    cd {{invocation_directory()}} && ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/iac/plan_table.py "{{show_json}}" {{args}}

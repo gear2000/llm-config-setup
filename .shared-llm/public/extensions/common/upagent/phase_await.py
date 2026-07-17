@@ -392,6 +392,10 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         envelope["dedupe_key"] = args.dedupe_key
     if args.request_id:
         envelope["request_id"] = args.request_id
+    if args.requested_action:
+        envelope["requested_action"] = args.requested_action
+    if args.evidence:
+        envelope["evidence"] = [{"kind": "durable-file", "path": path} for path in args.evidence]
     ctx.inbox_dir.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(ctx.inbox_dir / f"{uuid.uuid4().hex}.json", envelope)
     return 0
@@ -423,6 +427,17 @@ def main(argv: list[str] | None = None) -> int:
     publish.add_argument("--severity", default="attention")
     publish.add_argument("--dedupe-key", default=None)
     publish.add_argument("--request-id", default=None)
+    publish.add_argument(
+        "--requested-action",
+        default=None,
+        help="what the owner should do with this event (e.g. iac-approval)",
+    )
+    publish.add_argument(
+        "--evidence",
+        action="append",
+        default=None,
+        help="durable file path the owner should read; repeatable",
+    )
     publish.set_defaults(handler=_cmd_publish)
     args = parser.parse_args(argv)
     try:

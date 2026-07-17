@@ -341,6 +341,81 @@ async function main() {
 			),
 	);
 
+	// Two differently named profiles that resolve to the same harness+model are
+	// still "the same reviewer" for the max gear.
+	const maxSameFamilyAliased = validateRunnable(
+		canonicalPlan,
+		withMax(
+			validRoute.replace(
+				"llm_profiles:\n",
+				"llm_profiles:\n  pi-clone:\n    harness: pi\n    model: configured-default\n",
+			),
+			"        second_llm_profile: pi-clone\n",
+		),
+	);
+	check(
+		"accuracy: max with an aliased same-harness-and-model second auditor fails",
+		!maxSameFamilyAliased.ok &&
+			maxSameFamilyAliased.issues.some((i) =>
+				i.message.includes("different harness or model"),
+			),
+	);
+
+	// --- phase flavor (kind: iac) and the parallel escape hatch ---
+	const iacKind = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  phase-0:\n    merge_back_at:",
+			"  phase-0:\n    kind: iac\n    merge_back_at:",
+		),
+	);
+	check(
+		"kind: iac on a phase passes",
+		iacKind.ok,
+		iacKind.issues.map((i) => i.message).join("; "),
+	);
+
+	const badKind = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  phase-0:\n    merge_back_at:",
+			"  phase-0:\n    kind: kubernetes\n    merge_back_at:",
+		),
+	);
+	check(
+		"unknown phase kind fails",
+		!badKind.ok &&
+			badKind.issues.some((i) => i.message.includes("kind must be `iac`")),
+	);
+
+	const goodGroup = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  phase-0:\n    merge_back_at:",
+			"  phase-0:\n    parallel_group: urgent-net\n    merge_back_at:",
+		),
+	);
+	check(
+		"parallel_group with a lowercase token passes",
+		goodGroup.ok,
+		goodGroup.issues.map((i) => i.message).join("; "),
+	);
+
+	const badGroup = validateRunnable(
+		canonicalPlan,
+		validRoute.replace(
+			"  phase-0:\n    merge_back_at:",
+			"  phase-0:\n    parallel_group: Not A Token\n    merge_back_at:",
+		),
+	);
+	check(
+		"parallel_group with junk fails",
+		!badGroup.ok &&
+			badGroup.issues.some((i) =>
+				i.message.includes("parallel_group must be a lowercase token"),
+			),
+	);
+
 	// --- per-profile scope leash flag ---
 	const leashOk = validateRunnable(
 		canonicalPlan,

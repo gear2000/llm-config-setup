@@ -117,6 +117,22 @@ The leader runs the shared five-stage worktree lifecycle, ordering one worker pe
 
 The full stage rules, the Stage 2 multi-angle audit detail, and rollback safety live in the shared phase protocol; follow them exactly.
 
+## IaC phases (kind: iac)
+
+When the route marks this phase `kind: iac`, the same ladder runs with terraform meanings:
+
+- Stage-1 writes the terraform; stage-2 audits it adversarially (a different model family is recommended). Every IaC stage brief restricts the worker to `fmt`, `validate`, `init`, `plan`, and `show` — a stage worker never applies, and the terraform persona refuses apply without explicit approval evidence anyway.
+- Stage-3 runs `init` and `plan -out <pass-dir>/iac/plan.bin`, saves `terraform show -json` output as `<pass-dir>/iac/plan.json`, builds the human table with `just iac-plan-table <pass-dir>/iac/plan.json > <pass-dir>/iac/plan-table.txt`, and records the artifact's SHA-256 in `phase-status.md`.
+- The leader then asks the owner for the apply decision. The durable approval file is the owner→leader answer channel here, so this is a wait, not a `blocked`:
+
+```text
+just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT decision-required "IaC layer <phase-id>: apply approval required (destroy total <n>)" --requested-action iac-approval --evidence <pass-dir>/iac/plan-table.txt --evidence <pass-dir>/iac/plan.bin
+```
+
+  Then wait (bounded by the phase timeout) for `<pass-dir>/iac/approval.json` and, when it says approved, `<pass-dir>/iac/apply-receipt.json`. Validate both: `plan_sha256` in each must equal the recorded artifact digest, and the receipt's `exit_code` must be 0. `approved: false` ⇒ `phase-result.json` verdict `blocked` (the human declined). Timeout ⇒ `blocked` with the evidence paths. A sha mismatch means the plan went stale — re-run stage-3 as a new try and re-ask.
+- Stage-4 is the TUI-performed apply, recorded from the receipt (runner `tui-apply`, receipt path as evidence) — the leader hires no stage-4 worker in an iac phase. The variant for very long applies is a worker order with `operation: apply`, `requires_apply: true`, and the `plan_artifact`/`approval` blocks (the same SHA-bound contract the direct controller enforces).
+- Stage-5 finalizes as usual: verify outputs/state summary, record evidence, clean the worktree.
+
 ## Stage-level backtracking and escalation
 
 Backtracking replays **forward, in order** — nothing is reverted.

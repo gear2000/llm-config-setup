@@ -575,6 +575,30 @@ export function validateRoute(
 		const needsAlignment = accuracy === "high" || accuracy === "max";
 		const isMaxAccuracy = accuracy === "max";
 
+		// Optional phase flavor. `kind: iac` runs the same ladder with terraform
+		// meanings (stage-3 plans and builds the approval table; the TUI approves
+		// and applies). Any other value is an error; absent means a normal phase.
+		const kindRaw = valueIn(phaseBlock, 4, "kind");
+		if (kindRaw !== undefined && !hasTodo(kindRaw) && kindRaw !== "iac") {
+			issues.push(
+				issue(`${phase}.kind must be \`iac\` when present (got ${kindRaw})`),
+			);
+		}
+		// Optional parallel-group escape hatch: phases sharing a group token may be
+		// started together by the TUI. Absent means strictly sequential (the default).
+		const groupRaw = valueIn(phaseBlock, 4, "parallel_group");
+		if (
+			groupRaw !== undefined &&
+			!hasTodo(groupRaw) &&
+			!/^[a-z0-9][a-z0-9-]*$/.test(groupRaw)
+		) {
+			issues.push(
+				issue(
+					`${phase}.parallel_group must be a lowercase token like \`net-fixes\` (got ${groupRaw})`,
+				),
+			);
+		}
+
 		const stagesBlock = indentedBlock(phaseBlock ?? "", 4, "stages");
 		if (!stagesBlock) issues.push(issue(`${phase}.stages is required`));
 		for (const dup of duplicateKeysAtIndent(stagesBlock ?? "", 6)) {

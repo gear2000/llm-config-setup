@@ -1,0 +1,13 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "local_file.readme",
+      "change": { "actions": ["create"] }
+    },
+    {
+      "address": "local_file.config",
+      "change": { "actions": ["create"] }
+    }
+  ]
+}

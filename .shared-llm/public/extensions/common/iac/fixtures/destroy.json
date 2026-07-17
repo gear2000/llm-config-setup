@@ -1,0 +1,13 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_instance.legacy",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "local_file.kept",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}
