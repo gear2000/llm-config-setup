@@ -2454,6 +2454,324 @@ def test_direct_lifecycle_runs_job_without_an_account_manager(
     assert healthy and "direct lifecycle" in healthy[0]["message"]
 
 
+def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """First launch explodes; the rescue broker says retry; the relaunch succeeds."""
+    result_path = tmp_path / "result.json"
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+
+    attempts: list[str] = []
+    worker_result_paths: list[Path] = []
+
+    def flaky_start(
+        name: str, execution_order: dict, launch: str, **kwargs: object
+    ) -> tuple[str, str, str]:
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise RecruiterError("pane split exploded")
+        worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
+        return "worker-pane", "cockpit", name
+
+    def wait(*args: object) -> bool:
+        worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        worker_result_paths[0].write_text(
+            json.dumps(_result(order["order_id"], verdict="passed"))
+        )
+        return True
+
+    advice_calls: list[str] = []
+
+    def advise(*args: object) -> str:
+        advice_calls.append(str(args[-1]))
+        return "retry-startup"
+
+    monkeypatch.setattr(recruiter, "_startup_rescue_advice", advise)
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", flaky_start)
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 0
+
+    assert len(attempts) == 2, "exactly one rescue relaunch"
+    assert advice_calls and "pane split exploded" in advice_calls[0]
+    assert json.loads(result_path.read_text())["verdict"] == "passed"
+    rescue = [
+        payload
+        for _, payload in recruiter._mailbox_messages(ledger, key)
+        if payload.get("type") == "startup-rescue"
+    ]
+    assert rescue, "the requester must hear about the rescue relaunch"
+
+
+def test_failed_launch_is_not_retried_when_the_broker_declines(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    result_path = tmp_path / "result.json"
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+
+    attempts: list[str] = []
+
+    def dead_start(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        attempts.append("try")
+        raise RecruiterError("model flag rejected by the harness")
+
+    monkeypatch.setattr(recruiter, "_startup_rescue_advice", lambda *a: "ask-requester")
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", dead_start)
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+
+    assert len(attempts) == 1, "a declined rescue must not relaunch"
+    assert json.loads(result_path.read_text())["verdict"] == "blocked"
+    declined = [
+        payload
+        for _, payload in recruiter._mailbox_messages(ledger, key)
+        if payload.get("type") == "startup-rescue-declined"
+    ]
+    assert declined and declined[0]["detail"]["advice"] == "ask-requester"
+
+
+def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    result_path = tmp_path / "result.json"
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+        management={"mode": "dedicated"},
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+
+    manager_calls: list[str] = []
+
+    def fake_manager(
+        ledger_arg: object,
+        key_arg: str,
+        token_arg: str,
+        order_arg: dict,
+        roster_arg: dict,
+        generation_arg: int,
+        validation_arg: dict,
+    ) -> dict[str, object]:
+        manager_calls.append(order_arg["order_id"])
+        config = recruiter.llm_management.load_management_config(roster_arg)
+        return {
+            "address": None,
+            "config": config,
+            "decision": recruiter.lifecycle.ManagerDecision(
+                request_id=recruiter.lifecycle.request_identity(order_arg),
+                generation=generation_arg,
+                decision="approved",
+                message="ok",
+            ),
+            "generation": generation_arg,
+            "health": None,
+            "pane": None,
+            "workspace_id": None,
+        }
+
+    worker_result_paths: list[Path] = []
+
+    def fake_start(
+        name: str, execution_order: dict, launch: str, **kwargs: object
+    ) -> tuple[str, str, str]:
+        worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
+        return "worker-pane", "cockpit", name
+
+    def wait(*args: object) -> bool:
+        worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        worker_result_paths[0].write_text(
+            json.dumps(_result(order["order_id"], verdict="passed"))
+        )
+        return True
+
+    monkeypatch.setattr(recruiter, "_start_account_manager", fake_manager)
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 0
+
+    assert manager_calls == [order["order_id"]], (
+        "a dedicated-pinned order must hire the account manager even on a direct roster"
+    )
+
+
+def test_rescue_advice_survives_a_broken_filesystem(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The real helper must never raise: a dead disk degrades to 'retry once anyway'."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    order = _order(cwd=str(tmp_path))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    manager = {
+        "generation": 1,
+        "config": recruiter.llm_management.load_management_config({}),
+        "pane": None,
+    }
+
+    def broken_write(path: object, payload: object) -> None:
+        raise OSError("simulated disk full")
+
+    monkeypatch.setattr(recruiter.JobLedger, "_write_json", staticmethod(broken_write))
+
+    advice = recruiter._startup_rescue_advice(
+        ledger, key, order, manager, "pane split exploded"
+    )
+
+    assert advice == "retry-startup"
+
+
+def test_rescue_advice_returns_the_brokers_recommendation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Exercise the real body: spawn, health, typed assessment, pane closed."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    order = _order(cwd=str(tmp_path))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    manager = {
+        "generation": 1,
+        "config": recruiter.llm_management.load_management_config({}),
+        "pane": None,
+    }
+    closed: list[str] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_start_herdr_agent",
+        lambda name, o, command, **kwargs: ("rescue-pane", "ws", "addr"),
+    )
+    monkeypatch.setattr(recruiter, "_wait_for_agent_health", lambda *a, **k: None)
+    monkeypatch.setattr(
+        recruiter,
+        "_wait_typed_file",
+        lambda path, timeout, parse: SimpleNamespace(
+            assessment="startup-failed", recommended_action="ask-requester"
+        ),
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: closed.append(pane))
+
+    advice = recruiter._startup_rescue_advice(
+        ledger, key, order, manager, "harness rejected the model flag"
+    )
+
+    assert advice == "ask-requester"
+    assert closed == ["rescue-pane"], "the rescue pane must always be closed"
+
+
+def test_manager_startup_rejection_is_not_rescued(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A dedicated manager's explicit refusal is a ruling; no automatic relaunch."""
+    result_path = tmp_path / "result.json"
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+        management={"mode": "dedicated"},
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+
+    def fake_manager(*args: object) -> dict[str, object]:
+        roster_arg = args[4]
+        return {
+            "address": "manager-address",
+            "config": recruiter.llm_management.load_management_config(roster_arg),
+            "decision": recruiter.lifecycle.ManagerDecision(
+                request_id=recruiter.lifecycle.request_identity(order),
+                generation=1,
+                decision="approved",
+                message="ok",
+            ),
+            "generation": 1,
+            "health": None,
+            "pane": "manager-pane",
+            "workspace_id": "ws",
+        }
+
+    def no_rescue(*args: object) -> str:
+        raise AssertionError("a manager rejection must never reach the rescue broker")
+
+    monkeypatch.setattr(recruiter, "_start_account_manager", fake_manager)
+    monkeypatch.setattr(recruiter, "_startup_rescue_advice", no_rescue)
+    monkeypatch.setattr(
+        recruiter,
+        "_start_herdr_agent",
+        lambda name, o, command, **kwargs: ("worker-pane", "cockpit", name),
+    )
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_ask_manager_about_startup",
+        lambda *args: SimpleNamespace(
+            assessment="startup-failed", message="wrong model requested"
+        ),
+    )
+    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+
+    assert json.loads(result_path.read_text())["verdict"] == "blocked"
+    kinds = {
+        payload.get("type") for _, payload in recruiter._mailbox_messages(ledger, key)
+    }
+    assert "startup-needs-requester" in kinds
+    assert "startup-rescue" not in kinds
+
+
 def test_await_any_reports_terminal_receipt_tagged_with_request(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

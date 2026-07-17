@@ -35,6 +35,42 @@ def _write_roster(path: Path, runtime_dir: Path, repo_root: Path | None = None) 
     )
 
 
+def test_consult_orders_pin_a_dedicated_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every consult gets a broker regardless of the roster's lifecycle default."""
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    roster = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    _write_roster(roster, tmp_path / "runtime", repo_root)
+    monkeypatch.setenv("SPECIALIST_HUB_CONFIG", str(roster))
+    cfg = hub.load_config()
+    hub.paths(cfg)["consults"].mkdir(parents=True, exist_ok=True)
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("question brief\n")
+    consult = {
+        "consult_id": "c-123",
+        "specialist": "docs",
+        "question": "where does composition happen?",
+        "answer_path": str(tmp_path / "answer.json"),
+    }
+    entry = {
+        "name": "docs",
+        "location": ".claude/agents/docs.md",
+        "harness": "claude",
+        "model": "haiku",
+        "agent": "docs",
+        "effort": "low",
+    }
+
+    order_path, _result_path = hub._specialist_order(
+        cfg, consult, entry, prompt_file, "w1R:p2", str(repo_root)
+    )
+
+    order = json.loads(order_path.read_text())
+    assert order["management"] == {"mode": "dedicated"}
+
+
 def test_librarian_sidebar_label_names_the_consult_door(tmp_path: Path) -> None:
     """The pane label must not present the Librarian as a live idle agent."""
     message = hub._librarian_status_message(4)

@@ -43,6 +43,9 @@ RECOGNIZED_STAGE_IDS = (
 # Harnesses the roster (upagent.yaml) may map a launch template for.
 KNOWN_HARNESSES = ("claude", "codex", "pi", "cursor")
 MANAGER_PLACEMENT_MODES = ("shared", "requester", "workspace")
+# Per-order lifecycle-ownership override. KEEP IN SYNC with
+# llm_management.MANAGEMENT_MODES (both modules load standalone by path).
+MANAGEMENT_MODES = ("direct", "dedicated")
 OPERATIONS = ("plan", "apply")
 WATCHDOG_KINDS = {
     "phase-watchdog": "phase",
@@ -153,6 +156,20 @@ def parse_order(text: str) -> dict:
             raise ContractError("order.json: workspace manager placement needs `workspace_id` or `workspace_label`")
         if placement.get("workspace_id") and placement.get("workspace_label"):
             raise ContractError("order.json: manager placement may specify `workspace_id` or `workspace_label`, not both")
+    management = order.get("management")
+    if management is not None:
+        if not isinstance(management, dict):
+            raise ContractError("order.json: `management` must be an object when present")
+        unknown_management = set(management) - {"mode"}
+        if unknown_management:
+            raise ContractError(
+                "order.json: `management` supports only `mode`; unknown: "
+                + ", ".join(sorted(unknown_management))
+            )
+        if management.get("mode") not in MANAGEMENT_MODES:
+            raise ContractError(
+                "order.json: `management.mode` must be one of " + ", ".join(MANAGEMENT_MODES)
+            )
     operation = order.get("operation", "plan")
     if operation not in OPERATIONS:
         raise ContractError("order.json: `operation` must be one of " + ", ".join(OPERATIONS))

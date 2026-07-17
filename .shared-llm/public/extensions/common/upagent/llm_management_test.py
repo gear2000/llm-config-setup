@@ -21,6 +21,18 @@ lifecycle = _load("lifecycle")
 management = _load("llm_management")
 
 
+def test_rescue_flag_defaults_on_and_rejects_non_boolean() -> None:
+    assert management.load_management_config({}).rescue_on_startup_failure is True
+    off = management.load_management_config(
+        {"management": {"rescue_on_startup_failure": False}}
+    )
+    assert off.rescue_on_startup_failure is False
+    with pytest.raises(management.ManagementConfigError):
+        management.load_management_config(
+            {"management": {"rescue_on_startup_failure": "yes"}}
+        )
+
+
 def test_default_management_roles_are_bounded_and_low_effort() -> None:
     config = management.load_management_config({"harnesses": {"claude": "claude {model}"}})
     assert config.account_manager.timeout_ms > 0

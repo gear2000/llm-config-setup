@@ -48,6 +48,31 @@ def test_valid_order_parses() -> None:
     assert order["stage_id"] == "stage-1-implementation"
 
 
+def test_order_management_override_accepts_both_modes() -> None:
+    for mode in ("direct", "dedicated"):
+        order = _valid_order()
+        order["management"] = {"mode": mode}
+        parsed = contracts.parse_order(json.dumps(order))
+        assert parsed["management"]["mode"] == mode
+
+
+def test_order_management_override_rejects_junk() -> None:
+    order = _valid_order()
+    order["management"] = "dedicated"
+    with pytest.raises(ContractError, match="must be an object"):
+        contracts.parse_order(json.dumps(order))
+
+    order = _valid_order()
+    order["management"] = {"mode": "autopilot"}
+    with pytest.raises(ContractError, match="management.mode"):
+        contracts.parse_order(json.dumps(order))
+
+    order = _valid_order()
+    order["management"] = {"mode": "direct", "rescue": True}
+    with pytest.raises(ContractError, match="supports only"):
+        contracts.parse_order(json.dumps(order))
+
+
 def test_order_accepts_explicit_requester_and_request_identity() -> None:
     order = _valid_order()
     order["request_id"] = "req-run-a-stage-1"

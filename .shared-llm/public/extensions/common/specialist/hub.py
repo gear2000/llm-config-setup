@@ -406,13 +406,20 @@ def build_prompt(consult: dict, location: str, cwd: str) -> str:
 def _specialist_order(
     cfg: dict, consult: dict, entry: dict, prompt_file: Path, librarian: str, cwd: str
 ) -> tuple[Path, Path]:
-    """Build an ordinary UpAgent order; the Librarian remains routing, never lifecycle."""
+    """Build an ordinary UpAgent order; the Librarian remains routing, never lifecycle.
+
+    The order pins `management.mode: dedicated` so every consult gets a broker: the
+    Recruiter hires a dedicated manager that validates the request, watches the
+    consultant actually come up, and speaks for it — even when the roster default
+    is the direct Python lifecycle.
+    """
     digest = hashlib.sha256(consult["consult_id"].encode()).hexdigest()[:24]
     order_path = paths(cfg)["consults"] / f"{consult['consult_id']}.order.json"
     result_path = paths(cfg)["consults"] / f"{consult['consult_id']}.upagent-result.json"
     order = {
         "order_id": f"specialist-consult-{digest}",
         "request_id": f"specialist-{digest}",
+        "management": {"mode": "dedicated"},
         "requester": {
             "id": "specialist-librarian",
             "kind": "file-mailbox",

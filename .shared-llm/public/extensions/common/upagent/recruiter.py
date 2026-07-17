@@ -178,6 +178,10 @@ class AgentWaitTimeout(RecruiterError):
     """The worker reached its declared work cap without terminal evidence."""
 
 
+class StartupRejectedByManager(RecruiterError):
+    """A dedicated manager explicitly refused the startup; a ruling, not a launch flake."""
+
+
 class JobLedger:
     """Filesystem copy-on-write job state for concurrent Recruiter requests.
 
@@ -2424,6 +2428,91 @@ def _await_requester_timeout_decision(
     return None
 
 
+def _startup_rescue_advice(
+    ledger: JobLedger,
+    key: str,
+    order: dict,
+    manager: dict[str, object],
+    failure_reason: str,
+) -> str:
+    """One bounded broker assessment of a failed launch: retry it, or stop and say why.
+
+    This is the rescue half of the broker arrangement. The fast Python launch stays the
+    normal path, and a small LLM is hired exactly at the failure point to judge whether a
+    relaunch can succeed or the requester must hear about it first. When the broker itself
+    cannot run, default to one retry — ensuring the worker gets created beats waiting on
+    unavailable advice.
+    """
+    generation = cast(int, manager["generation"])
+    request_id = lifecycle.request_identity(order)
+    config = cast(Any, manager["config"])
+    directory = ledger.request_dir(key) / "rescue"
+    evidence_path = directory / "evidence.json"
+    output_path = directory / "assessment.json"
+    evidence = {
+        "kind": "startup-rescue",
+        "startup_failure": failure_reason,
+        "request_id": request_id,
+        "worker_configuration": {
+            field: order.get(field)
+            for field in ("order_id", "harness", "model", "agent", "effort", "cwd")
+        },
+    }
+    name = _safe_agent_name("upagent-rescue", request_id, generation)
+    anchor = manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
+    rescue_order = {**order, "cockpit_pane": cast(str, anchor)}
+    try:
+        # Every filesystem step lives inside this guard: this function must never raise —
+        # its caller runs in a detached job runner whose stderr goes nowhere.
+        JobLedger._write_json(evidence_path, evidence)
+        brief_path = directory / "brief.md"
+        _write_text_atomic(
+            brief_path,
+            llm_management.checker_brief(
+                request_id, generation, evidence_path, output_path
+            ),
+        )
+        command = llm_management.render_role_command(
+            config.checker, brief_path, order["cwd"], output_path
+        )
+        output_path.unlink(missing_ok=True)
+        rescue_pane, _, _ = _start_herdr_agent(
+            name, rescue_order, command, split_direction="down", tab_role="oversight"
+        )
+        try:
+            _wait_for_agent_health(
+                rescue_pane,
+                expected_agent=config.checker.expected_agent,
+                expected_process=config.checker.expected_process,
+                expected_cwd=order["cwd"],
+                timeout_ms=config.startup_timeout_ms,
+            )
+            assessment = _wait_typed_file(
+                output_path,
+                config.checker.timeout_ms,
+                lambda text_value: lifecycle.parse_check_assessment(
+                    text_value, request_id, generation
+                ),
+            )
+        finally:
+            _close_worker_pane(rescue_pane)
+    except (RecruiterError, LifecycleError, ContractError, OSError) as error:
+        # The event is telemetry; the advice is the contract. A broken ledger write must
+        # not turn "broker unavailable" into a raised exception.
+        with suppress(OSError):
+            ledger._event(key, "startup-rescue-advice-unavailable", reason=str(error))
+        return "retry-startup"
+    action = cast(str, getattr(assessment, "recommended_action"))
+    with suppress(OSError):
+        ledger._event(
+            key,
+            "startup-rescue-assessed",
+            assessment=getattr(assessment, "assessment"),
+            recommended_action=action,
+        )
+    return action
+
+
 def _run_order(
     order_path: str,
     roster_path: str,
@@ -2433,6 +2522,7 @@ def _run_order(
     on_worker_healthy: Callable[[dict[str, object]], None] | None = None,
     on_timeout: Callable[[int, threading.Event | None], int | None] | None = None,
     before_worker_cleanup: Callable[[], None] | None = None,
+    attempt: int = 1,
 ) -> tuple[int, dict, dict[str, object]]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -2451,6 +2541,7 @@ def _run_order(
     }
     monitor_finalized: threading.Event | None = None
     startup_validated = False
+    startup_rejected = False
     # Direct dispatch runs in the phase leader's environment; never report Recruiter state onto
     # that pane. Resolve the broker's explicit persisted address instead.
     my_pane = _recruiter_pane_from_state()
@@ -2473,7 +2564,8 @@ def _run_order(
         launch = resolve_launch_command(execution_order, roster)
         management_config = llm_management.load_management_config(roster)
         request_id = lifecycle.request_identity(order)
-        worker_name = _safe_agent_name("upagent", request_id, 1)
+        # The attempt number keeps a rescue relaunch's agent name distinct from attempt 1's.
+        worker_name = _safe_agent_name("upagent", request_id, attempt)
         worker_tab = _worker_tab_role(execution_order)
         worker_pane, workspace_id, worker_address = _start_herdr_agent(
             worker_name, execution_order, launch, tab_role=worker_tab
@@ -2543,6 +2635,9 @@ def _run_order(
                 idle_timeout_ms=WATCHDOG_CONTINUATION_TIMEOUT_MS,
             )
     except (RecruiterError, ContractError, KeyError, TypeError, OSError) as e:
+        # A dedicated manager's explicit refusal is a ruling, not a launch flake — callers
+        # must not auto-relaunch against it.
+        startup_rejected = isinstance(e, StartupRejectedByManager)
         # A filesystem failure writing the fallback propagates.  Without a valid result, the
         # caller must not publish terminal state or DONE.
         try:
@@ -2585,6 +2680,10 @@ def _run_order(
                     "verified_absent": False,
                     "reason": str(e),
                 }
+    # Callers use these to tell "launch never became healthy" from "ran and failed",
+    # and a manager's explicit refusal from a mechanical launch failure.
+    cleanup["startup_validated"] = startup_validated
+    cleanup["startup_rejected"] = startup_rejected
     final_label = "blocked" if fell_back else "done"
     _report_state(my_pane, "idle", f"last order: {order_id} ({final_label})")
     return (1 if fell_back else 0), result, cleanup
@@ -3179,8 +3278,12 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     manager: dict[str, object] | None = None
     mechanical_validation = inspect_worker_configuration(order, roster)
 
+    # An order may pin its own lifecycle ownership (the Specialist Hub pins `dedicated`
+    # for every consult so consults always get a broker); the roster sets the default.
+    requested_management = order.get("management") or {}
+    effective_management_mode = requested_management.get("mode") or management_config.mode
     try:
-        if management_config.mode == "dedicated":
+        if effective_management_mode == "dedicated":
             manager = _start_account_manager(
                 ledger,
                 key,
@@ -3393,7 +3496,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 message,
                 {"assessment": getattr(assessment, "assessment")},
             )
-            raise RecruiterError(
+            raise StartupRejectedByManager(
                 f"account manager did not validate worker startup: {message}"
             )
         if not ledger.mark_worker_healthy(key, token, evidence):
@@ -3410,16 +3513,54 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             evidence,
         )
 
-    result_code, result, cleanup = _run_order(
-        str(ledger.request_dir(key) / "request.json"),
-        roster_path,
-        worker_result_path,
-        start_monitor,
-        ledger.worker_instructions_path(key, token),
-        worker_healthy,
-        handle_timeout,
-        finish_monitor_before_cleanup,
-    )
+    def run_order_once(attempt: int) -> tuple[int, dict, dict[str, object]]:
+        return _run_order(
+            str(ledger.request_dir(key) / "request.json"),
+            roster_path,
+            worker_result_path,
+            start_monitor,
+            ledger.worker_instructions_path(key, token),
+            worker_healthy,
+            handle_timeout,
+            finish_monitor_before_cleanup,
+            attempt=attempt,
+        )
+
+    result_code, result, cleanup = run_order_once(1)
+    if (
+        result_code != 0
+        and cleanup.get("startup_validated") is False
+        and not cleanup.get("startup_rejected")
+        and management_config.rescue_on_startup_failure
+    ):
+        failure_reason = str(
+            result.get("reason", "worker launch failed before health verification")
+        )
+        advice = _startup_rescue_advice(ledger, key, order, manager, failure_reason)
+        if advice == "retry-startup":
+            ledger._event(key, "startup-rescue-relaunch", failure=failure_reason)
+            _notify_requester(
+                ledger,
+                key,
+                order,
+                generation,
+                "startup-rescue",
+                "The worker launch failed before health verification. The rescue broker "
+                "advised one retry; relaunching now.",
+                {"failure": failure_reason},
+            )
+            result_code, result, cleanup = run_order_once(2)
+        else:
+            _notify_requester(
+                ledger,
+                key,
+                order,
+                generation,
+                "startup-rescue-declined",
+                "The worker launch failed before health verification and the rescue "
+                f"broker advised '{advice}' instead of a retry.",
+                {"advice": advice, "failure": failure_reason},
+            )
     try:
         manager_cleanup = (
             _close_worker_pane(cast(str, manager["pane"]))

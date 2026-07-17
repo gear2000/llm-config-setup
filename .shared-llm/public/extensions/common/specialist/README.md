@@ -22,7 +22,9 @@ Herdr session
 The Librarian holds the routing map built from `agents.yaml`
 (`name -> {description, location, harness, model, agent, effort}`). Each specialist is an ordinary
 UpAgent request with its own Dedicated Account Manager, verified startup, lease, timeout policy,
-and cleanup. The Librarian never starts or closes an LLM pane.
+and cleanup — the consult order pins `management.mode: dedicated`, so consults always get that
+broker even though the roster default is the direct Python lifecycle. The Librarian never starts
+or closes an LLM pane.
 
 ## Consult protocol (files + signal)
 

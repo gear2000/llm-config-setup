@@ -64,8 +64,16 @@
 # fail-loud validates before launch, owns lease/monitor/timeout mechanics, and publishes
 # durable requester events consumed by upagent-await / upagent-await-any. The
 # account_manager block below is used only if mode is flipped to `dedicated`.
+# A single order may override the mode with `"management": {"mode": "dedicated"}` in its
+# order.json — the Specialist Hub pins this on every consult so consults always get a broker.
+#
+# rescue_on_startup_failure (default true) — when a worker launch fails or stalls before
+# health verification, hire one bounded broker (the checker role) to read the failure and
+# advise retry vs stop, then relaunch at most once. If the broker itself cannot run, the
+# Recruiter retries once anyway. Applies in both modes.
 management:
   mode: direct
+  rescue_on_startup_failure: true
   startup_timeout_ms: 45000
   inactivity_check_ms: 900000
   requester_grace_ms: 300000

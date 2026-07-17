@@ -31,7 +31,8 @@ class ManagementRole:
     timeout_ms: int
 
 
-# How each request lifecycle is owned.
+# How each request lifecycle is owned. KEEP IN SYNC with contracts.MANAGEMENT_MODES
+# (both modules load standalone by path).
 MANAGEMENT_MODES = ("direct", "dedicated")
 
 
@@ -43,6 +44,10 @@ class ManagementConfig:
     inactivity_check_ms: int
     requester_grace_ms: int
     mode: str = "direct"
+    # One automatic broker-advised relaunch when a worker launch fails or stalls before
+    # health verification. The fast Python path stays the default; intelligence is hired
+    # exactly at the failure point.
+    rescue_on_startup_failure: bool = True
 
 
 def _positive_int(value: object, field: str, default: int) -> int:
@@ -82,6 +87,9 @@ def load_management_config(roster: dict) -> ManagementConfig:
     mode = raw.get("mode", "direct")
     if mode not in MANAGEMENT_MODES:
         raise ManagementConfigError("management.mode must be one of " + ", ".join(MANAGEMENT_MODES))
+    rescue = raw.get("rescue_on_startup_failure", True)
+    if not isinstance(rescue, bool):
+        raise ManagementConfigError("management.rescue_on_startup_failure must be a boolean")
     return ManagementConfig(
         account_manager=_role(raw.get("account_manager"), "account_manager", DEFAULT_ACCOUNT_MANAGER_COMMAND),
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
@@ -89,6 +97,7 @@ def load_management_config(roster: dict) -> ManagementConfig:
         inactivity_check_ms=_positive_int(raw.get("inactivity_check_ms"), "inactivity_check_ms", 900_000),
         requester_grace_ms=_positive_int(raw.get("requester_grace_ms"), "requester_grace_ms", 300_000),
         mode=mode,
+        rescue_on_startup_failure=rescue,
     )
 
 
