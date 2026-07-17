@@ -10,9 +10,10 @@
 # module that is the repo root, NOT this file's dir) + the module's fixed repo-relative
 # path, which is identical in the kit and in every destination.
 
-# Ensure the shared-services workspace + an armed Recruiter pane.
-upagent-up:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py up
+# Ensure the services workspace + an armed Recruiter pane (unified `herdr` workspace by
+# default; pass --separate-workspaces for the dedicated `shared-services` workspace).
+upagent-up *FLAGS:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py up {{FLAGS}}
 
 # Recruiter state.
 upagent-status:

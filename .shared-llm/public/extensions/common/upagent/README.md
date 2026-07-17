@@ -9,7 +9,13 @@ for the authority model and use-case tree.
 ## Topology
 
 ```
-Herdr session
+Herdr session (default: single workspace)
+└── ws: herdr                  services AND runs share one workspace as role tabs
+    ├── tab: services          ├── recruiter (deterministic Python Hub)
+    │                          └── librarian (Specialist Hub — sibling module)
+    └── tabs: control / workers / oversight   per-run panes
+
+Herdr session (with `up --separate-workspaces`)
 ├── ws: <slug>                 TUI + leader + workers (+ opt-in managers / one-shot checkers)
 └── ws: shared-services        always up, plan-agnostic
     ├── recruiter               deterministic Python Hub

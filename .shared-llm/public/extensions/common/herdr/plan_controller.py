@@ -115,8 +115,59 @@ def _safe_name(value: str) -> str:
     )[:80]
 
 
+def _find_unified_workspace() -> dict | None:
+    """The unified `herdr` workspace from a live `workspace list`, or None if absent."""
+    workspaces = (
+        recruiter._herdr_json("workspace", "list")
+        .get("result", {})
+        .get("workspaces", [])
+    )
+    for workspace in workspaces:
+        if (
+            isinstance(workspace, dict)
+            and workspace.get("label") == recruiter.UNIFIED_WORKSPACE_LABEL
+            and isinstance(workspace.get("workspace_id"), str)
+            and workspace.get("workspace_id")
+        ):
+            return workspace
+    return None
+
+
+def _split_pane_into_control_tab(workspace_id: str) -> str:
+    """A fresh pane for this TUI in the unified workspace's `control` tab (joined when present,
+    created otherwise). Concurrent runs share the tab; the Recruiter's layout lock serializes
+    the placement."""
+    panes = (
+        recruiter._herdr_json("pane", "list", "--workspace", workspace_id)
+        .get("result", {})
+        .get("panes", [])
+    )
+    anchor = next(
+        (p["pane_id"] for p in panes if isinstance(p, dict) and p.get("pane_id")), None
+    )
+    if anchor is None:
+        raise PlanStartError(
+            f"unified workspace {workspace_id} has no pane to split from"
+        )
+    split = recruiter._herdr_json(
+        "pane", "split", anchor, "--direction", "right", "--no-focus"
+    )
+    pane_id = split.get("result", {}).get("pane", {}).get("pane_id")
+    if not isinstance(pane_id, str) or not pane_id:
+        raise PlanStartError("herdr pane split returned no pane_id")
+    return recruiter._place_started_agent_in_role_tab(
+        pane_id, workspace_id, CONTROL_TAB_LABEL, split_direction="right"
+    )
+
+
 def _create_tui(
-    *, repo: Path, plan_path: Path, route_path: Path, slug: str, harness: str
+    *,
+    repo: Path,
+    plan_path: Path,
+    route_path: Path,
+    slug: str,
+    harness: str,
+    separate_workspaces: bool = False,
 ) -> dict[str, object]:
     if harness not in TUI_LAUNCHES:
         raise PlanStartError(
@@ -124,21 +175,38 @@ def _create_tui(
             + ", ".join(TUI_LAUNCHES)
         )
     launch, expected_agent, expected_process = TUI_LAUNCHES[harness]
-    response = recruiter._herdr_json(
-        "workspace", "create", "--cwd", str(repo), "--label", slug, "--no-focus"
-    )
-    result = response.get("result", {})
-    root_pane = result.get("root_pane", {}) if isinstance(result, dict) else {}
-    pane_id = root_pane.get("pane_id") if isinstance(root_pane, dict) else None
-    tab_id = root_pane.get("tab_id") if isinstance(root_pane, dict) else None
-    workspace_id = (
-        root_pane.get("workspace_id") if isinstance(root_pane, dict) else None
-    )
+    if harness == "claude":
+        # The cockpit must always be drivable from the phone: give the Claude Code TUI a
+        # Remote Control session named after the run (= form keeps the trailing prompt
+        # argument from being read as the session name).
+        launch += f" --remote-control={shlex.quote(_safe_name(slug) or 'herdr-run')}"
+    pane_id: str | None = None
+    tab_id: str | None = None
+    workspace_id: str | None = None
+    unified = None if separate_workspaces else _find_unified_workspace()
+    created_workspace = unified is None
+    if created_workspace:
+        # Separate mode gets a per-run `<slug>` workspace; the unified default creates the
+        # one `herdr` workspace only when nothing (services included) has created it yet.
+        label = slug if separate_workspaces else recruiter.UNIFIED_WORKSPACE_LABEL
+        response = recruiter._herdr_json(
+            "workspace", "create", "--cwd", str(repo), "--label", label, "--no-focus"
+        )
+        result = response.get("result", {})
+        root_pane = result.get("root_pane", {}) if isinstance(result, dict) else {}
+        pane_id = root_pane.get("pane_id") if isinstance(root_pane, dict) else None
+        tab_id = root_pane.get("tab_id") if isinstance(root_pane, dict) else None
+        workspace_id = (
+            root_pane.get("workspace_id") if isinstance(root_pane, dict) else None
+        )
     command = f"cd {shlex.quote(str(repo))} && {launch} " + shlex.quote(
         f"/herdr-run --plan {plan_path} --route {route_path} "
         f"--run-tree {plan_path.parent} --slug {slug}"
     )
     try:
+        if not created_workspace and unified is not None:
+            workspace_id = unified["workspace_id"]
+            pane_id = _split_pane_into_control_tab(workspace_id)
         if not isinstance(pane_id, str) or not pane_id:
             raise PlanStartError("herdr workspace create returned no root pane_id")
         if (
@@ -162,7 +230,8 @@ def _create_tui(
             raise PlanStartError(f"TUI pane {pane_id} has no workspace_id")
         if not isinstance(tab_id, str) or not tab_id:
             raise PlanStartError(f"TUI pane {pane_id} has no tab_id")
-        recruiter._herdr("tab", "rename", tab_id, CONTROL_TAB_LABEL)
+        if created_workspace:
+            recruiter._herdr("tab", "rename", tab_id, CONTROL_TAB_LABEL)
         recruiter._herdr("pane", "rename", pane_id, "tui-agent")
         recruiter._herdr("pane", "run", pane_id, command)
         health = recruiter._wait_for_agent_health(
@@ -175,7 +244,9 @@ def _create_tui(
     except (OSError, PlanStartError, recruiter.RecruiterError) as error:
         cleanup_error: str | None = None
         try:
-            if isinstance(workspace_id, str) and workspace_id:
+            # Close the workspace only when this startup created it; a reused unified
+            # workspace still hosts the services (and possibly other runs).
+            if created_workspace and isinstance(workspace_id, str) and workspace_id:
                 recruiter._herdr("workspace", "close", workspace_id)
             elif isinstance(pane_id, str) and pane_id:
                 recruiter._herdr("pane", "close", pane_id)
@@ -190,6 +261,7 @@ def _create_tui(
         "health": health,
         "pane_id": pane_id,
         "workspace_id": workspace_id,
+        "workspace_mode": "separate" if separate_workspaces else "single",
     }
 
 
@@ -219,13 +291,9 @@ def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, obj
     if not isinstance(receipt_slug, str) or not receipt_slug:
         raise PlanStartError("plan-start receipt has no valid slug")
     if slug and receipt_slug != slug:
-        raise PlanStartError(
-            f"plan-start receipt does not belong to plan {slug!r}"
-        )
+        raise PlanStartError(f"plan-start receipt does not belong to plan {slug!r}")
     if receipt.get("state") not in ("ready", "ready-degraded"):
-        raise PlanStartError(
-            "plan-start receipt is not in a finishable ready state"
-        )
+        raise PlanStartError("plan-start receipt is not in a finishable ready state")
     plan_id = slug or receipt_slug
     if state == "succeeded":
         route_path = run_dir / "route.yaml"
@@ -272,7 +340,9 @@ def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, obj
         try:
             existing = json.loads(marker_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
-            raise PlanStartError(f"existing plan terminal marker is invalid: {error}") from error
+            raise PlanStartError(
+                f"existing plan terminal marker is invalid: {error}"
+            ) from error
         if (
             not isinstance(existing, dict)
             or existing.get("plan_id") != plan_id
@@ -287,6 +357,16 @@ def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, obj
     return marker
 
 
+def _services_separate_workspaces() -> bool:
+    """The workspace-mode choice persisted by the services' `up` (Recruiter STATE_FILE).
+    Absent or unreadable state means the unified default (False)."""
+    try:
+        state = json.loads(recruiter.STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(state.get("separate_workspaces")) if isinstance(state, dict) else False
+
+
 def start_plan(
     *,
     run_dir: Path,
@@ -294,6 +374,7 @@ def start_plan(
     tui_harness: str,
     repo: Path,
     roster_path: str,
+    separate_workspaces: bool = False,
 ) -> dict[str, object]:
     if not run_dir.is_absolute() or not run_dir.is_dir():
         raise PlanStartError(
@@ -310,6 +391,7 @@ def start_plan(
             tui_harness=tui_harness,
             repo=repo,
             roster_path=roster_path,
+            separate_workspaces=separate_workspaces,
         )
 
 
@@ -320,6 +402,7 @@ def _start_plan_locked(
     tui_harness: str,
     repo: Path,
     roster_path: str,
+    separate_workspaces: bool = False,
 ) -> dict[str, object]:
     plan_path = run_dir / "plan.md"
     route_path = run_dir / "route.yaml"
@@ -351,6 +434,7 @@ def _start_plan_locked(
             route_path=route_path,
             slug=slug,
             harness=tui_harness,
+            separate_workspaces=separate_workspaces,
         )
     except (OSError, PlanStartError, recruiter.RecruiterError) as error:
         _write_json_atomic(
@@ -379,6 +463,7 @@ def _start_plan_locked(
     _write_json_atomic(receipt_path, receipt)
     return receipt
 
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="herdr-plan-start")
     parser.add_argument(
@@ -391,8 +476,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--roster", default=recruiter.default_roster_path())
     parser.add_argument("--finish-state", choices=PLAN_TERMINAL_STATES)
+    parser.add_argument(
+        "--separate-workspaces",
+        action="store_true",
+        help="create a per-run <slug> workspace instead of joining the unified `herdr` "
+        "workspace (the mode chosen at `just herdr-up` is inherited by default)",
+    )
     args = parser.parse_args(argv)
-    run_dir = args.run_dir.expanduser().resolve()
+    repo = args.repo.expanduser().resolve()
+    run_dir = args.run_dir.expanduser()
+    if not run_dir.is_absolute():
+        run_dir = repo / run_dir
+    run_dir = run_dir.resolve()
     try:
         if args.finish_state is not None:
             result = finish_plan(
@@ -406,8 +501,10 @@ def main(argv: list[str] | None = None) -> int:
             run_dir=run_dir,
             slug=args.slug or run_dir.name,
             tui_harness=args.harness,
-            repo=args.repo.expanduser().resolve(),
+            repo=repo,
             roster_path=args.roster,
+            separate_workspaces=args.separate_workspaces
+            or _services_separate_workspaces(),
         )
     except (OSError, PlanStartError, recruiter.RecruiterError) as error:
         sys.exit(f"herdr-plan-start: {error}")

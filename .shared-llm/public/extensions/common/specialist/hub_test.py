@@ -310,3 +310,178 @@ def test_runtime_dir_command_uses_roster_configuration(
     hub.main()
 
     assert capsys.readouterr().out == f"{runtime_dir}\n"
+
+
+def _write_base_roster(base_dir: Path) -> Path:
+    """A synthetic kit base roster in a fake engine dir (with a .git marker above it)."""
+    (base_dir / ".git").mkdir(parents=True, exist_ok=True)
+    engine_dir = base_dir / "engine"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    (engine_dir / "agents.yaml").write_text(
+        "agents:\n"
+        "  - name: docs\n"
+        "    description: base docs specialist\n"
+        "    harness: claude\n"
+        "    model: sonnet\n"
+        "    agent: docs\n"
+        "  - name: reviewer\n"
+        "    description: base reviewer\n"
+        "    harness: claude\n"
+        "    model: opus\n"
+        "    agent: reviewer\n"
+    )
+    return engine_dir
+
+
+def _write_overlay_roster(repo_root: Path, runtime_dir: Path) -> Path:
+    (repo_root / ".git").mkdir(parents=True, exist_ok=True)
+    overlay = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "runtime_dir: " + str(runtime_dir) + "\n"
+        "agents:\n"
+        "  - name: reviewer\n"
+        "    description: repo reviewer with private routing\n"
+        "    harness: claude\n"
+        "    model: haiku\n"
+        "    agent: reviewer\n"
+        "  - name: payments\n"
+        "    description: repo-only payments specialist\n"
+        "    harness: claude\n"
+        "    model: sonnet\n"
+        "    agent: payments\n"
+    )
+    return overlay
+
+
+def test_overlay_merges_on_top_of_kit_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Base ∪ overlay: same-named overlay entries clobber base, both rosters stay available."""
+    engine_dir = _write_base_roster(tmp_path / "kit")
+    repo_root = tmp_path / "repo"
+    _write_overlay_roster(repo_root, tmp_path / "runtime")
+    monkeypatch.delenv("SPECIALIST_HUB_CONFIG", raising=False)
+    monkeypatch.setattr(hub, "HERE", engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    cfg = hub.load_config()
+
+    by_name = {a["name"]: a for a in cfg["agents"]}
+    assert set(by_name) == {"docs", "reviewer", "payments"}
+    assert by_name["docs"]["origin"] == "kit-base"
+    assert by_name["reviewer"]["origin"] == "this-repo"
+    assert by_name["reviewer"]["model"] == "haiku"  # overlay clobbers the base entry
+    assert by_name["payments"]["origin"] == "this-repo"
+    assert cfg["overridden"] == ["reviewer"]
+    assert cfg["repo_root"] == repo_root
+
+
+def test_env_override_skips_the_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """$SPECIALIST_HUB_CONFIG stays a single-file override: the kit base is not merged in."""
+    engine_dir = _write_base_roster(tmp_path / "kit")
+    repo_root = tmp_path / "repo"
+    overlay = _write_overlay_roster(repo_root, tmp_path / "runtime")
+    monkeypatch.setenv("SPECIALIST_HUB_CONFIG", str(overlay))
+    monkeypatch.setattr(hub, "HERE", engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    cfg = hub.load_config()
+
+    assert {a["name"] for a in cfg["agents"]} == {"reviewer", "payments"}
+    assert all(a["origin"] == "override" for a in cfg["agents"])
+    assert cfg["overridden"] == []
+
+
+def test_kit_base_alone_when_repo_has_no_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine_dir = _write_base_roster(tmp_path / "kit")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    monkeypatch.delenv("SPECIALIST_HUB_CONFIG", raising=False)
+    monkeypatch.setattr(hub, "HERE", engine_dir)
+    monkeypatch.chdir(outside)
+
+    cfg = hub.load_config()
+
+    assert {a["name"] for a in cfg["agents"]} == {"docs", "reviewer"}
+    assert all(a["origin"] == "kit-base" for a in cfg["agents"])
+    assert cfg["repo_root"] == tmp_path / "kit"
+
+
+def test_roster_prints_a_paste_ready_brief_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine_dir = _write_base_roster(tmp_path / "kit")
+    repo_root = tmp_path / "repo"
+    _write_overlay_roster(repo_root, tmp_path / "runtime")
+    monkeypatch.delenv("SPECIALIST_HUB_CONFIG", raising=False)
+    monkeypatch.setattr(hub, "HERE", engine_dir)
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setattr(sys, "argv", ["hub.py", "roster"])
+
+    hub.main()
+
+    out = capsys.readouterr().out
+    assert "MANDATORY" in out
+    assert "- **docs** — base docs specialist" in out
+    assert "- **payments** (this repo) — repo-only payments specialist" in out
+    assert "just specialist-hub consult" in out
+    assert "CONSULT <id> DONE" in out
+    assert "`consults` in your result.json" in out
+
+
+def test_roster_json_prints_the_merged_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine_dir = _write_base_roster(tmp_path / "kit")
+    repo_root = tmp_path / "repo"
+    _write_overlay_roster(repo_root, tmp_path / "runtime")
+    monkeypatch.delenv("SPECIALIST_HUB_CONFIG", raising=False)
+    monkeypatch.setattr(hub, "HERE", engine_dir)
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setattr(sys, "argv", ["hub.py", "roster", "--json"])
+
+    hub.main()
+
+    index = json.loads(capsys.readouterr().out)
+    assert index["reviewer"]["origin"] == "this-repo"
+    assert index["docs"]["origin"] == "kit-base"
+
+
+def test_roster_caps_each_specialist_to_one_brief_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The phone book rides inside every stage brief, so essay-length roster descriptions are
+    cut to their first line and hard-capped."""
+    engine_dir = _write_base_roster(tmp_path / "kit")
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(
+        "runtime_dir: " + str(tmp_path / "runtime") + "\n"
+        "agents:\n"
+        "  - name: essayist\n"
+        "    description: |\n"
+        "      " + "long first line " * 30 + "\n"
+        "      second line that must never appear\n"
+        "    harness: claude\n"
+        "    model: sonnet\n"
+        "    agent: essayist\n"
+    )
+    monkeypatch.delenv("SPECIALIST_HUB_CONFIG", raising=False)
+    monkeypatch.setattr(hub, "HERE", engine_dir)
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setattr(sys, "argv", ["hub.py", "roster"])
+
+    hub.main()
+
+    out = capsys.readouterr().out
+    essayist_line = next(line for line in out.splitlines() if "essayist" in line)
+    assert "second line" not in out
+    assert len(essayist_line) < 260
+    assert essayist_line.endswith("...")

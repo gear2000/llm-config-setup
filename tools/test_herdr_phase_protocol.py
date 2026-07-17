@@ -62,11 +62,15 @@ def test_tui_runs_one_managed_phase_start_without_a_watchdog() -> None:
 def test_tui_final_message_is_short_and_unambiguous() -> None:
     text = RUNNER.read_text()
 
-    assert "SUCCESS — Everything succeeded. Safe to close this workspace." in text
+    assert "SUCCESS — Everything succeeded. Safe to close this run's panes." in text
     assert "SUCCESS — Everything succeeded. Cleanup is still finishing" in text
     assert "STOPPED — This run did not succeed." in text
     assert "Do not print a stage-by-stage recap" in text
     assert "Those details belong only in `run-status.md`" in text
+    # Mode-aware close guidance: never tell the human to close a workspace that still
+    # hosts the services (the single-workspace default shares `herdr` across runs).
+    assert "Never tell the human" in text
+    assert "close a workspace that still hosts the services" in text
 
 
 def test_plan_launcher_owns_tui_startup_and_never_hires_a_watchdog() -> None:
@@ -122,3 +126,46 @@ def test_leader_publishes_typed_events_and_multiplexes_awaits() -> None:
     assert "AWAIT_EVENT" in text
     assert "Echo the returned `cursor` back on the next call" in text
     assert "nothing is ever pasted into this leader's pane" in text
+
+
+def test_every_stage_brief_carries_the_specialist_phone_book() -> None:
+    """The librarian is made discoverable mechanically: the leader pastes the roster
+    command's output into every brief, workers leave consult receipts, and Stage 2
+    audits the receipts."""
+    protocol = PROTOCOL.read_text()
+    shared = (PROTOCOL.parent.parent / "meta-runner-phase-protocol.md").read_text()
+
+    assert "just specialist-hub roster" in protocol
+    assert "VERBATIM" in protocol
+    assert "consult-receipt check" in protocol
+    assert "`consults`" in protocol
+    assert "just specialist-hub roster" in shared
+    assert "phone book" in shared
+    assert "blocking Stage 2 audit finding" in shared
+
+
+def test_tui_health_checks_the_librarian_at_cockpit_setup() -> None:
+    runner = RUNNER.read_text()
+
+    assert "just specialist-hub status" in runner
+    assert "load-bearing" in runner
+
+
+def test_workspace_mode_defaults_to_single_and_flag_restores_separate() -> None:
+    runner = RUNNER.read_text()
+    launcher = HERDR_JUSTFILE.read_text()
+    controller = PLAN_CONTROLLER.read_text()
+
+    assert "ws: herdr" in runner
+    assert "--separate-workspaces" in runner
+    assert "--separate-workspaces" in launcher
+    assert "--separate-workspaces" in controller
+    assert "UNIFIED_WORKSPACE_LABEL" in controller
+
+
+def test_claude_tui_always_launches_with_remote_control() -> None:
+    controller = PLAN_CONTROLLER.read_text()
+    launcher = HERDR_JUSTFILE.read_text()
+
+    assert "--remote-control=" in controller
+    assert "--remote-control=<slug>" in launcher

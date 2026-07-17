@@ -53,6 +53,27 @@ def _healthy_tui(**_: object) -> dict[str, object]:
     }
 
 
+def test_main_resolves_relative_run_dir_from_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, _ = _inputs(tmp_path)
+    captured: dict[str, object] = {}
+
+    def capture_start(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"state": "ready"}
+
+    monkeypatch.chdir(Path(__file__).parent)
+    monkeypatch.setattr(plan_controller, "start_plan", capture_start)
+
+    assert (
+        plan_controller.main(
+            [run_dir.name, "--repo", str(tmp_path), "--slug", "sample-run"]
+        )
+        == 0
+    )
+    assert captured["run_dir"] == run_dir
+    assert captured["repo"] == tmp_path
 
 
 def test_tui_launch_names_exact_run_tree_and_verifies_health(
@@ -95,6 +116,157 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     assert ("tab", "rename", "control-tab", "control") in calls
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
+    assert "--remote-control=sample-run" in run_call[3]
+
+
+def test_claude_tui_always_gets_remote_control_and_pi_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, _ = _inputs(tmp_path)
+    commands: dict[str, str] = {}
+
+    def run_for(harness: str) -> str:
+        calls: list[tuple[str, ...]] = []
+        monkeypatch.setattr(
+            plan_controller.recruiter,
+            "_herdr_json",
+            lambda *args: {
+                "result": {
+                    "workspaces": [],
+                    "root_pane": {
+                        "pane_id": "tui-pane",
+                        "tab_id": "control-tab",
+                        "workspace_id": "workspace-1",
+                    },
+                }
+            },
+        )
+        monkeypatch.setattr(
+            plan_controller.recruiter, "_herdr", lambda *args: calls.append(args)
+        )
+        monkeypatch.setattr(
+            plan_controller.recruiter,
+            "_wait_for_agent_health",
+            lambda *args, **kwargs: {"healthy": True},
+        )
+        plan_controller._create_tui(
+            repo=tmp_path,
+            plan_path=run_dir / "plan.md",
+            route_path=run_dir / "route.yaml",
+            slug="sample-run",
+            harness=harness,
+        )
+        return next(call for call in calls if call[:2] == ("pane", "run"))[3]
+
+    commands["claude"] = run_for("claude")
+    commands["pi"] = run_for("pi")
+
+    assert "--remote-control=sample-run" in commands["claude"]
+    assert "--remote-control" not in commands["pi"]
+
+
+def test_unified_mode_joins_the_existing_herdr_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default single-workspace mode splits a pane into the live `herdr` workspace's control
+    tab instead of creating a per-run workspace."""
+    run_dir, _ = _inputs(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    placements: list[tuple[str, ...]] = []
+
+    def herdr_json(*args: str) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {
+                "result": {
+                    "workspaces": [{"label": "herdr", "workspace_id": "ws-herdr"}]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": "recruiter-pane"}]}}
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "fresh-pane"}}}
+        if args[:2] == ("pane", "get"):
+            return {
+                "result": {
+                    "pane": {"tab_id": "control-tab", "workspace_id": "ws-herdr"}
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(
+        plan_controller.recruiter, "_herdr", lambda *args: calls.append(args)
+    )
+    monkeypatch.setattr(
+        plan_controller.recruiter,
+        "_place_started_agent_in_role_tab",
+        lambda pane_id, workspace_id, tab_role, split_direction: (
+            placements.append((pane_id, workspace_id, tab_role, split_direction))
+            or pane_id
+        ),
+    )
+    monkeypatch.setattr(
+        plan_controller.recruiter,
+        "_wait_for_agent_health",
+        lambda *args, **kwargs: {"healthy": True},
+    )
+
+    tui = plan_controller._create_tui(
+        repo=tmp_path,
+        plan_path=run_dir / "plan.md",
+        route_path=run_dir / "route.yaml",
+        slug="sample-run",
+        harness="claude",
+    )
+
+    assert tui["workspace_id"] == "ws-herdr"
+    assert tui["workspace_mode"] == "single"
+    assert placements == [("fresh-pane", "ws-herdr", "control", "right")]
+    # The reused workspace's tabs are not renamed; only the pane is claimed and armed.
+    assert ("tab", "rename", "control-tab", "control") not in calls
+    assert ("pane", "rename", "fresh-pane", "tui-agent") in calls
+
+
+def test_separate_workspaces_mode_creates_the_per_run_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, _ = _inputs(tmp_path)
+    created: list[tuple[str, ...]] = []
+
+    def herdr_json(*args: str) -> dict:
+        if args[:2] == ("workspace", "create"):
+            created.append(args)
+            return {
+                "result": {
+                    "root_pane": {
+                        "pane_id": "tui-pane",
+                        "tab_id": "control-tab",
+                        "workspace_id": "ws-run",
+                    }
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(plan_controller.recruiter, "_herdr", lambda *args: None)
+    monkeypatch.setattr(
+        plan_controller.recruiter,
+        "_wait_for_agent_health",
+        lambda *args, **kwargs: {"healthy": True},
+    )
+
+    tui = plan_controller._create_tui(
+        repo=tmp_path,
+        plan_path=run_dir / "plan.md",
+        route_path=run_dir / "route.yaml",
+        slug="sample-run",
+        harness="claude",
+        separate_workspaces=True,
+    )
+
+    assert tui["workspace_mode"] == "separate"
+    label = created[0][created[0].index("--label") + 1]
+    assert label == "sample-run"
 
 
 def test_tui_metadata_failure_closes_created_pane(
@@ -104,6 +276,8 @@ def test_tui_metadata_failure_closes_created_pane(
     calls: list[tuple[str, ...]] = []
 
     def herdr_json(*args: str) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {"result": {"workspaces": []}}
         if args[:2] == ("workspace", "create"):
             return {"result": {"root_pane": {"pane_id": "orphan-pane"}}}
         if args == ("pane", "get", "orphan-pane"):
@@ -174,18 +348,12 @@ def test_finish_plan_writes_the_terminal_marker_only_after_summary_exists(
 
     (run_dir / "run-status.md").write_text("# Complete\n")
     with pytest.raises(PlanStartError, match="missing phase result"):
-        plan_controller.finish_plan(
-            run_dir=run_dir, slug=None, state="succeeded"
-        )
+        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
     phase_result = run_dir / "phases/phase-0/phase-result.json"
     phase_result.parent.mkdir(parents=True)
-    phase_result.write_text(
-        json.dumps({"phase_id": "phase-0", "verdict": "passed"})
-    )
-    marker = plan_controller.finish_plan(
-        run_dir=run_dir, slug=None, state="succeeded"
-    )
+    phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
+    marker = plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
     assert marker["plan_id"] == "sample-run"
     assert marker["state"] == "succeeded"
@@ -201,9 +369,7 @@ def test_finish_plan_rejects_a_non_object_start_receipt(tmp_path: Path) -> None:
     (control / "plan-start.json").write_text("[]\n")
 
     with pytest.raises(PlanStartError, match="must be an object"):
-        plan_controller.finish_plan(
-            run_dir=run_dir, slug=None, state="stopped"
-        )
+        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
 
 
 def test_legacy_degraded_receipt_is_still_finishable(tmp_path: Path) -> None:
@@ -211,7 +377,13 @@ def test_legacy_degraded_receipt_is_still_finishable(tmp_path: Path) -> None:
     control = run_dir / "control"
     control.mkdir()
     (control / "plan-start.json").write_text(
-        json.dumps({"slug": "sample-run", "state": "ready-degraded", "watchdog": {"state": "unavailable"}})
+        json.dumps(
+            {
+                "slug": "sample-run",
+                "state": "ready-degraded",
+                "watchdog": {"state": "unavailable"},
+            }
+        )
     )
     (run_dir / "run-status.md").write_text("# Complete\n")
     phase_result = run_dir / "phases/phase-0/phase-result.json"

@@ -1,9 +1,14 @@
-# agents.yml.sample — base Specialist Hub roster
+# agents.yml.sample — template for a destination's OVERLAY roster
 #
 # Copy this file to the destination-owned:
 #   .shared-llm/this_repo/extensions/common/specialist/agents.yaml
 #
-# The entries below are generic public roles. Change harness/model values to match the
+# The kit already ships a live BASE roster (agents.yaml, next to hub.py) that is always
+# loaded. Your overlay merges ON TOP of it: a same-named entry here clobbers the base
+# entry, new entries are added, and both sets are available for runs — so keep only the
+# specialists you add or override, not a copy of the base list.
+#
+# The entries below are generic examples. Change harness/model values to match the
 # destination's installed runtimes; do not put project-specific names, URLs, or credentials here.
 
 runtime_dir: /tmp/.herdr-specialist

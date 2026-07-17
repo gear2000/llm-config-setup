@@ -5,14 +5,21 @@ Herdr-native. There is no tmux and no Go message hub anywhere in this engine —
 Librarian pane lives in a `shared-services` Herdr workspace and every action goes over
 the `herdr` CLI (which talks to the running Herdr over its unix socket).
 
-Reads agents.yaml (next to this file, or $SPECIALIST_HUB_CONFIG): each entry names a
-specialist, points at its definition, and declares an UpAgent harness/model/agent. Executable
-launch commands remain centralized in the Recruiter roster. The engine is public; the FILLED
-roster is a destination's own `this_repo` config (template: agents.yml.sample).
+Reads TWO rosters and merges them: the kit's BASE agents.yaml (next to this file, synced into
+every destination) plus the destination's own `this_repo` agents.yaml overlay. Same-named overlay
+entries clobber base entries; everything else is the union, so a repo gets the kit's generic
+specialists AND its own. $SPECIALIST_HUB_CONFIG remains a single-file override (no merge). Each
+entry names a specialist, points at its definition, and declares an UpAgent harness/model/agent.
+Executable launch commands remain centralized in the Recruiter roster.
 
-Topology:
+Topology (default: everything shares ONE `herdr` workspace; `up --separate-workspaces`
+restores the dedicated `shared-services` workspace):
 
-    ws: shared-services            always up, plan-agnostic
+    ws: herdr                      single-workspace default
+    └── tab: services              ├── recruiter · └── librarian
+    (runs add control/workers/oversight tabs to the same workspace)
+
+    ws: shared-services            with --separate-workspaces: services-only workspace
     ├── librarian                  owns the routing map only
     └── recruiter                  owns manager/specialist lifecycle and cleanup
 
@@ -31,15 +38,17 @@ resolves promptly. On timeout (only if the id was unrecoverable and no sentinel 
 reading a failure answer.json, the caller treats the consult as failed/unanswered.
 
 Commands:
-  up                  create/attach the shared-services workspace + Librarian pane (idempotent)
+  up                  create/attach the services workspace + Librarian pane (idempotent);
+                      --separate-workspaces keeps services in their own workspace
   down                close the Librarian pane, remove runtime state
-  status              workspace/pane health + roster size
-  reindex             rewrite index.json from agents.yaml
+  status              workspace/pane health + merged roster size
+  reindex             rewrite index.json from the merged rosters
+  roster              print the merged roster as a paste-ready stage-brief block (--json for raw)
   consult <path>      route and await one managed specialist consult
 
 Runtime files (one directory, default /tmp/.herdr-specialist):
-  state.json    {workspace, librarian_pane, repo_root} written by `up`
-  index.json    roster: name -> {description, location, harness, model, agent, effort}
+  state.json    {workspace, workspace_label, librarian_pane, repo_root} written by `up`
+  index.json    roster: name -> {description, location, harness, model, agent, effort, origin}
   consults/     where callers drop consult.json (and the Librarian writes prompt briefs)
 
 Roster paths are portable: when `repo_root` is absent, the hub walks upward from the discovered
@@ -47,9 +56,9 @@ roster path until it finds the repository's `.git` marker. Relative specialist `
 are always resolved from that repository root, never from the process current directory or the
 nested roster directory.
 
-To adopt from another repo: fill agents.yaml in your repo's `this_repo` config (this engine
-is synced from the kit into `.shared-llm/public/extensions/specialist/`) and import the
-sibling justfile so `just specialist-hub <cmd>` runs this file.
+To adopt from another repo: import the sibling justfile so `just specialist-hub <cmd>` runs this
+file. The kit's base roster works as-is; add repo-owned specialists (or clobber base ones by
+name) in `.shared-llm/this_repo/extensions/common/specialist/agents.yaml`.
 """
 
 from __future__ import annotations
@@ -72,11 +81,16 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contracts_consult as cc  # noqa: E402  (sibling module, path-imported)
 
-WORKSPACE_LABEL = "shared-services"
-# The Librarian claims ONLY a pane with this label in the shared `shared-services` workspace,
+# Single-workspace default: services (and every run's tabs) share one `herdr` workspace.
+# `up --separate-workspaces` restores the dedicated services-only workspace.
+UNIFIED_WORKSPACE_LABEL = "herdr"
+SEPARATE_WORKSPACE_LABEL = "shared-services"
+SERVICES_TAB_LABEL = "services"
+# The Librarian claims ONLY a pane with this label in the shared services workspace,
 # so it and the UpAgent Recruiter (label "recruiter") coexist without fighting over each
 # other's panes — regardless of which engine brought the workspace up first.
 LIBRARIAN_PANE_LABEL = "librarian"
+RECRUITER_PANE_LABEL = "recruiter"
 DEFAULT_RUNTIME = "/tmp/.herdr-specialist"
 # How long the Librarian grants a managed specialist worker (ms).
 CONSULT_TIMEOUT_MS = 600_000
@@ -86,24 +100,26 @@ UPAGENT_RECRUITER = HERE.parent / "upagent" / "recruiter.py"
 # --- config -------------------------------------------------------------------
 
 
-def default_config_path() -> Path:
-    """Resolve the roster path. The filled roster is repo-owned, so prefer, in order:
-      1. $SPECIALIST_HUB_CONFIG (explicit override);
-      2. the repo-owned `this_repo` roster, if the enclosing repo has one — walk up from cwd for
-         a `.shared-llm/this_repo/extensions/common/specialist/agents.yaml`;
-      3. `agents.yaml` beside this engine (the kit's own adoption — editable in the kit source).
-    load_config fails loud if the resolved path does not exist, so a destination that has done
-    neither (1) nor (2) gets a clear error rather than silently reading a kit-owned public file.
-    Mirrors the UpAgent Recruiter's default_roster_path convention.
+def config_paths() -> tuple[Path | None, Path, str]:
+    """Resolve (base, primary, primary_origin) roster paths. The effective roster is base merged
+    under primary — primary entries clobber same-named base entries, everything else is the union:
+      1. $SPECIALIST_HUB_CONFIG set — a single-file override, no merge (base is None);
+      2. a repo-owned `this_repo` overlay — walk up from cwd for
+         `.shared-llm/this_repo/extensions/common/specialist/agents.yaml` — merged ON TOP of the
+         kit base `agents.yaml` beside this engine (kit-synced into every destination);
+      3. no overlay — the kit base alone.
+    load_config fails loud if the primary path does not exist. The walk-up mirrors the UpAgent
+    Recruiter's default_roster_path convention.
     """
     env = os.environ.get("SPECIALIST_HUB_CONFIG")
     if env:
-        return Path(env)
+        return None, Path(env), "override"
+    base = HERE / "agents.yaml"
     for parent in [Path.cwd(), *Path.cwd().parents]:
         this_repo = parent / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
         if this_repo.is_file():
-            return this_repo
-    return HERE / "agents.yaml"
+            return (base if base.is_file() else None), this_repo, "this-repo"
+    return None, base, "kit-base"
 
 
 class ConfigError(RuntimeError):
@@ -177,25 +193,70 @@ def _normalize_legacy_agent(repo_root: Path, agent: dict) -> None:
     agent.setdefault("model", model or "")
 
 
-def load_config() -> dict:
-    """Read + validate the roster. Raises ConfigError (catchable) on any problem, so the consult
-    path can still honor its always-signal contract when the roster is bad."""
-    path = default_config_path()
-    if not path.is_file():
-        raise ConfigError(f"{path} not found (template: agents.yml.sample, next to this file)")
+def _read_roster_file(path: Path) -> dict:
+    """One roster document: a YAML object with a non-empty `agents:` list. Fail-loud per file."""
     try:
         cfg = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as e:
         raise ConfigError(f"{path} is not valid YAML: {e}") from e
+    if not isinstance(cfg, dict):
+        raise ConfigError(f"{path} must be a YAML object with an 'agents:' list")
     agents = cfg.get("agents")
     if not isinstance(agents, list) or not agents:
         raise ConfigError(f"{path} must have a non-empty 'agents:' list")
-    config_path = path.resolve()
-    repo_root = cfg.get("repo_root")
+    return cfg
+
+
+def _named_entries(agents: list, origin: str, path: Path) -> dict[str, dict]:
+    """Ordered name -> entry copies tagged with their roster of origin. Merging is by name, so an
+    unnamed entry is unmergeable and fails loud here with its source file."""
+    entries: dict[str, dict] = {}
+    for a in agents:
+        if not isinstance(a, dict):
+            raise ConfigError(f"every agent entry must be an object: {a!r} (in {path})")
+        name = a.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"every agent needs a non-empty 'name': {a} (in {path})")
+        entries[name] = {**a, "origin": origin}
+    return entries
+
+
+def load_config() -> dict:
+    """Read + validate + merge the rosters (kit base under the repo overlay; overlay entries
+    clobber same-named base entries). Raises ConfigError (catchable) on any problem, so the
+    consult path can still honor its always-signal contract when a roster is bad."""
+    base_path, primary_path, primary_origin = config_paths()
+    if not primary_path.is_file():
+        raise ConfigError(
+            f"{primary_path} not found (template: agents.yml.sample, next to this file)"
+        )
+    primary = _read_roster_file(primary_path)
+    base = _read_roster_file(base_path) if base_path is not None else None
+
+    named = _named_entries(primary["agents"], primary_origin, primary_path)
+    overridden: list[str] = []
+    cfg = dict(primary)
+    if base is not None:
+        base_named = _named_entries(base["agents"], "kit-base", base_path)
+        overridden = sorted(set(base_named) & set(named))
+        base_named.update(named)  # overlay clobbers same-named base entries, appends new ones
+        named = base_named
+        # Overlay scalars (runtime_dir, repo_root, ...) win over base scalars.
+        cfg = {**{k: v for k, v in base.items() if k != "agents"}, **cfg}
+    agents = list(named.values())
+    cfg["agents"] = agents
+    cfg["overridden"] = overridden
+
+    config_path = primary_path.resolve()
+    repo_root = primary.get("repo_root")
+    repo_root_anchor = config_path.parent
+    if repo_root is None and base is not None and base.get("repo_root") is not None:
+        repo_root = base.get("repo_root")
+        repo_root_anchor = base_path.resolve().parent if base_path is not None else repo_root_anchor
     cfg["repo_root"] = (
         _repo_root_from_roster(config_path)
         if repo_root is None
-        else _resolve_path(repo_root, config_path.parent, "repo_root")
+        else _resolve_path(repo_root, repo_root_anchor, "repo_root")
     )
     for a in agents:
         if not isinstance(a, dict):
@@ -221,6 +282,7 @@ def load_config() -> dict:
     cfg["runtime_dir"] = runtime_dir
     cfg["config_path"] = config_path
     cfg["config_dir"] = config_path.parent
+    cfg["base_config_path"] = base_path.resolve() if base_path is not None else None
     return cfg
 
 
@@ -267,8 +329,8 @@ def _description(cfg: dict, agent: dict) -> str:
     return str(desc).strip().split("\n")[0]
 
 
-def write_index(cfg: dict) -> dict:
-    index = {
+def _build_index(cfg: dict) -> dict:
+    return {
         a["name"]: {
             "description": _description(cfg, a),
             "location": a.get("location", ""),
@@ -276,9 +338,14 @@ def write_index(cfg: dict) -> dict:
             "effort": a.get("effort", "medium"),
             "harness": a["harness"],
             "model": a["model"],
+            "origin": a.get("origin", ""),
         }
         for a in cfg["agents"]
     }
+
+
+def write_index(cfg: dict) -> dict:
+    index = _build_index(cfg)
     cfg["runtime_dir"].mkdir(parents=True, exist_ok=True)
     paths(cfg)["index"].write_text(json.dumps(index, indent=2) + "\n")
     print(f"index: {len(index)} specialist(s) -> {paths(cfg)['index']}")
@@ -330,12 +397,21 @@ def _dig(obj: dict, *keys: str) -> str:
     return cur
 
 
-def _find_shared_services() -> dict | None:
-    """The shared-services WorkspaceInfo from a `herdr workspace list`, or None if absent."""
+def _find_workspace(label: str) -> dict | None:
+    """The WorkspaceInfo labeled `label` from a `herdr workspace list`, or None if absent."""
     resp = _herdr_json("workspace", "list")
     for w in resp.get("result", {}).get("workspaces", []):
-        if isinstance(w, dict) and w.get("label") == WORKSPACE_LABEL and w.get("workspace_id"):
+        if isinstance(w, dict) and w.get("label") == label and w.get("workspace_id"):
             return w
+    return None
+
+
+def _find_services_workspace() -> dict | None:
+    """The live services workspace under either mode's label, preferring the unified default."""
+    for label in (UNIFIED_WORKSPACE_LABEL, SEPARATE_WORKSPACE_LABEL):
+        found = _find_workspace(label)
+        if found is not None:
+            return found
     return None
 
 
@@ -348,18 +424,34 @@ def _find_role_pane(workspace_id: str, role_label: str) -> str | None:
     return None
 
 
-def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
-    """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the ONE shared
-    `shared-services` workspace, claiming ONLY a pane labeled `role_label` — never an arbitrary
+def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, bool]:
+    """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the ONE services
+    workspace (`workspace_label`), claiming ONLY a pane labeled `role_label` — never an arbitrary
     or first pane. This lets the Librarian and the Recruiter share one workspace without fighting,
     regardless of which engine started first:
+      - if services are already up under the OTHER mode's label, fail loud (run `just herdr-down`
+        first) rather than splitting the services across two workspaces;
       - if the workspace is absent, create it and label its root pane for my role;
       - if it exists, reuse my role-labeled pane when present, else split a fresh pane off an
         existing pane and label it for my role.
     """
-    existing = _find_shared_services()
+    other_label = (
+        SEPARATE_WORKSPACE_LABEL
+        if workspace_label == UNIFIED_WORKSPACE_LABEL
+        else UNIFIED_WORKSPACE_LABEL
+    )
+    other = _find_workspace(other_label)
+    if other is not None and any(
+        _find_role_pane(other["workspace_id"], role)
+        for role in (LIBRARIAN_PANE_LABEL, RECRUITER_PANE_LABEL)
+    ):
+        sys.exit(
+            f"error: services are already up in workspace {other_label!r}; "
+            "run `just herdr-down` first to switch workspace modes"
+        )
+    existing = _find_workspace(workspace_label)
     if existing is None:
-        created = _herdr_json("workspace", "create", "--label", WORKSPACE_LABEL, "--no-focus")
+        created = _herdr_json("workspace", "create", "--label", workspace_label, "--no-focus")
         # Herdr returns nested objects (ResponseResult::WorkspaceCreated), not bare ids.
         workspace_id = _dig(created, "result", "workspace", "workspace_id")
         pane_id = _dig(created, "result", "root_pane", "pane_id")
@@ -372,9 +464,18 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
         return workspace_id, mine, True
 
     panes = _herdr_json("pane", "list", "--workspace", workspace_id).get("result", {}).get("panes", [])
-    anchor = next((p["pane_id"] for p in panes if isinstance(p, dict) and p.get("pane_id")), None)
+    # Prefer splitting beside the Recruiter pane so services stay together in one tab even when
+    # the unified workspace already holds run panes.
+    anchor = next(
+        (
+            p["pane_id"]
+            for p in panes
+            if isinstance(p, dict) and p.get("label") == RECRUITER_PANE_LABEL and p.get("pane_id")
+        ),
+        None,
+    ) or next((p["pane_id"] for p in panes if isinstance(p, dict) and p.get("pane_id")), None)
     if anchor is None:
-        sys.exit(f"error: shared-services workspace {workspace_id} has no pane to split from")
+        sys.exit(f"error: services workspace {workspace_id} has no pane to split from")
     new_pane = _dig(
         _herdr_json("pane", "split", anchor, "--direction", "down", "--no-focus"),
         "result",
@@ -383,6 +484,42 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
     )
     _herdr("pane", "rename", new_pane, role_label)
     return workspace_id, new_pane, True
+
+
+def _label_services_tab(workspace_id: str, pane_id: str) -> None:
+    """Best-effort: label the tab holding the services panes `services`, so the unified-workspace
+    sidebar reads services / control / workers / oversight. Skips the rename when the tab also
+    holds non-service panes (e.g. a tui-agent, when bring-up ran in an unusual order).
+    Presentation-only — a failure warns and never breaks bring-up."""
+    try:
+        cp = _herdr("pane", "list", "--workspace", workspace_id, check=False)
+        panes = (
+            json.loads(cp.stdout).get("result", {}).get("panes", [])
+            if cp.returncode == 0
+            else []
+        )
+        tab_id = next(
+            (
+                p.get("tab_id")
+                for p in panes
+                if isinstance(p, dict) and p.get("pane_id") == pane_id
+            ),
+            None,
+        )
+        if not isinstance(tab_id, str) or not tab_id:
+            return
+        service_labels = (LIBRARIAN_PANE_LABEL, RECRUITER_PANE_LABEL)
+        foreign = [
+            p
+            for p in panes
+            if isinstance(p, dict)
+            and p.get("tab_id") == tab_id
+            and p.get("label") not in (*service_labels, None, "")
+        ]
+        if not foreign:
+            _herdr("tab", "rename", tab_id, SERVICES_TAB_LABEL, check=False)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"specialist-hub: could not label the services tab: {e}\n")
 
 
 # --- specialist briefing ------------------------------------------------------
@@ -478,11 +615,17 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
     write_index(cfg)
     paths(cfg)["consults"].mkdir(parents=True, exist_ok=True)
 
-    # Reuse the shared workspace + my own librarian pane if they already exist (idempotent), and
-    # NEVER create a duplicate shared-services workspace or claim the Recruiter's pane.
-    workspace, librarian, reused = _ensure_role_pane(LIBRARIAN_PANE_LABEL)
+    # Reuse the services workspace + my own librarian pane if they already exist (idempotent), and
+    # NEVER create a duplicate services workspace or claim the Recruiter's pane.
+    separate = bool(getattr(args, "separate_workspaces", False))
+    workspace_label = SEPARATE_WORKSPACE_LABEL if separate else UNIFIED_WORKSPACE_LABEL
+    workspace, librarian, reused = _ensure_role_pane(LIBRARIAN_PANE_LABEL, workspace_label)
+    if not separate:
+        _label_services_tab(workspace, librarian)
     state = {
         "workspace": workspace,
+        "workspace_label": workspace_label,
+        "separate_workspaces": separate,
         "librarian_pane": librarian,
         "repo_root": str(cfg["repo_root"]),
     }
@@ -510,7 +653,7 @@ def cmd_down(cfg: dict, args: argparse.Namespace) -> None:
     _require_herdr()
     # Close ONLY the librarian pane (found by label), never the shared workspace — the Recruiter
     # may still own its own pane there. Prefer the live label lookup over stale state.
-    ws = _find_shared_services()
+    ws = _find_services_workspace()
     pane = _find_role_pane(ws["workspace_id"], LIBRARIAN_PANE_LABEL) if ws else None
     if pane:
         _herdr("pane", "close", pane, check=False)
@@ -522,16 +665,63 @@ def cmd_down(cfg: dict, args: argparse.Namespace) -> None:
         state_path.unlink()
 
 
+def _roster_summary(index: dict) -> str:
+    """`N specialist(s) (K kit-base + M this-repo)` — the merged-roster shape at a glance."""
+    base = sum(1 for e in index.values() if isinstance(e, dict) and e.get("origin") == "kit-base")
+    repo = sum(1 for e in index.values() if isinstance(e, dict) and e.get("origin") == "this-repo")
+    detail = f" ({base} kit-base + {repo} this-repo)" if base and repo else ""
+    return f"{len(index)} specialist(s){detail}"
+
+
 def cmd_status(cfg: dict, args: argparse.Namespace) -> None:
     _require_herdr()
     index = read_index(cfg)
-    ws = _find_shared_services()
+    ws = _find_services_workspace()
     if ws is None:
-        print(f"librarian: NOT UP (no shared-services workspace) | roster: {len(index)} specialist(s)")
+        print(f"librarian: NOT UP (no services workspace) | roster: {_roster_summary(index)}")
         return
     pane = _find_role_pane(ws["workspace_id"], LIBRARIAN_PANE_LABEL)
     state = f"alive (pane {pane})" if pane else "DOWN (no librarian pane)"
-    print(f"librarian: {state} in workspace {ws['workspace_id']} | roster: {len(index)} specialist(s)")
+    print(f"librarian: {state} in workspace {ws['workspace_id']} | roster: {_roster_summary(index)}")
+
+
+def cmd_roster(cfg: dict, args: argparse.Namespace) -> None:
+    """Print the merged roster. Default: a paste-ready stage-brief block (the phone book) that a
+    phase leader embeds VERBATIM in every worker's instructions.md; --json: the raw merged index."""
+    index = _build_index(cfg)
+    if getattr(args, "json", False):
+        print(json.dumps(index, indent=2))
+        return
+    consults_dir = paths(cfg)["consults"]
+    lines = [
+        "## Repo specialists — consult before deciding (MANDATORY where a specialist owns the area)",
+        "",
+        "Conventions are asked, never guessed. Before deciding anything in an area listed below,",
+        "consult its specialist through the Librarian. Record every consult in your result.json",
+        "`consults` list (empty list when none applied); a skipped mandated consult is a blocking",
+        "audit finding.",
+        "",
+    ]
+    for name, entry in index.items():
+        origin = " (this repo)" if entry.get("origin") == "this-repo" else ""
+        # The block rides inside EVERY stage brief: one line per specialist, hard-capped, so a
+        # roster whose descriptions are whole agent preambles cannot bloat the briefs.
+        description = str(entry.get("description") or "(no description)").strip().split("\n")[0]
+        if len(description) > 220:
+            description = description[:217].rstrip() + "..."
+        lines.append(f"- **{name}**{origin} — {description}")
+    lines += [
+        "",
+        "How to consult (files + signal; NEVER paste a question into any pane):",
+        f"1. Write {consults_dir}/<consult-id>.json with:",
+        '   {"consult_id": "<unique-id>", "specialist": "<name above>",',
+        '    "question": "<one specific question>", "answer_path": "<absolute path for answer.json>"}',
+        "2. Run `just specialist-hub consult <that consult.json>` and wait (bounded) for the",
+        "   sentinel `CONSULT <id> DONE` — emitted even on failure, after a failure answer.json.",
+        "3. Read answer_path: a success answer carries file:line citations; a failure carries `error`.",
+        "4. Record {consult_id, specialist, answer_path} under `consults` in your result.json.",
+    ]
+    print("\n".join(lines))
 
 
 class ConsultFailure(RuntimeError):
@@ -666,10 +856,19 @@ def _read_state(cfg: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("up")
+    up = sub.add_parser("up")
+    up.add_argument(
+        "--separate-workspaces",
+        action="store_true",
+        help="keep services in their own `shared-services` workspace instead of the unified `herdr` one",
+    )
     sub.add_parser("down")
     sub.add_parser("status")
     sub.add_parser("reindex")
+    roster = sub.add_parser(
+        "roster", help="print the merged roster as a paste-ready stage-brief block"
+    )
+    roster.add_argument("--json", action="store_true", help="print the raw merged index as JSON")
     sub.add_parser("runtime-dir", help="print the configured Specialist Hub runtime directory")
     con = sub.add_parser("consult")
     con.add_argument("consult_path", help="path to the consult.json to answer")
@@ -687,6 +886,7 @@ def main() -> None:
         "down": cmd_down,
         "status": cmd_status,
         "reindex": lambda c, a: write_index(c),
+        "roster": cmd_roster,
         "runtime-dir": lambda c, a: print(c["runtime_dir"]),
     }
     handlers[args.cmd](cfg, args)

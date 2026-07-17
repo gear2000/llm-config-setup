@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """UpAgent Recruiter — the always-up broker that hires a fresh worker per work order.
 
-The Recruiter has a status pane in the `shared-services` Herdr workspace. Any requester places
-an order directly through the durable CLI lifecycle:
+The Recruiter has a status pane in the services workspace — the unified `herdr` workspace by
+default (services and every run's tabs share it), or a dedicated `shared-services` workspace
+with `up --separate-workspaces`. Any requester places an order directly through the durable
+CLI lifecycle:
 
     just upagent-request <path/to/order.json>
     just upagent-await <path/to/order.json>
@@ -95,7 +97,11 @@ sys.modules[_management_spec.name] = llm_management
 _management_spec.loader.exec_module(llm_management)
 ManagementConfigError = llm_management.ManagementConfigError
 
+# Single-workspace default: services (and every run's tabs) share one `herdr` workspace.
+# `up --separate-workspaces` restores the dedicated `shared-services` workspace.
+UNIFIED_WORKSPACE_LABEL = "herdr"
 SHARED_SERVICES_WORKSPACE = "shared-services"
+SERVICES_TAB_LABEL = "services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
 LEASE_GRACE_SECONDS = 60
 COMPLETION_MONITOR_POLL_SECONDS = 0.05
@@ -129,7 +135,7 @@ WATCHDOG_PANE_FRACTION = 0.28
 SUPPORT_PANE_FRACTION = 0.20
 LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
 WATCHDOG_CONTINUATION_TIMEOUT_MS = 120_000
-COCKPIT_TAB_ROLES = frozenset(("workers", "oversight"))
+COCKPIT_TAB_ROLES = frozenset(("workers", "oversight", "services", "control"))
 COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 
 
@@ -3723,30 +3729,63 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     return result_code
 
 
-def _find_shared_services(workspaces_resp: dict) -> dict | None:
-    """The shared-services WorkspaceInfo from a `workspace list` response, or None."""
+def _find_workspace(workspaces_resp: dict, label: str) -> dict | None:
+    """The WorkspaceInfo labeled `label` from a `workspace list` response, or None."""
     for w in workspaces_resp.get("result", {}).get("workspaces", []):
-        if w.get("label") == SHARED_SERVICES_WORKSPACE:
+        if w.get("label") == label:
             return w
     return None
 
 
+def _find_services_workspace(workspaces_resp: dict) -> dict | None:
+    """The live services workspace under either mode's label, preferring the unified default."""
+    for label in (UNIFIED_WORKSPACE_LABEL, SHARED_SERVICES_WORKSPACE):
+        found = _find_workspace(workspaces_resp, label)
+        if found is not None:
+            return found
+    return None
+
+
 RECRUITER_PANE_LABEL = "recruiter"
+LIBRARIAN_PANE_LABEL = "librarian"
 
 
-def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
-    """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the single shared
-    `shared-services` workspace, claiming ONLY a pane labeled `role_label` — never an arbitrary
+def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, bool]:
+    """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the single services
+    workspace (`workspace_label`), claiming ONLY a pane labeled `role_label` — never an arbitrary
     pane. This lets the Recruiter and the Librarian share one workspace without fighting over each
     other's panes, regardless of which engine started first:
-      - create the shared-services workspace if it is absent, and label its root pane for my role;
+      - if services are already up under the OTHER mode's label, fail loud (run `just herdr-down`
+        first) rather than splitting the services across two workspaces;
+      - create the services workspace if it is absent, and label its root pane for my role;
       - if it exists, reuse my role-labeled pane if present, else split a fresh pane off an
         existing one and label it for my role.
     """
-    existing = _find_shared_services(_herdr_json("workspace", "list"))
+    other_label = (
+        SHARED_SERVICES_WORKSPACE
+        if workspace_label == UNIFIED_WORKSPACE_LABEL
+        else UNIFIED_WORKSPACE_LABEL
+    )
+    other = _find_workspace(_herdr_json("workspace", "list"), other_label)
+    if other is not None and isinstance(other.get("workspace_id"), str):
+        other_panes = (
+            _herdr_json("pane", "list", "--workspace", other["workspace_id"])
+            .get("result", {})
+            .get("panes", [])
+        )
+        if any(
+            p.get("label") in (RECRUITER_PANE_LABEL, LIBRARIAN_PANE_LABEL)
+            for p in other_panes
+            if isinstance(p, dict)
+        ):
+            raise RecruiterError(
+                f"services are already up in workspace {other_label!r}; "
+                "run `just herdr-down` first to switch workspace modes"
+            )
+    existing = _find_workspace(_herdr_json("workspace", "list"), workspace_label)
     if existing is None:
         created = _herdr_json(
-            "workspace", "create", "--label", SHARED_SERVICES_WORKSPACE, "--no-focus"
+            "workspace", "create", "--label", workspace_label, "--no-focus"
         )["result"]
         workspace_id = created["workspace"]["workspace_id"]
         pane_id = created["root_pane"]["pane_id"]
@@ -3764,10 +3803,19 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
     )
     if mine is not None:
         return workspace_id, mine["pane_id"], True
-    anchor = next((p["pane_id"] for p in panes if p.get("pane_id")), None)
+    # Prefer splitting beside the sibling service pane so services stay together in one tab
+    # even when the unified workspace already holds run panes.
+    anchor = next(
+        (
+            p["pane_id"]
+            for p in panes
+            if p.get("label") == LIBRARIAN_PANE_LABEL and p.get("pane_id")
+        ),
+        None,
+    ) or next((p["pane_id"] for p in panes if p.get("pane_id")), None)
     if anchor is None:
         raise RecruiterError(
-            f"shared-services workspace {workspace_id} has no pane to split from"
+            f"services workspace {workspace_id} has no pane to split from"
         )
     new_pane = _herdr_json(
         "pane", "split", anchor, "--direction", "down", "--no-focus"
@@ -3776,18 +3824,38 @@ def _ensure_role_pane(role_label: str) -> tuple[str, str, bool]:
     return workspace_id, new_pane, True
 
 
-def cmd_up(roster_path: str) -> int:
-    """Ensure the shared-services workspace + an armed Recruiter pane. Idempotent.
+def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
+    """Ensure the services workspace + an armed Recruiter pane. Idempotent.
 
-    The pane remains a visible status/compatibility surface; normal phase leaders request/await
-    directly through the CLI and durable ledger. A legacy ``recruit`` shell function remains for
-    manual use, but its output is never a completion contract. The resolved roster is baked into
-    that function. Persists workspace, pane, roster, and supervisor ownership to STATE_FILE.
+    Default is the unified `herdr` workspace (services and every run's tabs share it);
+    `--separate-workspaces` restores the dedicated `shared-services` workspace. The pane remains
+    a visible status/compatibility surface; normal phase leaders request/await directly through
+    the CLI and durable ledger. A legacy ``recruit`` shell function remains for manual use, but
+    its output is never a completion contract. The resolved roster is baked into that function.
+    Persists workspace, mode, pane, roster, and supervisor ownership to STATE_FILE.
     """
     # Validate the roster up front so a missing/bad roster fails loudly at bring-up, not silently
     # at the first hire (the armed recruit() bakes this path in).
     load_roster(roster_path)
-    workspace_id, recruiter_pane, reused = _ensure_role_pane(RECRUITER_PANE_LABEL)
+    workspace_label = (
+        SHARED_SERVICES_WORKSPACE if separate_workspaces else UNIFIED_WORKSPACE_LABEL
+    )
+    workspace_id, recruiter_pane, reused = _ensure_role_pane(
+        RECRUITER_PANE_LABEL, workspace_label
+    )
+    if not separate_workspaces:
+        # Presentation-only: keep the Recruiter in the `services` role tab (joined when present,
+        # created otherwise) so the unified-workspace sidebar reads services / control / workers
+        # / oversight. A placement failure warns and never fails bring-up.
+        try:
+            recruiter_pane = _place_started_agent_in_role_tab(
+                recruiter_pane,
+                workspace_id,
+                SERVICES_TAB_LABEL,
+                split_direction="down",
+            )
+        except RecruiterError as error:
+            _layout_warning("services", recruiter_pane, str(error))
 
     # Bake the resolved roster into the armed function so every hire uses the right roster.
     # shlex.quote every interpolated token so paths with spaces/metacharacters can't break arming.
@@ -3800,6 +3868,8 @@ def cmd_up(roster_path: str) -> int:
     supervisor_token = uuid.uuid4().hex
     state = {
         "workspace_id": workspace_id,
+        "workspace_label": workspace_label,
+        "separate_workspaces": separate_workspaces,
         "recruiter_pane": recruiter_pane,
         "roster": roster_path,
         "supervisor_token": supervisor_token,
@@ -3843,8 +3913,9 @@ def cmd_down() -> int:
 
 
 def cmd_status() -> int:
-    up = _find_shared_services(_herdr_json("workspace", "list")) is not None
-    print(f"shared-services: {'up' if up else 'down'}")
+    services = _find_services_workspace(_herdr_json("workspace", "list"))
+    label = services.get("label") if services else None
+    print(f"services: {'up (' + str(label) + ')' if services else 'down'}")
     if STATE_FILE.is_file():
         print(STATE_FILE.read_text())
     return 0
@@ -3908,7 +3979,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("key", help=argparse.SUPPRESS)
     p_supervise = sub.add_parser("supervise", help=argparse.SUPPRESS)
     p_supervise.add_argument("token", help=argparse.SUPPRESS)
-    sub.add_parser("up", help="ensure the shared-services workspace")
+    p_up = sub.add_parser("up", help="ensure the services workspace")
+    p_up.add_argument(
+        "--separate-workspaces",
+        action="store_true",
+        help="keep services in their own `shared-services` workspace instead of the unified `herdr` one",
+    )
     sub.add_parser("down", help="stop the Recruiter and reconcile every owned worker")
     p_reconcile = sub.add_parser(
         "reconcile", help="reconcile dead or expired owned workers"
@@ -3956,7 +4032,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "supervise":
             return cmd_supervise(args.token)
         if args.command == "up":
-            return cmd_up(args.roster)
+            return cmd_up(args.roster, separate_workspaces=args.separate_workspaces)
         if args.command == "down":
             return cmd_down()
         if args.command == "reconcile":

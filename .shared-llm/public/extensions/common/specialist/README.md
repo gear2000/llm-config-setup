@@ -13,14 +13,21 @@ CLI (which drives a running Herdr over its unix socket).
 ## Topology
 
 ```
-Herdr session
-└── ws: shared-services            always up · plan-agnostic
+Herdr session (default: single workspace)
+└── ws: herdr                      one workspace for services AND runs
+    ├── tab: services              ├── recruiter · └── librarian
+    └── (runs add control/workers/oversight tabs here)
+
+Herdr session (with `up --separate-workspaces`)
+└── ws: shared-services            services-only workspace · plan-agnostic
     ├── librarian                  owns only specialist routing
-    └── recruiter                 owns every specialist worker lifecycle
+    └── recruiter                  owns every specialist worker lifecycle
 ```
 
-The Librarian holds the routing map built from `agents.yaml`
-(`name -> {description, location, harness, model, agent, effort}`). Each specialist is an ordinary
+The Librarian holds the routing map built from the **merged rosters** — the kit's base
+`agents.yaml` beside the engine plus the destination-owned `this_repo` overlay, same-named
+overlay entries clobbering base ones
+(`name -> {description, location, harness, model, agent, effort, origin}`). Each specialist is an ordinary
 UpAgent request with its own Dedicated Account Manager, verified startup, lease, timeout policy,
 and cleanup — the consult order pins `management.mode: dedicated`, so consults always get that
 broker even though the roster default is the direct Python lifecycle. The Librarian never starts
@@ -64,10 +71,11 @@ non-empty `error` string (and needs no citations), mirroring the Recruiter's `bl
 
 | Command | What it does |
 |---|---|
-| `up` | Create/attach the `shared-services` workspace + Librarian pane; write `index.json`; arm the `consult` dispatch. Idempotent — re-running while up just re-arms the pane. |
+| `up [--separate-workspaces]` | Create/attach the services workspace (unified `herdr` by default; `shared-services` with the flag) + Librarian pane; write `index.json`; arm the `consult` dispatch. Idempotent — re-running while up just re-arms the pane. |
 | `down` | Close the Librarian pane, remove runtime state. |
-| `status` | Librarian pane health + roster size. |
-| `reindex` | Rebuild `index.json` from `agents.yaml`. |
+| `status` | Librarian pane health + merged roster size (kit-base vs this-repo counts). |
+| `reindex` | Rebuild `index.json` from the merged rosters. |
+| `roster [--json]` | Print the merged roster as a paste-ready stage-brief block — the "phone book" a phase leader embeds VERBATIM in every worker's `instructions.md` (names, descriptions, exact consult mechanics). `--json` prints the raw merged index. |
 | `consult <consult.json>` | Route one question through a managed UpAgent specialist, validate its answer, and signal done. |
 
 Runtime files live in one directory (default `/tmp/.herdr-specialist`): `state.json` (workspace
@@ -80,13 +88,12 @@ Runtime files live in one directory (default `/tmp/.herdr-specialist`): `state.j
    `.shared-llm/public/extensions/common/specialist/`. Do not edit it there; it is regenerated.
 2. Import the module justfile from your root justfile:
    `import '.shared-llm/public/extensions/common/specialist/justfile'`
-3. Fill the roster and list your specialists. This filled roster is **yours** — the kit ships
-   only the generic template. `hub.py` resolves it in this order:
-   1. `$SPECIALIST_HUB_CONFIG`, if set (explicit override);
-   2. else the repo-owned `this_repo` roster it walks up from cwd to find:
-      `.shared-llm/this_repo/extensions/common/specialist/agents.yaml` — put your copy here for
-      zero-config discovery;
-   3. else `agents.yaml` beside the engine (the kit's own adoption).
+3. The kit ships a live **base roster** (`agents.yaml` beside the engine — generic public
+   roles on public model aliases) that always loads. Add your own specialists in the
+   repo-owned overlay `.shared-llm/this_repo/extensions/common/specialist/agents.yaml`
+   (template: `agents.yml.sample`): `hub.py` merges base ∪ overlay, and a same-named overlay
+   entry **clobbers** the base one — so both rosters are available for runs and yours wins on
+   conflict. `$SPECIALIST_HUB_CONFIG` remains a single-file override that skips the merge.
 4. Every new specialist should have explicit `harness`, `model`, `agent`, and optional `effort`.
    Executable commands live only in the UpAgent roster. `hub.py` still normalizes retired
    direct-Claude `cmd` entries in memory so older destination-owned rosters can boot; migrate

@@ -5,11 +5,13 @@
 #   .shared-llm/public/extensions/common/specialist/
 # To adopt: import this justfile from your root justfile:
 #   import '.shared-llm/public/extensions/common/specialist/justfile'
-# then fill the roster — save agents.yml.sample as agents.yaml (in your `this_repo` config,
-# next to hub.py) and edit it. Override the roster path with $SPECIALIST_HUB_CONFIG.
+# The kit's base agents.yaml (next to hub.py) works as-is; add repo-owned specialists in
+# .shared-llm/this_repo/extensions/common/specialist/agents.yaml — it merges ON TOP of the
+# base (same-named entries clobber base ones). $SPECIALIST_HUB_CONFIG is a single-file
+# override that skips the merge.
 #
 # Requires HERDR_ENV=1 (run inside Herdr) and the `herdr` CLI on PATH.
 
-# Librarian: up | down | status | reindex | consult <consult.json>
+# Librarian: up [--separate-workspaces] | down | status | reindex | roster [--json] | consult <consult.json>
 specialist-hub *ARGS:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/specialist/hub.py {{ARGS}}

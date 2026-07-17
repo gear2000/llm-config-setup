@@ -25,12 +25,15 @@ _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagen
 _SPECIALIST := justfile_directory() + "/.shared-llm/public/extensions/common/specialist/hub.py"
 _PLAN_CONTROLLER := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/plan_controller.py"
 
-# Bring up the always-up shared services (UpAgent Recruiter + Specialist Librarian,
-# each in its own role-labeled pane in the `shared-services` workspace, registered
-# in Herdr's agents sidebar), then print the status table so you can SEE it is up.
-herdr-up:
-    ${PYTHON_BIN:-python3} {{_UPAGENT}} up
-    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} up
+# Bring up the always-up shared services (UpAgent Recruiter + Specialist Librarian, each in
+# its own role-labeled pane, registered in Herdr's agents sidebar), then print the status
+# table so you can SEE it is up. By default everything shares ONE `herdr` workspace — the
+# services live in a `services` tab and each run adds control/workers/oversight tabs beside
+# it. Pass `--separate-workspaces` to restore the dedicated `shared-services` workspace plus
+# a per-run `<slug>` workspace (runs started later inherit whichever mode was chosen here).
+herdr-up *FLAGS:
+    ${PYTHON_BIN:-python3} {{_UPAGENT}} up {{FLAGS}}
+    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} up {{FLAGS}}
     @{{just_executable()}} --justfile "{{justfile()}}" herdr-status
 
 # Status of the shared services as a table with ✓ up (green) / ✗ down (red).
@@ -103,13 +106,19 @@ herdr-down:
 # / pi --approve) — it trusts its cwd and never blocks on a trust/permission dialog
 # — and the harness self-registers as a Herdr agent (name `tui-agent`), so it shows
 # up in the agents sidebar and in Herdr's remote/phone agent list for you to watch
-# and drive on the move.
+# and drive on the move. A Claude Code TUI ADDITIONALLY always starts with Claude's
+# own Remote Control (`--remote-control=<slug>`), so the session appears in the
+# claude.ai phone list under the run's name.
+#
+# The TUI joins the unified `herdr` workspace as a `control` tab by default; it
+# inherits `--separate-workspaces` (per-run `<slug>` workspace) when `herdr-up`
+# chose that mode, or when passed here explicitly.
 #
 #   just herdr-plan ops/work-log/2026-07-12/my-feature
 #   just herdr-plan ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
 #   just herdr-plan ops/work-log/2026-07-12/my-feature "" pi
-herdr-plan dir slug="" harness="claude":
-    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}"
+herdr-plan dir slug="" harness="claude" *FLAGS="":
+    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}" {{FLAGS}}
 
 # Publish the plan's durable terminal fact after run-status.md is complete. It is the run's
 # only terminal authority (and lets any in-flight legacy watchdog retire safely).

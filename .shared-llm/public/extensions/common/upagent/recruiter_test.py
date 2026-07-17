@@ -2946,3 +2946,86 @@ def test_await_any_rejects_duplicates_bad_cursor_and_unsubmitted(
         recruiter.cmd_await_any([str(order_path)], timeout_ms=50, cursor_json="[1]")
     with pytest.raises(recruiter.RecruiterError, match="at least one"):
         recruiter.cmd_await_any([], timeout_ms=50)
+
+
+def test_ensure_role_pane_defaults_to_the_unified_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh bring-up creates the `herdr` workspace and claims its root pane for the role."""
+
+    def fake_herdr_json(*args: str, **_: object) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {"result": {"workspaces": []}}
+        if args[:2] == ("workspace", "create"):
+            assert args[args.index("--label") + 1] == recruiter.UNIFIED_WORKSPACE_LABEL
+            return {
+                "result": {
+                    "workspace": {"workspace_id": "ws-herdr"},
+                    "root_pane": {"pane_id": "pane-1"},
+                }
+            }
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    renames: list[tuple[str, ...]] = []
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+    monkeypatch.setattr(recruiter, "_herdr", lambda *a: renames.append(a))
+
+    workspace, pane, reused = recruiter._ensure_role_pane(
+        recruiter.RECRUITER_PANE_LABEL, recruiter.UNIFIED_WORKSPACE_LABEL
+    )
+
+    assert (workspace, pane, reused) == ("ws-herdr", "pane-1", False)
+    assert ("pane", "rename", "pane-1", "recruiter") in renames
+
+
+def test_ensure_role_pane_rejects_switching_workspace_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Services already up under the other mode's label must fail loud, not split across two."""
+
+    def fake_herdr_json(*args: str, **_: object) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {
+                "result": {
+                    "workspaces": [
+                        {"label": "shared-services", "workspace_id": "ws-old"}
+                    ]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": "p1", "label": "recruiter"}]}}
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+
+    with pytest.raises(RecruiterError, match="herdr-down"):
+        recruiter._ensure_role_pane(
+            recruiter.RECRUITER_PANE_LABEL, recruiter.UNIFIED_WORKSPACE_LABEL
+        )
+
+
+def test_ensure_role_pane_separate_mode_reuses_shared_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--separate-workspaces keeps claiming the role pane in `shared-services` as before."""
+
+    def fake_herdr_json(*args: str, **_: object) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {
+                "result": {
+                    "workspaces": [
+                        {"label": "shared-services", "workspace_id": "ws-old"}
+                    ]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": "p1", "label": "recruiter"}]}}
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+
+    workspace, pane, reused = recruiter._ensure_role_pane(
+        recruiter.RECRUITER_PANE_LABEL, recruiter.SHARED_SERVICES_WORKSPACE
+    )
+
+    assert (workspace, pane, reused) == ("ws-old", "p1", True)
