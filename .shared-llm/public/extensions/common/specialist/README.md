@@ -27,11 +27,12 @@ Herdr session (with `up --separate-workspaces`)
 The Librarian holds the routing map built from the **merged rosters** — the kit's base
 `agents.yaml` beside the engine plus the destination-owned `this_repo` overlay, same-named
 overlay entries clobbering base ones
-(`name -> {description, location, harness, model, agent, effort, origin}`). Each specialist is an ordinary
-UpAgent request with its own Dedicated Account Manager, verified startup, lease, timeout policy,
-and cleanup — the consult order pins `management.mode: dedicated`, so consults always get that
-broker even though the roster default is the direct Python lifecycle. The Librarian never starts
-or closes an LLM pane.
+(`name -> {description, location, harness, model, agent, effort, origin}`). Each specialist is an
+ordinary UpAgent request on the roster's **default direct Python lifecycle** — verified startup
+(process/agent/cwd proof), lease, timeout policy, and cleanup, with no per-consult Account
+Manager pane (that historical broker duplicated the Python checks with an idle LLM session per
+question; a roster may still opt into `management.mode: dedicated` globally). The Librarian never
+starts or closes an LLM pane.
 
 ## Consult protocol (files + signal)
 
@@ -43,7 +44,7 @@ caller:     write  <runtime>/consults/<id>.json   { consult_id, specialist, ques
 caller:     invoke `specialist-hub consult <runtime>/consults/<id>.json`
 librarian:  validate + route the consult (unknown specialist ⇒ fail loud)
 librarian:  write a normal UpAgent order + cited-answer brief
-recruiter:  create manager → atomically start/verify specialist → monitor result/deadline
+recruiter:  atomically start/verify specialist (direct lifecycle) → monitor result/deadline
 specialist: write answer.json  { consult_id, answer, citations: ["file:line", ...] }
 librarian:  receive durable UpAgent receipt → validate answer.json → print "CONSULT <id> DONE"
 caller:     read answer.json

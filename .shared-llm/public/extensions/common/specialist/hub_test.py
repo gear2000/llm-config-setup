@@ -35,10 +35,11 @@ def _write_roster(path: Path, runtime_dir: Path, repo_root: Path | None = None) 
     )
 
 
-def test_consult_orders_pin_a_dedicated_manager(
+def test_consult_orders_follow_the_roster_default_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every consult gets a broker regardless of the roster's lifecycle default."""
+    """Consults are ordinary orders: no pinned per-consult manager — the deterministic Python
+    lifecycle already proves startup, so a babysitter pane per question is pure overhead."""
     repo_root = tmp_path / "repo"
     (repo_root / ".git").mkdir(parents=True)
     roster = repo_root / ".shared-llm/this_repo/extensions/common/specialist/agents.yaml"
@@ -68,7 +69,7 @@ def test_consult_orders_pin_a_dedicated_manager(
     )
 
     order = json.loads(order_path.read_text())
-    assert order["management"] == {"mode": "dedicated"}
+    assert "management" not in order
 
 
 def test_librarian_sidebar_label_names_the_consult_door(tmp_path: Path) -> None:

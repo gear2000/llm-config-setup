@@ -28,7 +28,7 @@ Consult protocol (files + signal, mirroring the UpAgent order/result pattern):
     caller:    write  consults/<id>.json   {consult_id, specialist, question, answer_path}
     caller:    invoke `specialist-hub consult <consults/<id>.json>` directly
     librarian: validate+route -> write an ordinary UpAgent order and cited-answer brief
-    recruiter: create manager -> atomically start/verify specialist -> monitor result/deadline
+    recruiter: atomically start/verify specialist (direct lifecycle) -> monitor result/deadline
     specialist: writes answer.json {consult_id, answer, citations:[file:line, ...]}
     librarian: receive durable receipt -> validate answer.json -> print "CONSULT <id> DONE"
 
@@ -600,10 +600,11 @@ def _specialist_order(
 ) -> tuple[Path, Path]:
     """Build an ordinary UpAgent order; the Librarian remains routing, never lifecycle.
 
-    The order pins `management.mode: dedicated` so every consult gets a broker: the
-    Recruiter hires a dedicated manager that validates the request, watches the
-    consultant actually come up, and speaks for it — even when the roster default
-    is the direct Python lifecycle.
+    Consults follow the roster's default lifecycle — the deterministic Python direct mode,
+    which already proves process/agent/cwd startup and monitors result/deadline. No
+    per-consult dedicated manager is pinned: that historical broker duplicated the Python
+    checks with an idle LLM pane per question. A roster that truly wants managers can still
+    opt in globally via its `management` configuration.
     """
     digest = hashlib.sha256(consult["consult_id"].encode()).hexdigest()[:24]
     order_path = paths(cfg)["consults"] / f"{consult['consult_id']}.order.json"
@@ -611,7 +612,6 @@ def _specialist_order(
     order = {
         "order_id": f"specialist-consult-{digest}",
         "request_id": f"specialist-{digest}",
-        "management": {"mode": "dedicated"},
         "requester": {
             "id": "specialist-librarian",
             "kind": "file-mailbox",
