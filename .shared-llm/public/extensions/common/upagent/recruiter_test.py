@@ -3099,3 +3099,205 @@ def test_recruit_pane_door_is_sealed() -> None:
     assert "just specialist-hub consult" in stub
     assert "return 2" in stub
     assert "recruiter.py" not in stub and ".py" not in stub  # nothing executable baked in
+
+
+def test_order_intake_repairs_aliases_and_rewrites_in_place(tmp_path: Path) -> None:
+    """A near-miss order (aliased fields, missing ids/result path) is normalized in place:
+    the canonical file is what every downstream reader sees; the raw submission and the
+    change record are preserved beside it."""
+    sloppy = {
+        "harness": "claude",
+        "agent": "backend",
+        "workdir": str(tmp_path),
+        "brief": str(tmp_path / "instructions.md"),
+        "pane": "w1:p1",
+        "stage": "stage-1",
+        "note_to_self": "should be dropped",
+    }
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(sloppy))
+
+    repaired = recruiter._load_order_forgivingly(str(order_path))
+
+    assert repaired["cwd"] == str(tmp_path)
+    assert repaired["instructions_path"] == str(tmp_path / "instructions.md")
+    assert repaired["cockpit_pane"] == "w1:p1"
+    assert repaired["stage_id"] == "stage-1-implementation"  # unambiguous prefix
+    assert repaired["order_id"].startswith("intake-")
+    assert repaired["result_path"].endswith("-result.json")
+    assert "note_to_self" not in repaired
+    # In-place rewrite: the file on disk is now the canonical order.
+    on_disk = json.loads(order_path.read_text())
+    assert on_disk == repaired
+    raw = json.loads((tmp_path / "order.json.raw-submitted.json").read_text())
+    assert raw["brief"] == str(tmp_path / "instructions.md")
+    stamp = json.loads((tmp_path / "order.json.intake.json").read_text())
+    assert stamp["mode"] == "mechanical-repair"
+    assert any("mapped field 'brief'" in c for c in stamp["changes"])
+    assert any("dropped unrecognized fields: note_to_self" in c for c in stamp["changes"])
+
+
+def test_order_intake_never_invents_execution_details(tmp_path: Path) -> None:
+    """Missing harness/agent/cwd/instructions/cockpit is refused with the fields named."""
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps({"harness": "claude", "agent": "backend"}))
+
+    with pytest.raises(RecruiterError) as refusal:
+        recruiter._load_order_forgivingly(str(order_path))
+
+    message = str(refusal.value)
+    assert "missing required fields" in message
+    assert "cwd" in message and "instructions_path" in message and "cockpit_pane" in message
+    assert "never invents" in message
+    # Nothing was rewritten on a refusal.
+    assert not (tmp_path / "order.json.intake.json").exists()
+
+
+def test_order_intake_refuses_non_json_helpfully(tmp_path: Path) -> None:
+    order_path = tmp_path / "order.json"
+    order_path.write_text("please hire someone to fix the tests")
+
+    with pytest.raises(RecruiterError, match="not a JSON object"):
+        recruiter._load_order_forgivingly(str(order_path))
+
+
+def test_valid_orders_bypass_the_intake_untouched(tmp_path: Path) -> None:
+    order = _order()
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+
+    loaded = recruiter._load_order_forgivingly(str(order_path))
+
+    assert loaded == order
+    assert not (tmp_path / "order.json.intake.json").exists()
+    assert not (tmp_path / "order.json.raw-submitted.json").exists()
+
+
+def test_repaired_consult_shaped_orders_still_face_the_token_door(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forgiveness does not bypass enforcement: a repaired order wearing the Librarian's
+    identity without the issued token is still refused."""
+    state_file = tmp_path / "recruiter-state.json"
+    state_file.write_text(json.dumps({"consult_token": "issued-token"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_file)
+    sloppy = {
+        "id": "specialist-consult-forged",
+        "harness": "claude",
+        "agent": "docs",
+        "workdir": str(tmp_path),
+        "brief": str(tmp_path / "b.md"),
+        "pane": "w1:p1",
+    }
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(sloppy))
+
+    with pytest.raises(RecruiterError, match="specialist-hub consult"):
+        recruiter.cmd_dispatch(str(order_path), str(tmp_path / "roster.yaml"))
+
+
+def test_order_intake_passes_through_direct_mode_execution_fields(tmp_path: Path) -> None:
+    """Repair must never rewrite intent: direct-mode IaC fields survive normalization."""
+    approval = {
+        "approved_by": "human",
+        "approved_at": "2026-07-18T00:00:00Z",
+        "nonce": "nonce-1",
+        "plan_sha256": "a" * 64,
+    }
+    plan_artifact = {"path": str(tmp_path / "plan.tfplan"), "sha256": "a" * 64}
+    sloppy = {
+        "order_id": "iac-step-1",
+        "phase_id": "plan-x",
+        "plan_id": "plan-x",
+        "step_id": "step-1",
+        "mode": "direct",
+        "operation": "apply",
+        "requires_apply": True,
+        "approval": approval,
+        "plan_artifact": plan_artifact,
+        "manager_placement": {"mode": "requester"},
+        "harness": "claude",
+        "agent": "terraform",
+        "workdir": str(tmp_path),
+        "brief": str(tmp_path / "instructions.md"),
+        "pane": "w1:p1",
+        "stage": "stage-5-finalization",
+        "result_path": str(tmp_path / "r.json"),
+    }
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(sloppy))
+
+    repaired = recruiter._load_order_forgivingly(str(order_path))
+
+    assert repaired["mode"] == "direct"
+    assert repaired["operation"] == "apply"
+    assert repaired["requires_apply"] is True
+    assert repaired["approval"] == approval
+    assert repaired["plan_artifact"] == plan_artifact
+    assert repaired["manager_placement"] == {"mode": "requester"}
+    assert repaired["plan_id"] == "plan-x"
+    assert repaired["step_id"] == "step-1"
+    # The passthrough set stays in lockstep with the contract: every field parse_order
+    # reads must survive repair (or repair would silently rewrite intent).
+    import re as _re
+
+    contract_source = (
+        Path(recruiter.__file__).with_name("contracts.py").read_text()
+    )
+    parse_order_body = contract_source.split("def parse_order", 1)[1].split(
+        "def load_order", 1
+    )[0]
+    recognized = set(_re.findall(r'order(?:\.get\(|\[)"([a-z_]+)"', parse_order_body))
+    passthrough = set(recruiter.ORDER_INTAKE_ALIASES) | {"step_id"}
+    assert recognized <= passthrough, (
+        f"contract fields missing from intake passthrough: {sorted(recognized - passthrough)}"
+    )
+
+
+def test_order_intake_regenerates_unsafe_order_ids_deterministically(
+    tmp_path: Path,
+) -> None:
+    sloppy = {
+        "id": "../../escape",
+        "harness": "claude",
+        "agent": "backend",
+        "workdir": str(tmp_path),
+        "brief": str(tmp_path / "b.md"),
+        "pane": "w1:p1",
+    }
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(sloppy))
+
+    repaired = recruiter._load_order_forgivingly(str(order_path))
+
+    assert repaired["order_id"].startswith("intake-")
+    assert "escape" not in repaired["order_id"]
+    assert "escape" not in repaired["result_path"]
+    assert repaired["result_path"].startswith(str(tmp_path))
+    # Deterministic: resubmitting identical raw bytes yields the identical id.
+    order_path2 = tmp_path / "order2.json"
+    order_path2.write_text(json.dumps(sloppy))
+    assert (
+        recruiter._load_order_forgivingly(str(order_path2))["order_id"]
+        == repaired["order_id"]
+    )
+
+
+def test_unsafe_consult_prefixed_order_ids_are_refused_not_laundered(
+    tmp_path: Path,
+) -> None:
+    """Regenerating an unsafe consult-shaped id would strip the marker the token door keys
+    on; the intake refuses instead of reinterpreting."""
+    sloppy = {
+        "id": "specialist-consult-../x",
+        "harness": "claude",
+        "agent": "docs",
+        "workdir": str(tmp_path),
+        "brief": str(tmp_path / "b.md"),
+        "pane": "w1:p1",
+    }
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(sloppy))
+
+    with pytest.raises(RecruiterError, match="invalid order"):
+        recruiter._load_order_forgivingly(str(order_path))

@@ -33,6 +33,19 @@ vertical split. This bounded, best-effort resizing happens only after atomic age
 ownership recording, so an unavailable layout control warns without blocking the worker. Every
 pane is closed only by its fenced lease owner.
 
+## Forgiving order intake (short leash)
+
+The submission doors (`recruit`/`dispatch`/`request`) strict-parse first; a near-miss order
+is then mechanically repaired — field aliases mapped (`brief`→`instructions_path`,
+`workdir`→`cwd`, …), missing ids/phase/stage defaulted, a missing result destination
+derived beside the order, relative paths anchored — and the canonical order is rewritten
+**in place** so every downstream reader sees one file, with the raw submission preserved at
+`<order>.raw-submitted.json` and every change recorded at `<order>.intake.json`. Execution
+intent — harness, agent, cwd, instructions_path, cockpit_pane — is **never invented**:
+submissions missing those are refused with the fields named. Orders run code, so unlike
+the Specialist Hub's consult intake there is no LLM clerk here; the leash stays short.
+Repaired orders still face every submission check, including the consult-token door.
+
 Phase startup has its own deterministic front door:
 
 ```text

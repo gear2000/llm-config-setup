@@ -80,6 +80,7 @@ HERE = Path(__file__).resolve().parent
 # be caught by type). Path-imported like the sibling Recruiter imports its `contracts`.
 sys.path.insert(0, str(HERE))
 import contracts_consult as cc  # noqa: E402  (sibling module, path-imported)
+import intake  # noqa: E402  (sibling module, path-imported — the forgiving intake ladder)
 
 # Single-workspace default: services (and every run's tabs) share one `herdr` workspace.
 # `up --separate-workspaces` restores the dedicated services-only workspace.
@@ -94,6 +95,16 @@ RECRUITER_PANE_LABEL = "recruiter"
 DEFAULT_RUNTIME = "/tmp/.herdr-specialist"
 # How long the Librarian grants a managed specialist worker (ms).
 CONSULT_TIMEOUT_MS = 600_000
+# The intake clerk is a quick normalization pass, not research — a short lease keeps a
+# wedged clerk from stalling the refusal it exists to improve.
+INTAKE_TIMEOUT_MS = 300_000
+# Roster-overridable via a top-level `intake:` mapping in agents.yaml (overlay wins).
+DEFAULT_INTAKE_PROFILE = {
+    "harness": "claude",
+    "model": "sonnet",
+    "agent": "intake-clerk",
+    "effort": "low",
+}
 UPAGENT_RECRUITER = HERE.parent / "upagent" / "recruiter.py"
 
 
@@ -277,6 +288,16 @@ def load_config() -> dict:
             raise ConfigError(f"agent {a['name']!r} has unsupported harness {a['harness']!r}")
         if "effort" in a and (not isinstance(a["effort"], str) or not a["effort"]):
             raise ConfigError(f"agent {a['name']!r} effort must be a non-empty string")
+
+    intake_profile = cfg.get("intake")
+    if intake_profile is not None:
+        if not isinstance(intake_profile, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in intake_profile.items()
+        ):
+            raise ConfigError("`intake:` must be a mapping of string settings when present")
+        intake_harness = intake_profile.get("harness")
+        if intake_harness is not None and intake_harness not in ("claude", "codex", "pi", "cursor"):
+            raise ConfigError(f"intake harness {intake_harness!r} is unsupported")
 
     runtime_dir = _resolve_path(cfg.get("runtime_dir", DEFAULT_RUNTIME), cfg["repo_root"], "runtime_dir")
     cfg["runtime_dir"] = runtime_dir
@@ -552,7 +573,15 @@ def _report_librarian_idle(cfg: dict) -> None:
         state = _read_state(cfg)
     except ConsultFailure:
         return
-    served = len(list(paths(cfg)["consults"].glob("*.upagent-result.json")))
+    # Clerk hires write clerk-*.upagent-result.json; the tally counts real specialist
+    # consults only (mechanically repaired ones, prefixed intake-, still count).
+    served = len(
+        [
+            p
+            for p in paths(cfg)["consults"].glob("*.upagent-result.json")
+            if not p.name.startswith("clerk-")
+        ]
+    )
     _report_librarian_state(
         state["librarian_pane"],
         "idle",
@@ -788,6 +817,195 @@ class ConsultFailure(RuntimeError):
     emitted — the caller's bounded wait must never be left to hang."""
 
 
+def _persist_intake(
+    consults_dir: Path, raw_path: Path, consult: dict, mode: str, changes: list[str]
+) -> None:
+    """Write the normalized consult + the intake stamp beside the submission. The
+    interpretation is ALWAYS written down — forgiveness with a paper trail."""
+    consults_dir.mkdir(parents=True, exist_ok=True)
+    normalized_path = consults_dir / f"{consult['consult_id']}.normalized.json"
+    normalized_path.write_text(json.dumps(consult, indent=2, sort_keys=True) + "\n")
+    record = intake.intake_record(
+        mode=mode,
+        raw_path=str(raw_path),
+        normalized_path=str(normalized_path),
+        changes=changes,
+    )
+    (consults_dir / f"{consult['consult_id']}.intake.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n"
+    )
+    print(
+        f"intake: {mode} normalized {raw_path} -> {normalized_path} "
+        f"({len(changes)} change(s))",
+        flush=True,
+    )
+
+
+def _hire_intake_clerk(cfg: dict, raw_text: str) -> dict:
+    """One managed clerk hire through the same door as every consult — leased,
+    token-stamped, visible pane. Returns the strictly parsed clerk document. Raises on any
+    fault so the ladder degrades to a refusal instead of hanging."""
+    state = _read_state(cfg)
+    profile = {**DEFAULT_INTAKE_PROFILE, **(cfg.get("intake") or {})}
+    tag = intake.generate_clerk_tag()
+    consults = paths(cfg)["consults"]
+    consults.mkdir(parents=True, exist_ok=True)
+    prompt_file = consults / f"{tag}.prompt.txt"
+    output_path = consults / f"{tag}.clerk.json"
+    output_path.unlink(missing_ok=True)
+    prompt_file.write_text(
+        intake.clerk_brief(raw_text, _build_index(cfg), str(output_path))
+        + "\nAfter the JSON file is durable, satisfy the Recruiter delivery contract "
+        "appended to this brief and exit.\n"
+    )
+    order = {
+        "order_id": f"specialist-{tag}",
+        "request_id": f"specialist-{tag}",
+        "requester": {
+            "id": "specialist-librarian",
+            "kind": "file-mailbox",
+            "address": str(cfg["runtime_dir"] / "librarian-inbox"),
+        },
+        "phase_id": "specialist-intake",
+        "stage_id": "stage-5-finalization",
+        "harness": profile["harness"],
+        "model": str(profile.get("model", "")),
+        "agent": profile["agent"],
+        "effort": str(profile.get("effort", "low")),
+        "cwd": str(cfg["repo_root"]),
+        "instructions_path": str(prompt_file),
+        "result_path": str(consults / f"{tag}.upagent-result.json"),
+        "cockpit_pane": state["librarian_pane"],
+        "timeout_ms": INTAKE_TIMEOUT_MS,
+    }
+    token = _recruiter_consult_token()
+    if token is not None:
+        order["consult_token"] = token
+    order_path = consults / f"{tag}.order.json"
+    document = json.dumps(order, indent=2, sort_keys=True) + "\n"
+    temporary = order_path.with_name(f".{order_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(document)
+    os.replace(temporary, order_path)
+    _report_librarian_state(
+        state["librarian_pane"], "working", f"intake {tag}: normalizing a submission"
+    )
+    _dispatch_specialist(order_path, str(cfg["repo_root"]))
+    return intake.parse_clerk_output(output_path.read_text())
+
+
+def _refuse_intake(
+    raw_path: Path, strict_error: cc.ConsultError, clerk_error: str | None
+) -> None:
+    """Ladder step 4: refuse HELPFULLY — say what was understood, what is missing, and what
+    a valid consult looks like. Honors the always-signal contract: a failure answer lands at
+    the caller's answer_path when one was recoverable, else a refusal file beside the raw
+    submission; the DONE sentinel prints either way."""
+    message = (
+        f"intake refusal: could not understand {raw_path} as a consult. "
+        f"Strict parse said: {strict_error}. "
+        + (f"Intake clerk said: {clerk_error}. " if clerk_error else "")
+        + "A consult needs: consult_id, specialist (a phone-book name), question, and an "
+        "absolute answer_path. Submit one consult per specialist with "
+        "`just specialist-hub consult <consult.json>`."
+    )
+    recovered = _recover_consult_fields(str(raw_path))
+    if recovered is not None:
+        consult_id, answer_path = recovered
+        _write_failure_answer(answer_path, consult_id, message)
+    else:
+        consult_id = intake.generate_consult_id()
+        try:
+            raw_path.with_name(raw_path.name + ".refusal.json").write_text(
+                json.dumps(
+                    cc.failure_answer(consult_id, message), indent=2, sort_keys=True
+                )
+                + "\n"
+            )
+        except OSError as e:
+            sys.stderr.write(f"specialist-hub: could not write the refusal file: {e}\n")
+    sys.stderr.write(f"specialist-hub: {message}\n")
+    print(f"CONSULT {consult_id} DONE", flush=True)
+
+
+def _forgiving_intake(
+    consult_path: str, strict_error: cc.ConsultError
+) -> dict | None:
+    """Walk a failed submission down the intake ladder. Returns a valid consult dict to
+    continue with, or None after a refusal/failure was durably written and the DONE
+    sentinel printed — the caller's bounded wait resolves on every path."""
+    raw_path = Path(consult_path)
+    try:
+        raw_text = raw_path.read_text()
+    except OSError:
+        sys.exit(f"error: unrecoverable consult.json {consult_path}: {strict_error}")
+
+    cfg: dict | None
+    try:
+        cfg = load_config()
+    except (ConfigError, OSError) as e:
+        sys.stderr.write(f"specialist-hub: intake continues without a roster: {e}\n")
+        cfg = None
+
+    roster_names = [a["name"] for a in cfg["agents"]] if cfg is not None else []
+    consults_dir = paths(cfg)["consults"] if cfg is not None else raw_path.parent
+    clerk_error: str | None = None
+    intake_fault: str | None = None
+    try:
+        repaired = intake.mechanical_repair(
+            raw_text, roster_names=roster_names, consults_dir=consults_dir
+        )
+        if repaired is not None:
+            consult, changes = repaired
+            _persist_intake(consults_dir, raw_path, consult, "mechanical-repair", changes)
+            return consult
+
+        if cfg is not None:
+            try:
+                clerk = _hire_intake_clerk(cfg, raw_text)
+            except (
+                ConsultFailure,
+                ConfigError,
+                OSError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                ValueError,
+                KeyError,
+            ) as e:
+                sys.stderr.write(f"specialist-hub: intake clerk unavailable: {e}\n")
+                clerk = None
+            if clerk is not None and "consult" in clerk:
+                try:
+                    consult = cc.parse_consult(json.dumps(clerk["consult"]))
+                except cc.ConsultError as e:
+                    clerk_error = f"clerk produced an invalid consult: {e}"
+                else:
+                    changes = [
+                        "normalized by the intake clerk from a free-form submission"
+                    ]
+                    if not Path(str(consult["answer_path"])).is_absolute():
+                        consult["answer_path"] = str(
+                            consults_dir / str(consult["answer_path"])
+                        )
+                        changes.append(
+                            "anchored the clerk's relative answer_path at "
+                            f"{consult['answer_path']}"
+                        )
+                    _persist_intake(
+                        consults_dir, raw_path, consult, "intake-clerk", changes
+                    )
+                    return consult
+            elif clerk is not None:
+                clerk_error = clerk["error"]
+    except OSError as e:
+        # A failed intake WRITE (disk full, permissions) must degrade to a refusal —
+        # never escape past the always-signal contract and leave the caller hanging.
+        intake_fault = f"intake could not persist its interpretation: {e}"
+        sys.stderr.write(f"specialist-hub: {intake_fault}\n")
+
+    _refuse_intake(raw_path, strict_error, clerk_error or intake_fault)
+    return None
+
+
 def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
     """Best-effort (consult_id, answer_path) from a malformed consult.json, so the Librarian can
     still leave a failure answer + emit DONE instead of stranding the caller. Returns None if the
@@ -830,18 +1048,14 @@ def cmd_consult(args: argparse.Namespace) -> None:
     """
     _require_herdr()
 
-    # Load + validate the consult; if malformed, still honor the DONE contract when possible.
+    # Load + validate the consult; a near-miss walks the forgiving intake ladder
+    # (mechanical repair -> intake clerk -> helpful refusal) before anything is refused.
     try:
         consult = cc.load_consult(args.consult_path)
-    except cc.ConsultError as e:
-        recovered = _recover_consult_fields(args.consult_path)
-        if recovered is None:
-            sys.exit(f"error: unrecoverable consult.json {args.consult_path}: {e}")
-        consult_id, answer_path = recovered
-        _write_failure_answer(answer_path, consult_id, f"malformed consult.json: {e}")
-        sys.stderr.write(f"specialist-hub: consult {consult_id} failed: malformed consult.json: {e}\n")
-        print(f"CONSULT {consult_id} DONE", flush=True)
-        return
+    except cc.ConsultError as strict_error:
+        consult = _forgiving_intake(args.consult_path, strict_error)
+        if consult is None:
+            return  # the intake wrote its refusal/failure and printed the DONE sentinel
 
     consult_id = consult["consult_id"]
     cfg: dict | None = None

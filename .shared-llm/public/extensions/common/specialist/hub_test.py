@@ -562,3 +562,309 @@ def test_consult_flips_the_librarian_sidebar_working_then_idle(
     assert "consult-managed-1" in states[0][1]
     assert states[-1][0] == "idle"
     assert "consult(s) served" in states[-1][1]
+
+
+def test_mechanical_repair_maps_aliases_and_defaults_form_only(tmp_path: Path) -> None:
+    """Aliases and missing envelope fields are repaired deterministically; every change is
+    recorded for the intake stamp."""
+    repaired = hub.intake.mechanical_repair(
+        json.dumps({"agent": "docs", "ask": "where is composition documented?"}),
+        roster_names=["docs", "reviewer"],
+        consults_dir=tmp_path / "consults",
+    )
+
+    assert repaired is not None
+    consult, changes = repaired
+    assert consult["specialist"] == "docs"
+    assert consult["question"] == "where is composition documented?"
+    assert consult["consult_id"].startswith("intake-")
+    assert consult["answer_path"].endswith("-answer.json")
+    assert any("mapped field 'agent'" in c for c in changes)
+    assert any("generated consult_id" in c for c in changes)
+
+
+def test_mechanical_repair_resolves_agent_suffix_only_when_unambiguous(
+    tmp_path: Path,
+) -> None:
+    ok = hub.intake.mechanical_repair(
+        json.dumps({"specialist": "docs-agent", "question": "q"}),
+        roster_names=["docs", "reviewer"],
+        consults_dir=tmp_path,
+    )
+    assert ok is not None and ok[0]["specialist"] == "docs"
+
+    ambiguous = hub.intake.mechanical_repair(
+        json.dumps({"specialist": "docs", "question": "q"}),
+        roster_names=["Docs", "DOCS"],
+        consults_dir=tmp_path,
+    )
+    assert ambiguous is None  # two candidates — escalate, never guess
+
+
+def test_mechanical_repair_never_invents_intent(tmp_path: Path) -> None:
+    """A payload without a findable specialist+question cannot be repaired mechanically."""
+    assert (
+        hub.intake.mechanical_repair(
+            json.dumps({"consult_id": "x", "answer_path": "/tmp/a.json"}),
+            roster_names=["docs"],
+            consults_dir=tmp_path,
+        )
+        is None
+    )
+    assert (
+        hub.intake.mechanical_repair(
+            "Q1 -> please help with the layering system",  # prose, not JSON
+            roster_names=["docs"],
+            consults_dir=tmp_path,
+        )
+        is None
+    )
+
+
+def test_clerk_output_is_validated_strictly() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        hub.intake.parse_clerk_output(json.dumps({"consult": {}, "error": "both"}))
+    with pytest.raises(ValueError, match="exactly one"):
+        hub.intake.parse_clerk_output(json.dumps({"unrelated": 1}))
+    with pytest.raises(ValueError, match="non-empty"):
+        hub.intake.parse_clerk_output(json.dumps({"error": ""}))
+    assert hub.intake.parse_clerk_output(json.dumps({"error": "missing question"}))
+
+
+def _sloppy_intake_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict, Path]:
+    runtime_dir = tmp_path / "runtime"
+    cfg = {
+        "runtime_dir": runtime_dir,
+        "repo_root": tmp_path,
+        "agents": [
+            {"name": "docs", "harness": "claude", "model": "haiku", "agent": "docs"}
+        ],
+    }
+    monkeypatch.setattr(hub, "_require_herdr", lambda: None)
+    monkeypatch.setattr(hub, "load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hub,
+        "read_index",
+        lambda _cfg: {
+            "docs": {
+                "location": "",
+                "harness": "claude",
+                "model": "haiku",
+                "agent": "docs",
+                "effort": "low",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        hub,
+        "_read_state",
+        lambda _cfg: {"librarian_pane": "lib-pane", "repo_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(hub, "_herdr", lambda *a, **k: None)
+    return cfg, runtime_dir
+
+
+def test_sloppy_submission_is_repaired_and_walks_the_full_consult(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End to end: aliased fields, no id, no answer_path — the intake normalizes, persists
+    its interpretation, and the consult continues; the failure answer still lands at the
+    DEFAULTED answer path when the specialist never writes one."""
+    _cfg, runtime_dir = _sloppy_intake_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(hub, "_dispatch_specialist", lambda *a, **k: None)
+    sloppy = tmp_path / "sloppy.json"
+    sloppy.write_text(json.dumps({"agent": "docs", "ask": "where do skills compose?"}))
+
+    hub.cmd_consult(hub.argparse.Namespace(consult_path=str(sloppy)))
+
+    out = capsys.readouterr().out
+    assert "intake: mechanical-repair normalized" in out
+    consults = runtime_dir / "consults"
+    normalized = list(consults.glob("*.normalized.json"))
+    stamps = list(consults.glob("*.intake.json"))
+    assert len(normalized) == 1 and len(stamps) == 1
+    consult = json.loads(normalized[0].read_text())
+    assert consult["specialist"] == "docs"
+    stamp = json.loads(stamps[0].read_text())
+    assert stamp["mode"] == "mechanical-repair"
+    assert stamp["raw_path"] == str(sloppy)
+    # The always-answer contract held at the defaulted path (specialist wrote nothing).
+    answer = json.loads(Path(consult["answer_path"]).read_text())
+    assert answer["consult_id"] == consult["consult_id"]
+    assert "error" in answer
+    assert f"CONSULT {consult['consult_id']} DONE" in out
+
+
+def test_prose_submission_reaches_the_clerk_and_normalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _cfg, runtime_dir = _sloppy_intake_env(tmp_path, monkeypatch)
+    answer_path = tmp_path / "clerk-chosen-answer.json"
+
+    def fake_clerk(cfg: dict, raw_text: str) -> dict:
+        assert "skill composition" in raw_text
+        return {
+            "consult": {
+                "consult_id": "intake-clerk-1",
+                "specialist": "docs",
+                "question": "how does skill composition work?",
+                "answer_path": str(answer_path),
+            }
+        }
+
+    def fake_dispatch(order_path: Path, cwd: str) -> None:
+        answer_path.write_text(
+            json.dumps(
+                {
+                    "consult_id": "intake-clerk-1",
+                    "answer": "like this",
+                    "citations": ["src/a.py:1"],
+                }
+            )
+        )
+
+    monkeypatch.setattr(hub, "_hire_intake_clerk", fake_clerk)
+    monkeypatch.setattr(hub, "_dispatch_specialist", fake_dispatch)
+    prose = tmp_path / "prose.txt"
+    prose.write_text("CONSULT please: docs question about skill composition")
+
+    hub.cmd_consult(hub.argparse.Namespace(consult_path=str(prose)))
+
+    out = capsys.readouterr().out
+    assert "intake: intake-clerk normalized" in out
+    assert "CONSULT intake-clerk-1 DONE" in out
+    assert json.loads(answer_path.read_text())["answer"] == "like this"
+
+
+def test_clerk_error_becomes_a_helpful_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _cfg, _runtime = _sloppy_intake_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        hub,
+        "_hire_intake_clerk",
+        lambda cfg, raw: {
+            "error": "two specialists addressed; submit one consult per specialist",
+            "missing": [],
+        },
+    )
+    prose = tmp_path / "multi.txt"
+    prose.write_text("Q1 -> docs: ... Q2 -> reviewer: ...")
+
+    hub.cmd_consult(hub.argparse.Namespace(consult_path=str(prose)))
+
+    captured = capsys.readouterr()
+    assert "CONSULT intake-" in captured.out and "DONE" in captured.out
+    assert "two specialists addressed" in captured.err
+    refusal = json.loads((tmp_path / "multi.txt.refusal.json").read_text())
+    assert "one consult per specialist" in refusal["error"]
+    assert "specialist-hub consult" in refusal["error"]
+
+
+def test_unsafe_consult_id_is_regenerated_and_files_stay_inside_consults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A path-shaped ticket number must never become a path: the id is regenerated and every
+    intake artifact lands inside the consults directory."""
+    _cfg, runtime_dir = _sloppy_intake_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(hub, "_dispatch_specialist", lambda *a, **k: None)
+    sloppy = tmp_path / "sloppy.json"
+    sloppy.write_text(
+        json.dumps({"id": "../escape", "agent": "docs", "ask": "where do skills compose?"})
+    )
+
+    hub.cmd_consult(hub.argparse.Namespace(consult_path=str(sloppy)))
+
+    out = capsys.readouterr().out
+    assert "CONSULT intake-" in out and "DONE" in out
+    consults = runtime_dir / "consults"
+    normalized = list(consults.glob("*.normalized.json"))
+    assert len(normalized) == 1
+    consult = json.loads(normalized[0].read_text())
+    assert consult["consult_id"].startswith("intake-")
+    assert "escape" not in consult["consult_id"]
+    # Nothing escaped one level up.
+    assert not list(runtime_dir.glob("escape*"))
+    assert not list(tmp_path.glob("escape*"))
+    stamp = json.loads(next(iter(consults.glob("*.intake.json"))).read_text())
+    assert any("not filesystem-safe" in c for c in stamp["changes"])
+
+
+def test_intake_write_failure_degrades_to_refusal_with_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Disk-full/permission faults during persistence must end in a refusal + DONE, never a
+    traceback that strands the caller."""
+    _cfg, _runtime = _sloppy_intake_env(tmp_path, monkeypatch)
+
+    def broken_persist(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hub, "_persist_intake", broken_persist)
+    sloppy = tmp_path / "sloppy.json"
+    sloppy.write_text(json.dumps({"agent": "docs", "ask": "q"}))
+
+    hub.cmd_consult(hub.argparse.Namespace(consult_path=str(sloppy)))
+
+    captured = capsys.readouterr()
+    assert "DONE" in captured.out
+    assert "could not persist its interpretation" in captured.err
+    refusal = json.loads((tmp_path / "sloppy.json.refusal.json").read_text())
+    assert "disk full" in refusal["error"]
+
+
+def test_generated_consult_ids_are_deterministic_per_submission(tmp_path: Path) -> None:
+    """The same sloppy bytes always produce the same id, so a retry loop dedupes instead of
+    double-hiring."""
+    raw = json.dumps({"agent": "docs", "ask": "q"})
+    first = hub.intake.mechanical_repair(raw, roster_names=["docs"], consults_dir=tmp_path)
+    second = hub.intake.mechanical_repair(raw, roster_names=["docs"], consults_dir=tmp_path)
+    assert first is not None and second is not None
+    assert first[0]["consult_id"] == second[0]["consult_id"]
+
+
+def test_hire_intake_clerk_builds_a_token_stamped_leased_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real clerk hire: order shape, token stamp, short lease, strict output parse."""
+    runtime_dir = tmp_path / "runtime"
+    cfg = {
+        "runtime_dir": runtime_dir,
+        "repo_root": tmp_path,
+        "agents": [
+            {"name": "docs", "harness": "claude", "model": "haiku", "agent": "docs"}
+        ],
+    }
+    monkeypatch.setattr(
+        hub,
+        "_read_state",
+        lambda _cfg: {"librarian_pane": "lib-pane", "repo_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(hub, "_recruiter_consult_token", lambda: "issued-token")
+    monkeypatch.setattr(hub, "_herdr", lambda *a, **k: None)
+    dispatched: list[Path] = []
+
+    def fake_dispatch(order_path: Path, cwd: str) -> None:
+        dispatched.append(Path(order_path))
+        order = json.loads(Path(order_path).read_text())
+        tag = order["order_id"].removeprefix("specialist-")
+        (runtime_dir / "consults" / f"{tag}.clerk.json").write_text(
+            json.dumps({"error": "no question found"})
+        )
+
+    monkeypatch.setattr(hub, "_dispatch_specialist", fake_dispatch)
+
+    clerk = hub._hire_intake_clerk(cfg, "free-form text with no question")
+
+    assert clerk == {"error": "no question found"}
+    order = json.loads(dispatched[0].read_text())
+    assert order["consult_token"] == "issued-token"
+    assert order["timeout_ms"] == hub.INTAKE_TIMEOUT_MS
+    assert order["stage_id"] == "stage-5-finalization"
+    assert order["requester"]["id"] == "specialist-librarian"
+    assert order["agent"] == "intake-clerk"
+    prompt = (runtime_dir / "consults" / f"{order['order_id'].removeprefix('specialist-')}.prompt.txt").read_text()
+    assert "NEVER invent the question" in prompt
+    assert order["order_id"].startswith("specialist-clerk-")

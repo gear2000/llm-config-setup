@@ -13,6 +13,15 @@
 # Models here are public Claude aliases so every entry launches anywhere Claude Code is
 # installed; override per name when your repo routes differently.
 
+# The intake clerk profile: the LLM the forgiving intake hires (through the Recruiter, same
+# door as any consult) to normalize prose or unfixable submissions into a valid consult.
+# Overlay rosters may replace this whole mapping; omit it to keep these defaults.
+intake:
+  harness: claude
+  model: sonnet
+  agent: intake-clerk
+  effort: low
+
 agents:
   - name: backend
     location: .claude/agents/backend.md

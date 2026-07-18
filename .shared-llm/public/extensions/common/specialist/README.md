@@ -78,6 +78,35 @@ answer. A **success** answer needs a **non-empty `citations` list of `file:line`
 specialist answer with no sources is a contract violation; a **failure** answer instead carries a
 non-empty `error` string (and needs no citations), mirroring the Recruiter's `blocked` result.
 
+## Forgiving intake
+
+A submission is strict-parsed first, but a near-miss walks an intake ladder instead of
+bouncing off the door (Postel's law — liberal in what the hub accepts, conservative in
+what executes):
+
+1. **Mechanical repair** — deterministic Python, no LLM: field aliases mapped
+   (`agent`→`specialist`, `ask`→`question`, …), a missing `consult_id` generated, a missing
+   or relative `answer_path` defaulted/anchored, an unambiguous specialist-name variant
+   resolved against the merged roster.
+2. **Intake clerk** — for prose or unfixable payloads, an LLM hired through the Recruiter
+   like any consult (profile from the roster's optional top-level `intake:` mapping;
+   default claude/sonnet/low, agent `intake-clerk`) converts the payload into a valid
+   consult — or reports what is missing. Its output is validated as strictly as any
+   caller's.
+3. **Helpful refusal** — when intent cannot be established: the refusal names what was
+   understood, what is missing, and the valid shape; a failure answer still lands at the
+   caller's answer path when one was recoverable, and the `CONSULT <id> DONE` sentinel
+   prints on every path.
+
+Two invariants keep forgiveness safe: the interpretation is **always written down**
+(`<id>.normalized.json` + `<id>.intake.json` in the consults directory, for the caller and
+the Stage 2 audit — an interpretation that cannot be persisted is refused, not executed),
+and the intake guesses **form, never intent** — ids and paths may be generated (ids are
+charset-checked and derived from the submission bytes so retries dedupe); the specialist
+and the question may only be found, or the ladder refuses.
+Forgiveness is a safety net, not an advertised API: the phone book keeps teaching the
+strict format.
+
 ## Commands
 
 `just specialist-hub <cmd>` (imports `hub.py`):

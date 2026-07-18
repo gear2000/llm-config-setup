@@ -44,6 +44,7 @@ from contextlib import contextmanager, suppress
 import errno
 import fcntl
 import hashlib
+import re
 import hmac
 import importlib.util
 import json
@@ -2695,6 +2696,226 @@ def _run_order(
     return (1 if fell_back else 0), result, cleanup
 
 
+# Accepted spellings for order fields, first entry canonical. Alias mapping is FORM — the
+# caller plainly said "brief"/"output"; we relabel, we never reinterpret. Part of the
+# forgiving intake: liberal in what the doors accept, conservative in what executes.
+ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
+    "order_id": ("order_id", "id"),
+    "request_id": ("request_id", "req_id"),
+    "phase_id": ("phase_id", "phase"),
+    "stage_id": ("stage_id", "stage"),
+    "harness": ("harness",),
+    "model": ("model",),
+    "agent": ("agent", "persona"),
+    "effort": ("effort",),
+    "cwd": ("cwd", "workdir", "working_directory", "dir"),
+    "instructions_path": (
+        "instructions_path",
+        "instructions",
+        "brief",
+        "brief_path",
+        "prompt_path",
+        "prompt_file",
+    ),
+    "result_path": ("result_path", "result", "result_file", "output_path", "output"),
+    "cockpit_pane": ("cockpit_pane", "pane", "cockpit"),
+    "timeout_ms": ("timeout_ms", "timeout"),
+    "env": ("env",),
+    "requester": ("requester",),
+    "management": ("management",),
+    "consult_token": ("consult_token",),
+    # Identity passthroughs for EVERY optional field parse_order recognizes and execution
+    # honors — dropping any of these would silently rewrite the caller's intent (a direct
+    # IaC apply degrading to a phase plan, an approval or watchdog contract vanishing).
+    # Keep this in lockstep with contracts.parse_order; the passthrough test pins it.
+    "mode": ("mode",),
+    "plan_id": ("plan_id",),
+    "step_id": ("step_id",),
+    "operation": ("operation",),
+    "requires_apply": ("requires_apply",),
+    "manager_placement": ("manager_placement",),
+    "approval": ("approval",),
+    "plan_artifact": ("plan_artifact",),
+    "watchdog_terminal": ("watchdog_terminal",),
+}
+# order_id becomes part of derived file names (the defaulted result_path); anything outside
+# this charset is regenerated — ids are form, never intent.
+_SAFE_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# Execution intent is never invented: these must arrive in the payload (aliases allowed) or
+# the submission is refused. Orders run code in a directory — a shorter leash than consults.
+ORDER_INTAKE_NEVER_INVENTED = ("harness", "agent", "cwd", "instructions_path", "cockpit_pane")
+
+
+def _repair_order(order_path: str) -> dict | None:
+    """Deterministic short-leash intake for a near-miss order submission.
+
+    Guess the FORM, never the intent: ids, phase/stage bookkeeping, an empty model, and a
+    derivable result destination may be defaulted or anchored; the ORDER_INTAKE_NEVER_INVENTED
+    fields must be present. On success the ORIGINAL order path is atomically rewritten so
+    every downstream reader (awaits, ledger, workers) sees one canonical file — the raw
+    submission is preserved at `<path>.raw-submitted.json` and every change recorded at
+    `<path>.intake.json`. Returns None when repair cannot help (refuse helpfully instead).
+    """
+    path = Path(order_path)
+    try:
+        raw_text = path.read_text()
+        raw = json.loads(raw_text)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    order: dict = {}
+    changes: list[str] = []
+    for canonical, aliases in ORDER_INTAKE_ALIASES.items():
+        for alias in aliases:
+            if alias in raw:
+                order[canonical] = raw[alias]
+                if alias != canonical:
+                    changes.append(f"mapped field {alias!r} -> {canonical!r}")
+                break
+    known_aliases = {alias for aliases in ORDER_INTAKE_ALIASES.values() for alias in aliases}
+    dropped = sorted(key for key in raw if key not in known_aliases)
+    if dropped:
+        changes.append(f"dropped unrecognized fields: {', '.join(dropped)}")
+
+    for field in ORDER_INTAKE_NEVER_INVENTED:
+        value = order.get(field)
+        if not isinstance(value, str) or not value:
+            return None
+
+    order_dir = path.resolve().parent
+    order_id = order.get("order_id")
+    if isinstance(order_id, str) and order_id and not _SAFE_ORDER_ID_RE.match(order_id):
+        if order_id.startswith("specialist-consult-"):
+            # Never launder a consult-shaped id into a plain order: regenerating it would
+            # strip the marker the token door keys on. Refuse instead of reinterpreting.
+            return None
+        order.pop("order_id")
+        changes.append(f"regenerated order_id: {order_id!r} is not filesystem-safe")
+    if not isinstance(order.get("order_id"), str) or not order["order_id"]:
+        # Derived from the raw bytes so a retry loop resubmitting the same sloppy file gets
+        # the SAME id — the ledger's idempotent-submit dedupe keeps working.
+        order["order_id"] = f"intake-{hashlib.sha256(raw_text.encode()).hexdigest()[:12]}"
+        changes.append(f"generated order_id {order['order_id']}")
+    if not isinstance(order.get("phase_id"), str) or not order["phase_id"]:
+        order["phase_id"] = "intake-adhoc"
+        changes.append("defaulted phase_id to intake-adhoc")
+    stage = order.get("stage_id")
+    if not isinstance(stage, str) or stage not in contracts.RECOGNIZED_STAGE_IDS:
+        resolved = None
+        if isinstance(stage, str) and stage:
+            prefixed = [s for s in contracts.RECOGNIZED_STAGE_IDS if s.startswith(stage)]
+            if len(prefixed) == 1:
+                resolved = prefixed[0]
+        order["stage_id"] = resolved or "stage-5-finalization"
+        changes.append(f"resolved stage_id to {order['stage_id']}")
+    if not isinstance(order.get("model"), str):
+        order["model"] = ""
+        changes.append("defaulted model to empty (the harness template resolves it)")
+    for field in ("cwd", "instructions_path"):
+        if not Path(order[field]).is_absolute():
+            order[field] = str(order_dir / order[field])
+            changes.append(f"anchored relative {field} at {order[field]}")
+    result = order.get("result_path")
+    if not isinstance(result, str) or not result:
+        order["result_path"] = str(order_dir / f"{order['order_id']}-result.json")
+        changes.append(f"defaulted result_path to {order['result_path']}")
+    elif not Path(result).is_absolute():
+        order["result_path"] = str(order_dir / result)
+        changes.append(f"anchored relative result_path at {order['result_path']}")
+    timeout = order.get("timeout_ms")
+    if isinstance(timeout, str) and timeout.isdigit():
+        order["timeout_ms"] = int(timeout)
+        changes.append("coerced timeout_ms to an integer")
+    elif timeout is not None and (
+        isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0
+    ):
+        order.pop("timeout_ms", None)
+        changes.append("dropped invalid timeout_ms (the default applies)")
+
+    if not changes:
+        return None
+    try:
+        contracts.parse_order(json.dumps(order))
+    except ContractError:
+        return None
+
+    raw_copy = path.with_name(path.name + ".raw-submitted.json")
+    try:
+        raw_copy.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
+        path.with_name(path.name + ".intake.json").write_text(
+            json.dumps(
+                {
+                    "at_ns": time.time_ns(),
+                    "mode": "mechanical-repair",
+                    "raw_path": str(raw_copy),
+                    "changes": changes,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        JobLedger._write_json(path, order)
+    except OSError as error:
+        # No stamp, no repair: a normalization that cannot persist its paper trail is
+        # refused rather than executed unrecorded.
+        sys.stderr.write(
+            f"recruiter: intake could not persist the normalization of {path}: {error}\n"
+        )
+        return None
+    sys.stderr.write(
+        f"recruiter: intake normalized {path} ({len(changes)} change(s)); "
+        f"raw preserved at {raw_copy}\n"
+    )
+    return order
+
+
+def _intake_refusal_message(order_path: str, strict_error: ContractError) -> str:
+    """Refuse HELPFULLY: name exactly what is missing after alias mapping, and what the
+    intake will never invent, instead of echoing a bare parse error."""
+    try:
+        raw = json.loads(Path(order_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        raw = None
+    if isinstance(raw, dict):
+        aliased = {
+            canonical
+            for canonical, aliases in ORDER_INTAKE_ALIASES.items()
+            if any(alias in raw for alias in aliases)
+        }
+        missing = [k for k in contracts.ORDER_REQUIRED if k not in aliased]
+        detail = (
+            f"missing required fields even after intake repair: {', '.join(missing)}"
+            if missing
+            else str(strict_error)
+        )
+    else:
+        detail = f"not a JSON object ({strict_error})"
+    return (
+        f"invalid order {order_path}: {detail}. The intake maps common field aliases and "
+        "defaults ids, stage, and result destination — but never invents "
+        f"{', '.join(ORDER_INTAKE_NEVER_INVENTED)}. "
+        "Template: upagent.yaml.example (order shape: contracts.ORDER_REQUIRED)."
+    )
+
+
+def _load_order_forgivingly(order_path: str) -> dict:
+    """Strict parse first; a near-miss walks the mechanical repair; what repair cannot fix
+    is refused with the missing fields named. Every door uses this so a sloppy submission
+    meets a helpful answer instead of a bare contract error."""
+    try:
+        return load_order(order_path)
+    except ContractError as strict_error:
+        repaired = _repair_order(order_path)
+        if repaired is not None:
+            return repaired
+        raise RecruiterError(
+            _intake_refusal_message(order_path, strict_error)
+        ) from strict_error
+
+
 def _issued_consult_token() -> str | None:
     """The consult token this Recruiter issued at `up` (from its own STATE_FILE), or None when
     none was issued (state absent, corrupt, or written by a pre-token `up`)."""
@@ -2741,9 +2962,9 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     for the durable receipt without depending on this command's pane output.
     """
     try:
-        order = load_order(order_path)
-    except ContractError as e:
-        _reject_legacy_order(order_path, f"invalid order {order_path}: {e}")
+        order = _load_order_forgivingly(order_path)
+    except RecruiterError as e:
+        _reject_legacy_order(order_path, str(e))
         return 1
     _reject_unbrokered_consult(order)
     ledger = JobLedger()
@@ -2969,10 +3190,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
     Recruiter shell, so adjacent orders cannot interleave. The child process is the zero-poll
     wake-up path; an idempotent duplicate falls back to a bounded ledger wait.
     """
-    try:
-        order = load_order(order_path)
-    except ContractError as e:
-        raise RecruiterError(f"invalid order {order_path}: {e}") from e
+    order = _load_order_forgivingly(order_path)
     _reject_unbrokered_consult(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
@@ -3053,10 +3271,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
 
 def cmd_request(order_path: str, roster_path: str) -> int:
     """Submit directly and return only after the worker is healthy or terminally rejected."""
-    try:
-        order = load_order(order_path)
-    except ContractError as error:
-        raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    order = _load_order_forgivingly(order_path)
     _reject_unbrokered_consult(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
