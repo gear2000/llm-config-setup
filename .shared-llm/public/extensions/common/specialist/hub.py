@@ -638,7 +638,12 @@ def _specialist_order(
     checks with an idle LLM pane per question. A roster that truly wants managers can still
     opt in globally via its `management` configuration.
     """
-    digest = hashlib.sha256(consult["consult_id"].encode()).hexdigest()[:24]
+    # The Recruiter rotates its consult token on every `up`. Fold that generation into the
+    # request identity so retrying a previously failed consult after Hub restart cannot collide
+    # with the old ledger entry. Retries within one generation remain idempotent.
+    token = _recruiter_consult_token()
+    identity = consult["consult_id"] + (f"\0{token}" if token is not None else "")
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
     order_path = paths(cfg)["consults"] / f"{consult['consult_id']}.order.json"
     result_path = paths(cfg)["consults"] / f"{consult['consult_id']}.upagent-result.json"
     order = {
@@ -661,7 +666,6 @@ def _specialist_order(
         "cockpit_pane": librarian,
         "timeout_ms": CONSULT_TIMEOUT_MS,
     }
-    token = _recruiter_consult_token()
     if token is not None:
         order["consult_token"] = token
     result_path.unlink(missing_ok=True)
@@ -675,14 +679,19 @@ def _specialist_order(
 def _dispatch_specialist(order_path: Path, cwd: str) -> None:
     if not UPAGENT_RECRUITER.is_file():
         raise ConsultFailure(f"UpAgent Recruiter is missing: {UPAGENT_RECRUITER}")
-    subprocess.run(
+    proc = subprocess.run(
         [sys.executable, str(UPAGENT_RECRUITER), "dispatch", str(order_path)],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         cwd=cwd,
         timeout=CONSULT_TIMEOUT_MS / 1000 + 600,
     )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "no diagnostic output"
+        raise ConsultFailure(
+            f"UpAgent dispatch failed for {order_path.name} (exit {proc.returncode}): {detail}"
+        )
 
 
 def _librarian_status_message(agent_count: int) -> str:

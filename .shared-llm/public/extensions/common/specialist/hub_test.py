@@ -556,6 +556,62 @@ def test_specialist_orders_carry_the_recruiter_consult_token(
     assert json.loads(order_path.read_text())["consult_token"] == "issued-token"
 
 
+def test_specialist_order_identity_rotates_with_the_recruiter_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry after Recruiter restart must not collide with the prior token generation."""
+    cfg = {"runtime_dir": tmp_path / "runtime"}
+    hub.paths(cfg)["consults"].mkdir(parents=True)
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("brief\n")
+    consult = {
+        "consult_id": "retry-after-restart",
+        "specialist": "docs",
+        "question": "q",
+        "answer_path": str(tmp_path / "answer.json"),
+    }
+    entry = {"name": "docs", "harness": "claude", "model": "haiku", "agent": "docs"}
+
+    monkeypatch.setattr(hub, "_recruiter_consult_token", lambda: "generation-one")
+    first_path, _ = hub._specialist_order(
+        cfg, consult, entry, prompt_file, "w1:p1", str(tmp_path)
+    )
+    first = json.loads(first_path.read_text())
+
+    monkeypatch.setattr(hub, "_recruiter_consult_token", lambda: "generation-two")
+    second_path, _ = hub._specialist_order(
+        cfg, consult, entry, prompt_file, "w1:p1", str(tmp_path)
+    )
+    second = json.loads(second_path.read_text())
+    third_path, _ = hub._specialist_order(
+        cfg, consult, entry, prompt_file, "w1:p1", str(tmp_path)
+    )
+    third = json.loads(third_path.read_text())
+
+    assert first["request_id"] != second["request_id"]
+    assert first["order_id"] != second["order_id"]
+    assert second["request_id"] == third["request_id"]
+    assert second["order_id"] == third["order_id"]
+
+
+def test_dispatch_failure_includes_the_recruiter_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recruiter = tmp_path / "recruiter.py"
+    recruiter.write_text("# test executable marker\n")
+    monkeypatch.setattr(hub, "UPAGENT_RECRUITER", recruiter)
+
+    def fake_run(*args, **kwargs):
+        assert kwargs["check"] is False
+        assert kwargs["cwd"] == str(tmp_path)
+        return hub.subprocess.CompletedProcess(args[0], 1, stdout="", stderr="ledger collision")
+
+    monkeypatch.setattr(hub.subprocess, "run", fake_run)
+
+    with pytest.raises(hub.ConsultFailure, match="ledger collision"):
+        hub._dispatch_specialist(tmp_path / "order.json", str(tmp_path))
+
+
 def test_specialist_orders_omit_the_token_when_recruiter_never_issued_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
