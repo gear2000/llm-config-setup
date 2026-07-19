@@ -868,3 +868,33 @@ def test_hire_intake_clerk_builds_a_token_stamped_leased_order(
     prompt = (runtime_dir / "consults" / f"{order['order_id'].removeprefix('specialist-')}.prompt.txt").read_text()
     assert "NEVER invent the question" in prompt
     assert order["order_id"].startswith("specialist-clerk-")
+
+
+def test_consult_cwd_ignores_a_worktree_that_no_longer_exists(tmp_path: Path) -> None:
+    """Consults run in the repo the roster came from. A caller pointing at a deleted
+    throwaway worktree gets the live root instead of a failed process start."""
+    live = tmp_path / "live"
+    live.mkdir()
+    gone = tmp_path / "trees" / "deleted-worktree"
+
+    cwd = hub._resolve_consult_cwd({"repo_root": live}, {"cwd": str(gone)}, "c-1")
+
+    assert cwd == str(live)
+
+
+def test_consult_cwd_prefers_the_callers_own_directory(tmp_path: Path) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+
+    cwd = hub._resolve_consult_cwd({"repo_root": live}, {"cwd": str(caller)}, "c-2")
+
+    assert cwd == str(caller)
+
+
+def test_consult_cwd_defaults_to_the_roster_root(tmp_path: Path) -> None:
+    live = tmp_path / "live"
+    live.mkdir()
+
+    assert hub._resolve_consult_cwd({"repo_root": live}, {}, "c-3") == str(live)

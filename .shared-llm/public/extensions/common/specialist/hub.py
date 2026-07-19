@@ -48,6 +48,9 @@ Commands:
 
 Runtime files (one directory, default /tmp/.herdr-specialist):
   state.json    {workspace, workspace_label, librarian_pane, repo_root} written by `up`
+                `repo_root` here is a record of where `up` ran and is INFORMATIONAL ONLY —
+                never start a process in it. It goes stale the moment that directory is a
+                worktree someone deleted. Use `cfg["repo_root"]`, re-derived on every load.
   index.json    roster: name -> {description, location, harness, model, agent, effort, origin}
   consults/     where callers drop consult.json (and the Librarian writes prompt briefs)
 
@@ -1034,6 +1037,30 @@ def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> Non
         sys.stderr.write(f"specialist-hub: could not write failure answer for {consult_id}: {e}\n")
 
 
+def _resolve_consult_cwd(cfg: dict, consult: dict, consult_id: str) -> str:
+    """Pick a directory the specialist can actually be started in.
+
+    The rule is deliberately dull: run in the repo the roster came from, unless the caller
+    named a directory that exists. `cfg["repo_root"]` is re-derived on every config load from
+    a path the running hub process resolved, so it is live by construction.
+
+    What this replaces: the hub used to inherit the repo_root frozen into services state at
+    `up` time. Bring services up inside a throwaway worktree, delete the worktree, and every
+    consult afterwards died starting a process in a directory that no longer existed. Consults
+    are read-and-cite work; there is no reason for them to be pinned to a transient checkout.
+    """
+    requested = consult.get("cwd")
+    if requested and Path(requested).is_dir():
+        return str(requested)
+    root = str(cfg["repo_root"])
+    if requested:
+        sys.stderr.write(
+            f"specialist-hub: consult {consult_id}: requested cwd {requested} does not "
+            f"exist; running in {root}\n"
+        )
+    return root
+
+
 def cmd_consult(args: argparse.Namespace) -> None:
     """Route one question into an ordinary managed UpAgent order and validate its answer.
 
@@ -1075,7 +1102,7 @@ def cmd_consult(args: argparse.Namespace) -> None:
         _report_librarian_state(
             librarian, "working", f"consult {consult_id} -> {specialist}: routing to a managed specialist"
         )
-        cwd = consult.get("cwd", state["repo_root"])
+        cwd = _resolve_consult_cwd(cfg, consult, consult_id)
 
         location = entry.get("location") or "(no definition file)"
         if entry.get("location"):
