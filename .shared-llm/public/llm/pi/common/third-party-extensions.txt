@@ -19,7 +19,11 @@
 npm:pi-lens@3.8.45
 
 # pi-subagents — spawn and manage Pi subagents.
-npm:pi-subagents@0.25.0
+#   FLOOR 0.30.0 — do not pin lower. Below it, user-agent discovery walks
+#   ~/.agents recursively and reads every Codex home SKILL.md as an agent
+#   definition, so this kit's `backend` skill shadows its `backend` persona.
+#   See the reconciler note in tools/harness.py.
+npm:pi-subagents@0.30.0
 
 # pi-web-access — fetch and search the web from inside a Pi session.
 npm:pi-web-access@0.10.7
@@ -52,7 +56,11 @@ npm:@ayulab/pi-rewind@0.4.2
 #   tools/install-pi-extensions.sh. Needs Pi >= 0.79.1 and Node >= 22.19.
 # npm:pi-cursor-sdk@0.1.42
 
-# Pi extension that keeps noisy tool output out of your context window.
-# Automatically rewrites shell commands through Hypa for local, deterministic
-# compression, context-aware file tools, and recoverable
-npm:@hypabolic/pi-hypa
+# --- Retired: do NOT re-enable without re-testing tool calls end to end ---
+# @hypabolic/pi-hypa — kept noisy tool output out of the context window by
+#   rewriting shell commands through Hypa. Retired after a half-installed copy
+#   broke every Pi tool call. The installer actively removes it when present.
+#   It must stay commented out: a live entry here reinstalls it on any machine
+#   that does NOT already have it, because the `installed_names` snapshot the
+#   manifest pass skips against is taken BEFORE the removal above.
+# npm:@hypabolic/pi-hypa

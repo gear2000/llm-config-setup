@@ -7,9 +7,8 @@
 #
 # This module is PUBLIC (kit-synced) and lands in a destination at
 #   .shared-llm/public/extensions/common/herdr/
-# To adopt, import it (plus its two sibling engines) from your root justfile:
+# To adopt, import it (plus its sibling engine) from your root justfile:
 #   import '.shared-llm/public/extensions/common/upagent/justfile'
-#   import '.shared-llm/public/extensions/common/specialist/justfile'
 #   import '.shared-llm/public/extensions/common/herdr/justfile'
 #
 # Requires the `herdr` CLI on PATH with a running Herdr. The engines are driven
@@ -22,26 +21,23 @@
 # single entry seam, so issue-driven runs are an additive fetcher, not a fork.
 
 _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/recruiter.py"
-_SPECIALIST := justfile_directory() + "/.shared-llm/public/extensions/common/specialist/hub.py"
 _PLAN_CONTROLLER := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/plan_controller.py"
 
-# Bring up the always-up shared services (UpAgent Recruiter + Specialist Librarian, each in
-# its own role-labeled pane, registered in Herdr's agents sidebar), then print the status
-# table so you can SEE it is up. By default everything shares ONE `herdr` workspace — the
-# services live in a `services` tab and each run adds control/workers/oversight tabs beside
-# it. Pass `--separate-workspaces` to restore the dedicated `shared-services` workspace plus
-# a per-run `<slug>` workspace (runs started later inherit whichever mode was chosen here).
+# Bring up the always-up shared service (the UpAgent Recruiter, in its own role-labeled pane,
+# registered in Herdr's agents sidebar), then print the status table so you can SEE it is up.
+# By default everything shares ONE `herdr` workspace — the service lives in a `services` tab
+# and each run adds control/workers/oversight tabs beside it. Pass `--separate-workspaces` to
+# restore the dedicated `shared-services` workspace plus a per-run `<slug>` workspace (runs
+# started later inherit whichever mode was chosen here).
 herdr-up *FLAGS:
     ${PYTHON_BIN:-python3} {{_UPAGENT}} up {{FLAGS}}
-    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} up {{FLAGS}}
     @{{just_executable()}} --justfile "{{justfile()}}" herdr-status
 
-# Status of the shared services as a table with ✓ up (green) / ✗ down (red).
+# Status of the shared service as a table with ✓ up (green) / ✗ down (red).
 herdr-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    runtime=$(${PYTHON_BIN:-python3} "{{_SPECIALIST}}" runtime-dir)
-    SPECIALIST_RUNTIME="$runtime" ${PYTHON_BIN:-python3} - <<'PY'
+    ${PYTHON_BIN:-python3} - <<'PY'
     import json, os, subprocess
     G, R, DIM, RST = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
     def live_panes():
@@ -66,16 +62,6 @@ herdr-status:
         rows.append(("recruiter", True, f"pane {rec['recruiter_pane']} · roster {os.path.basename(rec.get('roster',''))}"))
     else:
         rows.append(("recruiter", False, "not up — run `just herdr-up`"))
-    # librarian
-    specialist_runtime = os.environ["SPECIALIST_RUNTIME"]
-    lib = read(os.path.join(specialist_runtime, "state.json"))
-    idx = read(os.path.join(specialist_runtime, "index.json"))
-    n = len(idx) if isinstance(idx, (dict, list)) else 0
-    if lib and lib.get("librarian_pane") in panes:
-        detail = f"pane {lib['librarian_pane']}" + (f" · {n} specialists" if n else "")
-        rows.append(("librarian", True, detail))
-    else:
-        rows.append(("librarian", False, "not up — run `just herdr-up`"))
     W = max(len(d) for _,_,d in rows + [("","","Herdr shared services")])
     bar = "─" * (W + 2)
     print(f"┌──────────────┬────────┬{bar}┐")
@@ -92,7 +78,6 @@ herdr-status:
 herdr-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    HERDR_ENV=1 ${PYTHON_BIN:-python3} {{_SPECIALIST}} down || true
     ${PYTHON_BIN:-python3} {{_UPAGENT}} down || true
     {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
 

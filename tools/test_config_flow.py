@@ -615,10 +615,56 @@ def test_home_runtime_copies_agents_and_excludes_codex(tmp_path: Path) -> None:
 
     # Generic agents land in the cc + pi home agent dirs (a known persona: backend).
     assert (home / ".claude/agents/backend.md").exists()
-    assert (home / ".pi/agents/backend.md").exists()
+    # Pi reads personas from inside its config dir, not from ~/.pi/agents.
+    assert (home / ".pi/agent/agents/backend.md").exists()
+    assert not (home / ".pi/agents").exists()
     # Codex has no user-agent dir — never invented.
     assert not (home / ".codex/agents").exists()
     assert not (home / ".agents/agents").exists()
+
+
+def test_home_runtime_migrates_legacy_pi_agents_dir(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc", "pi"], "destinations": []}
+
+    # First run populates the new dir; seed the legacy dir the way the old engine
+    # did — a byte-identical copy of a composed agent plus a persona symlink.
+    m.do_home_runtime(cfg, _quiet(m))
+    legacy = home / ".pi/agents"
+    legacy.mkdir(parents=True)
+    (legacy / "backend.md").write_bytes((home / ".pi/agent/agents/backend.md").read_bytes())
+    persona = m.project_root() / ".shared-llm/public/llm/pi/common/agents/doc-reviewer.md"
+    (legacy / "doc-reviewer.md").symlink_to(persona)
+    # A DIVERGENT same-name file: qa IS a composed persona, but this copy has been
+    # hand-edited and no longer matches the staged output. Nothing proves the kit
+    # wrote these bytes, so migration must PRESERVE it — deleting on a name match
+    # alone would be irreversible data loss.
+    divergent = "---\nname: qa\ndescription: hand-edited local override\n---\n"
+    (legacy / "qa.md").write_text(divergent)
+    assert (legacy / "qa.md").read_text() != (home / ".pi/agent/agents/qa.md").read_text()
+    (legacy / "someone-elses.md").write_text("---\nname: someone-elses\n---\n")
+
+    m.do_home_runtime(cfg, _quiet(m))
+
+    # Provably-ours entries are gone: the byte-identical copy and the kit symlink.
+    assert not (legacy / "backend.md").exists()
+    assert not (legacy / "doc-reviewer.md").is_symlink()
+    # The divergent same-name file is PRESERVED, untouched — the data-loss guard:
+    # a name match alone must never delete a file whose bytes we did not write.
+    assert (legacy / "qa.md").exists()
+    assert (legacy / "qa.md").read_text() == divergent
+    # A genuinely foreign file (a name the kit does not compose) survives too.
+    assert (legacy / "someone-elses.md").exists()
+    # Because divergent/foreign files remain, the legacy dir is NOT removed.
+    assert legacy.is_dir()
+
+    # Once the user clears the preserved files, the next run removes the empty dir.
+    (legacy / "qa.md").unlink()
+    (legacy / "someone-elses.md").unlink()
+    m.do_home_runtime(cfg, _quiet(m))
+    assert not legacy.exists()
 
 
 def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:

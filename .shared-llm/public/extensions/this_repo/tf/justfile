@@ -1,7 +1,7 @@
 # Terraform workflow module — imported by the root justfile.
 # Extensions (auto-loaded from ~/.pi/agent/extensions/): tf-implement.ts,
 #   tf-approve.ts, do-planish.ts
-# Agent:      ~/.pi/agents/tf-reviewer.md
+# Agent:      ~/.pi/agent/agents/tf-reviewer.md
 
 # Load a plan and run the implement loop (write reviewed terraform until approved).
 tf-implement plan:
@@ -24,7 +24,7 @@ tf-reviewer-cc:
         [ "$i" = "60" ] && { echo "tf-reviewer-cc: TUI never showed ready footer in 60s" >&2; exit 1; }; \
         sleep 1; \
     done
-    tmux send-keys -t tf-reviewer 'Read ~/.pi/agents/tf-reviewer.md and follow its instructions.'
+    tmux send-keys -t tf-reviewer 'Read ~/.pi/agent/agents/tf-reviewer.md and follow its instructions.'
     sleep 1
     tmux send-keys -t tf-reviewer Enter
 
@@ -38,7 +38,7 @@ tf-reviewer-pi model="openai-codex/gpt-5.5":
         [ "$$i" = "60" ] && { echo "tf-reviewer-pi: pi never showed ready prompt in 60s" >&2; exit 1; }; \
         sleep 1; \
     done
-    tmux send-keys -t tf-reviewer 'Read ~/.pi/agents/tf-reviewer.md and follow its instructions.'
+    tmux send-keys -t tf-reviewer 'Read ~/.pi/agent/agents/tf-reviewer.md and follow its instructions.'
     sleep 1
     tmux send-keys -t tf-reviewer Enter
 

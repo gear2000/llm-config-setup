@@ -150,7 +150,7 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
       agents/<name>.yaml          — recipe: one generic agent persona (roster count in Inventory)
     llm/pi/common/                — Pi harness runtime config (NOT a compose input; see below)
     llm/claude/common/            — Claude harness runtime config (NOT a compose input; see below)
-    extensions/this_repo/         — tool-module extensions (specialist, pi-hub, tf); justfile-imported
+    extensions/this_repo/         — tool-module extensions (pi-hub, tf); justfile-imported
 tools/
   harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
   install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
@@ -188,7 +188,7 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
 1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, then copies each into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills/` (Codex). Pi standalone planning is `/do-planish` from the extension; the workflow-suite commands are `/do-*` on Pi and the matching `cc-*` on Claude Code — including the standalone `/cc-planish` planner (the Claude Code port of `/do-planish`).
-2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section) and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
+2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section) and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent (never clobbers per-machine tweaks).
 5. **Herdr config** — reconciles the kit-owned `herdr-config.toml` symlink at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning.
@@ -224,7 +224,7 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 
 ### Generic agents (26)
 
-Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agents/`. Adopt them as-is — they contain no project-specific references.
+Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.
 
 | Name | Description |
 | --- | --- |
@@ -385,7 +385,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
   - **Capture — deliberately NOT full parity.** On `agent_end` it writes **deterministic** third-person notes (what the user asked, which tools the agent used, a clipped agent reply) — **lighter than Claude's and the memsearch codex reference plugin's default**, which run an LLM to summarize the turn. The deterministic path is chosen so capture never makes a blocking nested LLM call. It appends the notes (with a `<!-- session: turn: transcript: -->` anchor) to today's daily log synchronously (the markdown is the source of truth), then runs `memsearch index` in a detached child. If the Milvus Lite single-writer lock is contended (Claude indexing the same store at the same time), the child retries that condition only; on exhaustion it **fails loud** — writes to `~/.pi/agent/memsearch-index.log` and drops an `<!-- index-deferred: <ISO> reason=lock -->` breadcrumb in the daily md — and the next `session_start` re-index catches it up. Non-lock errors fail loud immediately. Nothing is lost because the markdown is already written.
   - Symlinked as a directory into `~/.pi/agent/extensions/` (auto-loaded; Pi loads `index.ts`, with `collection.ts` riding along as an imported helper). `collection.ts` holds just the derivation (Node built-ins only) so it can be unit-tested (`memsearch.test.ts`, golden value `ms_my_project_a26ceb5d` for the example path `/home/user/code/my-project`). Needs the `memsearch` CLI on `PATH` or `uvx` (ONNX embeddings, no API key); if neither is present it no-ops silently.
 - `extensions/codex-reviewer-hub.ts`, `extensions/doc-review-hub.ts`, `extensions/pr-review-hub.ts` — Pi extensions that each listen on a Unix socket and dispatch a sub-agent request: adversarial code review, document review, and PR/branch review respectively. `extensions/hub-common.ts` is the shared socket/dispatch helper they import. The hub extensions are symlinked into `~/.pi/extensions/` (loaded when Pi is launched with `-e`).
-- `agents/codex-reviewer.md`, `agents/doc-reviewer.md`, `agents/pr-reviewer.md` — The system prompts for the review agents invoked by the hub extensions. Symlinked into `~/.pi/agents/`.
+- `agents/codex-reviewer.md`, `agents/doc-reviewer.md`, `agents/pr-reviewer.md` — The system prompts for the review agents invoked by the hub extensions. Symlinked into `~/.pi/agent/agents/`.
 - `third-party-extensions.txt` — Pinned manifest of **third-party** Pi extensions, one `pi install` source per line. `tools/install-pi-extensions.sh` reads it and installs each via `pi install` (skipping any already present), so the set reproduces on any machine with one command. `just pi-extensions` runs that installer.
 - `THIRD-PARTY-EXTENSIONS.md` — The per-extension reference: what each one does, its runtime deps, and the own-vs-third-party rule below.
 - `settings.template.json` — A starter Pi settings file (provider, model, thinking level). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten. Its `packages` array starts empty — the installer fills it.
@@ -415,7 +415,7 @@ just pi-status   # show hub + socket state
 just pi-clean    # stop the hub, remove stale sockets
 ```
 
-If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), the global step leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks that resolve into this repo family.
+If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agent/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), the global step leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks that resolve into this repo family.
 
 Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/node_modules/`), never committed here. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 

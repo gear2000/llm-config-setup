@@ -1,6 +1,6 @@
 """Unit tests for the specialist consult/answer contracts. Pure stdlib — no Herdr needed.
 
-Run: python3 -m pytest .shared-llm/extensions/common/specialist/contracts_consult_test.py -q
+Run: python3 -m pytest .shared-llm/public/extensions/common/upagent/contracts_consult_test.py -q
 """
 
 from __future__ import annotations

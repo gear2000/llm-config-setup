@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -157,12 +158,56 @@ def render_intake_clerk_command(
     )
 
 
-def intake_clerk_brief(raw_text: str, raw_path: Path, output_path: Path) -> str:
-    """One bounded normalization assignment. The clerk interprets form, never authority."""
-    return f"""# UpAgent intake envelope normalization
+def _unclassified_section(unknown_fields: Sequence[str]) -> str:
+    """Name the keys Python cannot classify so the clerk can map or refuse them, not drop them."""
+    if not unknown_fields:
+        return ""
+    return (
+        "## Keys Python does not recognize\n\n"
+        "The submission carries these unrecognized keys: "
+        + ", ".join(unknown_fields)
+        + ". Python will not execute an order while any of them is unaccounted for. Either each "
+        "one is another spelling of a canonical field — put its exact value under that field — or "
+        "you must refuse and name it. Never drop one silently.\n\n"
+    )
 
-A caller submitted one imperfect work-order envelope. The exact submitted bytes are preserved at
-`{raw_path}` and repeated below. Convert only its FORM into canonical order fields, or refuse.
+
+def _correction_section(correction: dict | None) -> str:
+    """Hand this same role Python's authoritative errors so it can correct its own answer."""
+    if correction is None:
+        return ""
+    errors = correction.get("errors") or []
+    return (
+        "## Correction round\n\n"
+        "Your previous interpretation did not pass Python's provenance and contract checks. "
+        "Python's findings are authoritative; do not argue with them.\n\n"
+        "Your previous interpreted order:\n\n```json\n"
+        + json.dumps(correction.get("order"), indent=2, sort_keys=True)
+        + "\n```\n\nPython rejected it for:\n\n"
+        + "".join(f"- {error}\n" for error in errors)
+        + "\nReturn a corrected order that fixes exactly those findings using only values already "
+        "present in the submission below, or return a refusal naming what the submission does not "
+        "contain. Do not repeat the same interpretation.\n\n"
+    )
+
+
+def intake_clerk_brief(
+    raw_text: str,
+    raw_path: Path,
+    output_path: Path,
+    *,
+    attempt: int = 1,
+    attempt_limit: int = 1,
+    unknown_fields: Sequence[str] = (),
+    correction: dict | None = None,
+) -> str:
+    """One bounded normalization assignment. The clerk interprets form, never authority."""
+    return f"""# UpAgent intake envelope normalization (attempt {attempt} of {attempt_limit})
+
+A caller submitted one work-order envelope. Every submission reaches you: canonical JSON, malformed
+JSON, prose, an incomplete object, unknown fields, or a request worded as specialist expertise. The
+exact submitted bytes are preserved at `{raw_path}` and repeated below. Convert only its FORM into
+canonical order fields, or refuse. An already-canonical submission is returned unchanged.
 Do not execute the task, inspect a repository, launch an agent, or authorize an operation.
 
 NEVER invent or change any execution intent. This includes target harness/model/effort,
@@ -184,7 +229,7 @@ all provenance and contract checks. Return exactly one of these shapes and nothi
 {{"refusal": "what is missing or ambiguous", "understood": ["explicit value"], "missing": ["field"]}}
 ```
 
------ BEGIN EXACT SUBMISSION -----
+{_unclassified_section(unknown_fields)}{_correction_section(correction)}----- BEGIN EXACT SUBMISSION -----
 {raw_text}
 ----- END EXACT SUBMISSION -----
 """

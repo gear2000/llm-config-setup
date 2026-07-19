@@ -55,7 +55,7 @@ CATEGORIES: list[tuple[str, Path, str]] = [
         "Generic agents",
         SHARED / "compose" / "agents",
         "Brand-free agent personas the global step copies into `~/.claude/agents/` and "
-        "`~/.pi/agents/`. Adopt them as-is — they contain no project-specific references.",
+        "`~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.",
     ),
     (
         "Slash-command skills",

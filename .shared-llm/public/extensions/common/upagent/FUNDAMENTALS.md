@@ -1,7 +1,7 @@
 # UpAgent lifecycle fundamental
 
 The **UpAgent Recruiter Hub** is a universal lifecycle owner for an LLM worker. Its caller may
-be a TUI, phase leader, Librarian, another agent, or an unrelated framework. Callers use one
+be a TUI, phase leader, another agent, or an unrelated framework. Callers use one
 request contract and do not need to understand Claude, Codex, Pi, Cursor, Herdr process details,
 or cleanup mechanics.
 
@@ -9,7 +9,7 @@ The fundamental separation is:
 
 ```text
 Requester                  owns intent and consequential decisions
-Intake clerk               reshapes one failed envelope; never creates intent or authority
+Intake clerk               reshapes every submitted envelope; never creates intent or authority
 Dedicated Account Manager  owns conversation and lifecycle interpretation
 Python Recruiter Hub       owns facts, durable state, validation, and execution
 UpAgent worker             owns the requested work and its result
@@ -27,11 +27,13 @@ REQUESTER
    ▼
 PYTHON RECRUITER HUB
 │
-├─ strict-validates the request
-├─ on failure, tries deterministic form repair, then at most one bounded intake clerk
+├─ preserves the exact submitted bytes, then starts a fresh intake clerk for every distinct
+│  submission (a byte-identical resubmission reuses that request's own validated response)
 ├─ accepts intent provenance only from known keys in a structurally unambiguous JSON object
 ├─ writes raw/interpreted/audit/validation artifacts before replacing the order
-├─ refuses when intent is missing, ambiguous, changed, or cannot be audited
+├─ returns its own provenance/contract findings to that same clerk, bounded, to correct
+├─ answers with exactly one outcome: accepted, clerk-authored block, clerk failure, or
+│  infrastructure failure — each with durable evidence paths and its own exit code
 ├─ strict-validates the interpreted order again
 ├─ assigns a globally unique request identity and generation
 ├─ persists ownership, deadlines, and an event ledger atomically
@@ -100,6 +102,13 @@ PYTHON RECRUITER HUB
    always capped at 300000 ms. A shell-quoting Python-owned wrapper feeds the brief and captures one
    stdout object. Persona text is guidance; structurally keyed JSON provenance, typed parsing, and
    the unchanged strict order contract enforce safety. Prose labels cannot authorize execution.
+   Interpreting every request rather than only a failed one widens what the clerk is asked, never
+   what it may do: the same no-tools launch, the same private scratch directory, the same cap, the
+   same provenance and contract gates on its answer. A byte-identical resubmission is idempotent
+   (invariant 3): it reuses that request's own already-validated response rather than launching a
+   new clerk, which changes nothing about what a clerk may do. Bounded correction rounds re-ask that same
+   role with Python's findings; Python never edits an interpretation itself, and an exhausted
+   budget is a reported clerk failure, not an accepted order.
 7. A missing or malformed pre-launch manager decision becomes `needs-requester` or `blocked`; it
    never becomes guessed success. After Python has mechanically proved worker process, harness, and
    cwd health, a missing or malformed advisory startup assessment becomes `worker-healthy-degraded`
@@ -133,6 +142,12 @@ PYTHON RECRUITER HUB
 14. Detached job runners inherit no request command pipes. A caller receives the mechanically
     verified `REQUEST_ACCEPTED` response when startup finishes; a background runner cannot keep a
     captured stdout or stderr descriptor open and turn healthy startup into a false timeout.
+15. A terminal record always answers with exactly one structured outcome. Publication writes the
+    validated result, the Hub's own durable copy of it, and the receipt naming that copy together.
+    When the caller's `result_path` is later absent or unreadable, the Hub republishes from that
+    copy; when no trustworthy copy survives, it refuses visibly with the order id, the loader's
+    reason, the receipt path, and the recorded verdict. A terminal record never crashes the result
+    loader and never silently reopens finished work.
 
 ## Lifecycle states
 
@@ -171,8 +186,9 @@ surfaces; pane ids may change or be reused and therefore never serve as durable 
 
 The LLM roles consume bounded evidence snapshots and return typed assessments. Python remains
 correct when an LLM is unavailable: a failed intake clerk produces a durable actionable refusal
-with no target worker, while lifecycle-role failure is recorded and follows the configured
-deadline policy without silently losing the request.
+with no target worker — a named reason, the raw/interpreted/validation/refusal paths, and its own
+exit code, never a hang, a crash, or a guessed order — while lifecycle-role failure is recorded and
+follows the configured deadline policy without silently losing the request.
 
 ## Use case: start one plan
 

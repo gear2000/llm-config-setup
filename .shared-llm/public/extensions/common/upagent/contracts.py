@@ -77,6 +77,12 @@ RESULT_REQUIRED = (
     "full_log",  # pointer to the harness transcript (absolute path or session id)
 )
 
+# Required keys on each entry of a result's optional `consults` list — the worker's record of
+# the specialists it asked. `request_id` is the load-bearing one: it is an ordinary UpAgent
+# request id, which is what lets the Recruiter resolve the claim against its own ledger instead
+# of taking the worker's word for it.
+CONSULT_CLAIM_REQUIRED = ("consult_id", "specialist", "request_id", "answer_path")
+
 
 class ContractError(ValueError):
     """A malformed order.json or result.json. Raised fail-loud; never swallowed."""
@@ -133,11 +139,6 @@ def parse_order(text: str) -> dict:
     request_id = order.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not request_id):
         raise ContractError("order.json: `request_id` must be a non-empty string when present")
-    # Optional `consult_token`: the Librarian stamps the Recruiter-issued token on the consult
-    # orders it brokers; the Recruiter refuses consult-shaped orders that lack the current one.
-    consult_token = order.get("consult_token")
-    if consult_token is not None and (not isinstance(consult_token, str) or not consult_token):
-        raise ContractError("order.json: `consult_token` must be a non-empty string when present")
     requester = order.get("requester")
     if requester is not None:
         if not isinstance(requester, dict):
@@ -269,6 +270,24 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
             raise ContractError(f"result.json: revisit stage {stage!r} is not a recognized stage id")
     if result["verdict"] == "failed" and not revisit:
         raise ContractError("result.json: a `failed` verdict must name at least one stage to `revisit`")
+
+    # `consults` (optional) is the worker's own record of the specialists it asked. Shape only:
+    # this module is pure and has no ledger access, so it can say a claim is WELL FORMED but
+    # never that it is TRUE. The Recruiter resolves each claim against its own consult index at
+    # publication and stamps `consults_verified` / `consults_unverified` on the receipt.
+    consults = result.get("consults")
+    if consults is not None:
+        if not isinstance(consults, list):
+            raise ContractError("result.json: `consults` must be a list when present")
+        for claim in consults:
+            if not isinstance(claim, dict):
+                raise ContractError(f"result.json: every `consults` entry must be an object: {claim!r}")
+            for field in CONSULT_CLAIM_REQUIRED:
+                if not isinstance(claim.get(field), str) or not claim[field]:
+                    raise ContractError(
+                        f"result.json: `consults` entry needs a non-empty `{field}` "
+                        f"(got {claim.get(field)!r}); the phone book in the brief names all four"
+                    )
 
     # Optional advisor ruling. Present only on an advisor order's result; must be recognized.
     decision = result.get("decision")

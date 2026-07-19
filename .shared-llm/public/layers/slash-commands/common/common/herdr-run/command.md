@@ -35,8 +35,8 @@ tabs (`just herdr-up --separate-workspaces` restores the two-workspace layout):
 ```text
 ws: herdr                      ← everything, as tabs (single-workspace default)
   tab: services                ← always up · plan-agnostic
-    ├── recruiter  (UpAgent Hub)    deterministic lifecycle and durable mailboxes
-    └── librarian  (Specialist Hub) routes a question → transient specialist
+    └── recruiter  (UpAgent Hub)    deterministic lifecycle and durable mailboxes;
+                                    ordinary work AND specialist consults, one door
   tab: control                 ← primary view
     ├── tui-agent              you talk to the TUI
     └── phase-leader           current phase owner
@@ -48,7 +48,7 @@ ws: herdr                      ← everything, as tabs (single-workspace default
 
 --separate-workspaces          ← legacy layout: same tabs, two workspaces
 ws: <slug>                     ← one run cockpit (control/workers/oversight tabs)
-ws: shared-services            ← recruiter + librarian, peripheral
+ws: shared-services            ← recruiter, peripheral
 ```
 
 Concurrent runs in the single-workspace default share the role tabs (each adds its own
@@ -56,7 +56,7 @@ tui-agent/leader panes); start heavy parallel runs with `--separate-workspaces` 
 per-run isolation. The mode is chosen once at `just herdr-up` and inherited by `just herdr-plan`.
 
 1. The cockpit is the workspace holding this (tui-agent) pane. `just herdr-plan` has already created and health-checked this TUI. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` (its `watchdog` block says `not-configured` by design — there is no standing plan-lifecycle-watchdog in coordination v2; a legacy run may still show `ready-degraded`, which is equally continuable). Liveness does not come from an observer agent: this TUI hears every phase condition — completion, blocked, crash, stall, quiet — as the typed return value of its own blocking `upagent-phase-await` call, and urgent unacknowledged events additionally escalate to the human through `herdr notification`. **The TUI has no authority to create, launch, prompt, adopt, or replace a watchdog agent or a phase leader.** Its sole phase-start authority is the controller command in the phase loop below; never attempt an ad-hoc monitoring repair.
-2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible Recruiter services pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates. Then verify the **Specialist Hub Librarian** with `just specialist-hub status` — the librarian is load-bearing for this run (every stage brief embeds its phone book, and workers' mandated consults route through it), so a down librarian is fixed now (`just herdr-up`), not discovered mid-phase.
+2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible Recruiter services pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates. There is one service and one door: specialist consultation is an ordinary UpAgent order placed with `just upagent-consult`, and the phone book every stage brief embeds comes from `just upagent-specialists`. A Recruiter that is not up therefore stops mandated consults as well as stage work, so confirm `just upagent-status` now rather than discovering it mid-phase.
 3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub defaults to direct lifecycle: Python validates configuration, atomically starts the worker, returns `worker-healthy` after process/agent/cwd proof, and publishes durable requester mailbox events consumed by `upagent-await` / `upagent-await-any`. A roster may opt into `management.mode: dedicated` for the historical Account Manager pane. The worker itself receives no controller addresses.
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
 5. Do not start an ad-hoc LLM result poller, and never create a standing watchdog agent. Observability is layered deterministically: the blocking awaits (`upagent-phase-await` here, `upagent-await`/`upagent-await-any` in the leader) reconcile durable state against live Herdr state every sweep and return `leader-missing`/`leader-stalled`/`inactivity-checkpoint` events; the Recruiter launches fresh **one-shot** LLM checkers only at configured inactivity/anomaly checkpoints; urgent unacknowledged events escalate to the human via `herdr notification`. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported.

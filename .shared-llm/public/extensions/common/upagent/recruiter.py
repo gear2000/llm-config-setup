@@ -33,13 +33,13 @@ the leader is never stranded — it reads the blocked verdict and escalates per 
 route.yaml is authoritative for which harness/model/agent runs each stage; the Recruiter
 only knows HOW to launch each harness. It never picks the agent.
 
-Pure stdlib + PyYAML (as the sibling specialist hub uses). No Go hub, no tmux — Herdr only.
+Pure stdlib + PyYAML. No Go hub, no tmux — Herdr only.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 import errno
 import fcntl
@@ -79,6 +79,19 @@ RECOGNIZED_STAGE_IDS = contracts.RECOGNIZED_STAGE_IDS
 load_order = contracts.load_order
 load_result = contracts.load_result
 parse_result = contracts.parse_result
+
+# The consult/answer contracts: a SEPARATE boundary from contracts.py. That one gates the
+# leader<->worker lifecycle (`result.json`); this one gates the caller<->specialist exchange
+# (`consult.json` / `answer.json`) and owns the only mechanical citation check in the repo.
+_consult_spec = importlib.util.spec_from_file_location(
+    "upagent_contracts_consult", HERE / "contracts_consult.py"
+)
+if _consult_spec is None or _consult_spec.loader is None:
+    raise RuntimeError("could not load UpAgent consult contracts")
+contracts_consult = cast(Any, importlib.util.module_from_spec(_consult_spec))
+sys.modules[_consult_spec.name] = contracts_consult
+_consult_spec.loader.exec_module(contracts_consult)
+ConsultError = contracts_consult.ConsultError
 
 _lifecycle_spec = importlib.util.spec_from_file_location(
     "upagent_lifecycle", HERE / "lifecycle.py"
@@ -127,6 +140,12 @@ STAGE_TIMEOUT_MS = {
     "stage-1-implementation": 10_800_000,
     "stage-2-adversarial-audit": 10_800_000,
 }
+# How long a consult's specialist worker gets. A consult is read-and-cite work, not a stage.
+CONSULT_TIMEOUT_MS = 600_000
+# The phase id every consult order carries. Deliberately NOT the caller's phase: the phase-tree
+# receipt check walks a brief's path for `phases/<phase_id>/pass-N/`, and a consult whose brief
+# sits inside a phase tree would otherwise emit a spurious `phase-receipt-degraded` per question.
+CONSULT_PHASE_ID = "consult"
 # Where `up` records the resolved workspace + Recruiter pane so `status`/callers can find it.
 STATE_FILE = Path(
     os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")
@@ -150,7 +169,6 @@ def default_roster_path() -> str:
       3. `upagent.yaml` beside this engine (the kit's own adoption — editable in the kit source).
     `load_roster` fails loud if the resolved path does not exist, so a destination that has done
     neither (1) nor (2) gets a clear error rather than silently reading a kit-owned public file.
-    Mirrors the Specialist Hub's SPECIALIST_HUB_CONFIG convention.
     """
     env = os.environ.get("UPAGENT_CONFIG")
     if env:
@@ -376,17 +394,108 @@ class JobLedger:
             raise RecruiterError(f"job state {key} is not an object")
         return snapshot.get("state") in ("finished", "cleanup-failed")
 
+    def published_result_path(self, key: str) -> Path:
+        """Return the hub's own durable copy of the result it published for one order.
+
+        The order's `result_path` belongs to the caller's run tree, which may be pruned long
+        before this ledger record is retired.  This copy is what keeps a terminal record
+        answerable once that happens.
+        """
+        return self.request_dir(key) / "published-result.json"
+
     def completed_result(self, key: str, order: dict) -> dict | None:
         """Return a strictly valid terminal result, if this order has already finished."""
         if not self._is_finished(key):
             return None
-        result = load_result(order["result_path"], expected_order_id=order["order_id"])
         receipt = self.completed_receipt(key, order)
+        try:
+            result = load_result(
+                order["result_path"], expected_order_id=order["order_id"]
+            )
+        except (ContractError, OSError) as unusable:
+            # Both a malformed contract and a filesystem read error (the public result vanished
+            # between is_file() and read_text(), or is unreadable) are unusable-result evidence,
+            # routed through the same reconcile-or-refuse path rather than crashing the loader.
+            result = self._reconcile_terminal_result(key, order, receipt, unusable)
         if receipt["verdict"] != result["verdict"]:
             raise RecruiterError(
                 f"completion receipt for {order['order_id']} disagrees with result.json"
             )
         return result
+
+    def _reconcile_terminal_result(
+        self, key: str, order: dict, receipt: dict, unusable: ContractError | OSError
+    ) -> dict:
+        """Restore a finished order's public result from the hub's own durable copy.
+
+        A terminal record always answers with exactly one structured outcome: the recovered
+        result, or a refusal naming the evidence.  `unusable` is whatever made the public result
+        unreadable — a malformed contract or a filesystem read error alike.  It never crashes in
+        the result loader — not on the read that detected the problem, not on the best-effort
+        republication — and it never quietly reopens work the ledger has already finished.
+        """
+        durable = self._durable_terminal_result(key, order, receipt)
+        if durable is None:
+            raise RecruiterError(
+                f"terminal order {order['order_id']} cannot be answered: {unusable}; "
+                f"receipt {self.request_dir(key) / 'receipt.json'} records verdict "
+                f"{receipt['verdict']!r} but no durable copy of that result survives"
+            )
+        try:
+            self._write_json(Path(order["result_path"]), durable)
+        except OSError as republish_error:
+            # Republication is best-effort: it must not lose an already-recovered result or crash.
+            # The next dispatch reconciles again idempotently from the same durable copy.
+            sys.stderr.write(
+                f"upagent: could not republish result for {order['order_id']} to "
+                f"{order['result_path']}: {republish_error}\n"
+            )
+            self._event(
+                key,
+                "result-republish-failed",
+                verdict=durable["verdict"],
+                result_path=order["result_path"],
+                reason=str(republish_error),
+            )
+            return durable
+        self._event(
+            key,
+            "result-republished",
+            verdict=durable["verdict"],
+            result_path=order["result_path"],
+            reason=str(unusable),
+        )
+        # `durable` is the strictly-parsed result object just written (validated in
+        # `_durable_terminal_result`); re-reading the file only reintroduces the loader crash
+        # this method exists to prevent.
+        return durable
+
+    def _durable_terminal_result(
+        self, key: str, order: dict, receipt: dict
+    ) -> dict | None:
+        """Return the hub-held result for a finished order, or None when it cannot be trusted.
+
+        A hub copy that is malformed OR unreadable (OSError) is treated the same: untrustworthy,
+        so the terminal record refuses with evidence rather than crashing in the loader.
+        """
+        recorded = receipt.get("published_result_path")
+        if isinstance(recorded, str) and recorded:
+            try:
+                return load_result(recorded, expected_order_id=order["order_id"])
+            except (ContractError, OSError):
+                return None
+        # Records finalized before the receipt named its copy: the lease-private results still
+        # sit under the request directory.  Accept one only when order identity and the
+        # receipt's verdict leave exactly one candidate — a retried order has several.
+        surviving: list[dict] = []
+        for path in sorted((self.request_dir(key) / "results").glob("*.json")):
+            try:
+                candidate = load_result(path, expected_order_id=order["order_id"])
+            except (ContractError, OSError):
+                continue
+            if candidate["verdict"] == receipt["verdict"] and candidate not in surviving:
+                surviving.append(candidate)
+        return surviving[0] if len(surviving) == 1 else None
 
     def completed_receipt(self, key: str, order: dict) -> dict:
         """Return the durable receipt for a finished order, validating its identity."""
@@ -776,6 +885,10 @@ class JobLedger:
             parsed = parse_result(
                 json.dumps(result), expected_order_id=order["order_id"]
             )
+            # The hub keeps its own copy of what it published, so a pruned run tree cannot
+            # strand this record without the result its receipt vouches for.
+            published = self.published_result_path(key)
+            self._write_json(published, parsed)
             self._write_json(Path(order["result_path"]), parsed)
             load_result(order["result_path"], expected_order_id=order["order_id"])
             terminal_state = "finished" if verified_absent else "cleanup-failed"
@@ -787,12 +900,18 @@ class JobLedger:
                 "cleanup": cleanup,
                 "generation": lease.get("generation", 1),
                 "order_id": order["order_id"],
+                "published_result_path": str(published),
                 "request_id": lease.get(
                     "request_id", lifecycle.request_identity(order)
                 ),
                 "result_path": order["result_path"],
                 "state": terminal_state,
                 "verdict": parsed["verdict"],
+                # A worker's `consults` list is its own account of its own diligence. Resolve it
+                # against the Hub's record of what it actually brokered, so the Stage 2 auditor
+                # reads a Python-checked fact instead of the worker's prose. Present only when
+                # the worker made claims; absent means it recorded no `consults` key at all.
+                **resolve_consult_claims(order, parsed),
             }
             self._event(
                 key,
@@ -864,6 +983,199 @@ def load_roster(path: str | Path) -> dict:
             f"{p} has invalid LLM management configuration: {error}"
         ) from error
     return data
+
+
+# --- the specialist roster: WHO can be asked ----------------------------------
+#
+# A SECOND, deliberate load path — not an extension of `load_roster`. The two rosters answer
+# different questions and therefore need opposite merge rules:
+#
+#   load_roster(path)          how do I LAUNCH harness X   upagent.yaml      replace
+#   load_specialist_roster()   who can be ASKED about Y    specialists.yaml  merge
+#
+# Launch templates must replace: you never want half a launch command assembled from two files.
+# Specialists must merge: a destination that overrides one specialist has to keep the eleven the
+# kit ships. Forcing either rule onto the other file breaks something, and the specialist
+# direction breaks silently — the phone book just gets shorter, which reads to a worker as "no
+# specialist owns this area" rather than as an error.
+
+SPECIALIST_ROSTER_FILE = "specialists.yaml"
+SPECIALIST_OVERLAY_REL = ".shared-llm/this_repo/extensions/common/upagent/specialists.yaml"
+
+
+def specialist_roster_paths() -> tuple[Path | None, Path, str]:
+    """Resolve (base, primary, primary_origin) specialist roster paths.
+
+    The effective roster is base merged UNDER primary — primary entries clobber same-named base
+    entries, everything else is the union:
+      1. a repo-owned `this_repo` overlay — walk up from cwd for
+         `.shared-llm/this_repo/extensions/common/upagent/specialists.yaml` — merged ON TOP of
+         the kit base `specialists.yaml` beside this engine (kit-synced into every destination);
+      2. no overlay — the kit base alone.
+
+    There is deliberately NO single-file environment override. `$UPAGENT_CONFIG` names an
+    `upagent.yaml` and is irrelevant here, and a variable that could drop the base entirely is
+    the silent-loss trap above reachable by an environment.
+    """
+    base = HERE / SPECIALIST_ROSTER_FILE
+    for parent in [Path.cwd(), *Path.cwd().parents]:
+        this_repo = parent / SPECIALIST_OVERLAY_REL
+        if this_repo.is_file():
+            return (base if base.is_file() else None), this_repo, "this-repo"
+    return None, base, "kit-base"
+
+
+def _resolve_specialist_path(value: object, base: Path, field: str) -> Path:
+    """Resolve a configured path against `base`, rejecting non-string path values."""
+    if not isinstance(value, str) or not value:
+        raise RecruiterError(f"{field} must be a non-empty string (got {value!r})")
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
+def _repo_root_from_roster(path: Path) -> Path:
+    """The repository containing a discovered roster, found without consulting the current
+    directory. Re-derived on every load rather than frozen anywhere: a consult that inherits a
+    stale root starts its specialist in a directory that may no longer exist (`fe96fba`)."""
+    for candidate in (path.parent, *path.parent.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    raise RecruiterError(f"could not find a repository root above roster {path}: no .git marker")
+
+
+def _read_specialist_file(path: Path) -> dict:
+    """One roster document: a YAML object with a non-empty `specialists:` list. Fail-loud per
+    file, so a broken overlay names itself rather than shrinking the merge."""
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as e:
+        raise RecruiterError(f"{path} is unreadable or invalid YAML: {e}") from e
+    if not isinstance(data, dict):
+        raise RecruiterError(f"{path} must be a YAML object with a `specialists:` list")
+    specialists = data.get("specialists")
+    if not isinstance(specialists, list) or not specialists:
+        raise RecruiterError(f"{path} must have a non-empty `specialists:` list")
+    return data
+
+
+def _named_specialists(entries: list, origin: str, path: Path) -> dict[str, dict]:
+    """Ordered name -> entry copies tagged with their roster of origin. Merging is BY NAME, so
+    an unnamed entry is unmergeable and fails loud here with its source file.
+
+    A name defined twice WITHIN one file is ambiguous and fails loud too: base-under-overlay
+    replacement happens BETWEEN files, so silently keeping the last same-named entry within a
+    single file would hide a malformed roster rather than surface it."""
+    named: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RecruiterError(f"every specialist entry must be an object: {entry!r} (in {path})")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise RecruiterError(f"every specialist needs a non-empty `name`: {entry} (in {path})")
+        if name in named:
+            raise RecruiterError(
+                f"specialist {name!r} is defined more than once in {path}; base-under-overlay "
+                "replacement happens between files, never within one"
+            )
+        named[name] = {**entry, "origin": origin}
+    return named
+
+
+def _validate_specialist(entry: dict) -> None:
+    """One merged entry must be launchable: the roster is the only thing that knows how."""
+    for key in ("name", "harness", "agent"):
+        if not isinstance(entry.get(key), str) or not entry[key]:
+            raise RecruiterError(f"every specialist needs a non-empty `{key}`: {entry}")
+    if not isinstance(entry.get("model"), str):
+        raise RecruiterError(f"every specialist needs a string `model` (may be empty): {entry}")
+    if entry["harness"] not in KNOWN_HARNESSES:
+        raise RecruiterError(
+            f"specialist {entry['name']!r} has unsupported harness {entry['harness']!r}"
+        )
+    if "effort" in entry and (not isinstance(entry["effort"], str) or not entry["effort"]):
+        raise RecruiterError(f"specialist {entry['name']!r} effort must be a non-empty string")
+
+
+def load_specialist_roster() -> dict:
+    """Read + validate + MERGE the specialist rosters (kit base under the repo overlay).
+
+    Returns the merged list plus the merge's own audit trail: which base names the overlay
+    replaced, and the repository the roster describes. Fail-loud (`RecruiterError`) on any
+    problem — the consult door catches it inside its recoverable block so a bad roster still
+    leaves the caller a legible failure answer.
+    """
+    base_path, primary_path, primary_origin = specialist_roster_paths()
+    if not primary_path.is_file():
+        raise RecruiterError(
+            f"specialist roster not found: {primary_path} "
+            "(template: specialists.yml.sample, beside this engine)"
+        )
+    primary = _read_specialist_file(primary_path)
+    base = _read_specialist_file(base_path) if base_path is not None else None
+
+    named = _named_specialists(primary["specialists"], primary_origin, primary_path)
+    overridden: list[str] = []
+    if base is not None and base_path is not None:
+        base_named = _named_specialists(base["specialists"], "kit-base", base_path)
+        overridden = sorted(set(base_named) & set(named))
+        # The overlay clobbers same-named base entries wholesale and appends its new ones; base
+        # order is preserved, so an override keeps the position a worker already knows it by.
+        base_named.update(named)
+        named = base_named
+    specialists = list(named.values())
+    for entry in specialists:
+        _validate_specialist(entry)
+
+    config_path = primary_path.resolve()
+    return {
+        "specialists": specialists,
+        "overridden": overridden,
+        # Anchored on the roster this call actually resolved, never on a recorded path: a
+        # consult runs in the repository its roster describes.
+        "repo_root": _repo_root_from_roster(config_path),
+        "config_path": config_path,
+        "base_config_path": base_path.resolve() if base_path is not None else None,
+    }
+
+
+def _specialist_description(roster: dict, entry: dict) -> str:
+    """One line: the entry's own `description`, else the persona file's frontmatter
+    description, else empty. The fallback is what keeps a roster that only carries
+    `location:` from rendering a phone book of bare names nobody can choose from."""
+    if entry.get("description"):
+        return str(entry["description"]).strip()
+    location = entry.get("location")
+    if not location:
+        return ""
+    path = _resolve_specialist_path(location, roster["repo_root"], "specialist location")
+    if not path.is_file():
+        return ""
+    matched = re.match(r"\A---\n(.*?)\n---\n", path.read_text(), re.DOTALL)
+    if not matched:
+        return ""
+    try:
+        frontmatter = yaml.safe_load(matched.group(1))
+    except yaml.YAMLError:
+        return ""
+    description = (frontmatter or {}).get("description", "") if isinstance(frontmatter, dict) else ""
+    return str(description).strip().split("\n")[0]
+
+
+def _specialist_index(roster: dict) -> dict[str, dict]:
+    """The merged roster keyed by name, with descriptions resolved. In memory only — it is
+    cheap to compute, and a persisted copy is a cache with a staleness problem and no owner."""
+    return {
+        entry["name"]: {
+            "description": _specialist_description(roster, entry),
+            "location": entry.get("location", ""),
+            "agent": entry["agent"],
+            "effort": entry.get("effort", "medium"),
+            "harness": entry["harness"],
+            "model": entry["model"],
+            "origin": entry.get("origin", ""),
+        }
+        for entry in roster["specialists"]
+    }
 
 
 def _default_timeout_ms(stage_id: str) -> int:
@@ -2724,7 +3036,6 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "env": ("env",),
     "requester": ("requester",),
     "management": ("management",),
-    "consult_token": ("consult_token",),
     "mode": ("mode",),
     "plan_id": ("plan_id",),
     "step_id": ("step_id",),
@@ -2763,7 +3074,6 @@ ORDER_INTAKE_PROTECTED = (
     "env",
     "requester",
     "management",
-    "consult_token",
     "mode",
     "plan_id",
     "step_id",
@@ -2774,6 +3084,87 @@ ORDER_INTAKE_PROTECTED = (
     "plan_artifact",
     "watchdog_terminal",
 )
+_ORDER_KNOWN_ALIASES = frozenset(
+    alias for aliases in ORDER_INTAKE_ALIASES.values() for alias in aliases
+)
+
+# Every distinct submission starts one fresh intake clerk (a byte-identical resubmission reuses a
+# clean prior attempt instead). When that clerk's machine-readable answer fails Python's provenance
+# or contract checks, the same role gets those findings back this many more times before the
+# request ends as an intake-clerk failure.
+INTAKE_CORRECTION_LIMIT = 2
+INTAKE_ATTEMPT_LIMIT = INTAKE_CORRECTION_LIMIT + 1
+
+# The four visible outcomes of a submission: acceptance (exit 0, printed by each door), then one
+# standardized non-accepted outcome per marker. A caller can branch on the exit code alone.
+INTAKE_OUTCOMES: dict[str, tuple[str, int]] = {
+    "blocked": ("REQUEST_BLOCKED", 3),
+    "intake-clerk-failure": ("REQUEST_INTAKE_FAILED", 4),
+    "infrastructure-failure": ("REQUEST_INFRASTRUCTURE_FAILED", 5),
+}
+
+
+class IntakeOutcomeError(RecruiterError):
+    """One non-accepted request outcome, its durable evidence, and its exit code.
+
+    Only three things may end a received request: the intake clerk authored a block, the intake
+    clerk could not answer, or the Hub's own machinery failed. A request's schema, wording, order
+    id, agent name, or intent never ends it here.
+    """
+
+    def __init__(
+        self,
+        outcome: str,
+        order_path: str,
+        reason: str,
+        *,
+        evidence: dict[str, str],
+        missing: Sequence[str] = (),
+        understood: Sequence[str] = (),
+        errors: Sequence[str] = (),
+        attempts: int = 0,
+    ) -> None:
+        marker, exit_code = INTAKE_OUTCOMES[outcome]
+        super().__init__(
+            f"request {order_path} could not be taken in: {reason}"
+            if outcome == "infrastructure-failure"
+            else _intake_refusal_message(order_path, reason, list(missing))
+        )
+        self.outcome = outcome
+        self.marker = marker
+        self.exit_code = exit_code
+        self.order_path = order_path
+        self.reason = reason
+        self.evidence = dict(evidence)
+        self.missing = list(missing)
+        self.understood = list(understood)
+        self.errors = list(errors) or [reason]
+        self.attempts = attempts
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "attempts": self.attempts,
+            "authored_by": _intake_author(self.outcome),
+            "errors": self.errors,
+            "evidence": self.evidence,
+            "missing": self.missing,
+            "order_path": self.order_path,
+            "outcome": self.outcome,
+            "reason": self.reason,
+            "understood": self.understood,
+        }
+
+
+def _intake_author(outcome: str) -> str:
+    """Who ended the request. Only a block is the clerk's own words."""
+    return "intake-clerk" if outcome == "blocked" else "recruiter"
+
+
+def _print_intake_outcome(outcome: IntakeOutcomeError) -> None:
+    """One machine-readable line naming the outcome and every durable evidence path."""
+    print(
+        f"{outcome.marker} {json.dumps(outcome.payload(), sort_keys=True)}", flush=True
+    )
 
 
 def _intake_artifact_paths(order_path: Path) -> dict[str, Path]:
@@ -2996,16 +3387,6 @@ def _intake_attempt_lock(key: str) -> Iterator[None]:
         os.close(lock_directory)
 
 
-def _first_alias(raw: dict, canonical: str) -> tuple[object | None, str | None, bool]:
-    present = [(alias, raw[alias]) for alias in ORDER_INTAKE_ALIASES[canonical] if alias in raw]
-    if not present:
-        return None, None, False
-    first_alias, first_value = present[0]
-    if any(value != first_value for _alias, value in present[1:]):
-        return None, None, True
-    return first_value, first_alias, False
-
-
 def _raw_unknown_fields(raw_text: str) -> list[str]:
     try:
         document = json.loads(raw_text)
@@ -3051,7 +3432,11 @@ def _complete_order_form(
 
     order_id = order.get("order_id")
     if isinstance(order_id, str) and order_id and not _SAFE_ORDER_ID_RE.fullmatch(order_id):
-        if order_id.startswith("specialist-consult-"):
+        if order_id.startswith("consult-"):
+            # NOT specialist vocabulary — a laundering guard. An unsafe order id claiming the
+            # consult door's minted identity is REFUSED, never silently renamed into a valid
+            # one. `_SAFE_ORDER_ID_RE` already excludes `/`; this guard's contribution is
+            # refusing rather than repairing. Pinned by recruiter_test.py.
             raise ContractError("order.json: unsafe consult-shaped order_id cannot be regenerated")
         order.pop("order_id")
         changes.append(f"regenerated unsafe order_id {order_id!r}")
@@ -3089,49 +3474,10 @@ def _complete_order_form(
     return order, changes
 
 
-def _mechanical_order_candidate(
-    raw_text: str, order_path: Path
-) -> tuple[dict, list[str]] | None:
-    """Pure form repair. Ambiguity, unknown fields, and invalid explicit values escalate."""
-    try:
-        raw = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw, dict) or _raw_unknown_fields(raw_text):
-        return None
-
-    candidate: dict[str, object] = {}
-    changes: list[str] = []
-    for canonical in ORDER_INTAKE_ALIASES:
-        value, alias, conflict = _first_alias(raw, canonical)
-        if conflict:
-            return None
-        if alias is None:
-            continue
-        if (
-            canonical == "instructions_path"
-            and alias == "instructions"
-            and isinstance(value, str)
-            and any(character.isspace() for character in value)
-        ):
-            return None  # inline task prose is not silently reinterpreted as a path
-        candidate[canonical] = value
-        if alias != canonical:
-            changes.append(f"mapped field {alias!r} -> {canonical!r}")
-    for field in ORDER_INTAKE_NEVER_INVENTED:
-        if not isinstance(candidate.get(field), str) or not candidate[field]:
-            return None
-    try:
-        order, form_changes = _complete_order_form(candidate, raw_text, order_path)
-    except ContractError:
-        return None
-    changes.extend(form_changes)
-    if not changes:
-        return None
-    return order, changes
-
-
 def _nested_field_values(value: object, aliases: tuple[str, ...]) -> list[object]:
+    """Collect every value keyed by these aliases. A recognized field owns its own subtree — the
+    `mode` inside `manager_placement` and the `id` inside `requester` are that object's members,
+    never a second top-level declaration — matching how _raw_unknown_fields walks the same JSON."""
     found: list[object] = []
     if isinstance(value, list):
         for item in value:
@@ -3140,7 +3486,7 @@ def _nested_field_values(value: object, aliases: tuple[str, ...]) -> list[object
         for key, child in value.items():
             if key in aliases:
                 found.append(child)
-            else:
+            elif key not in _ORDER_KNOWN_ALIASES:
                 found.extend(_nested_field_values(child, aliases))
     return found
 
@@ -3217,11 +3563,12 @@ def _clerk_provenance_errors(raw_text: str, candidate: dict) -> list[str]:
 
 def _intake_record(
     *, mode: str, raw_path: Path, interpreted_path: Path, changes: list[str],
-    unknown_fields: list[str], clerk: dict | None = None
+    unknown_fields: list[str], attempts: int, clerk: dict | None = None
 ) -> dict:
     return {
         "at_ns": time.time_ns(),
         "mode": mode,
+        "attempts": attempts,
         "raw_path": str(raw_path),
         "raw_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
         "interpreted_path": str(interpreted_path),
@@ -3234,16 +3581,25 @@ def _intake_record(
     }
 
 
+def _intake_evidence(paths: dict[str, Path], clerk: dict | None = None) -> dict[str, str]:
+    """Every durable path a human or agent can open after a non-accepted outcome."""
+    evidence = {name: str(path) for name, path in paths.items()}
+    for field in ("brief_path", "output_path", "ownership_path"):
+        value = (clerk or {}).get(field)
+        if isinstance(value, str):
+            evidence[f"clerk_{field.removesuffix('_path')}"] = value
+    return evidence
+
+
 def _persist_intake_success(
     order_path: Path,
     paths: dict[str, Path],
     order: dict,
     *,
-    mode: str,
-    strict_error: ContractError,
     changes: list[str],
     unknown_fields: list[str],
     clerk: dict | None,
+    attempts: int,
 ) -> None:
     """Commit the full paper trail before atomically replacing the caller's order."""
     paths["refusal"].unlink(missing_ok=True)
@@ -3251,11 +3607,12 @@ def _persist_intake_success(
     JobLedger._write_json(
         paths["intake"],
         _intake_record(
-            mode=mode,
+            mode="intake-clerk",
             raw_path=paths["raw"],
             interpreted_path=paths["interpreted"],
             changes=changes,
             unknown_fields=unknown_fields,
+            attempts=attempts,
             clerk=clerk,
         ),
     )
@@ -3263,7 +3620,8 @@ def _persist_intake_success(
         paths["validation"],
         {
             "at_ns": time.time_ns(),
-            "initial_error": str(strict_error),
+            "attempts": attempts,
+            "authored_by": "intake-clerk",
             "valid": True,
             "errors": [],
         },
@@ -3274,24 +3632,27 @@ def _persist_intake_success(
 def _persist_intake_refusal(
     paths: dict[str, Path],
     *,
-    strict_error: ContractError,
+    outcome: str,
     reason: str,
     missing: list[str],
     understood: list[str],
     candidate: dict | None,
     unknown_fields: list[str],
     clerk: dict | None,
+    attempts: int,
     errors: list[str] | None = None,
 ) -> None:
+    authored_by = _intake_author(outcome)
     JobLedger._write_json(paths["interpreted"], candidate if candidate is not None else {"order": None})
     JobLedger._write_json(
         paths["intake"],
         _intake_record(
-            mode="intake-clerk-refusal",
+            mode="intake-clerk-refusal" if outcome == "blocked" else "intake-clerk-failure",
             raw_path=paths["raw"],
             interpreted_path=paths["interpreted"],
             changes=[],
             unknown_fields=unknown_fields,
+            attempts=attempts,
             clerk=clerk,
         ),
     )
@@ -3300,7 +3661,8 @@ def _persist_intake_refusal(
         paths["validation"],
         {
             "at_ns": time.time_ns(),
-            "initial_error": str(strict_error),
+            "attempts": attempts,
+            "authored_by": authored_by,
             "valid": False,
             "errors": validation_errors,
         },
@@ -3309,6 +3671,8 @@ def _persist_intake_refusal(
         paths["refusal"],
         {
             "at_ns": time.time_ns(),
+            "attempts": attempts,
+            "authored_by": authored_by,
             "error": reason,
             "missing": missing,
             "understood": understood,
@@ -3646,9 +4010,17 @@ def _record_started_intake_clerk(
 
 
 def _run_order_intake_clerk(
-    raw_text: str, raw_path: Path, roster_path: str, intake_key: str
+    raw_text: str,
+    raw_path: Path,
+    roster_path: str,
+    intake_key: str,
+    *,
+    attempt_number: int = 1,
+    unknown_fields: Sequence[str] = (),
+    correction: dict | None = None,
 ) -> tuple[object, dict]:
-    """Launch one journaled support clerk; malformed caller data never controls its launch."""
+    """Launch one journaled support clerk, or reuse a clean prior attempt's validated response for a
+    byte-identical resubmission (same `intake_key`); malformed caller data never controls its launch."""
     recruiter_pane = _recruiter_pane_from_state()
     if recruiter_pane is None:
         raise RecruiterError(
@@ -3659,7 +4031,7 @@ def _run_order_intake_clerk(
     layout = _prepare_intake_layout()
     reused = _load_reusable_intake_clerk_response(layout, intake_key)
     if reused is not None:
-        return reused
+        return reused[0], {**reused[1], "attempt": attempt_number}
 
     attempt = _new_intake_attempt(layout)
     output_path = attempt / "response.json"
@@ -3668,7 +4040,15 @@ def _run_order_intake_clerk(
     cwd = str(attempt)
     _secure_write_text(
         brief_path,
-        llm_management.intake_clerk_brief(raw_text, raw_path, output_path),
+        llm_management.intake_clerk_brief(
+            raw_text,
+            raw_path,
+            output_path,
+            attempt=attempt_number,
+            attempt_limit=INTAKE_ATTEMPT_LIMIT,
+            unknown_fields=unknown_fields,
+            correction=correction,
+        ),
     )
     command = llm_management.render_intake_clerk_command(
         config.intake_clerk, brief_path, cwd, output_path
@@ -3837,7 +4217,7 @@ def _run_order_intake_clerk(
         },
     )
     return response, {
-        "attempt": 1,
+        "attempt": attempt_number,
         "attempt_name": attempt.name,
         "brief_path": str(brief_path),
         "output_path": str(output_path),
@@ -3850,234 +4230,236 @@ def _intake_refusal_message(
     order_path: str, reason: str, missing: list[str] | None = None
 ) -> str:
     suffix = f" Missing: {', '.join(missing)}." if missing else ""
+    detail = reason.rstrip().removesuffix(".")  # the clerk writes sentences; keep one full stop
     return (
-        f"invalid order {order_path}: {reason}.{suffix} The intake repaired common form "
-        "issues and asked one bounded intake clerk, but it will not invent or change "
+        f"invalid order {order_path}: {detail}.{suffix} One fresh intake clerk read the exact "
+        "submitted bytes and could not produce an executable order. It will not invent or change "
         + ", ".join(ORDER_INTAKE_NEVER_INVENTED)
         + ", target model/effort, requester identity, or operation/apply authority. "
-        "Submit a canonical order or add the named missing values."
+        "Add the named missing values and resubmit."
     )
 
 
-def _load_order_forgivingly(order_path: str, roster_path: str | None = None) -> dict:
-    """Strict -> mechanical form repair -> one clerk -> strict validation or durable refusal."""
+def _intake_attempt_key(submission_key: str, attempt: int, correction: dict | None) -> str:
+    """Give every bounded attempt its own reuse identity so a correction round can never be
+    answered by the very response it was sent to correct."""
+    if attempt == 1:
+        return submission_key
+    digest = hashlib.sha256(
+        json.dumps(correction, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    return hashlib.sha256(f"{submission_key}\0{attempt}\0{digest}".encode()).hexdigest()
+
+
+def _refuse_intake(
+    paths: dict[str, Path],
+    order_path: str,
+    outcome: str,
+    *,
+    reason: str,
+    raw_text: str,
+    unknown_fields: list[str],
+    clerk: dict | None,
+    attempts: int,
+    missing: list[str] | None = None,
+    understood: list[str] | None = None,
+    candidate: dict | None = None,
+    errors: list[str] | None = None,
+) -> IntakeOutcomeError:
+    """Commit the durable refusal, then hand the door one standardized outcome to raise."""
+    if missing is None or understood is None:
+        summary_understood, summary_missing = _intake_field_summary(raw_text)
+        missing = summary_missing if missing is None else missing
+        understood = summary_understood if understood is None else understood
     try:
-        return load_order(order_path)
-    except ContractError as error:
-        initial_error = error
-    except (OSError, UnicodeDecodeError) as error:
-        initial_error = ContractError(f"order.json could not be decoded: {error}")
+        _persist_intake_refusal(
+            paths,
+            outcome=outcome,
+            reason=reason,
+            missing=missing,
+            understood=understood,
+            candidate=candidate,
+            unknown_fields=unknown_fields,
+            clerk=clerk,
+            attempts=attempts,
+            errors=errors,
+        )
+    except OSError as error:
+        return IntakeOutcomeError(
+            "infrastructure-failure",
+            order_path,
+            f"{reason}; the refusal paper trail also failed: {error}",
+            evidence=_intake_evidence(paths, clerk),
+            attempts=attempts,
+        )
+    return IntakeOutcomeError(
+        outcome,
+        order_path,
+        reason,
+        evidence=_intake_evidence(paths, clerk),
+        missing=missing,
+        understood=understood,
+        errors=errors or [reason],
+        attempts=attempts,
+    )
 
+
+def _intake_order(order_path: str, roster_path: str) -> dict:
+    """Every distinct submission starts one fresh intake clerk; Python never interprets a submission.
+
+    Python's whole job here is to preserve the exact submitted bytes, launch the clerk, record its
+    evidence, and consume its canonical output. Canonical JSON, malformed JSON, prose, an
+    incomplete object, unknown fields, and specialist-worded requests all take this one path, and
+    nothing about a request's schema, wording, order id, agent name, or intent ends it in Python.
+    A byte-identical resubmission of the same file with a clean prior attempt is idempotent: it
+    reuses that attempt's already-validated response instead of launching again (the reuse seam
+    lives in `_run_order_intake_clerk`). Only three things end a request: a clerk-authored block, a
+    clerk that could not answer within its bounded correction rounds, or a failure of the Hub's own
+    machinery.
+    """
     path = Path(order_path)
+    paths = _intake_artifact_paths(path)
     path_key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
-    with _intake_attempt_lock(path_key):
-        # A concurrent submission may already have been normalized while we waited. Read the
-        # bytes only after taking the path lock so the interpretation cannot race a rewrite.
+    try:
+        with _intake_attempt_lock(path_key):
+            return _interpret_submission(order_path, path, paths, roster_path)
+    except IntakeOutcomeError:
+        raise
+    except RecruiterError as error:  # the Hub's own workspace, never the submission
+        raise IntakeOutcomeError(
+            "infrastructure-failure",
+            order_path,
+            f"the Hub's intake workspace is unusable: {error}",
+            evidence=_intake_evidence(paths),
+        ) from error
+
+
+def _interpret_submission(
+    order_path: str, path: Path, paths: dict[str, Path], roster_path: str
+) -> dict:
+    """Run the bounded intake conversation for one submission under its held path lock."""
+    try:
+        raw_bytes = path.read_bytes()
+        raw_text = raw_bytes.decode()
+    except (OSError, UnicodeDecodeError) as error:
+        raise IntakeOutcomeError(
+            "infrastructure-failure",
+            order_path,
+            f"could not preserve the submitted bytes: {error}",
+            evidence=_intake_evidence(paths),
+        ) from error
+    try:
+        _write_bytes_atomic(paths["raw"], raw_bytes)
+    except OSError as error:
+        raise IntakeOutcomeError(
+            "infrastructure-failure",
+            order_path,
+            "intake could not persist the exact raw submission; no paper trail means no "
+            f"execution ({error})",
+            evidence=_intake_evidence(paths),
+        ) from error
+
+    unknown_fields = _raw_unknown_fields(raw_text)
+    submission_key = hashlib.sha256(
+        str(path.resolve()).encode() + b"\0" + raw_bytes
+    ).hexdigest()
+    clerk_record: dict | None = None
+    correction: dict[str, object] | None = None
+    candidate: dict | None = None
+    errors: list[str] = []
+    reason = "the intake clerk returned no interpretation"
+
+    for attempt in range(1, INTAKE_ATTEMPT_LIMIT + 1):
         try:
-            return load_order(order_path)
-        except (ContractError, OSError, UnicodeDecodeError):
-            pass
-        try:
-            raw_bytes = path.read_bytes()
-            raw_text = raw_bytes.decode()
-        except (OSError, UnicodeDecodeError) as error:
-            raise RecruiterError(
-                f"invalid order {order_path}: could not preserve submitted bytes: {error}"
+            response, clerk_record = _run_order_intake_clerk(
+                raw_text,
+                paths["raw"],
+                roster_path,
+                _intake_attempt_key(submission_key, attempt, correction),
+                attempt_number=attempt,
+                unknown_fields=unknown_fields,
+                correction=correction,
+            )
+        except (RecruiterError, LifecycleError, ManagementConfigError, OSError) as error:
+            raise _refuse_intake(
+                paths,
+                order_path,
+                "intake-clerk-failure",
+                reason=f"intake clerk unavailable: {error}",
+                raw_text=raw_text,
+                unknown_fields=unknown_fields,
+                clerk=clerk_record,
+                attempts=attempt,
             ) from error
-        intake_key = hashlib.sha256(
-            str(path.resolve()).encode() + b"\0" + raw_bytes
-        ).hexdigest()
-        paths = _intake_artifact_paths(path)
-        try:
-            _write_bytes_atomic(paths["raw"], raw_bytes)
-        except OSError as error:
-            raise RecruiterError(
-                f"invalid order {order_path}: intake could not persist the exact raw submission; "
-                f"no paper trail means no execution ({error})"
-            ) from error
-
-        unknown_fields = _raw_unknown_fields(raw_text)
-        mechanical = _mechanical_order_candidate(raw_text, path)
-        if mechanical is not None:
-            order, changes = mechanical
-            try:
-                _persist_intake_success(
-                    path,
-                    paths,
-                    order,
-                    mode="mechanical-repair",
-                    strict_error=initial_error,
-                    changes=changes,
-                    unknown_fields=unknown_fields,
-                    clerk=None,
-                )
-            except OSError as error:
-                raise RecruiterError(
-                    f"invalid order {order_path}: intake could not persist its paper trail; "
-                    f"no execution occurred ({error})"
-                ) from error
-            return order
-
-        clerk_record: dict | None = None
-        reason = "intake clerk unavailable: no typed response was returned"
-        if roster_path is None:
-            reason = "intake clerk unavailable: no trusted roster was supplied"
-            response = None
-        else:
-            try:
-                response, clerk_record = _run_order_intake_clerk(
-                    raw_text, paths["raw"], roster_path, intake_key
-                )
-            except (RecruiterError, LifecycleError, ManagementConfigError, OSError) as error:
-                response = None
-                reason = f"intake clerk unavailable: {error}"
-
-        if response is None:
-            understood, missing = _intake_field_summary(raw_text)
-            try:
-                _persist_intake_refusal(
-                    paths,
-                    strict_error=initial_error,
-                    reason=reason,
-                    missing=missing,
-                    understood=understood,
-                    candidate=None,
-                    unknown_fields=unknown_fields,
-                    clerk=clerk_record,
-                )
-            except OSError as error:
-                raise RecruiterError(
-                    f"invalid order {order_path}: {reason}; refusal paper trail also failed: {error}"
-                ) from error
-            raise RecruiterError(
-                _intake_refusal_message(order_path, reason, missing)
-            ) from initial_error
 
         refusal = getattr(response, "refusal")
         if refusal is not None:
-            missing = list(getattr(response, "missing"))
-            understood = list(getattr(response, "understood"))
-            try:
-                _persist_intake_refusal(
-                    paths,
-                    strict_error=initial_error,
-                    reason=refusal,
-                    missing=missing,
-                    understood=understood,
-                    candidate=None,
-                    unknown_fields=unknown_fields,
-                    clerk=clerk_record,
-                )
-            except OSError as error:
-                raise RecruiterError(
-                    f"invalid order {order_path}: {refusal}; refusal paper trail failed: {error}"
-                ) from error
-            raise RecruiterError(
-                _intake_refusal_message(order_path, refusal, missing)
-            ) from initial_error
-
-        candidate = cast(dict, getattr(response, "order"))
-        provenance_errors = _clerk_provenance_errors(raw_text, candidate)
-        if provenance_errors:
-            reason = (
-                "intake clerk interpretation invented or changed execution intent: "
-                + "; ".join(provenance_errors)
-            )
-            try:
-                _persist_intake_refusal(
-                    paths,
-                    strict_error=initial_error,
-                    reason=reason,
-                    missing=[],
-                    understood=[],
-                    candidate=candidate,
-                    unknown_fields=unknown_fields,
-                    clerk=clerk_record,
-                    errors=provenance_errors,
-                )
-            except OSError as error:
-                raise RecruiterError(
-                    f"invalid order {order_path}: {reason}; refusal paper trail failed: {error}"
-                ) from error
-            raise RecruiterError(_intake_refusal_message(order_path, reason)) from initial_error
-
-        try:
-            order, form_changes = _complete_order_form(candidate, raw_text, path)
-        except ContractError as error:
-            reason = f"intake clerk interpretation failed strict validation: {error}"
-            try:
-                _persist_intake_refusal(
-                    paths,
-                    strict_error=initial_error,
-                    reason=reason,
-                    missing=[],
-                    understood=[],
-                    candidate=candidate,
-                    unknown_fields=unknown_fields,
-                    clerk=clerk_record,
-                )
-            except OSError as persistence_error:
-                raise RecruiterError(
-                    f"invalid order {order_path}: {reason}; refusal paper trail failed: {persistence_error}"
-                ) from persistence_error
-            raise RecruiterError(_intake_refusal_message(order_path, reason)) from error
-
-        changes = list(getattr(response, "notes")) + form_changes
-        try:
-            _persist_intake_success(
-                path,
+            raise _refuse_intake(
                 paths,
-                order,
-                mode="intake-clerk",
-                strict_error=initial_error,
-                changes=changes,
+                order_path,
+                "blocked",
+                reason=refusal,
+                raw_text=raw_text,
                 unknown_fields=unknown_fields,
                 clerk=clerk_record,
+                attempts=attempt,
+                missing=list(getattr(response, "missing")),
+                understood=list(getattr(response, "understood")),
             )
-        except OSError as error:
-            raise RecruiterError(
-                f"invalid order {order_path}: intake could not persist its paper trail; "
-                f"no execution occurred ({error})"
-            ) from error
-        return order
 
-def _issued_consult_token() -> str | None:
-    """The consult token this Recruiter issued at `up` (from its own STATE_FILE), or None when
-    none was issued (state absent, corrupt, or written by a pre-token `up`)."""
-    try:
-        state = json.loads(STATE_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    token = state.get("consult_token") if isinstance(state, dict) else None
-    return token if isinstance(token, str) and token else None
+        candidate = cast(dict, getattr(response, "order"))
+        errors = _clerk_provenance_errors(raw_text, candidate)
+        if errors:
+            reason = (
+                "intake clerk interpretation invented or changed execution intent: "
+                + "; ".join(errors)
+            )
+        else:
+            try:
+                order, form_changes = _complete_order_form(candidate, raw_text, path)
+            except ContractError as error:
+                errors = [str(error)]
+                reason = f"intake clerk interpretation failed strict validation: {error}"
+            else:
+                try:
+                    _persist_intake_success(
+                        path,
+                        paths,
+                        order,
+                        changes=list(getattr(response, "notes")) + form_changes,
+                        unknown_fields=unknown_fields,
+                        clerk=clerk_record,
+                        attempts=attempt,
+                    )
+                except OSError as error:
+                    raise IntakeOutcomeError(
+                        "infrastructure-failure",
+                        order_path,
+                        "intake could not persist its paper trail; no execution occurred "
+                        f"({error})",
+                        evidence=_intake_evidence(paths, clerk_record),
+                        attempts=attempt,
+                    ) from error
+                return order
+        # Bounded correction: the same intake role sees Python's authoritative findings and
+        # either fixes its own answer or refuses. Python never edits an interpretation itself.
+        correction = {"order": candidate, "errors": errors}
 
-
-def _reject_unbrokered_consult(order: dict) -> None:
-    """Specialist consults must arrive brokered by the Librarian, which stamps the
-    Recruiter-issued consult token on every order it authors. A consult-shaped order without
-    the current token is a hand-written imitation — a worker that read the hub's files and
-    forged the Librarian's identity — and is refused with the correct door named. No token
-    issued (a pre-token `up` state) means there is nothing to verify against, so enforcement
-    waits for the next `up`."""
-    requester = order.get("requester")
-    requester_id = requester.get("id") if isinstance(requester, dict) else None
-    consult_shaped = (
-        order.get("phase_id") == "specialist-consult"
-        or str(order.get("order_id", "")).startswith("specialist-consult-")
-        or requester_id == "specialist-librarian"
+    raise _refuse_intake(
+        paths,
+        order_path,
+        "intake-clerk-failure",
+        reason=(
+            f"the intake clerk did not produce a valid order in {INTAKE_ATTEMPT_LIMIT} "
+            f"bounded attempts: {reason}"
+        ),
+        raw_text=raw_text,
+        unknown_fields=unknown_fields,
+        clerk=clerk_record,
+        attempts=INTAKE_ATTEMPT_LIMIT,
+        candidate=candidate,
+        errors=errors,
     )
-    if not consult_shaped:
-        return
-    issued = _issued_consult_token()
-    if issued is None:
-        return
-    if order.get("consult_token") != issued:
-        raise RecruiterError(
-            f"order {order.get('order_id')!r} is consult-shaped but was not brokered by the "
-            "Librarian (missing or stale consult token). Never hand-write specialist-consult "
-            "orders or inject them into panes — write a consult.json and run "
-            "`just specialist-hub consult <consult.json>`."
-        )
 
 
 def cmd_recruit(order_path: str, roster_path: str) -> int:
@@ -4087,11 +4469,14 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     for the durable receipt without depending on this command's pane output.
     """
     try:
-        order = _load_order_forgivingly(order_path, roster_path)
+        order = _intake_order(order_path, roster_path)
+    except IntakeOutcomeError as e:
+        _print_intake_outcome(e)
+        _reject_legacy_order(order_path, str(e))  # wake old waiters after the outcome is visible
+        return e.exit_code
     except RecruiterError as e:
         _reject_legacy_order(order_path, str(e))
         return 1
-    _reject_unbrokered_consult(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -4394,8 +4779,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
     Recruiter shell, so adjacent orders cannot interleave. The child process is the zero-poll
     wake-up path; an idempotent duplicate falls back to a bounded ledger wait.
     """
-    order = _load_order_forgivingly(order_path, roster_path)
-    _reject_unbrokered_consult(order)
+    order = _intake_order(order_path, roster_path)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -4475,8 +4859,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
 
 def cmd_request(order_path: str, roster_path: str) -> int:
     """Submit directly and return only after the worker is healthy or terminally rejected."""
-    order = _load_order_forgivingly(order_path, roster_path)
-    _reject_unbrokered_consult(order)
+    order = _intake_order(order_path, roster_path)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
@@ -4857,8 +5240,8 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     manager: dict[str, object] | None = None
     mechanical_validation = inspect_worker_configuration(order, roster)
 
-    # An order may pin its own lifecycle ownership (the Specialist Hub pins `dedicated`
-    # for every consult so consults always get a broker); the roster sets the default.
+    # An order may pin its own lifecycle ownership; the roster sets the default. Consults do
+    # not pin one: they follow the roster like any other order.
     requested_management = order.get("management") or {}
     effective_management_mode = requested_management.get("mode") or management_config.mode
     try:
@@ -5208,7 +5591,6 @@ def _find_services_workspace(workspaces_resp: dict) -> dict | None:
 
 
 RECRUITER_PANE_LABEL = "recruiter"
-LIBRARIAN_PANE_LABEL = "librarian"
 
 def _recruit_door_command(roster_path: str) -> str:
     """A narrow compatibility door for the common ``recruit <path>`` pane command.
@@ -5223,7 +5605,7 @@ def _recruit_door_command(roster_path: str) -> str:
     return (
         'recruit() { if [ "$#" -ne 1 ]; then '
         "echo 'recruit expects exactly one order.json path. Use `recruit <order.json>`; "
-        "specialist questions use `just specialist-hub consult <consult.json>`.' >&2; "
+        "specialist questions use `just upagent-consult <consult.json>`.' >&2; "
         "return 2; fi; "
         f"{python} {script} --roster {roster} request -- \"$1\"; "
         "} # normal verified request door"
@@ -5233,8 +5615,8 @@ def _recruit_door_command(roster_path: str) -> str:
 def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, bool]:
     """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the single services
     workspace (`workspace_label`), claiming ONLY a pane labeled `role_label` — never an arbitrary
-    pane. This lets the Recruiter and the Librarian share one workspace without fighting over each
-    other's panes, regardless of which engine started first:
+    pane. Claiming by role label keeps bring-up idempotent and lets the service coexist with a
+    run's own panes in the unified workspace without fighting over them:
       - if services are already up under the OTHER mode's label, fail loud (run `just herdr-down`
         first) rather than splitting the services across two workspaces;
       - create the services workspace if it is absent, and label its root pane for my role;
@@ -5254,7 +5636,7 @@ def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, 
             .get("panes", [])
         )
         if any(
-            p.get("label") in (RECRUITER_PANE_LABEL, LIBRARIAN_PANE_LABEL)
+            p.get("label") == RECRUITER_PANE_LABEL
             for p in other_panes
             if isinstance(p, dict)
         ):
@@ -5283,16 +5665,9 @@ def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, 
     )
     if mine is not None:
         return workspace_id, mine["pane_id"], True
-    # Prefer splitting beside the sibling service pane so services stay together in one tab
-    # even when the unified workspace already holds run panes.
-    anchor = next(
-        (
-            p["pane_id"]
-            for p in panes
-            if p.get("label") == LIBRARIAN_PANE_LABEL and p.get("pane_id")
-        ),
-        None,
-    ) or next((p["pane_id"] for p in panes if p.get("pane_id")), None)
+    # Split my role pane off an existing pane so the service stays in this tab even when the
+    # unified workspace already holds a run's own panes.
+    anchor = next((p["pane_id"] for p in panes if p.get("pane_id")), None)
     if anchor is None:
         raise RecruiterError(
             f"services workspace {workspace_id} has no pane to split from"
@@ -5311,10 +5686,8 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     `--separate-workspaces` restores the dedicated `shared-services` workspace. The pane is a
     visible status surface ONLY; requesters submit through the CLI and durable ledger. The
     pane's `recruit()` function is armed as a sealed stub that refuses and names the real
-    doors — pane text is not a message queue. `up` also issues a fresh `consult_token` that
-    the Librarian stamps on the orders it brokers; consult-shaped orders without it are
-    refused at submission. Persists workspace, mode, pane, roster, token, and supervisor
-    ownership to STATE_FILE.
+    doors — pane text is not a message queue. Persists workspace, mode, pane, roster, and
+    supervisor ownership to STATE_FILE.
     """
     # Validate the roster up front so a missing/bad roster fails loudly at bring-up, not
     # silently at the first hire.
@@ -5351,9 +5724,6 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
         "recruiter_pane": recruiter_pane,
         "roster": roster_path,
         "supervisor_token": supervisor_token,
-        # Issued fresh per `up`; the Librarian reads it from this state file and stamps it on
-        # every consult order it brokers. See _reject_unbrokered_consult.
-        "consult_token": uuid.uuid4().hex,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     JobLedger._write_json(STATE_FILE, state)
@@ -5399,6 +5769,528 @@ def cmd_status() -> int:
     print(f"services: {'up (' + str(label) + ')' if services else 'down'}")
     if STATE_FILE.is_file():
         print(STATE_FILE.read_text())
+    return 0
+
+
+# --- the phone book -----------------------------------------------------------
+
+
+PHONE_BOOK_DESCRIPTION_CAP = 220
+# The whole rendered line, name and markers included — the budget that actually rides in every
+# stage brief. A description cap alone is not the same bound: a 29-character specialist name
+# with a `(this repo)` marker adds 48 characters of prefix in front of it.
+PHONE_BOOK_LINE_CAP = 260
+
+
+def cmd_specialists(as_json: bool = False) -> int:
+    """Print the merged specialist roster.
+
+    Default: the paste-ready stage-brief block (the phone book) that a phase leader embeds
+    VERBATIM in every worker's instructions.md, so a worker never has to discover consulting on
+    its own. `--json`: the raw merged index.
+    """
+    roster = load_specialist_roster()
+    index = _specialist_index(roster)
+    if as_json:
+        print(json.dumps(index, indent=2))
+        return 0
+    lines = [
+        "## Repo specialists — consult before deciding (MANDATORY where a specialist owns the area)",
+        "",
+        "Conventions are asked, never guessed. Before deciding anything in an area listed below,",
+        "consult its specialist through UpAgent. Record every consult in your result.json",
+        "`consults` list (empty list when none applied); a skipped mandated consult is a blocking",
+        "audit finding.",
+        "",
+    ]
+    for name, entry in index.items():
+        origin = " (this repo)" if entry.get("origin") == "this-repo" else ""
+        # This block rides inside EVERY stage brief of every phase, so an unbounded roster
+        # description is context spent on every worker the run ever hires. One line each, hard
+        # capped, whatever the roster says.
+        #
+        # The LINE is what is capped, not just the description: a long specialist name plus the
+        # `(this repo)` marker is 40-odd characters of prefix, so capping the description alone
+        # lets the rendered line run well past the budget on a real roster.
+        prefix = f"- **{name}**{origin} — "
+        budget = min(PHONE_BOOK_DESCRIPTION_CAP, PHONE_BOOK_LINE_CAP - 1 - len(prefix))
+        description = str(entry.get("description") or "(no description)").strip().split("\n")[0]
+        if len(description) > budget:
+            description = description[: max(0, budget - 3)].rstrip() + "..."
+        lines.append(prefix + description)
+    lines += [
+        "",
+        "How to consult (files + one blocking command; NEVER paste a question into any pane):",
+        "1. Write <your-cwd>/consults/<consult-id>.json with:",
+        '   {"consult_id": "<unique-id>", "specialist": "<name above>",',
+        '    "question": "<one specific question>", "answer_path": "<absolute path for answer.json>",',
+        '    "requested_by": "<YOUR OWN order_id>"}',
+        "   `requested_by` must be your order_id exactly. It is how the Hub files the consult",
+        "   under you; omit it and your consult still runs, but it can never be credited to you.",
+        "2. Run `just upagent-consult <that consult.json>`. It BLOCKS until the consult is",
+        "   terminal and prints one CONSULT_RECEIPT line — the command returning IS the signal,",
+        "   so there is no sentinel to wait for. An answer is always written, failures included.",
+        "3. Read answer_path: a success answer carries file:line citations; a failure carries `error`.",
+        "4. Record {consult_id, specialist, request_id, answer_path} under `consults` in your",
+        "   result.json. `request_id` is the ordinary UpAgent request id the receipt names, and",
+        "   the Recruiter resolves every entry against its own record of what it brokered: a",
+        "   consult you did not actually make is published as `consults_unverified`.",
+        "",
+        "`just upagent-specialists` reprints this block.",
+    ]
+    print("\n".join(lines))
+    return 0
+
+
+# --- the consult door ---------------------------------------------------------
+#
+# One question in, one cited answer out. Everything between is an ORDINARY UpAgent order: the
+# door builds it, hands it to `cmd_dispatch` in-process, and the unchanged generic lifecycle
+# runs it. The order carries no consult-specific field — `_complete_order_form` rejects any key
+# outside `ORDER_INTAKE_ALIASES`, so a `consult` block in the order would be a latent failure
+# with a long fuse. The consult<->order link lives in the sidecar receipt, keyed by order_id.
+
+
+def _resolve_specialist_name(
+    value: str, roster_names: list[str]
+) -> tuple[str | None, str | None]:
+    """(resolved_name, note) when `value` matches exactly one roster name under deterministic
+    normalizations; (None, None) when ambiguous or unmatched — which is a refusal listing the
+    roster, never a guess. This fills in the envelope, never the intent: a capitalisation must
+    not cost an LLM hire, and an unrecognizable name must not be quietly resolved to something
+    the caller did not ask for."""
+    if value in roster_names:
+        return value, None
+    lowered = value.lower()
+    case_matches = [n for n in roster_names if n.lower() == lowered]
+    if len(case_matches) == 1:
+        return case_matches[0], f"specialist {value!r} matched {case_matches[0]!r} (case)"
+    stripped = lowered.removesuffix("-agent")
+    suffix_matches = [n for n in roster_names if n.lower() in (stripped, f"{stripped}-agent")]
+    if len(set(suffix_matches)) == 1:
+        resolved = suffix_matches[0]
+        return resolved, f"specialist {value!r} matched {resolved!r} (-agent suffix)"
+    return None, None
+
+
+def _resolve_consult_cwd(roster: dict, consult: dict, consult_id: str) -> str:
+    """Pick a directory the specialist can actually be started in.
+
+    The rule is deliberately dull: run in the repository the roster came from, unless the caller
+    named a directory that exists. `roster["repo_root"]` is re-derived on every load from the
+    roster file this call resolved, so it is live by construction.
+
+    What this replaces: the hub used to inherit a repo_root frozen into services state at `up`
+    time. Bring services up inside a throwaway worktree, delete the worktree, and every consult
+    afterwards died starting a process in a directory that no longer existed (`fe96fba`).
+    Consults are read-and-cite work; there is no reason to pin them to a transient checkout.
+    """
+    requested = consult.get("cwd")
+    if requested and Path(requested).is_dir():
+        return str(requested)
+    root = str(roster["repo_root"])
+    if requested:
+        sys.stderr.write(
+            f"upagent-consult: consult {consult_id}: requested cwd {requested} does not "
+            f"exist; running in {root}\n"
+        )
+    return root
+
+
+def build_consult_brief(consult: dict, location: str, cwd: str) -> str:
+    """The briefing a transient specialist reads: the question, where its own definition and the
+    repo live, and the exact answer.json contract it must satisfy (answer + file:line citations).
+
+    Two contracts stack here and both are load-bearing. This one produces the consult's PRODUCT.
+    `_write_worker_instructions` then appends the Recruiter delivery contract, which produces the
+    lifecycle RECEIPT. The closing sentence hands the worker from one to the other.
+    """
+    return (
+        f"You are the '{consult['specialist']}' specialist answering ONE consult. "
+        f"Load only your own definition at {location} and inspect the repo at {cwd}. "
+        f"Question: {consult['question']} "
+        f"Answer concisely from your domain, then write STRICT JSON to {consult['answer_path']} "
+        f'with keys: "consult_id": "{consult["consult_id"]}", "answer": "<your answer>", '
+        f'"citations": ["path/to/file:line", ...]. Every claim MUST carry a real file:line '
+        f"citation into the repo. Write nothing outside that JSON file.\n"
+        "After the cited answer is durable, satisfy the Recruiter delivery contract appended "
+        "to this brief and exit.\n"
+    )
+
+
+def consult_request_id(consult_id: str) -> str:
+    """The ordinary UpAgent request identity for one consult.
+
+    A digest, not the caller's string: `_SAFE_ORDER_ID_RE` admits only `[A-Za-z0-9._-]`, and a
+    digest is safe by construction whatever the caller put in `consult_id`. This is the id a
+    `consults` receipt names, and the id the Recruiter's own ledger can be asked about.
+    """
+    return f"consult-{hashlib.sha256(consult_id.encode()).hexdigest()[:24]}"
+
+
+def consult_artifact_paths(consult_path: str | Path) -> dict[str, Path]:
+    """Every artifact a consult produces, beside the consult.json that asked for it."""
+    path = Path(consult_path)
+    return {
+        "brief": path.with_name(path.name + ".brief.md"),
+        "order": path.with_name(path.name + ".order.json"),
+        "result": path.with_name(path.name + ".upagent-result.json"),
+        "receipt": path.with_name(path.name + ".receipt.json"),
+    }
+
+
+def build_consult_order(
+    consult: dict,
+    entry: dict,
+    artifacts: dict[str, Path],
+    *,
+    cwd: str,
+    cockpit_pane: str,
+) -> dict:
+    """One ordinary order. Every key below is an existing `contracts.parse_order` key.
+
+    `stage_id` is inert: a consult is not a phase stage, but `parse_order` requires a member of
+    RECOGNIZED_STAGE_IDS, and adding `stage-consult` to that enum would legitimise
+    `revisit: ["stage-consult"]` — meaningless — and ripple into the route schema and the
+    five-stage protocol. `timeout_ms` is set explicitly, so the stage never decides anything.
+
+    No `management` key: consults follow the roster default. The historical per-consult
+    dedicated broker duplicated Python's own checks with an idle LLM pane per question.
+    """
+    request_id = consult_request_id(consult["consult_id"])
+    return {
+        "order_id": request_id,
+        "request_id": request_id,
+        "requester": {
+            "id": "upagent-consult",
+            "kind": "file-mailbox",
+            "address": str(artifacts["receipt"]),
+        },
+        "phase_id": CONSULT_PHASE_ID,
+        "stage_id": "stage-5-finalization",
+        "harness": entry["harness"],
+        "model": entry["model"],
+        "agent": entry["agent"],
+        "effort": entry.get("effort", "medium"),
+        "cwd": cwd,
+        "instructions_path": str(artifacts["brief"]),
+        "result_path": str(artifacts["result"]),
+        "cockpit_pane": cockpit_pane,
+        "timeout_ms": CONSULT_TIMEOUT_MS,
+    }
+
+
+def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
+    """Best-effort (consult_id, answer_path) from a malformed consult.json, so the door can
+    still leave a failure answer instead of stranding the caller. None when the file is too
+    broken to recover either field. Mirrors the Recruiter's own `_recover_order_fields`."""
+    try:
+        raw = json.loads(Path(consult_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    consult_id, answer_path = raw.get("consult_id"), raw.get("answer_path")
+    if isinstance(consult_id, str) and consult_id and isinstance(answer_path, str) and answer_path:
+        return consult_id, answer_path
+    return None
+
+
+def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> None:
+    """Leave a legible FAILURE answer.json so the caller reads a clear failure instead of a
+    stale or missing file. Best-effort: a filesystem fault here must not skip the receipt (the
+    caller's bounded wait then falls back to treating the consult as failed anyway)."""
+    try:
+        path = Path(answer_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(contracts_consult.failure_answer(consult_id, f"upagent-consult: {reason}"), indent=2)
+        )
+    except (OSError, ConsultError) as e:
+        sys.stderr.write(
+            f"upagent-consult: could not write failure answer for {consult_id}: {e}\n"
+        )
+
+
+def consult_index_dir() -> Path:
+    """The Hub's own record of the consults it brokered. Resolved from `STATE_FILE` at call
+    time, never frozen at import, so it follows the Recruiter's state root."""
+    return STATE_FILE.parent / "consults"
+
+
+def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
+    """Where the Hub records that IT brokered this consult for this requester.
+
+    Under the Recruiter's own state root, not the caller's tree: the point of the index is that
+    the worker's `result.json` is not the only account of what happened. Both path segments are
+    digests — `consult_id` is caller-controlled and would otherwise be a traversal into the
+    Hub's state directory, and the request-id digest is the identity being verified anyway.
+    """
+    requester_key = hashlib.sha256(requested_by.encode()).hexdigest()[:16]
+    return consult_index_dir() / requester_key / f"{consult_request_id(consult_id)}.json"
+
+
+def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
+    """The Hub's own record of one claimed consult, or None when nothing backs the claim."""
+    consult_id = claim.get("consult_id")
+    if not isinstance(requested_by, str) or not requested_by:
+        return None
+    if not isinstance(consult_id, str) or not consult_id:
+        return None
+    try:
+        recorded = json.loads(consult_index_entry_path(requested_by, consult_id).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(recorded, dict):
+        return None
+    # Only a consult whose order actually finished is verifiable. The write side already keeps
+    # unfinished consults out of the index; refusing one here too means the forgery guarantee
+    # holds even against an index entry some other path may have written.
+    if recorded.get("order_receipt_state") != "finished":
+        return None
+    # The digest in the filename already binds requester and consult_id, so these two compare
+    # the CONTENT of the claim against the content of the record: a worker naming a consult that
+    # really happened but attaching someone else's request id does not get a pass.
+    if recorded.get("consult_id") != consult_id:
+        return None
+    if recorded.get("request_id") != claim.get("request_id"):
+        return None
+    return recorded
+
+
+def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
+    """Split a worker's claimed consults into the ones the Hub can confirm and the ones it cannot.
+
+    WHAT THIS CLOSES: forgery. A `consults` entry used to be four keys of prose that nothing
+    ever read, so a worker could bank a receipt for a consultation that never happened. Now each
+    claim has to resolve to an entry the CONSULT DOOR wrote, under the Recruiter's own state
+    root, keyed by the requester — and only a consult whose order actually RAN TO COMPLETION
+    (`order_receipt_state == "finished"`) creates one. A consult rejected before a specialist
+    ran — unknown specialist, Recruiter down, dispatch failure — leaves a rejected receipt but no
+    index entry, so it can never be verified. A consult whose worker ran stays verifiable whatever
+    verdict its answer earned — `cited`, a specialist-signaled `failed`, or a citation-gate
+    `rejected` — because its order finished.
+
+    WHAT THIS DOES NOT CLOSE, and no mechanism here could: whether a consult SHOULD have
+    happened. Judging that means judging whether the work touched an area a listed specialist
+    owns, which stays the Stage 2 auditor's call. A worker can also ask something trivial and
+    bank a valid receipt; the cost of a fake rises from one line of JSON to actually hiring a
+    specialist, which is a real raise and not a proof of diligence.
+
+    Every field of a verified entry is read from the Hub's record, never echoed from the claim.
+    Advisory by construction: this reports, and never raises into publication — a bookkeeping
+    fault must not destroy a result that represents real work.
+    """
+    claims = result.get("consults")
+    if not isinstance(claims, list):
+        return {}
+    requested_by = order.get("order_id")
+    verified: list[dict] = []
+    unverified: list[dict] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        recorded = _recorded_consult(requested_by, claim)
+        if recorded is None:
+            unverified.append(
+                {
+                    "consult_id": claim.get("consult_id"),
+                    "request_id": claim.get("request_id"),
+                }
+            )
+            continue
+        verified.append(
+            {
+                "answer_verdict": recorded.get("answer_verdict"),
+                "consult_id": recorded.get("consult_id"),
+                "request_id": recorded.get("request_id"),
+                "specialist": recorded.get("resolved_specialist") or recorded.get("specialist"),
+            }
+        )
+    return {"consults_verified": verified, "consults_unverified": unverified}
+
+
+def _record_consult_in_index(receipt: dict) -> Path | None:
+    """Record a brokered consult under its requester, or explain why it could not be.
+
+    Only a consult that actually RAN TO COMPLETION is indexed. `order_receipt_state` becomes
+    "finished" at exactly one point — after `cmd_dispatch` returns a durable ORDER_RECEIPT — so
+    this admits every consult whose worker ran, whatever its answer earned: `cited`, a
+    specialist-signaled failure (`answer_verdict == "failed"`), or an answer the citation gate
+    rejected (`answer_verdict == "rejected"`). It excludes only a consult rejected BEFORE a
+    specialist ran: an unknown specialist, a Recruiter that is down, or a dispatch failure.
+    Indexing one of those would let a worker bank a `consults` receipt for a consultation that
+    never happened.
+
+    A consult with no `requested_by` is likewise not indexed and therefore not later verifiable.
+    Both omissions fail in the SAFE direction: a worker can only ever understate its own
+    consulting, never overstate it.
+    """
+    if receipt.get("order_receipt_state") != "finished":
+        return None
+    requested_by = receipt.get("requested_by")
+    if not isinstance(requested_by, str) or not requested_by:
+        return None
+    path = consult_index_entry_path(requested_by, str(receipt["consult_id"]))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_bytes_atomic(path, (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode())
+    except OSError as e:
+        # Loud, because the consequence lands on someone else: an unrecorded consult makes an
+        # honest worker's claim read as unverified.
+        sys.stderr.write(f"upagent-consult: could not index consult at {path}: {e}\n")
+        return None
+    return path
+
+
+def _publish_consult_receipt(receipt: dict, receipt_path: Path) -> None:
+    """Publish the consult's own terminal record — beside the consult.json for the caller, and
+    into the Hub's requester-keyed index for the audit.
+
+    Every field derives from an ordinary UpAgent request id or result path plus the durable
+    ORDER_RECEIPT the generic lifecycle already produced — nothing here is invented.
+    """
+    indexed = _record_consult_in_index(receipt)
+    if indexed is not None:
+        receipt = {**receipt, "index_path": str(indexed)}
+    try:
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    except OSError as e:
+        sys.stderr.write(f"upagent-consult: could not write {receipt_path}: {e}\n")
+    print(f"CONSULT_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
+
+
+def _roster_names_or_reason() -> str:
+    """The phone book as one line for an error message, or why it could not be read."""
+    try:
+        return ", ".join(_specialist_index(load_specialist_roster())) or "(empty)"
+    except RecruiterError as e:
+        return f"(roster unavailable: {e})"
+
+
+def cmd_consult(consult_path: str, roster_path: str) -> int:
+    """Route one question into an ordinary UpAgent order and validate the answer it produces.
+
+    Guarantee: once the consult_id is known this ALWAYS leaves an answer.json (real or failure)
+    and ALWAYS publishes a receipt, on every path — so a bounded caller wait resolves to a
+    legible outcome rather than a hang. Failures are still written to stderr; nothing is
+    swallowed. The command BLOCKS, and its returning is the completion signal: there is no
+    sentinel, because `cmd_dispatch` already blocks for the durable ORDER_RECEIPT.
+
+    Everything that can fail lives inside the recoverable block once consult_id is known —
+    including the roster load — so a bad roster, an unknown specialist or a Herdr fault still
+    resolves the caller instead of raising past it.
+    """
+    artifacts = consult_artifact_paths(consult_path)
+    try:
+        consult = contracts_consult.load_consult(consult_path)
+    except ConsultError as strict_error:
+        recovered = _recover_consult_fields(consult_path)
+        if recovered is None:
+            # Nothing to answer INTO. This is the one path with no durable artifact to leave,
+            # so it is the one path that refuses in Python — naming what was missing.
+            raise RecruiterError(
+                f"{strict_error}. A consult needs at least `consult_id` and `answer_path` "
+                f"before anything can be answered into it. Roster: {_roster_names_or_reason()}"
+            ) from strict_error
+        consult_id, answer_path = recovered
+        reason = f"{strict_error}. Roster: {_roster_names_or_reason()}"
+        _write_failure_answer(answer_path, consult_id, reason)
+        _publish_consult_receipt(
+            {
+                "answer_path": answer_path,
+                "answer_verdict": "rejected",
+                "consult_id": consult_id,
+                "reason": reason,
+            },
+            artifacts["receipt"],
+        )
+        return 0
+
+    consult_id = consult["consult_id"]
+    answer_path = consult["answer_path"]
+    request_id = consult_request_id(consult_id)
+    receipt: dict[str, object] = {
+        "answer_path": answer_path,
+        "consult_id": consult_id,
+        "order_id": request_id,
+        "request_id": request_id,
+        "requested_by": consult.get("requested_by"),
+        "result_path": str(artifacts["result"]),
+        "specialist": consult["specialist"],
+    }
+    try:
+        roster = load_specialist_roster()
+        index = _specialist_index(roster)
+        resolved, note = _resolve_specialist_name(consult["specialist"], list(index))
+        if resolved is None:
+            raise RecruiterError(
+                f"unknown specialist {consult['specialist']!r}; roster: "
+                f"{', '.join(index) or '(empty)'}"
+            )
+        receipt["resolved_specialist"] = resolved
+        if note is not None:
+            # A silent rename is never invisible: the interpretation is always recorded.
+            receipt["resolution_note"] = note
+        entry = index[resolved]
+
+        cockpit_pane = _recruiter_pane_from_state()
+        if not cockpit_pane:
+            raise RecruiterError(
+                f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
+                "run `just herdr-up` first"
+            )
+        cwd = _resolve_consult_cwd(roster, consult, consult_id)
+        receipt["cwd"] = cwd
+        location = "(no definition file)"
+        if entry.get("location"):
+            location = str(
+                _resolve_specialist_path(
+                    entry["location"], roster["repo_root"], "specialist location"
+                )
+            )
+
+        artifacts["brief"].parent.mkdir(parents=True, exist_ok=True)
+        artifacts["brief"].write_text(build_consult_brief({**consult, "specialist": resolved}, location, cwd))
+        # Any answer.json left at this path by a PRIOR consult goes before launch, so the only
+        # answer readable afterwards is the one this specialist wrote.
+        Path(answer_path).unlink(missing_ok=True)
+        order = build_consult_order(consult, entry, artifacts, cwd=cwd, cockpit_pane=cockpit_pane)
+        artifacts["result"].unlink(missing_ok=True)
+        _write_bytes_atomic(
+            artifacts["order"], (json.dumps(order, indent=2, sort_keys=True) + "\n").encode()
+        )
+
+        # In-process, no subprocess hop: the door is a caller of the ordinary lifecycle, not a
+        # second one. This blocks until the durable ORDER_RECEIPT exists.
+        cmd_dispatch(str(artifacts["order"]), roster_path)
+        receipt["order_receipt_state"] = "finished"
+
+        # THE CITATION GATE. `parse_result` already said the worker ran and delivered; this says
+        # the answer is backed by evidence. Two questions, two artifacts, both required.
+        answer = contracts_consult.load_answer(answer_path, expected_consult_id=consult_id)
+        receipt["answer_verdict"] = "failed" if answer.get("error") else "cited"
+    except (
+        RecruiterError,
+        ContractError,
+        ConsultError,
+        LifecycleError,
+        ManagementConfigError,
+        OSError,
+        subprocess.SubprocessError,
+        KeyError,
+        TypeError,
+    ) as e:
+        receipt["answer_verdict"] = "rejected"
+        receipt["reason"] = str(e)
+        _write_failure_answer(answer_path, consult_id, str(e))
+        sys.stderr.write(f"upagent-consult: consult {consult_id} failed: {e}\n")
+    # Tier 2 (`consults_verified`) plugs in HERE and nowhere else: a second write of this same
+    # receipt into a requester-keyed index under the Recruiter's state root, which order
+    # finalization then resolves a worker's claimed `consults` against. Additive — no field
+    # below changes, and the door already carries `requested_by` and `request_id`.
+    _publish_consult_receipt(receipt, artifacts["receipt"])
     return 0
 
 
@@ -5474,6 +6366,16 @@ def main(argv: list[str] | None = None) -> int:
         "--all", action="store_true", help="reconcile every active worker"
     )
     sub.add_parser("status", help="report shared-services state")
+    p_specialists = sub.add_parser(
+        "specialists", help="print the merged specialist roster as a paste-ready brief block"
+    )
+    p_specialists.add_argument(
+        "--json", action="store_true", help="print the raw merged index as JSON"
+    )
+    p_consult = sub.add_parser(
+        "consult", help="ask one specialist one question; blocks for the cited answer"
+    )
+    p_consult.add_argument("consult", help="path to the consult.json to answer")
 
     args = parser.parse_args(argv)
     try:
@@ -5520,6 +6422,16 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_reconcile(force=args.all)
         if args.command == "status":
             return cmd_status()
+        if args.command == "specialists":
+            return cmd_specialists(as_json=args.json)
+        if args.command == "consult":
+            return cmd_consult(args.consult, args.roster)
+    except IntakeOutcomeError as e:
+        # One standardized non-accepted outcome: the machine line, the human reason, and an exit
+        # code the caller can branch on without parsing anything.
+        _print_intake_outcome(e)
+        print(f"recruiter: {e}", file=sys.stderr, flush=True)
+        return e.exit_code
     except RecruiterError as e:
         sys.exit(f"recruiter: {e}")
     return 0

@@ -1,15 +1,22 @@
 """Specialist consult/answer contracts — the single source of truth for the two files a
-caller (a worker) and a specialist exchange through the Librarian.
+caller (a worker) and a specialist exchange through the Recruiter's consult door.
 
 Two JSON files cross the boundary, mirroring the UpAgent order/result pattern:
 
-  consult.json — a caller writes it, the Librarian reads it to route + brief a specialist.
+  consult.json — a caller writes it; the consult door reads it to route + brief a specialist.
   answer.json  — the transient specialist writes it before its pane closes; the caller reads
                  it as the authoritative answer to its question.
 
+`answer.json` is a DIFFERENT artifact from the order's `result.json`, and both are written.
+`result.json` says the specialist worker ran and delivered — the Recruiter's lifecycle receipt,
+validated by `contracts.parse_result` like every other worker's. `answer.json` says the answer
+is backed by citations, and `parse_answer` below is the only mechanical check of that anywhere
+in the consult path. Folding citations into `result.json` would put consult-specific keys in
+front of every non-consult worker in the system.
+
 Everything here is fail-loud: a malformed consult or answer raises `ConsultError` with a
-precise message rather than being silently tolerated. The Librarian refuses to spawn a
-specialist on a bad consult; the caller treats a missing/bad answer as an unanswered consult.
+precise message rather than being silently tolerated. The door refuses to spawn a specialist on
+a bad consult; the caller treats a missing/bad answer as an unanswered consult.
 
 This module is pure stdlib and has no Herdr dependency, so it is unit-testable without a
 running Herdr instance (see contracts_consult_test.py).
@@ -28,7 +35,7 @@ CITATION_RE = re.compile(r"^.+:\d+(-\d+)?$")
 # Required keys on a consult.json the caller writes.
 CONSULT_REQUIRED = (
     "consult_id",   # unique per question, e.g. "phase-0.stage-1.pass-1.consult-1"
-    "specialist",   # roster name the Librarian routes to (a key in agents.yaml)
+    "specialist",   # roster name the door routes to (a key in specialists.yaml)
     "question",     # the natural-language question for the specialist
     "answer_path",  # absolute path the specialist MUST write answer.json to
 )
@@ -65,8 +72,8 @@ def parse_consult(text: str) -> dict:
         _require_str(consult, key, "consult.json")
 
     # Optional `cwd`: the directory the specialist runs in so its citations resolve. When
-    # present it must be a non-empty string; when absent the Librarian falls back to the
-    # repo root it was brought up in.
+    # present it must be a non-empty string; when absent the door falls back to the repo root
+    # its merged roster was resolved from.
     cwd = consult.get("cwd")
     if cwd is not None and (not isinstance(cwd, str) or cwd == ""):
         raise ConsultError("consult.json: `cwd` must be a non-empty string when present")
@@ -79,7 +86,7 @@ def parse_answer(text: str, expected_consult_id: str | None = None) -> dict:
     Two legal shapes, distinguished by the `error` key:
       - a SUCCESS answer carries `answer` text + a non-empty `citations` list of `file:line`s;
       - a FAILURE answer carries a non-empty `error` string (and no answer/citations required) —
-        the Librarian writes one when a consult cannot be answered, so the caller's bounded wait
+        the door writes one when a consult cannot be answered, so the caller's bounded wait
         resolves to a legible failure instead of only timing out. Mirrors the Recruiter writing a
         `blocked` result.json rather than leaving the leader to hang.
 
@@ -123,7 +130,7 @@ def parse_answer(text: str, expected_consult_id: str | None = None) -> dict:
 
 
 def failure_answer(consult_id: str, error: str) -> dict:
-    """The canonical FAILURE answer.json shape the Librarian writes when a consult cannot be
+    """The canonical FAILURE answer.json shape the door writes when a consult cannot be
     answered. `parse_answer` accepts it; the caller reads `error` to see the consult failed."""
     if not consult_id:
         raise ConsultError("failure_answer: consult_id must be non-empty")

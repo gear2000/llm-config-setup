@@ -1,7 +1,7 @@
 # UpAgent Hub — the Recruiter
 
 The UpAgent Hub is a universal lifecycle service for LLM workers. Its caller may be a phase
-leader, TUI, Librarian, or another framework. The always-up Python **Recruiter** persists the
+leader, TUI, or another framework. The always-up Python **Recruiter** persists the
 request, uses Python-owned direct lifecycle by default, atomically launches and verifies the worker,
 collects the result, and reports to the recorded requester. See [FUNDAMENTALS.md](FUNDAMENTALS.md)
 for the authority model and use-case tree.
@@ -11,15 +11,13 @@ for the authority model and use-case tree.
 ```
 Herdr session (default: single workspace)
 └── ws: herdr                  services AND runs share one workspace as role tabs
-    ├── tab: services          ├── recruiter (deterministic Python Hub)
-    │                          └── librarian (Specialist Hub — sibling module)
+    ├── tab: services          └── recruiter (deterministic Python Hub)
     └── tabs: control / workers / oversight   per-run panes
 
 Herdr session (with `up --separate-workspaces`)
 ├── ws: <slug>                 TUI + leader + workers (+ opt-in managers / one-shot checkers)
 └── ws: shared-services        always up, plan-agnostic
-    ├── recruiter               deterministic Python Hub
-    └── librarian  (Specialist Hub — sibling module)
+    └── recruiter               deterministic Python Hub
 ```
 
 The Recruiter pane is a visible status surface, not a free-form command queue. Requests go directly
@@ -35,24 +33,44 @@ vertical split. This bounded, best-effort resizing happens only after atomic age
 ownership recording, so an unavailable layout control warns without blocking the worker. Every
 pane is closed only by its fenced lease owner.
 
-## Forgiving order intake (short leash)
+## LLM order intake (short leash)
 
-Every submission door (`recruit`/`dispatch`/`request`) uses one conservative ladder:
+Every submission door (`recruit`/`dispatch`/`request`) takes one path. Python owns transport; an
+LLM owns interpretation:
 
-1. The strict order contract runs first. A canonical order bypasses intake unchanged.
-2. Deterministic repair maps unambiguous field aliases, anchors paths, and supplies only
-   Python-owned bookkeeping defaults. Conflicting aliases, unknown fields, an explicit invalid
-   stage, or an invalid timeout are not silently dropped or rewritten.
-3. When form repair cannot finish, Python launches exactly one short-lived `intake-clerk` support
-   role from the trusted Recruiter pane and a broker-owned scratch cwd. The clerk can flatten or
-   rename a JSON envelope, or explain why prose is incomplete. Prose labels are never execution
-   authority: every required and authority-bearing value must come from an unambiguous JSON object
-   through a known key or alias.
-4. The interpreted order passes Python provenance checks and the unchanged strict contract again.
-   A missing, invented, changed, ambiguous, unavailable, malformed, or unsafe interpretation
-   becomes an actionable refusal, never a worker launch. If a model wraps its one JSON object in
-   exactly one whole-response Markdown JSON fence, Python removes that fence as form normalization;
-   prose outside the fence and multiple objects remain invalid.
+1. Python preserves the exact submitted bytes, then launches one short-lived `intake-clerk` support
+   role from the trusted Recruiter pane and a broker-owned scratch cwd. Every distinct submission
+   goes through a clerk — canonical JSON, malformed JSON, prose, an incomplete object, unknown
+   fields, and specialist-worded requests alike; a byte-identical resubmission of the same file with
+   a clean prior attempt is idempotent and reuses that attempt's validated response rather than
+   launching again. Python cannot end a request because of its schema, wording, order id, agent
+   name, or intent; there is no canonical-order bypass and no Python form repair.
+2. The clerk flattens or renames a JSON envelope, returns an already-canonical order unchanged, or
+   explains why the submission is not executable. Prose labels are never execution authority: every
+   required and authority-bearing value must come from an unambiguous JSON object through a known
+   key or alias.
+3. The interpreted order passes Python provenance checks and the unchanged strict contract. Those
+   findings go back to the same clerk for a bounded number of correction rounds rather than
+   becoming a Python refusal; each round gets its own reuse identity so a correction can never be
+   answered by the response it was sent to correct. If a model wraps its one JSON object in exactly
+   one whole-response Markdown JSON fence, Python removes that fence as form normalization; prose
+   outside the fence and multiple objects remain invalid.
+4. Python then supplies only its own bookkeeping defaults — identifiers, a result path, missing
+   phase/stage bookkeeping, path anchoring — and hands the order to the unchanged worker lifecycle.
+
+Every submission ends in exactly one visible outcome with durable evidence and its own exit code:
+
+| Outcome | Marker | Exit | Authored by |
+|---|---|---|---|
+| accepted | `REQUEST_ACCEPTED` / `ORDER_RECEIPT` / `ORDER … DONE` | `0` | — |
+| blocked | `REQUEST_BLOCKED` | `3` | intake clerk |
+| intake clerk failure | `REQUEST_INTAKE_FAILED` | `4` | recruiter |
+| infrastructure failure | `REQUEST_INFRASTRUCTURE_FAILED` | `5` | recruiter |
+
+A non-executable request is blocked in the clerk's own words, recorded with `authored_by` so a
+reader can tell a judgement from a machine fault. An unavailable clerk, an exhausted correction
+budget, and a fault in the Hub's own machinery are each reported as themselves — never a hang, a
+crash, or a guessed order.
 
 The complete paper trail is written before the caller's order is atomically replaced:
 `<order>.raw-submitted` contains the exact bytes, `.interpreted.json` the attempted canonical
@@ -74,8 +92,9 @@ Cleanup resolves that unique agent name and rechecks agent/process/cwd identity;
 stale pane id by itself. The reconciler can recover a crash before the pane id was journaled. A
 not-found lookup while that launch is uncertain keeps the tiny journal open for later sweeps,
 because the in-flight Herdr start may still publish the named agent. Reconciliation also rejects
-symlinked or escaped attempt metadata. Repaired orders still face all submission checks,
-including the Specialist Hub consult-token door.
+symlinked or escaped attempt metadata. Interpreted orders still face all submission checks,
+including the laundering guard that refuses an unsafe consult-shaped order id rather than
+regenerating it into a valid-looking one.
 
 Phase startup has its own deterministic front door:
 
@@ -128,7 +147,11 @@ Durable files are the source of truth; terminal text is display-only.
   stop. Managers/checkers can recommend actions but cannot execute them.
 - The job owner validates the result, closes only its recorded worker/manager panes, verifies
   absence, then publishes the public result plus `receipt.json`. `ORDER_RECEIPT` wakes the caller.
-  If anything goes wrong it publishes a fail-loud `blocked` result/receipt. The lease records the
+  If anything goes wrong it publishes a fail-loud `blocked` result/receipt. Publication also keeps
+  the hub's own `published-result.json` and names it in the receipt, so a terminal record survives
+  the pruning of the run tree that owns `result_path`: a later dispatch republishes that copy
+  instead of failing in the strict result loader, and refuses with the evidence paths when no copy
+  survives. The lease records the
   requester, manager, runner, Recruiter, worker, workspace, token, generation, and expiry; a
   small Python supervisor safely
   reconciles dead/expired owners. A request's immutable `request.json` and events are durable; its
@@ -146,6 +169,38 @@ codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
   --model {model} -c model_reasoning_effort={effort} \
   "Read {instructions_path} ... write result.json to {result_path}."
 ```
+
+## Consulting a specialist (`specialists.yaml`) — who can be asked
+
+Asking a specialist is not a second mechanism. A consult is an ordinary UpAgent order placed by
+an ordinary door, so it uses the same ledger, the same lease, the same verified startup and the
+same published result as any stage worker. Two commands:
+
+```text
+just upagent-specialists              # the phone book, paste-ready for a stage brief
+just upagent-consult <consult.json>   # ask one question; BLOCKS until the answer is terminal
+```
+
+The caller writes `consult.json` — `{consult_id, specialist, question, answer_path}`, plus
+optional `cwd` and `requested_by` — and the door does the rest: it resolves the specialist
+against the merged roster, briefs a fresh worker, dispatches it in-process, and validates what
+comes back. Beside the `consult.json` it leaves `.brief.md`, `.order.json`,
+`.upagent-result.json` and `.receipt.json`.
+
+Two files cross the boundary and they answer different questions. `result.json` is the ordinary
+lifecycle receipt: the specialist worker ran and delivered. `answer.json` is the consult's
+product, and `contracts_consult.parse_answer` is the only mechanical check anywhere in the repo
+that an answer carries real `file:line` citations rather than confident prose. An answer is
+ALWAYS written — a failure answer names the reason — so a caller's bounded wait resolves to a
+legible outcome instead of a missing file.
+
+**Who can be asked is a different roster from how to launch.** `upagent.yaml` is keyed by
+harness and REPLACES across files, because half a launch command from each file is dangerous.
+`specialists.yaml` is keyed by persona and MERGES: the kit base beside `recruiter.py` under this
+repo's own `.shared-llm/this_repo/extensions/common/upagent/specialists.yaml` (template:
+`specialists.yml.sample`). A destination that overrides one specialist keeps every other one the
+kit ships — the opposite rule would shrink the phone book with no error, and a short phone book
+reads to a worker as "no specialist owns this area".
 
 ## The roster (`upagent.yaml`) — how each harness launches
 
@@ -190,7 +245,8 @@ harness has no phase-leader template.
 
 ## Tests
 
-`just test` covers contracts, typed LLM responses, strict/mechanical/clerk intake, exact audit
+`just test` covers contracts, typed LLM responses, mandatory clerk intake and its bounded
+correction rounds, the four standardized submission outcomes, exact audit
 artifacts, request mailboxes, identity/lease fencing, startup health, timeout authority, roster
 resolution, and cleanup behavior. The socket-driving path is also exercised in a live Herdr
 session before release.

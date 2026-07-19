@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import collections
 from dataclasses import dataclass
+import filecmp
 import json
 import os
 from pathlib import Path
@@ -588,13 +589,34 @@ class Composer:
 #   do_home_runtime (global Pi runtime — plan_pi_runtime):
 #     ext      .shared-llm/public/llm/pi/common/extensions/<x> -> ~/.pi/agent/extensions/<x>
 #              (or ~/.pi/extensions for *-hub.ts)
-#     personas .shared-llm/public/llm/pi/common/agents/<x>.md  -> ~/.pi/agents/<x>.md
+#     personas .shared-llm/public/llm/pi/common/agents/<x>.md  -> ~/.pi/agent/agents/<x>.md
+#
+# Pi's agent dirs sit INSIDE its config dir (`PI_CODING_AGENT_DIR`, default
+# ~/.pi/agent) — user personas are read from ~/.pi/agent/agents, exactly as
+# skills are read from ~/.pi/agent/skills. ~/.pi/agents is NOT a discovery
+# path; personas parked there are invisible to Pi. See LEGACY_PI_AGENTS_REL.
+#
+# Pi reads user personas from a SECOND dir too: ~/.agents — the very dir this
+# kit installs Codex home skills into (see _global_home_dirs). pi-subagents
+# below 0.30.0 walked it recursively and took every SKILL.md carrying `name:`
+# + `description:` for an agent definition, so each Codex home skill surfaced
+# as a phantom Pi agent; the two user dirs merge last-wins, so the phantom
+# `backend` SKILL beat this kit's real `backend` PERSONA. 0.30.0 skips
+# ~/.agents/skills, which is why third-party-extensions.txt pins that as a
+# floor. Keep the floor: composing a convention skill and an agent persona
+# under one name is only safe above it.
 #
 # It RECONCILES desired-vs-actual: creates missing links, re-points drifted ones,
 # and PRUNES links whose source was renamed or deleted. It only ever touches a
 # link that resolves into THIS repo family — never a foreign link or a real file.
 
 HOME = Path.home()
+
+# Where this kit USED to park Pi personas. Pi never read it (see the reconciler
+# note above), so every run migrates what it owns out of here and leaves
+# anything foreign alone. Kept relative and joined to HOME at call time — baking
+# HOME in here would make the test suite write to the real home dir.
+LEGACY_PI_AGENTS_REL = ".pi/agents"
 
 # Authored extensions present in the tree but intentionally NOT linked on this
 # clone. Empty in the portable kit — nothing to skip.
@@ -711,7 +733,7 @@ def plan_pi_runtime(root: Path) -> LinkPlan:
     routed) and the composed generic agents are COPIED by do_home_runtime, so this
     plan deliberately excludes both — it is only the stable .ts/.md runtime sources
     that are safe to symlink."""
-    pi_agents = HOME / ".pi/agents"
+    pi_agents = HOME / ".pi/agent/agents"
     agent_ext = HOME / ".pi/agent/extensions"
     hub_ext = HOME / ".pi/extensions"
     desired: dict[Path, Path] = {}
@@ -1727,8 +1749,6 @@ def do_link(cfg: dict, log: RunLog) -> None:
 # Safe-migration discipline (mirrors the reconciler): idempotent; never clobber a
 # foreign symlink or a divergent real dir; prune only byte-identical stale copies.
 
-import filecmp
-
 GLOBAL_CONVENTION_SKILLS = {
     "python": "compose/global/python.yaml",
     "nextjs": "compose/global/nextjs.yaml",
@@ -1900,8 +1920,9 @@ def do_global(cfg: dict, log: RunLog) -> None:
 # statusline / settings. Ported here so install-local.sh can be retired. Codex
 # has no user-agent dir concept, so agents skip it (never invent a dir).
 
-# Home agent dir per harness token (codex intentionally absent).
-GENERIC_AGENT_HOME = {"cc": ".claude/agents", "pi": ".pi/agents"}
+# Home agent dir per harness token (codex intentionally absent). Pi's lives
+# inside its config dir, alongside skills/ and extensions/ — see LEGACY_PI_AGENTS_REL.
+GENERIC_AGENT_HOME = {"cc": ".claude/agents", "pi": ".pi/agent/agents"}
 
 
 def _install_file(staged: Path, target: Path, log: RunLog) -> str:
@@ -1953,6 +1974,65 @@ def _install_claude_runtime(kit_shared: Path, log: RunLog, exclude: list[str]) -
         _scaffold_settings(src / "settings.template.json", claude_home / "settings.json", log)
 
 
+def _migrate_legacy_pi_agents(kit: Path, staged_agents: Path, log: RunLog) -> None:
+    """Empty out ~/.pi/agents — where this kit parked Pi personas before it was
+    established that Pi reads them from ~/.pi/agent/agents. Removes only what is
+    PROVABLY the kit's: its own symlinks into this repo family, and real files
+    that are byte-for-byte the composed persona of the same name (a known stale
+    copy the kit once wrote).
+
+    A same-name file whose bytes DIFFER is not proven ours — it may be a user's
+    hand-edited or independently authored persona — so it is preserved and named
+    in a warning, exactly like a live dir keeps a divergent file. Deleting on a
+    name match alone would be irreversible data loss. Anything the kit does not
+    compose is left alone too, and the dir is removed only once truly empty.
+
+    `HOME` is read here (not captured at import) so a patched test HOME is honoured
+    and the real ~/.pi is never touched during tests."""
+    legacy = HOME / LEGACY_PI_AGENTS_REL
+    if not legacy.is_dir():
+        return
+    composed = {p.name for p in staged_agents.glob("*.md")} if staged_agents.is_dir() else set()
+    removed = 0
+    foreign = []      # names the kit does not compose — genuinely not ours
+    divergent = []    # same name as a persona, but the bytes are not what we ship
+    for entry in sorted(legacy.iterdir()):
+        if entry.is_symlink():
+            ours = link_is_ours(entry, repo_family(kit), kit)
+        elif entry.is_file() and entry.name in composed:
+            # Delete only a byte-identical stale copy; a divergent same-name file
+            # is preserved (nothing proves the kit wrote its current bytes).
+            if entry.read_bytes() == (staged_agents / entry.name).read_bytes():
+                ours = True
+            else:
+                divergent.append(entry)
+                log(f"    legacy: kept {entry} (differs from composed {entry.name} — not deleting)")
+                continue
+        else:
+            ours = False
+        if ours:
+            entry.unlink()
+            removed += 1
+            log(f"    legacy: migrated {entry.name}")
+        else:
+            foreign.append(entry)
+            log(f"    legacy: left {entry} (not ours)")
+    if divergent:
+        log.always(
+            "  legacy ~/.pi/agents: PRESERVED " + ", ".join(e.name for e in divergent)
+            + " — same name as a composed persona but the bytes differ, so the kit will "
+            "not delete them; review and remove by hand if they are stale"
+        )
+    if foreign or divergent:
+        log.always(
+            f"  legacy ~/.pi/agents: migrated {removed}, left {len(foreign) + len(divergent)} "
+            f"in place — Pi never read this dir, so move or delete them"
+        )
+        return
+    legacy.rmdir()
+    log.always(f"  legacy ~/.pi/agents: migrated {removed}, removed empty dir")
+
+
 def do_home_runtime(cfg: dict, log: RunLog) -> None:
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
     if not wanted:
@@ -1999,6 +2079,7 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
             f"  pi runtime: created {counts['create']}, repointed {counts['repoint']}, "
             f"pruned {counts['prune']}, skipped-foreign {counts['skip-foreign']}"
         )
+        _migrate_legacy_pi_agents(kit, staged_agents, log)
         if not _is_excluded(kit_shared / "llm/pi/common/settings.template.json", kit_shared, exclude):
             _scaffold_settings(kit_shared / "llm/pi/common/settings.template.json",
                                HOME / ".pi/agent/settings.json", log)

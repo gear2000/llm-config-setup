@@ -40,21 +40,23 @@ The script reads `third-party-extensions.txt`, skips anything already in `pi lis
 Each line below is exactly what `tools/install-pi-extensions.sh` runs. Source of truth is `third-party-extensions.txt`.
 
 ```bash
-# Carried over from the original kit (the 5 that used to come in via npm ci):
+# Carried over from the original kit:
 pi install npm:pi-lens@3.8.45                  # inline diagnostics / linting lens
-pi install npm:pi-subagents@0.25.0             # spawn and manage Pi subagents
+pi install npm:pi-subagents@0.30.0             # spawn and manage Pi subagents (0.30.0 floor — see manifest)
 pi install npm:pi-web-access@0.10.7            # fetch and search the web from a session
 pi install npm:pi-powerline-footer@0.5.4       # powerline-style TUI status footer
-pi install npm:@juicesharp/rpiv-btw@1.12.0     # review-plan-implement-verify workflow helper
 
 # Added:
 pi install npm:pi-markdown-preview@0.10.0      # rendered markdown / Mermaid / LaTeX preview
-pi install npm:@plannotator/pi-extension@0.20.1 # browser-based plan / diff / PR review UI
 pi install npm:pi-simplify@0.2.2               # review recently changed code for clarity
-pi install npm:@quintinshaw/pi-dynamic-workflows@2.10.0 # dynamic workflows / subagent fan-out
 pi install npm:pi-intercom@0.6.0               # 1:1 messaging between Pi sessions
 pi install npm:@ayulab/pi-rewind@0.4.2         # /rewind checkpoint navigation
 ```
+
+Three packages this list used to carry — `@juicesharp/rpiv-btw`, `@plannotator/pi-extension`, and
+`@quintinshaw/pi-dynamic-workflows` — were deliberately dropped from the manifest and are **not**
+installed. Re-add a line to `third-party-extensions.txt` if you want one back; adding it here does
+nothing.
 
 ### Runtime dependencies (the kit never installs these — install them yourself if you want the feature)
 
@@ -62,7 +64,17 @@ pi install npm:@ayulab/pi-rewind@0.4.2         # /rewind checkpoint navigation
   - **Pandoc** (+ a LaTeX engine such as `xelatex`) — for `/preview` rendering and PDF export. **Not present on this machine** as of writing; without it the PDF/preview rendering paths are unavailable, but the extension still loads. Install Pandoc separately (`apt install pandoc` / `brew install pandoc`); set `PANDOC_PATH` if it is off `PATH`.
   - A **Chromium-based browser** (Chrome / Brave / Edge / Chromium) for terminal/PNG preview. A Chrome binary is present here (`/usr/bin/google-chrome`). Set `PUPPETEER_EXECUTABLE_PATH` to override detection.
   - Optional: Mermaid CLI for Mermaid-in-PDF.
-- **@plannotator/pi-extension** opens reviews in your **default browser**. Requires **Pi >= 0.74.0**.
+
+## Retired: @hypabolic/pi-hypa (do not re-enable casually)
+
+`@hypabolic/pi-hypa` (compressed noisy tool output out of the context window) is **commented out** in
+the manifest, and the installer **actively removes it** when it finds it installed.
+
+- It is retired because a half-installed copy broke every Pi tool call.
+- The manifest line must stay commented. The installer snapshots the installed set *before* removing
+  hypa, so a live manifest entry would reinstall it on any machine that does not already have it —
+  the removal and the reinstall would fight, and the reinstall would win on a fresh machine.
+- If you ever re-enable it, re-test tool calls end to end before relying on the session.
 
 ## Skipped: pi-cursor-sdk (opt-in; this project doesn't use Cursor)
 

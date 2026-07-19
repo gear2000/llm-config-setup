@@ -1,0 +1,39 @@
+# specialists.yml.sample — template for a destination's OVERLAY specialist roster
+#
+# Copy this file to the destination-owned:
+#   .shared-llm/this_repo/extensions/common/upagent/specialists.yaml
+#
+# The kit already ships a live BASE roster (specialists.yaml, next to recruiter.py) that is
+# always loaded. Your overlay merges ON TOP of it: a same-named entry here clobbers the base
+# entry, new entries are added, and both sets are available for runs — so keep only the
+# specialists you add or override, not a copy of the base list.
+#
+# Every entry needs `name`, `harness`, `agent`, and a string `model` (which may be empty when
+# the harness resolves its own). `location` and `description` are optional: `location` points
+# at the persona file so a specialist's brief can name its own definition, and `description`
+# is the one line a worker reads in the phone book — when it is omitted the loader falls back
+# to the persona file's frontmatter `description`.
+#
+# The entries below are generic examples. Change harness/model values to match the
+# destination's installed runtimes; do not put project-specific names, URLs, or credentials here.
+
+specialists:
+  - name: backend
+    location: .claude/agents/backend.md
+    description: "Backend services, APIs, request contracts, tests, and failure diagnosis."
+    harness: claude
+    model: configured-claude-model
+    agent: backend
+  - name: frontend
+    location: .claude/agents/frontend.md
+    description: "Frontend pages, components, routing, data fetching, and accessibility."
+    harness: claude
+    model: configured-claude-model
+    agent: frontend
+  - name: reviewer
+    location: .claude/agents/reviewer.md
+    description: "Independent read-only review with concrete file and evidence citations."
+    harness: claude
+    model: configured-claude-model
+    agent: reviewer
+    effort: high

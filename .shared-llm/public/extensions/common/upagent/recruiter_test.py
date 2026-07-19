@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import os
 import stat
 import threading
 import time
@@ -26,6 +27,64 @@ assert _spec and _spec.loader
 recruiter = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(recruiter)
 RecruiterError = recruiter.RecruiterError
+ContractError = recruiter.ContractError
+
+# Every submission door now hires a fresh intake clerk, so the real launcher is captured here for
+# the tests that prove its own behavior. Everything else gets the deterministic double below.
+_live_intake_clerk = recruiter._run_order_intake_clerk
+
+
+def _fake_intake_clerk(raw_text, raw_path, roster_path, intake_key, **kwargs):
+    """Stand in for the intake LLM: map unambiguous aliases, refuse anything it cannot form.
+
+    It answers the way a competent clerk does — never inventing a value the submission does not
+    contain — so lifecycle tests exercise the real intake seam without an LLM.
+    """
+    record = {
+        "attempt": kwargs.get("attempt_number", 1),
+        "attempt_name": "attempt-test-double",
+        "brief_path": f"{raw_path}.brief.md",
+        "output_path": f"{raw_path}.response.json",
+        "ownership_path": f"{raw_path}.ownership.json",
+        "cleanup": {"status": "closed", "worker_pane": None, "verified_absent": True},
+    }
+
+    def answer(**fields) -> tuple[SimpleNamespace, dict]:
+        base = {"order": None, "refusal": None, "understood": (), "missing": (), "notes": ()}
+        return SimpleNamespace(**{**base, **fields}), record
+
+    try:
+        document = json.loads(raw_text)
+    except json.JSONDecodeError:
+        document = None
+    if not isinstance(document, dict):
+        return answer(
+            refusal="the submission is not one JSON object naming a target agent",
+            missing=list(recruiter.ORDER_INTAKE_NEVER_INVENTED),
+        )
+    order = {}
+    for canonical, aliases in recruiter.ORDER_INTAKE_ALIASES.items():
+        for alias in aliases:
+            if alias in document:
+                order[canonical] = document[alias]
+                break
+    missing = [
+        field
+        for field in recruiter.ORDER_INTAKE_NEVER_INVENTED
+        if not isinstance(order.get(field), str) or not order[field]
+    ]
+    if missing:
+        return answer(
+            refusal="the submission does not name " + ", ".join(missing),
+            understood=sorted(order),
+            missing=missing,
+        )
+    return answer(order=order)
+
+
+@pytest.fixture(autouse=True)
+def _stub_intake_clerk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", _fake_intake_clerk)
 
 
 def _order(**over) -> dict:
@@ -229,13 +288,19 @@ def test_legacy_recruit_rejection_writes_blocked_result_and_terminal_marker(
         lambda *args, **kwargs: pytest.fail("invalid order must not start a job"),
     )
 
-    assert recruiter.cmd_recruit(str(order_path), "roster.yaml") == 1
+    # The clerk, not Python, decides this incomplete submission is not executable, so the legacy
+    # door reports the standardized blocked outcome and still wakes its old waiter.
+    assert recruiter.cmd_recruit(str(order_path), "roster.yaml") == 3
 
     result = json.loads(result_path.read_text())
     assert result["order_id"] == "legacy-invalid-order"
     assert result["verdict"] == "blocked"
     assert "invalid order" in result["reason"]
-    assert "ORDER legacy-invalid-order DONE" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "ORDER legacy-invalid-order DONE" in out
+    blocked = json.loads(out.split("REQUEST_BLOCKED ", 1)[1].splitlines()[0])
+    assert blocked["authored_by"] == "intake-clerk"
+    assert blocked["evidence"]["refusal"] == str(order_path) + ".refusal.json"
 
 
 def test_worker_health_requires_expected_process_agent_and_cwd(monkeypatch) -> None:
@@ -1088,11 +1153,16 @@ def test_job_ledger_finalization_publishes_valid_result_and_terminal_state(
         "cleanup": cleanup,
         "generation": 1,
         "order_id": order["order_id"],
+        "published_result_path": str(ledger.published_result_path(key)),
         "request_id": recruiter.lifecycle.request_identity(order),
         "result_path": order["result_path"],
         "state": "finished",
         "verdict": "passed",
     }
+    # The receipt only means something alongside the copy it vouches for.
+    assert json.loads(ledger.published_result_path(key).read_text()) == _result(
+        order["order_id"]
+    )
 
 
 def test_requester_decision_is_fenced_to_current_lease_and_extends_it(
@@ -1620,8 +1690,11 @@ def test_recruit_completed_order_emits_done_without_spawning(
 def test_recruit_submits_and_spawns_without_waiting(
     tmp_path: Path, monkeypatch
 ) -> None:
+    # A door test keeps its result inside tmp_path: the legacy door writes a blocked result to
+    # whatever result_path a submission names, and _order()'s default is a shared real directory.
+    order = _order(result_path=str(tmp_path / "result.json"))
     order_path = tmp_path / "order.json"
-    order_path.write_text(json.dumps(_order()))
+    order_path.write_text(json.dumps(order))
     spawned = []
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     monkeypatch.setattr(
@@ -1632,7 +1705,7 @@ def test_recruit_submits_and_spawns_without_waiting(
     assert recruiter.cmd_recruit(str(order_path), "roster.yaml") == 0
     assert len(spawned) == 1
     assert spawned[0][0][-2] == "run-job" and spawned[0][1]["start_new_session"] is True
-    key = recruiter.JobLedger().key_for_order(_order())
+    key = recruiter.JobLedger().key_for_order(order)
     assert (tmp_path / "hub/requests" / key / "state/latest.json").is_file()
 
 
@@ -1672,6 +1745,174 @@ def test_dispatch_blocks_on_job_process_and_returns_durable_receipt(
         == order["order_id"]
     )
     assert waits
+
+
+def _finished_order(tmp_path: Path, monkeypatch) -> tuple[dict, Path, object, str]:
+    """Submit and finish one Stage 1 order, leaving a terminal ledger record behind."""
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    staging = ledger.result_staging_path(key, token)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text(json.dumps(_result(order["order_id"])))
+    assert ledger.finalize(
+        key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_spawn_job",
+        lambda key, roster: pytest.fail("re-ran an already finished order"),
+    )
+    return order, order_path, ledger, key
+
+
+def _receipts(capsys) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("ORDER_RECEIPT "))
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("ORDER_RECEIPT ")
+    ]
+
+
+def test_dispatch_reconciles_terminal_order_whose_public_result_was_pruned(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A finished order outlives the run tree that owned its `result_path`.
+
+    Dispatch must reconcile from the hub's own durable copy instead of crashing inside the
+    strict result loader, and must keep answering with the same terminal receipt.
+    """
+    order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
+    Path(order["result_path"]).unlink()
+
+    for _ in range(3):
+        assert recruiter.cmd_dispatch(str(order_path), "roster.yaml") == 0
+
+    receipts = _receipts(capsys)
+    assert len(receipts) == 3
+    assert all(receipt == receipts[0] for receipt in receipts)
+    assert receipts[0]["verdict"] == "passed"
+    assert ledger.completed_result(key, order) == _result(order["order_id"])
+
+
+def test_dispatch_recovers_a_terminal_record_that_predates_the_receipt_pointer(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A receipt written before it named its durable copy still has the lease-private result."""
+    order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
+    receipt_path = ledger.request_dir(key) / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt.pop("published_result_path", None)
+    ledger._write_json(receipt_path, receipt)
+    (ledger.request_dir(key) / "published-result.json").unlink(missing_ok=True)
+    Path(order["result_path"]).unlink()
+
+    assert recruiter.cmd_dispatch(str(order_path), "roster.yaml") == 0
+
+    assert _receipts(capsys)[0]["verdict"] == "passed"
+    assert Path(order["result_path"]).is_file()
+
+
+def test_dispatch_reports_evidence_when_a_terminal_result_cannot_be_recovered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No durable copy survives: refuse visibly with evidence, never a bare loader crash."""
+    order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
+    Path(order["result_path"]).unlink()
+    for durable in ledger.request_dir(key).rglob("*result*.json"):
+        durable.unlink()
+
+    with pytest.raises(RecruiterError) as failure:
+        recruiter.cmd_dispatch(str(order_path), "roster.yaml")
+
+    message = str(failure.value)
+    assert order["order_id"] in message
+    assert order["result_path"] in message
+    assert str(ledger.request_dir(key) / "receipt.json") in message
+    assert "passed" in message
+
+
+def test_completed_result_returns_durable_when_the_public_read_always_oserrors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`load_result` can raise OSError on EVERY read of the public result — persistently unreadable,
+    or a file that keeps racing. Reconciliation returns the hub's own validated durable object and
+    must NOT re-read the public path it just wrote: that second read is the very loader crash this
+    method exists to prevent."""
+    order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
+    real_load = recruiter.load_result
+    public_reads = {"n": 0}
+
+    def always_racing_load(path, expected_order_id=None):
+        if str(path) == order["result_path"]:
+            public_reads["n"] += 1
+            raise OSError("simulated: result.json unreadable on every read")
+        return real_load(path, expected_order_id=expected_order_id)
+
+    monkeypatch.setattr(recruiter, "load_result", always_racing_load)
+
+    result = ledger.completed_result(key, order)
+
+    assert result == _result(order["order_id"])
+    assert public_reads["n"] == 1  # the initial read only; reconcile returns durable, never re-reads
+
+
+def test_reconcile_returns_durable_when_republishing_the_public_result_oserrors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Republication is best-effort. If writing the recovered result back to the public path raises
+    OSError (unwritable dir, disk full), reconciliation still returns the already-recovered durable
+    object — it must never lose it or crash. The next dispatch reconciles again idempotently."""
+    order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
+    Path(order["result_path"]).unlink()  # public gone -> ContractError enters reconcile
+    real_write = ledger._write_json
+
+    def failing_write(path, value):
+        if str(path) == order["result_path"]:
+            raise OSError("simulated: cannot republish (unwritable)")
+        return real_write(path, value)
+
+    monkeypatch.setattr(ledger, "_write_json", failing_write)
+
+    result = ledger.completed_result(key, order)
+
+    assert result == _result(order["order_id"])
+    assert not Path(order["result_path"]).exists()  # republish failed; the result was still returned
+
+
+def test_a_terminal_record_refuses_with_evidence_when_the_hub_copy_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The public result is gone AND the hub's own durable copy raises OSError on read. The
+    terminal record must refuse with evidence — a structured RecruiterError naming the receipt —
+    not a bare loader crash out of `_durable_terminal_result`."""
+    order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
+    Path(order["result_path"]).unlink()  # public copy gone -> ContractError enters reconcile
+    durable = str(ledger.published_result_path(key))
+    real_load = recruiter.load_result
+
+    def flaky_load(path, expected_order_id=None):
+        if str(path) == durable:
+            raise OSError("simulated: durable copy unreadable")
+        return real_load(path, expected_order_id=expected_order_id)
+
+    monkeypatch.setattr(recruiter, "load_result", flaky_load)
+
+    with pytest.raises(RecruiterError) as failure:
+        ledger.completed_result(key, order)
+
+    message = str(failure.value)
+    assert order["order_id"] in message
+    assert str(ledger.request_dir(key) / "receipt.json") in message
 
 
 def test_expired_lease_with_recorded_worker_requires_runtime_reconciliation(
@@ -3033,65 +3274,6 @@ def test_ensure_role_pane_separate_mode_reuses_shared_services(
     assert (workspace, pane, reused) == ("ws-old", "p1", True)
 
 
-def _consult_shaped_order(tmp_path: Path, **over) -> str:
-    order = _order(
-        order_id="specialist-consult-fake-1",
-        phase_id="specialist-consult",
-        stage_id="stage-5-finalization",
-        **over,
-    )
-    path = tmp_path / "consult-order.json"
-    path.write_text(json.dumps(order))
-    return str(path)
-
-
-def _issue_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: str) -> None:
-    state_file = tmp_path / "recruiter-state.json"
-    state_file.write_text(json.dumps({"consult_token": token}))
-    monkeypatch.setattr(recruiter, "STATE_FILE", state_file)
-
-
-def test_consult_shaped_orders_without_the_issued_token_are_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A worker that hand-writes Librarian-identity paperwork must be turned away at the door,
-    with the real consult command named."""
-    _issue_token(tmp_path, monkeypatch, "issued-token")
-    order_path = _consult_shaped_order(tmp_path)
-
-    with pytest.raises(RecruiterError, match="specialist-hub consult"):
-        recruiter.cmd_dispatch(order_path, str(tmp_path / "unused-roster.yaml"))
-
-
-def test_consult_orders_stamped_with_the_issued_token_pass_the_door(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _issue_token(tmp_path, monkeypatch, "issued-token")
-    order = json.loads(
-        Path(_consult_shaped_order(tmp_path, consult_token="issued-token")).read_text()
-    )
-
-    recruiter._reject_unbrokered_consult(order)  # must not raise
-
-
-def test_consult_orders_are_tolerated_when_no_token_was_ever_issued(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A pre-token `up` state has nothing to verify against; enforcement waits for the next up."""
-    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "absent-state.json")
-    order = json.loads(Path(_consult_shaped_order(tmp_path)).read_text())
-
-    recruiter._reject_unbrokered_consult(order)  # must not raise
-
-
-def test_ordinary_stage_orders_never_hit_the_consult_door(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _issue_token(tmp_path, monkeypatch, "issued-token")
-
-    recruiter._reject_unbrokered_consult(_order())  # must not raise
-
-
 @pytest.mark.parametrize(
     ("door", "catches"),
     [
@@ -3109,7 +3291,7 @@ def test_every_submission_door_uses_the_same_forgiving_ladder(
         calls.append((order_path, roster_path))
         raise RecruiterError("intake sentinel")
 
-    monkeypatch.setattr(recruiter, "_load_order_forgivingly", intake)
+    monkeypatch.setattr(recruiter, "_intake_order", intake)
     monkeypatch.setattr(recruiter, "_reject_legacy_order", lambda *args: None)
     if catches:
         assert door("order.json", "roster.yaml") == 1
@@ -3126,7 +3308,7 @@ def test_recruit_pane_door_safely_forwards_one_path() -> None:
     assert 'if [ "$#" -ne 1 ]' in door
     assert "request -- \"$1\"" in door
     assert "normal verified request door" in door
-    assert "just specialist-hub consult" in door
+    assert "just upagent-consult" in door
     assert "eval" not in door
     assert "'/tmp/roster with spaces.yaml'" in door
     wrong_arity = recruiter.subprocess.run(
@@ -3139,9 +3321,11 @@ def test_recruit_pane_door_safely_forwards_one_path() -> None:
     assert "expects exactly one" in wrong_arity.stderr
 
 
-def test_order_intake_repairs_form_mechanically_before_clerk(
+def test_alias_form_is_interpreted_by_the_clerk_not_by_python(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Python owns no form-repair shortcut any more: even unambiguous aliases are the clerk's
+    work, and Python only completes its own bookkeeping afterwards."""
     raw_text = json.dumps(
         {
             "harness": "claude",
@@ -3156,14 +3340,17 @@ def test_order_intake_repairs_form_mechanically_before_clerk(
     )
     order_path = tmp_path / "order.json"
     order_path.write_text(raw_text)
-    monkeypatch.setattr(
-        recruiter,
-        "_run_order_intake_clerk",
-        lambda *args, **kwargs: pytest.fail("mechanical repair must run before the clerk"),
-    )
+    launches = []
 
-    repaired = recruiter._load_order_forgivingly(str(order_path), "unused-roster.yaml")
+    def clerk(*args, **kwargs):
+        launches.append(kwargs["attempt_number"])
+        return _fake_intake_clerk(*args, **kwargs)
 
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", clerk)
+
+    repaired = recruiter._intake_order(str(order_path), "unused-roster.yaml")
+
+    assert launches == [1]
     assert repaired["cwd"] == str(tmp_path)
     assert repaired["instructions_path"] == str(tmp_path / "instructions.md")
     assert repaired["cockpit_pane"] == "w1:p1"
@@ -3174,7 +3361,7 @@ def test_order_intake_repairs_form_mechanically_before_clerk(
     assert (tmp_path / "order.json.raw-submitted").read_bytes() == raw_text.encode()
     assert json.loads((tmp_path / "order.json.interpreted.json").read_text()) == repaired
     stamp = json.loads((tmp_path / "order.json.intake.json").read_text())
-    assert stamp["mode"] == "mechanical-repair"
+    assert stamp["mode"] == "intake-clerk" and stamp["attempts"] == 1
     assert json.loads((tmp_path / "order.json.validation.json").read_text())["valid"] is True
 
 
@@ -3218,7 +3405,7 @@ def test_order_intake_escalates_nested_envelope_to_one_clerk(
         )
 
     monkeypatch.setattr(recruiter, "_run_order_intake_clerk", clerk)
-    repaired = recruiter._load_order_forgivingly(str(order_path), "roster.yaml")
+    repaired = recruiter._intake_order(str(order_path), "roster.yaml")
 
     assert len(calls) == 1
     assert repaired["agent"] == "backend"
@@ -3249,7 +3436,7 @@ def test_clerk_interpretation_still_faces_the_unchanged_strict_contract(
     )
 
     with pytest.raises(RecruiterError, match="failed strict validation.*unknown harness"):
-        recruiter._load_order_forgivingly(str(path), "roster.yaml")
+        recruiter._intake_order(str(path), "roster.yaml")
     assert json.loads((tmp_path / "order.json.validation.json").read_text())["valid"] is False
     assert json.loads(path.read_text()) == {"payload": values}
 
@@ -3276,7 +3463,7 @@ def test_order_intake_refusal_is_actionable_and_audited(
     )
 
     with pytest.raises(RecruiterError, match="target agent and execution context"):
-        recruiter._load_order_forgivingly(str(order_path), "roster.yaml")
+        recruiter._intake_order(str(order_path), "roster.yaml")
 
     assert (tmp_path / "order.json.raw-submitted").read_text() == raw
     refusal = json.loads((tmp_path / "order.json.refusal.json").read_text())
@@ -3384,7 +3571,7 @@ def test_order_intake_rejects_clerk_invented_or_changed_intent(
     )
 
     with pytest.raises(RecruiterError, match="invented or changed execution intent"):
-        recruiter._load_order_forgivingly(str(order_path), "roster.yaml")
+        recruiter._intake_order(str(order_path), "roster.yaml")
 
     validation = json.loads((tmp_path / "order.json.validation.json").read_text())
     assert validation["valid"] is False
@@ -3392,41 +3579,299 @@ def test_order_intake_rejects_clerk_invented_or_changed_intent(
     assert any("operation" in error for error in validation["errors"])
 
 
-def test_valid_orders_bypass_the_intake_untouched(tmp_path: Path) -> None:
-    order = _order()
-    order_path = tmp_path / "order.json"
-    original = json.dumps(order)
-    order_path.write_text(original)
-
-    loaded = recruiter._load_order_forgivingly(str(order_path), "unused-roster.yaml")
-
-    assert loaded == order
-    assert order_path.read_text() == original
-    assert not list(tmp_path.glob("order.json.*"))
-
-
-def test_repaired_consult_shaped_orders_still_face_the_token_door(
+def test_canonical_orders_still_start_a_fresh_intake_clerk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state_file = tmp_path / "recruiter-state.json"
-    state_file.write_text(json.dumps({"consult_token": "issued-token"}))
-    monkeypatch.setattr(recruiter, "STATE_FILE", state_file)
-    sloppy = {
-        "id": "specialist-consult-forged",
-        "phase": "specialist-consult",
+    """There is no canonical-JSON bypass: an already-valid order is interpreted by a clerk like
+    every other submission, reaches Python unchanged, and leaves the same evidence behind."""
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    launches = []
+
+    def clerk(*args, **kwargs):
+        launches.append(kwargs["attempt_number"])
+        return _fake_intake_clerk(*args, **kwargs)
+
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", clerk)
+
+    loaded = recruiter._intake_order(str(order_path), "unused-roster.yaml")
+
+    assert launches == [1]
+    assert loaded == order
+    assert json.loads(order_path.read_text()) == order
+    assert (tmp_path / "order.json.raw-submitted").read_text() == json.dumps(order)
+    stamp = json.loads((tmp_path / "order.json.intake.json").read_text())
+    assert stamp["mode"] == "intake-clerk" and stamp["changes"] == []
+    assert stamp["clerk"]["attempt"] == 1
+
+
+def _counting_clerk(rounds: list, mutate=None):
+    """Wrap the intake double so a test can watch every bounded round it is given."""
+
+    def clerk(raw_text, raw_path, roster_path, intake_key, **kwargs):
+        attempt = kwargs["attempt_number"]
+        rounds.append(
+            {
+                "attempt": attempt,
+                "correction": kwargs["correction"],
+                "intake_key": intake_key,
+                "unknown_fields": list(kwargs["unknown_fields"]),
+            }
+        )
+        response, record = _fake_intake_clerk(
+            raw_text, raw_path, roster_path, intake_key, **kwargs
+        )
+        if mutate is not None:
+            mutate(attempt, response)
+        return response, record
+
+    return clerk
+
+
+@pytest.mark.parametrize(
+    ("shape", "raw"),
+    [
+        ("canonical-json", json.dumps(_order())),
+        ("malformed-json", '{"harness": "claude", "agent": '),
+        ("prose", "please have someone fix the failing retry tests"),
+        ("incomplete-object", json.dumps({"harness": "claude", "agent": "backend"})),
+        ("unknown-fields", json.dumps({**_order(), "op": "apply-now"})),
+        ("specialist-worded", "consult the docs specialist about the retry contract"),
+    ],
+)
+def test_every_submission_shape_records_one_intake_clerk_launch(
+    shape: str, raw: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Canonical JSON, malformed JSON, prose, incomplete objects, unknown fields, and
+    specialist-worded requests all reach the same fresh clerk. Python interprets none of them."""
+    order_path = tmp_path / "order.json"
+    order_path.write_text(raw)
+    rounds: list = []
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", _counting_clerk(rounds))
+
+    try:
+        recruiter._intake_order(str(order_path), "roster.yaml")
+    except recruiter.IntakeOutcomeError as error:
+        assert error.outcome != "infrastructure-failure", shape
+
+    assert rounds and rounds[0]["attempt"] == 1, f"{shape} never reached the intake clerk"
+    assert (tmp_path / "order.json.raw-submitted").read_text() == raw
+    stamp = json.loads((tmp_path / "order.json.intake.json").read_text())
+    assert stamp["clerk"]["attempt_name"] == "attempt-test-double"
+
+
+def test_executable_requests_reach_request_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A sloppy but executable submission is interpreted by the clerk and accepted by the
+    unchanged worker lifecycle."""
+    submitted = {
+        "id": "phase-0.stage-1-implementation.pass-1.try-1",
+        "phase": "phase-0",
+        "stage": "stage-1-implementation",
         "harness": "claude",
         "model": "some-model",
-        "agent": "docs",
+        "persona": "backend",
         "workdir": str(tmp_path),
-        "brief": str(tmp_path / "b.md"),
+        "brief": str(tmp_path / "instructions.md"),
+        "output": str(tmp_path / "result.json"),
         "pane": "w1:p1",
-        "stage": "stage-5-finalization",
     }
     order_path = tmp_path / "order.json"
-    order_path.write_text(json.dumps(sloppy))
+    order_path.write_text(json.dumps(submitted))
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
+    monkeypatch.setattr(
+        recruiter, "_spawn_job", lambda *args: SimpleNamespace(poll=lambda: None)
+    )
+    monkeypatch.setattr(
+        recruiter.JobLedger,
+        "state",
+        lambda self, key: {
+            "state": "running",
+            "requester_control_token": "control-token",
+            "worker_pane": "w1:p2",
+        },
+    )
 
-    with pytest.raises(RecruiterError, match="specialist-hub consult"):
-        recruiter.cmd_dispatch(str(order_path), str(tmp_path / "roster.yaml"))
+    assert recruiter.cmd_request(str(order_path), "roster.yaml") == 0
+
+    accepted = json.loads(capsys.readouterr().out.split("REQUEST_ACCEPTED ", 1)[1])
+    assert accepted["state"] == "running"
+    assert accepted["control_token"] == "control-token"
+    interpreted = json.loads((tmp_path / "order.json.interpreted.json").read_text())
+    assert interpreted["agent"] == "backend" and interpreted["cwd"] == str(tmp_path)
+
+
+def test_non_executable_requests_are_blocked_by_the_clerk_not_by_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The refusal is the clerk's own words, attributed to it, with every evidence path named."""
+    order_path = tmp_path / "order.json"
+    order_path.write_text("please have someone look at the flaky retry test")
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(
+        recruiter.JobLedger,
+        "submit",
+        lambda *args, **kwargs: pytest.fail("a blocked request must never reach the ledger"),
+    )
+
+    assert recruiter.main(["--roster", "roster.yaml", "dispatch", str(order_path)]) == 3
+
+    blocked = json.loads(capsys.readouterr().out.split("REQUEST_BLOCKED ", 1)[1])
+    assert blocked["outcome"] == "blocked"
+    assert blocked["authored_by"] == "intake-clerk"
+    assert blocked["reason"] == "the submission is not one JSON object naming a target agent"
+    assert "agent" in blocked["missing"]
+    assert set(blocked["evidence"]) >= {"raw", "interpreted", "intake", "validation", "refusal"}
+    recorded = json.loads(Path(blocked["evidence"]["refusal"]).read_text())
+    assert recorded["authored_by"] == "intake-clerk"
+    assert recorded["error"] == blocked["reason"]
+
+
+def test_invalid_clerk_output_is_corrected_by_the_same_clerk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Machine-validation errors go back to the intake clerk instead of becoming a refusal."""
+    order_path = tmp_path / "order.json"
+    order_path.write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "model": "some-model",
+                "agent": "backend",
+                "workdir": str(tmp_path),
+                "brief": str(tmp_path / "b.md"),
+                "pane": "w1:p1",
+                "stage": "stage-5-finalization",
+            }
+        )
+    )
+    rounds: list = []
+
+    def drop_stage_once(attempt: int, response) -> None:
+        if attempt == 1:
+            response.order = {k: v for k, v in response.order.items() if k != "stage_id"}
+
+    monkeypatch.setattr(
+        recruiter, "_run_order_intake_clerk", _counting_clerk(rounds, drop_stage_once)
+    )
+
+    order = recruiter._intake_order(str(order_path), "roster.yaml")
+
+    assert [entry["attempt"] for entry in rounds] == [1, 2]
+    assert rounds[0]["correction"] is None
+    assert rounds[1]["correction"]["errors"] == ["clerk dropped explicit stage_id"]
+    assert "stage_id" not in rounds[1]["correction"]["order"]
+    # A correction round must never be answered by the response it was sent to correct.
+    assert rounds[0]["intake_key"] != rounds[1]["intake_key"]
+    assert order["stage_id"] == "stage-5-finalization"
+    assert json.loads((tmp_path / "order.json.intake.json").read_text())["attempts"] == 2
+
+
+def test_correction_is_bounded_and_ends_as_an_intake_clerk_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clerk that never corrects itself exhausts a bounded budget; it never loops forever and
+    its failure is the Hub's to report, not the clerk's words."""
+    order_path = tmp_path / "order.json"
+    order_path.write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "model": "some-model",
+                "agent": "backend",
+                "workdir": str(tmp_path),
+                "brief": str(tmp_path / "b.md"),
+                "pane": "w1:p1",
+                "stage": "stage-5-finalization",
+            }
+        )
+    )
+    rounds: list = []
+    monkeypatch.setattr(
+        recruiter,
+        "_run_order_intake_clerk",
+        _counting_clerk(
+            rounds,
+            lambda _attempt, response: response.order.update(agent="terraform"),
+        ),
+    )
+
+    with pytest.raises(recruiter.IntakeOutcomeError) as failure:
+        recruiter._intake_order(str(order_path), "roster.yaml")
+
+    assert len(rounds) == recruiter.INTAKE_ATTEMPT_LIMIT
+    assert failure.value.outcome == "intake-clerk-failure"
+    assert failure.value.exit_code == 4
+    assert "clerk changed agent" in str(failure.value)
+    validation = json.loads((tmp_path / "order.json.validation.json").read_text())
+    assert validation["attempts"] == recruiter.INTAKE_ATTEMPT_LIMIT
+    assert validation["authored_by"] == "recruiter"
+    assert json.loads(order_path.read_text())["agent"] == "backend"
+
+
+def test_an_unavailable_clerk_is_a_durable_refusal_with_its_own_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Python stays correct when the intake LLM cannot run: no hang, no crash, no guessed
+    success — one structured refusal with evidence and a distinct exit code."""
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", _live_intake_clerk)
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/absent.json")
+    (tmp_path / "state").mkdir()
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(_order(result_path=str(tmp_path / "result.json"))))
+    monkeypatch.setattr(
+        recruiter.JobLedger,
+        "submit",
+        lambda *args, **kwargs: pytest.fail("an unanswered intake must never launch a worker"),
+    )
+
+    assert recruiter.main(["--roster", "roster.yaml", "dispatch", str(order_path)]) == 4
+
+    failed = json.loads(capsys.readouterr().out.split("REQUEST_INTAKE_FAILED ", 1)[1])
+    assert failed["outcome"] == "intake-clerk-failure"
+    assert failed["authored_by"] == "recruiter"
+    assert "no live Recruiter state" in failed["reason"]
+    assert Path(failed["evidence"]["raw"]).read_text() == order_path.read_text()
+    assert json.loads(Path(failed["evidence"]["validation"]).read_text())["valid"] is False
+
+
+def test_an_unreadable_submission_is_an_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A fault in the Hub's own machinery is never dressed up as the request's fault."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/absent.json")
+    (tmp_path / "state").mkdir()
+    missing = tmp_path / "never-written.json"
+
+    assert recruiter.main(["--roster", "roster.yaml", "dispatch", str(missing)]) == 5
+
+    failure = json.loads(capsys.readouterr().out.split("REQUEST_INFRASTRUCTURE_FAILED ", 1)[1])
+    assert failure["outcome"] == "infrastructure-failure"
+    assert failure["authored_by"] == "recruiter"
+    assert "could not preserve the submitted bytes" in failure["reason"]
+
+
+def test_a_recognized_field_owns_its_own_subtree(tmp_path: Path) -> None:
+    """`requester.id` is not a second `order_id` and `manager_placement.mode` is not a second
+    `mode`; otherwise every richly-shaped submission would look self-contradictory."""
+    supplied = {
+        "order_id": "apply-step-1",
+        "mode": "direct",
+        "manager_placement": {"mode": "requester"},
+        "requester": {"id": "leader", "kind": "file-mailbox", "address": str(tmp_path)},
+    }
+    raw = json.dumps(supplied)
+
+    assert recruiter._raw_field_values(raw, "order_id") == ["apply-step-1"]
+    assert recruiter._raw_field_values(raw, "mode") == ["direct"]
+    assert recruiter._clerk_provenance_errors(raw, dict(supplied)) == []
+    # Hoisting a value out of a recognized field's subtree is still invention, not provenance.
+    assert "clerk invented stage_id" in recruiter._clerk_provenance_errors(
+        raw, {**supplied, "stage_id": "requester"}
+    )
 
 
 def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -> None:
@@ -3463,7 +3908,7 @@ def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -
     order_path = tmp_path / "order.json"
     order_path.write_text(json.dumps(sloppy))
 
-    repaired = recruiter._load_order_forgivingly(str(order_path), "unused.yaml")
+    repaired = recruiter._intake_order(str(order_path), "unused.yaml")
 
     for field in (
         "mode", "operation", "requires_apply", "approval", "plan_artifact",
@@ -3499,7 +3944,7 @@ def test_explicit_invalid_stage_and_timeout_are_not_silently_rewritten(
 
     monkeypatch.setattr(recruiter, "_run_order_intake_clerk", refuse)
     with pytest.raises(RecruiterError, match="Explicit stage and timeout"):
-        recruiter._load_order_forgivingly(str(order_path), "roster.yaml")
+        recruiter._intake_order(str(order_path), "roster.yaml")
     assert called == [True]
     assert json.loads(order_path.read_text()) == raw
 
@@ -3537,7 +3982,7 @@ def test_conflicting_aliases_escalate_instead_of_silently_winning(
     )
 
     with pytest.raises(RecruiterError, match="cwd aliases conflict"):
-        recruiter._load_order_forgivingly(str(path), "roster.yaml")
+        recruiter._intake_order(str(path), "roster.yaml")
     assert called == [True]
     assert json.loads(path.read_text()) == raw
 
@@ -3564,7 +4009,7 @@ def test_unknown_fields_escalate_instead_of_being_dropped(
     )
 
     with pytest.raises(RecruiterError, match="ambiguous"):
-        recruiter._load_order_forgivingly(str(order_path), "roster.yaml")
+        recruiter._intake_order(str(order_path), "roster.yaml")
     assert called == [True]
     assert "op" in json.loads((tmp_path / "order.json.intake.json").read_text())["unknown_fields"]
 
@@ -3588,7 +4033,7 @@ def test_intake_persistence_failure_never_rewrites_original(
     )
 
     with pytest.raises(RecruiterError, match="paper trail"):
-        recruiter._load_order_forgivingly(str(path), "unused.yaml")
+        recruiter._intake_order(str(path), "unused.yaml")
     assert path.read_text() == raw
 
 
@@ -3639,7 +4084,7 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
         or {"status": "closed", "worker_pane": ownership["pane"], "verified_absent": True},
     )
 
-    response, record = recruiter._run_order_intake_clerk(
+    response, record = _live_intake_clerk(
         "malformed", tmp_path / "order.json.raw-submitted", "roster.yaml", "abc123"
     )
 
@@ -3661,16 +4106,21 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
 def test_intake_clerk_unavailable_becomes_refusal_without_target_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", _live_intake_clerk)
     state = tmp_path / "missing-state.json"
     monkeypatch.setattr(recruiter, "STATE_FILE", state)
     order_path = tmp_path / "order.json"
     order_path.write_text("not json")
 
     with pytest.raises(RecruiterError, match="intake clerk unavailable") as refusal:
-        recruiter._load_order_forgivingly(str(order_path), "roster.yaml")
+        recruiter._intake_order(str(order_path), "roster.yaml")
     assert "agent" in str(refusal.value) and "instructions_path" in str(refusal.value)
     recorded = json.loads((tmp_path / "order.json.refusal.json").read_text())
     assert "agent" in recorded["missing"]
+    # An unavailable clerk is the Hub's failure to report, never the clerk's own words.
+    assert recorded["authored_by"] == "recruiter"
+    assert refusal.value.outcome == "intake-clerk-failure"
+    assert refusal.value.exit_code == 4
 
 
 def test_order_intake_regenerates_unsafe_ids_deterministically(tmp_path: Path) -> None:
@@ -3690,8 +4140,8 @@ def test_order_intake_regenerates_unsafe_ids_deterministically(tmp_path: Path) -
     first_path.write_text(raw)
     second_path.write_text(raw)
 
-    first = recruiter._load_order_forgivingly(str(first_path), "unused.yaml")
-    second = recruiter._load_order_forgivingly(str(second_path), "unused.yaml")
+    first = recruiter._intake_order(str(first_path), "unused.yaml")
+    second = recruiter._intake_order(str(second_path), "unused.yaml")
 
     assert first["order_id"] == second["order_id"]
     assert first["order_id"].startswith("intake-")
@@ -3699,11 +4149,52 @@ def test_order_intake_regenerates_unsafe_ids_deterministically(tmp_path: Path) -
     assert first["result_path"].startswith(str(tmp_path))
 
 
+def _repairable_order(tmp_path: Path, order_id: str) -> dict:
+    return {
+        "order_id": order_id,
+        "harness": "claude",
+        "model": "some-model",
+        "agent": "docs",
+        "cwd": str(tmp_path),
+        "instructions_path": str(tmp_path / "b.md"),
+        "cockpit_pane": "w1:p1",
+        "stage_id": "stage-5-finalization",
+    }
+
+
+def test_an_unsafe_consult_identity_is_refused_rather_than_regenerated(tmp_path: Path) -> None:
+    """A LAUNDERING GUARD, not specialist vocabulary — and the reason a keyword sweep of the
+    word `consult` must not take it out.
+
+    Intake repairs an unsafe order id by regenerating it. That is right for an ordinary
+    submission and wrong for one claiming the consult door's minted identity: regenerating
+    would turn forged paperwork into a valid order under a fresh, legitimate-looking id. The
+    rule is refuse, never rename. `_SAFE_ORDER_ID_RE` already excludes `/`, so the traversal
+    fails the regex either way; this guard's whole contribution is WHICH branch it takes.
+    """
+    with pytest.raises(ContractError, match="cannot be regenerated"):
+        recruiter._complete_order_form(
+            _repairable_order(tmp_path, "consult-../../etc/passwd"), "raw", tmp_path / "order.json"
+        )
+
+
+def test_an_ordinary_unsafe_order_id_is_still_repaired(tmp_path: Path) -> None:
+    """The other half of the same rule: the guard is narrow. An ordinary caller whose order id
+    happens to be unusable gets it regenerated with the change recorded, exactly as before —
+    a guard that refused everything would break every sloppy submission intake exists to fix."""
+    order, changes = recruiter._complete_order_form(
+        _repairable_order(tmp_path, "phase-1/stage-1"), "raw", tmp_path / "order.json"
+    )
+
+    assert recruiter._SAFE_ORDER_ID_RE.fullmatch(order["order_id"])
+    assert any("regenerated unsafe order_id" in c for c in changes)
+
+
 def test_unsafe_consult_prefixed_order_ids_are_refused_not_laundered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sloppy = {
-        "id": "specialist-consult-../x",
+        "id": "consult-../x",
         "harness": "claude",
         "model": "some-model",
         "agent": "docs",
@@ -3724,7 +4215,81 @@ def test_unsafe_consult_prefixed_order_ids_are_refused_not_laundered(
     )
 
     with pytest.raises(RecruiterError, match="Unsafe consult identity"):
-        recruiter._load_order_forgivingly(str(path), "roster.yaml")
+        recruiter._intake_order(str(path), "roster.yaml")
+
+
+def test_identical_bytes_reuse_one_clerk_but_different_bytes_launch_a_fresh_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reuse is idempotency, not a bypass — the two halves of the contract, through the REAL seam.
+
+    A byte-identical resubmission of the same order file reuses the first attempt's validated
+    response: it does NOT launch a second clerk (the reuse key is the resolved path plus the exact
+    submitted bytes). A submission whose bytes DIFFER — a genuinely different request, or a
+    correction round — is a different request and launches a fresh clerk. This drives the real
+    `_run_order_intake_clerk` reuse index, not a hand-built one, and counts actual launches.
+    """
+    state = tmp_path / "state/recruiter.json"
+    state.parent.mkdir()
+    state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+    monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
+    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", _live_intake_clerk)  # the real seam
+
+    order_a = _order(result_path=str(tmp_path / "result-a.json"))
+    order_b = _order(agent="reviewer", result_path=str(tmp_path / "result-b.json"))
+    order_path = tmp_path / "order.json"
+    launches: list[str] = []
+    current = {"order": order_a}
+
+    def start(name, clerk_order, launch, **kwargs):
+        launches.append(name)
+        return "clerk:pane", "workspace", name
+
+    def wait(path, _timeout, parser):
+        value = {"order": current["order"]}
+        recruiter._secure_write_json(path, value)
+        return parser(json.dumps(value))
+
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", start)
+    monkeypatch.setattr(recruiter, "_resize_started_pane", lambda *a, **k: None)
+    monkeypatch.setattr(
+        recruiter,
+        "_wait_for_agent_health",
+        lambda pane, **kwargs: {
+            "healthy": True,
+            "pane_id": pane,
+            "detected_agent": "claude",
+            "cwd_matches": True,
+            "process_pid": None,
+        },
+    )
+    monkeypatch.setattr(recruiter, "_wait_typed_file", wait)
+    monkeypatch.setattr(
+        recruiter,
+        "_cleanup_intake_clerk",
+        lambda ownership: {
+            "status": "closed",
+            "worker_pane": ownership["pane"],
+            "verified_absent": True,
+        },
+    )
+
+    # First submission of order A: one fresh clerk launches and its response is indexed.
+    order_path.write_text(json.dumps(order_a))
+    assert recruiter._intake_order(str(order_path), "roster.yaml") == order_a
+    assert len(launches) == 1
+
+    # Byte-identical resubmission of order A: reused, no second launch.
+    order_path.write_text(json.dumps(order_a))
+    assert recruiter._intake_order(str(order_path), "roster.yaml") == order_a
+    assert len(launches) == 1  # the resubmission reused the first attempt's validated response
+
+    # A DIFFERENT submission (order B): different bytes, so a fresh clerk launches.
+    current["order"] = order_b
+    order_path.write_text(json.dumps(order_b))
+    assert recruiter._intake_order(str(order_path), "roster.yaml") == order_b
+    assert len(launches) == 2  # different bytes are a different request — never reused
 
 
 def test_identical_intake_reuses_only_a_validated_indexed_attempt(
@@ -3775,7 +4340,7 @@ def test_identical_intake_reuses_only_a_validated_indexed_attempt(
         lambda *args, **kwargs: pytest.fail("a verified identical intake must not hire twice"),
     )
 
-    parsed, record = recruiter._run_order_intake_clerk(
+    parsed, record = _live_intake_clerk(
         "bad", tmp_path / "order.raw-submitted", "roster.yaml", key
     )
     assert parsed.refusal == "agent missing"
@@ -3823,7 +4388,7 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
     )
 
     with pytest.raises(RecruiterError, match="journal disk failure"):
-        recruiter._run_order_intake_clerk(
+        _live_intake_clerk(
             "bad", tmp_path / "order.raw-submitted", "roster.yaml", "failure-key"
         )
 
@@ -3966,7 +4531,7 @@ def test_reuse_rejects_attempt_directory_swapped_to_symlink(
     )
 
     with pytest.raises(RecruiterError, match="real broker-owned directory"):
-        recruiter._run_order_intake_clerk(
+        _live_intake_clerk(
             "bad", tmp_path / "raw", "roster.yaml", key
         )
     assert not list(outside.iterdir())
@@ -3999,7 +4564,7 @@ def test_reuse_index_cannot_escape_the_trusted_attempts_root(
     )
 
     with pytest.raises(RecruiterError, match="invalid attempt directory name"):
-        recruiter._run_order_intake_clerk("bad", tmp_path / "raw", "roster.yaml", key)
+        _live_intake_clerk("bad", tmp_path / "raw", "roster.yaml", key)
 
 
 def test_stale_pane_id_is_never_closed_when_unique_agent_is_absent(
@@ -4152,3 +4717,1010 @@ def test_pid_reuse_does_not_count_as_the_original_intake_owner(
     assert recruiter._reconcile_intake_clerks(force=False) == 1
     assert len(cleaned) == 1
     assert recruiter._secure_json(ownership_path)["state"] == "closed"
+
+
+# --- the specialist roster the kit actually ships -----------------------------
+#
+# `specialist_roster_contract_test.py` writes its own fixture rosters, so every one of its
+# thirteen tests passes green against an EMPTY `specialists.yaml`. These two load the real
+# shipped file, which is the only thing that catches "the merge works perfectly and the kit
+# ships nothing to merge" — a destination with no overlay of its own would get an empty phone
+# book, and an empty phone book reads to a worker as "no specialist owns this area".
+
+
+_ENGINE = Path(recruiter.__file__).resolve()
+
+
+def _kit_base_specialists() -> list[dict]:
+    """The roster file as SHIPPED, read directly. Not through `load_specialist_roster()`: that
+    walks up from cwd and would merge whatever overlay the enclosing repo happens to own."""
+    return recruiter.yaml.safe_load(
+        _ENGINE.with_name(recruiter.SPECIALIST_ROSTER_FILE).read_text()
+    )["specialists"]
+
+
+def test_the_shipped_kit_base_roster_lists_every_persona_the_kit_agents_compose() -> None:
+    """The kit base is loaded in EVERY destination, so it is the whole phone book wherever a
+    repo has not written an overlay. Each entry must name a persona the kit can actually
+    launch: `agent:` is what the launch template substitutes, and a name with no compose
+    recipe behind it hires a worker with no definition to read."""
+    specialists = _kit_base_specialists()
+    # .../<tree>/extensions/common/upagent/recruiter.py -> .../<tree>/compose/agents. Identical
+    # in the kit and in every destination, both of which carry the composed agent recipes.
+    recipes = {path.stem for path in (_ENGINE.parents[3] / "compose/agents").glob("*.yaml")}
+
+    assert specialists, "the kit ships no specialists — every destination's phone book is empty"
+    assert recipes, "no agent compose recipes found; the path this test resolves has moved"
+    missing = sorted(
+        entry["agent"] for entry in specialists if entry["agent"] not in recipes
+    )
+    assert not missing, f"specialists name personas the kit does not compose: {missing}"
+
+
+def test_the_phone_book_caps_the_whole_line_not_just_the_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Found against a real destination roster, not by design.
+
+    The migration gate caps an essay description and checks the rendered line, but its fixture
+    specialist is named `essayist` — eight characters. A real repo-owned roster has names like
+    `payments-integration-reviewer`, and `- **<29 chars>** (this repo) — ` is 48 characters of
+    prefix before the description even starts. Capping the description alone therefore passed
+    the gate while emitting 270-character lines into every stage brief. The budget belongs to
+    the LINE, because the line is what rides in the brief.
+    """
+    repo = _specialist_world(tmp_path, monkeypatch)
+    overlay = repo / recruiter.SPECIALIST_OVERLAY_REL
+    overlay.write_text(
+        recruiter.yaml.safe_dump(
+            {
+                "specialists": [
+                    {
+                        "name": "payments-integration-reviewer",
+                        "description": "long ownership sentence " * 40,
+                        "harness": "claude",
+                        "model": "opus",
+                        "agent": "payments-integration-reviewer",
+                    }
+                ]
+            }
+        )
+    )
+
+    recruiter.cmd_specialists()
+
+    rendered = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("- **")]
+    assert len(rendered) == 1
+    assert len(rendered[0]) < recruiter.PHONE_BOOK_LINE_CAP
+    assert rendered[0].endswith("...")
+    assert "(this repo)" in rendered[0]
+
+
+def test_a_specialist_with_no_description_falls_back_to_its_persona_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A roster entry may carry only `location:`. Without the fallback its phone-book line
+    renders blank, and a worker cannot tell what the specialist covers — so it picks wrong, or
+    not at all. Silent quality loss with no signal, which is why it is pinned here."""
+    repo = _specialist_world(tmp_path, monkeypatch)
+    overlay = repo / recruiter.SPECIALIST_OVERLAY_REL
+    overlay.write_text(
+        recruiter.yaml.safe_dump(
+            {
+                "specialists": [
+                    {
+                        "name": "reviewer",
+                        "location": ".claude/agents/reviewer.md",
+                        "harness": "claude",
+                        "model": "opus",
+                        "agent": "reviewer",
+                    }
+                ]
+            }
+        )
+    )
+    persona = repo / ".claude/agents/reviewer.md"
+    persona.parent.mkdir(parents=True)
+    persona.write_text("---\ndescription: Reads the diff and cites it.\nmodel: opus\n---\n\nBody.\n")
+
+    index = recruiter._specialist_index(recruiter.load_specialist_roster())
+
+    assert index["reviewer"]["description"] == "Reads the diff and cites it."
+
+
+def test_the_shipped_kit_base_roster_satisfies_the_loader_it_ships_for() -> None:
+    """Shipping a roster the loader rejects turns every consult in every destination into a
+    failure answer. Validate the real file through the real validator, not a fixture."""
+    specialists = _kit_base_specialists()
+
+    for entry in specialists:
+        recruiter._validate_specialist({**entry, "origin": "kit-base"})
+        assert entry.get("description"), f"{entry['name']} has no description to choose it by"
+
+
+# --- the consult door ---------------------------------------------------------
+#
+# `specialist_roster_contract_test.py` pins the roster merge and the phone book; these pin the
+# door itself. Everything here runs with `cmd_dispatch` replaced, because the door's own
+# contract is what it builds and what it does with the answer — the lifecycle underneath it is
+# the ordinary one and is covered above.
+
+
+def _two_reviewers_roster() -> str:
+    """A roster document that names `reviewer` twice — a malformed base or overlay."""
+    return recruiter.yaml.safe_dump(
+        {
+            "specialists": [
+                {"name": "reviewer", "description": "first", "harness": "claude",
+                 "model": "opus", "agent": "reviewer"},
+                {"name": "reviewer", "description": "second", "harness": "claude",
+                 "model": "haiku", "agent": "other"},
+            ]
+        }
+    )
+
+
+def test_a_duplicate_specialist_name_in_the_overlay_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same name defined twice in ONE roster file is ambiguous — the last would silently win.
+    The loader must fail loud, naming the file, before any base-under-overlay merge."""
+    engine = tmp_path / "kit"
+    engine.mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    overlay = repo / recruiter.SPECIALIST_OVERLAY_REL
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(_two_reviewers_roster())
+    monkeypatch.setattr(recruiter, "HERE", engine)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(recruiter.RecruiterError, match="defined more than once"):
+        recruiter.load_specialist_roster()
+
+
+def test_a_duplicate_specialist_name_in_the_kit_base_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard covers the kit base file too, reached with a CLEAN overlay present so the base is
+    loaded as the base half of the merge. Ambiguity within a file is caught before it is merged
+    away, never resolved to the last duplicate."""
+    engine = tmp_path / "kit"
+    engine.mkdir()
+    (engine / recruiter.SPECIALIST_ROSTER_FILE).write_text(_two_reviewers_roster())
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    overlay = repo / recruiter.SPECIALIST_OVERLAY_REL
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(
+        recruiter.yaml.safe_dump(
+            {
+                "specialists": [
+                    {"name": "payments", "description": "clean", "harness": "claude",
+                     "model": "sonnet", "agent": "payments"},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(recruiter, "HERE", engine)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(recruiter.RecruiterError, match="defined more than once"):
+        recruiter.load_specialist_roster()
+
+
+def _specialist_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **entry_over: object
+) -> Path:
+    """A repo whose own overlay names one specialist, an up Recruiter, and cwd inside it.
+
+    The engine dir ships no kit base here, so the overlay is the whole roster and `repo_root`
+    anchors on the repository that owns it — the arrangement the cwd rule is about.
+    """
+    engine = tmp_path / "kit"
+    engine.mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    overlay = repo / recruiter.SPECIALIST_OVERLAY_REL
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(
+        recruiter.yaml.safe_dump(
+            {
+                "specialists": [
+                    {
+                        "name": "reviewer",
+                        "description": "Independent read-only review.",
+                        "harness": "claude",
+                        "model": "opus",
+                        "agent": "reviewer",
+                        **entry_over,
+                    }
+                ]
+            }
+        )
+    )
+    state = tmp_path / "recruiter-state.json"
+    state.write_text(json.dumps({"recruiter_pane": "ws1:%7"}))
+    monkeypatch.setattr(recruiter, "HERE", engine)
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def _consult_file(tmp_path: Path, **over: object) -> Path:
+    consult = {
+        "consult_id": "phase-2.stage-1.pass-1.consult-1",
+        "specialist": "reviewer",
+        "question": "Where is the retry budget enforced?",
+        "answer_path": str(tmp_path / "answers" / "c1.answer.json"),
+        **over,
+    }
+    path = tmp_path / "consults" / "c1.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(consult))
+    return path
+
+
+def _answering_dispatch(answer: dict | None, seen: list[dict]):
+    """Stand in for the whole worker lifecycle: record the order, write what the specialist would."""
+
+    def dispatch(order_path: str, roster_path: str) -> int:
+        path = Path(order_path)
+        seen.append(json.loads(path.read_text()))
+        if answer is not None:
+            consult = path.with_name(path.name.removesuffix(".order.json"))
+            target = Path(json.loads(consult.read_text())["answer_path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(answer))
+        return 0
+
+    return dispatch
+
+
+def _receipt(consult_path: Path) -> dict:
+    return json.loads(consult_path.with_name(consult_path.name + ".receipt.json").read_text())
+
+
+def _cited_answer(consult_id: str = "phase-2.stage-1.pass-1.consult-1") -> dict:
+    return {
+        "consult_id": consult_id,
+        "answer": "In the leader loop, before each try.",
+        "citations": ["recruiter.py:134"],
+    }
+
+
+def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The order carries NO consult-specific field. `_complete_order_form` rejects any key
+    outside ORDER_INTAKE_ALIASES, so a `consult` block here would work until the day intake
+    stops short-circuiting a canonical order — a latent failure with a long fuse. The link
+    between consult and order lives in the sidecar receipt instead."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    assert recruiter.cmd_consult(str(consult), "roster.yaml") == 0
+
+    order = seen[0]
+    assert set(order) <= set(recruiter.ORDER_INTAKE_ALIASES)
+    recruiter.contracts.parse_order(json.dumps(order))  # must satisfy the ordinary contract
+    assert order["agent"] == "reviewer"
+    assert order["timeout_ms"] == recruiter.CONSULT_TIMEOUT_MS
+    assert order["cockpit_pane"] == "ws1:%7"
+    assert "management" not in order
+
+
+def test_a_consult_order_is_not_filed_under_the_callers_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_phase_start_receipt` walks a brief's path for `phases/<phase_id>/pass-N/`. Reusing the
+    caller's phase id would make every consult whose brief sits inside a phase tree emit a
+    spurious `phase-receipt-degraded` event — noise that erodes a real signal."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert seen[0]["phase_id"] == recruiter.CONSULT_PHASE_ID == "consult"
+    assert recruiter._phase_start_receipt(seen[0]) is None
+
+
+def test_an_uncited_answer_is_refused_and_overwritten_with_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE EVIDENCE GATE, exercised through the door rather than through the contract alone.
+    A specialist that delivers confident prose has run and delivered — its `result.json` is
+    perfectly valid — so nothing but this refuses it."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    uncited = {"consult_id": "phase-2.stage-1.pass-1.consult-1", "answer": "Trust me."}
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(uncited, []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "citations" in receipt["reason"]
+    assert json.loads(Path(receipt["answer_path"]).read_text())["error"]
+
+
+def test_a_specialist_signalled_failure_is_recorded_as_failed_not_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A specialist saying "I could not answer" is a legitimate terminal outcome and needs no
+    citations. Collapsing it into `rejected` would lose the distinction between the specialist
+    reporting a failure and the door refusing its evidence."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    signalled = {"consult_id": "phase-2.stage-1.pass-1.consult-1", "error": "repo unreadable"}
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(signalled, []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert _receipt(consult)["answer_verdict"] == "failed"
+
+
+def test_a_consult_that_never_reaches_a_worker_still_answers_its_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ALWAYS-ANSWER GUARANTEE. A caller's wait is bounded by the door returning, so every
+    failure path — including one where no worker ever ran — must leave a durable artifact
+    rather than a missing file the caller cannot distinguish from a hang."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+
+    def exploding(order_path: str, roster_path: str) -> int:
+        raise RecruiterError("herdr socket is gone")
+
+    monkeypatch.setattr(recruiter, "cmd_dispatch", exploding)
+
+    assert recruiter.cmd_consult(str(consult), "roster.yaml") == 0
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    answer = json.loads(Path(receipt["answer_path"]).read_text())
+    assert "herdr socket is gone" in answer["error"]
+    assert recruiter.contracts_consult.parse_answer(json.dumps(answer)) == answer
+
+
+def test_a_bad_roster_still_answers_instead_of_stranding_the_consult(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The roster load lives INSIDE the recoverable block on purpose: a consult must be
+    answerable even when the thing that routes it is broken, or the caller only ever resolves
+    on timeout."""
+    engine = tmp_path / "kit"
+    engine.mkdir()
+    (engine / "specialists.yaml").write_text("specialists: []\n")
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(recruiter, "HERE", engine)
+    monkeypatch.chdir(tmp_path / "repo")
+    consult = _consult_file(tmp_path)
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert "non-empty `specialists:` list" in _receipt(consult)["reason"]
+
+
+def test_an_unknown_specialist_is_refused_with_the_roster_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, specialist="nobody")
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "reviewer" in receipt["reason"]
+
+
+def test_a_near_miss_specialist_name_is_resolved_deterministically_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guess the FORM, never the intent. A capitalisation must not cost an LLM hire or a
+    failure answer — and the interpretation is written into the receipt, so a resolved name is
+    never a silent rename."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, specialist="Reviewer")
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["resolved_specialist"] == "reviewer"
+    assert "matched 'reviewer' (case)" in receipt["resolution_note"]
+    assert seen[0]["agent"] == "reviewer"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("reviewer", "reviewer"),
+        ("Reviewer", "reviewer"),
+        ("REVIEWER", "reviewer"),
+        ("reviewer-agent", "reviewer"),
+        ("payments", None),
+        ("", None),
+    ],
+)
+def test_specialist_name_resolution_is_deterministic(value: str, expected: str | None) -> None:
+    assert recruiter._resolve_specialist_name(value, ["reviewer", "qa"])[0] == expected
+
+
+def test_an_ambiguous_specialist_name_is_never_guessed() -> None:
+    """Two roster names that normalize to one string is exactly when a resolver must stop.
+    Picking either would answer a question the caller did not ask."""
+    assert recruiter._resolve_specialist_name("Docs", ["docs", "DOCS"]) == (None, None)
+
+
+def test_a_consult_runs_in_the_directory_the_caller_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _specialist_world(tmp_path, monkeypatch)
+    elsewhere = tmp_path / "worktree"
+    elsewhere.mkdir()
+    consult = _consult_file(tmp_path, cwd=str(elsewhere))
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert seen[0]["cwd"] == str(elsewhere)
+
+
+def test_a_consult_naming_a_vanished_directory_falls_back_to_the_rosters_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fe96fba`, restated as a rule. Bring services up in a throwaway worktree, delete it, and
+    every later consult used to die starting a process in a directory that no longer existed.
+    The fallback is the roster's own repository, re-derived on this load — live by construction
+    rather than a path recorded earlier — and the specialist answers about a tree that exists."""
+    repo = _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, cwd=str(tmp_path / "deleted-worktree"))
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert seen[0]["cwd"] == str(repo)
+    assert _receipt(consult)["cwd"] == str(repo)
+
+
+def test_a_stale_answer_from_a_previous_consult_is_removed_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reusing an answer_path is legal; reading the previous occupant's answer is not. The
+    consult_id echo catches it afterwards, but only if the stale file is gone first — otherwise
+    a worker that never wrote anything looks answered."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    stale = Path(json.loads(consult.read_text())["answer_path"])
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps(_cited_answer("an-older-consult")))
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(None, []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "not found" in receipt["reason"]
+
+
+def test_the_brief_states_the_citation_requirement_the_answer_is_judged_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The specialist is judged on citations, so it has to be TOLD about citations. The brief
+    and `parse_answer` must not drift apart — a worker refused for a rule it never read is a
+    guaranteed retry loop."""
+    _specialist_world(tmp_path, monkeypatch, location=".claude/agents/reviewer.md")
+    consult = _consult_file(tmp_path)
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    brief = Path(seen[0]["instructions_path"]).read_text()
+    assert "MUST carry a real file:line citation" in brief
+    assert json.loads(consult.read_text())["answer_path"] in brief
+    assert "Recruiter delivery contract" in brief
+    assert str(tmp_path / "repo" / ".claude/agents/reviewer.md") in brief
+
+
+def test_a_consult_id_that_could_escape_a_path_becomes_a_safe_request_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller owns `consult_id` and it reaches the ledger as an order id, so it is digested
+    rather than carried. A digest is safe by construction whatever the caller wrote."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, consult_id="../../etc/passwd")
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        recruiter,
+        "cmd_dispatch",
+        _answering_dispatch({"consult_id": "../../etc/passwd", "error": "n/a"}, seen),
+    )
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert recruiter._SAFE_ORDER_ID_RE.fullmatch(seen[0]["order_id"])
+    assert seen[0]["order_id"] == seen[0]["request_id"]
+    assert ".." not in seen[0]["order_id"]
+
+
+def test_a_consult_too_broken_to_answer_into_refuses_in_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one path with no durable artifact to leave is the one path that may refuse: with no
+    `answer_path` there is nowhere for a failure answer to go, so the caller has to be told
+    directly, with what was missing named."""
+    _specialist_world(tmp_path, monkeypatch)
+    path = tmp_path / "consults" / "broken.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json at all")
+
+    with pytest.raises(RecruiterError, match="answer_path"):
+        recruiter.cmd_consult(str(path), "roster.yaml")
+
+
+def test_a_malformed_consult_that_names_an_answer_path_is_answered_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consult missing `question` cannot run, but it CAN be answered: the caller gets a
+    failure naming the missing field and listing the roster, instead of a Python refusal it
+    would have to parse out of stderr."""
+    _specialist_world(tmp_path, monkeypatch)
+    path = tmp_path / "consults" / "partial.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"consult_id": "c-9", "answer_path": str(tmp_path / "a.json"), "specialist": "reviewer"}
+        )
+    )
+
+    assert recruiter.cmd_consult(str(path), "roster.yaml") == 0
+
+    answer = json.loads((tmp_path / "a.json").read_text())
+    assert "question" in answer["error"]
+    assert "reviewer" in answer["error"]
+    assert recruiter.contracts_consult.parse_answer(json.dumps(answer), "c-9") == answer
+
+
+def test_the_receipt_names_the_ordinary_request_identity_the_ledger_knows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt is derived, never invented: every field traces to an ordinary UpAgent request
+    id or result path. That is what makes a worker's `consults` claim resolvable rather than
+    self-reported prose."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, requested_by="phase-2.stage-1-implementation.pass-1.try-1")
+    seen: list[dict] = []
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "cited"
+    assert receipt["request_id"] == seen[0]["request_id"] == seen[0]["order_id"]
+    assert receipt["requested_by"] == "phase-2.stage-1-implementation.pass-1.try-1"
+    assert receipt["result_path"] == seen[0]["result_path"]
+    assert receipt["order_receipt_state"] == "finished"
+
+
+def test_the_consult_prints_one_machine_readable_receipt_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command returning IS the completion signal, so stdout carries evidence rather than a
+    sentinel to wait for. One line, parseable, emitted on every path."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("CONSULT_RECEIPT ")]
+    assert len(lines) == 1
+    assert json.loads(lines[0].removeprefix("CONSULT_RECEIPT "))["answer_verdict"] == "cited"
+
+
+# --- consult receipts a worker cannot forge (Tier 2) --------------------------
+#
+# A `consults` list used to be four keys of prose that nothing in the system ever read:
+# `contracts.parse_result` did not look at it, and no ledger lookup resolved it. A worker could
+# therefore bank a receipt for a consultation that never happened, which is the failure mode
+# project memory records as "workers forged librarian paperwork". These pin the resolution.
+
+
+def _worker_order(tmp_path: Path) -> dict:
+    return _order(
+        order_id="phase-2.stage-1-implementation.pass-1.try-1",
+        cwd=str(tmp_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+        result_path=str(tmp_path / "result.json"),
+    )
+
+
+def _claim(**over: str) -> dict:
+    base = {
+        "consult_id": "phase-2.stage-1.pass-1.consult-1",
+        "specialist": "reviewer",
+        "request_id": recruiter.consult_request_id("phase-2.stage-1.pass-1.consult-1"),
+        "answer_path": "/tmp/answers/c1.answer.json",
+    }
+    base.update(over)
+    return base
+
+
+def _worker_result(claims: list[dict], order: dict) -> dict:
+    return {
+        "order_id": order["order_id"],
+        "verdict": "passed",
+        "full_log": "/tmp/session.jsonl",
+        "consults": claims,
+    }
+
+
+def _broker_a_real_consult(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: dict, **over: object
+) -> None:
+    """Run one consult end to end so the Hub's own index records it, exactly as production
+    does — through `cmd_consult`, never by writing the index entry directly. A test that forged
+    the index would prove only that the reader reads."""
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, requested_by=order["order_id"], **over)
+    consult_id = json.loads(consult.read_text())["consult_id"]
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(consult_id), [])
+    )
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+
+def test_a_worker_cannot_bank_a_receipt_for_a_consult_that_never_happened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE FORGERY GATE.
+
+    This worker writes a perfectly well-formed `consults` entry — four non-empty strings, a
+    correctly derived `request_id`, everything `contracts.parse_result` asks for — for a
+    consultation it never made. Nothing about the claim itself is detectably wrong; the only
+    thing that distinguishes it from a real one is that the Recruiter has no record of having
+    brokered it. Publication must say so.
+    """
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    forged = _worker_result([_claim()], order)
+
+    stamp = recruiter.resolve_consult_claims(order, forged)
+
+    assert stamp["consults_verified"] == []
+    assert stamp["consults_unverified"] == [
+        {"consult_id": "phase-2.stage-1.pass-1.consult-1", "request_id": _claim()["request_id"]}
+    ]
+
+
+def test_a_consult_that_really_happened_is_verified_from_the_hubs_own_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control. Without it the gate above could be a check that never passes — everything
+    would read as forged and the distinction would be worthless."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    _broker_a_real_consult(tmp_path, monkeypatch, order)
+
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
+
+    assert stamp["consults_unverified"] == []
+    assert stamp["consults_verified"] == [
+        {
+            "answer_verdict": "cited",
+            "consult_id": "phase-2.stage-1.pass-1.consult-1",
+            "request_id": _claim()["request_id"],
+            "specialist": "reviewer",
+        }
+    ]
+
+
+def test_a_consult_another_worker_made_cannot_be_claimed_as_your_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index is keyed by REQUESTER, not just by consult id. Otherwise one real consult
+    anywhere in the run would launder every worker's claim to have made it."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    mine = _worker_order(tmp_path)
+    theirs = _order(order_id="phase-2.stage-1-implementation.pass-1.try-2")
+    _broker_a_real_consult(tmp_path, monkeypatch, theirs)
+
+    assert recruiter.resolve_consult_claims(mine, _worker_result([_claim()], mine))[
+        "consults_verified"
+    ] == []
+    assert recruiter.resolve_consult_claims(theirs, _worker_result([_claim()], theirs))[
+        "consults_verified"
+    ]
+
+
+def test_a_real_consult_claimed_under_a_borrowed_request_id_is_not_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both halves of the claim are checked against the record, not just the one in the path.
+    Naming a consult that happened while attaching a different request id is still a false
+    claim — the `request_id` is what the auditor would follow back to the ledger."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    _broker_a_real_consult(tmp_path, monkeypatch, order)
+
+    borrowed = _worker_result([_claim(request_id="consult-somebodyelses")], order)
+
+    assert recruiter.resolve_consult_claims(order, borrowed)["consults_verified"] == []
+
+
+def test_a_worker_that_recorded_no_consults_key_gets_no_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent is not the same as empty. A worker that declared `consults: []` said something —
+    "none applied" — and gets an explicit empty verdict; one that omitted the key never made a
+    claim to resolve, and the receipt stays silent rather than inventing agreement."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    silent = {k: v for k, v in _worker_result([], order).items() if k != "consults"}
+
+    assert recruiter.resolve_consult_claims(order, silent) == {}
+    assert recruiter.resolve_consult_claims(order, _worker_result([], order)) == {
+        "consults_verified": [],
+        "consults_unverified": [],
+    }
+
+
+def test_a_consult_with_no_requester_is_unverifiable_but_never_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`requested_by` is worker-supplied, so a worker can omit it and lose attribution for a
+    consult it really made. That fails in the SAFE direction: omission understates diligence,
+    it can never overstate it. A worker cannot manufacture an entry by leaving fields out."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)  # no requested_by
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert "index_path" not in _receipt(consult)
+    assert recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))[
+        "consults_verified"
+    ] == []
+
+
+def test_a_consult_that_failed_before_any_specialist_ran_is_not_verifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consult that never reached a specialist worker cannot verify a worker's claim.
+
+    An unknown specialist is rejected BEFORE dispatch, so no worker ran and no durable
+    ORDER_RECEIPT was ever produced. The rejected receipt still carries `requested_by`, and that
+    alone used to put it in the Hub's index — laundering a `consults` claim for a consultation
+    that never happened. Only a consult whose order reached `order_receipt_state == "finished"`
+    may enter the verified index.
+    """
+    order = _worker_order(tmp_path)
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, requested_by=order["order_id"], specialist="ghostwriter")
+    monkeypatch.setattr(
+        recruiter,
+        "cmd_dispatch",
+        lambda *a, **k: pytest.fail("an unknown specialist must fail before any worker runs"),
+    )
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "order_receipt_state" not in receipt  # the order never finished — no worker ran
+    assert "index_path" not in receipt  # so nothing was recorded to verify against
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
+    assert stamp["consults_verified"] == []
+    assert stamp["consults_unverified"] == [
+        {"consult_id": "phase-2.stage-1.pass-1.consult-1", "request_id": _claim()["request_id"]}
+    ]
+
+
+def test_a_consult_that_never_reached_the_recruiter_is_not_verifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same guarantee through the other pre-dispatch door. With no Recruiter pane the consult
+    is rejected before a worker could run, so its `requested_by` receipt must stay out of the
+    index exactly as the unknown-specialist case does."""
+    order = _worker_order(tmp_path)
+    _specialist_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "recruiter-is-down.json")
+    consult = _consult_file(tmp_path, requested_by=order["order_id"])  # names the known reviewer
+    monkeypatch.setattr(
+        recruiter,
+        "cmd_dispatch",
+        lambda *a, **k: pytest.fail("a down Recruiter must fail before any worker runs"),
+    )
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "order_receipt_state" not in receipt
+    assert "index_path" not in receipt
+    assert recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))[
+        "consults_verified"
+    ] == []
+
+
+def test_a_planted_index_entry_with_no_finished_order_is_not_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth for the forgery gate's read side. Even if some future path wrote an index
+    entry for a consult whose order never finished, verification refuses it: a verified entry has
+    to record `order_receipt_state == "finished"`, which only a completed dispatch ever sets."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    claim = _claim()
+    entry_path = recruiter.consult_index_entry_path(order["order_id"], claim["consult_id"])
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry_path.write_text(
+        json.dumps(
+            {
+                "consult_id": claim["consult_id"],
+                "request_id": claim["request_id"],
+                "requested_by": order["order_id"],
+                "answer_verdict": "cited",
+                # note: no order_receipt_state — this consult never ran to completion
+            }
+        )
+    )
+
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([claim], order))
+
+    assert stamp["consults_verified"] == []
+    assert stamp["consults_unverified"] == [
+        {"consult_id": claim["consult_id"], "request_id": claim["request_id"]}
+    ]
+
+
+def test_a_consult_whose_answer_failed_the_citation_gate_is_verifiable_as_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deliberate OTHER side of the gate — the CITATION path specifically. A consult whose
+    specialist RAN and returned a SUCCESS-shaped answer that the citation gate rejected (a citation
+    that is not `file:line`) still finished its order, so it stays verifiable — carrying the
+    `rejected` verdict the gate assigned (`parse_answer` raises `ConsultError`, which `cmd_consult`
+    records as `rejected`, NOT `failed`). The gate excludes only a consult that never reached a
+    specialist, never one that ran and produced an uncited answer."""
+    order = _worker_order(tmp_path)
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, requested_by=order["order_id"])
+    consult_id = json.loads(consult.read_text())["consult_id"]
+    # A SUCCESS answer (no `error`) whose citation is not `file:line` — this is what the citation
+    # gate exists to reject, distinct from a specialist-signaled failure envelope.
+    uncited_success = {
+        "consult_id": consult_id,
+        "answer": "In the leader loop, before each try.",
+        "citations": ["foo.py"],  # no `:line` — fails CITATION_RE
+    }
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(uncited_success, []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["order_receipt_state"] == "finished"  # the worker ran
+    assert receipt["answer_verdict"] == "rejected"  # the citation gate rejected the uncited answer
+    assert "index_path" in receipt  # still indexed, because it ran
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
+    assert stamp["consults_verified"] == [
+        {
+            "answer_verdict": "rejected",
+            "consult_id": consult_id,
+            "request_id": _claim()["request_id"],
+            "specialist": "reviewer",
+        }
+    ]
+
+
+def test_a_consult_whose_specialist_signaled_failure_is_verifiable_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The distinct post-run case: the specialist itself SIGNALED failure via the `error` envelope,
+    which `parse_answer` accepts WITHOUT applying the citation gate, so the verdict is `failed` (not
+    the citation gate's `rejected`). The order still finished, so this too stays verifiable — and
+    the two verdicts must not be conflated."""
+    order = _worker_order(tmp_path)
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path, requested_by=order["order_id"])
+    consult_id = json.loads(consult.read_text())["consult_id"]
+    signaled_failure = recruiter.contracts_consult.failure_answer(consult_id, "could not determine")
+    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(signaled_failure, []))
+
+    recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    receipt = _receipt(consult)
+    assert receipt["order_receipt_state"] == "finished"  # the worker ran
+    assert receipt["answer_verdict"] == "failed"  # specialist-signaled failure, NOT the citation gate
+    assert "index_path" in receipt  # still indexed, because it ran
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
+    assert stamp["consults_verified"] == [
+        {
+            "answer_verdict": "failed",
+            "consult_id": consult_id,
+            "request_id": _claim()["request_id"],
+            "specialist": "reviewer",
+        }
+    ]
+
+
+def test_a_caller_controlled_consult_id_cannot_escape_the_hubs_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`consult_id` is written by the caller and becomes a path segment. Both segments are
+    digests for exactly this reason — a raw id would let a consult write anywhere under (or
+    above) the Recruiter's own state root."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+
+    entry = recruiter.consult_index_entry_path("worker-1", "../../../../etc/passwd")
+
+    assert ".." not in str(entry)
+    assert recruiter.consult_index_dir() in entry.parents
+
+
+def test_a_publication_stamps_the_receipt_the_stage_2_auditor_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the real publication path, not the resolver alone: the auditor reads
+    the RECEIPT, so the stamp has to survive `JobLedger.finalize` and reach it."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    _broker_a_real_consult(tmp_path, monkeypatch, order)
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 60_000, owner={"runner_pid": os.getpid()})
+    assert token is not None
+    result = _worker_result([_claim(), _claim(consult_id="never-happened")], order)
+
+    ledger.finalize(
+        key,
+        token,
+        order,
+        result,
+        cleanup={"status": "closed", "worker_pane": None, "verified_absent": True},
+    )
+
+    receipt = ledger.completed_receipt(key, order)
+    assert [c["consult_id"] for c in receipt["consults_verified"]] == [
+        "phase-2.stage-1.pass-1.consult-1"
+    ]
+    assert [c["consult_id"] for c in receipt["consults_unverified"]] == ["never-happened"]
+
+
+def test_a_malformed_consults_claim_is_refused_by_the_result_contract(tmp_path: Path) -> None:
+    """Tier 1: shape. `parse_result` is pure and has no ledger, so it can say a claim is WELL
+    FORMED but never that it is TRUE — that is the resolver's job above. What it can do is
+    refuse bookkeeping that could not be resolved by anyone, which is what an entry missing its
+    `request_id` is."""
+    order = _worker_order(tmp_path)
+    missing = _claim()
+    del missing["request_id"]
+
+    with pytest.raises(ContractError, match="request_id"):
+        recruiter.contracts.parse_result(json.dumps(_worker_result([missing], order)))
+    with pytest.raises(ContractError, match="consults"):
+        recruiter.contracts.parse_result(
+            json.dumps({**_worker_result([], order), "consults": "reviewer"})
+        )
+
+
+def test_a_wellformed_consults_list_still_passes_the_result_contract(tmp_path: Path) -> None:
+    """The shape check must not become a reason a real result is thrown away."""
+    order = _worker_order(tmp_path)
+
+    parsed = recruiter.contracts.parse_result(json.dumps(_worker_result([_claim()], order)))
+
+    assert parsed["consults"] == [_claim()]

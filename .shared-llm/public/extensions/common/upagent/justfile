@@ -75,6 +75,17 @@ upagent-await-any timeout_ms cursor +orders:
 upagent-respond order control_token nonce action extension_ms:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"
 
+# Print the merged specialist roster (kit base UNION this repo's overlay) as the paste-ready
+# phone book a phase leader embeds VERBATIM in every stage brief. `--json` prints the raw index.
+upagent-specialists *args:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py specialists {{args}}
+
+# Ask one specialist one question. Blocking: returns only after the consult is terminal, having
+# written an answer.json (real or failure) at the consult's answer_path plus a sidecar receipt.
+# The consult runs as an ordinary UpAgent order — same ledger, same worker lifecycle.
+upagent-consult consult:
+    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py consult "{{consult}}"
+
 # Reconcile dead/expired runners using their durable lease ownership records.
 upagent-reconcile:
     ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py reconcile
