@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -37,8 +38,38 @@ def test_default_management_roles_are_bounded_and_low_effort() -> None:
     config = management.load_management_config({"harnesses": {"claude": "claude {model}"}})
     assert config.account_manager.timeout_ms > 0
     assert config.checker.timeout_ms > 0
+    assert 0 < config.intake_clerk.timeout_ms <= management.MAX_INTAKE_CLERK_TIMEOUT_MS
     assert "upagent-account-manager" in config.account_manager.command
     assert "upagent-checker" in config.checker.command
+    assert "intake-clerk" in config.intake_clerk.command
+    assert '--tools ""' in config.intake_clerk.command
+    assert "--print" in config.intake_clerk.command
+    assert "< {brief_path}" in config.intake_clerk.command
+    assert "--dangerously-skip-permissions" not in config.intake_clerk.command
+    assert "Read" not in config.intake_clerk.command
+    assert "Write" not in config.intake_clerk.command
+    assert "Bash" not in config.intake_clerk.command
+
+
+def test_intake_clerk_timeout_is_capped_without_capping_other_roles() -> None:
+    maximum = management.MAX_INTAKE_CLERK_TIMEOUT_MS
+    accepted = management.load_management_config(
+        {
+            "management": {
+                "intake_clerk": {"timeout_ms": maximum},
+                "account_manager": {"timeout_ms": maximum + 1},
+                "checker": {"timeout_ms": maximum + 2},
+            }
+        }
+    )
+    assert accepted.intake_clerk.timeout_ms == maximum
+    assert accepted.account_manager.timeout_ms == maximum + 1
+    assert accepted.checker.timeout_ms == maximum + 2
+
+    with pytest.raises(management.ManagementConfigError, match="no greater than"):
+        management.load_management_config(
+            {"management": {"intake_clerk": {"timeout_ms": maximum + 1}}}
+        )
 
 
 def test_management_config_rejects_unknown_placeholders() -> None:
@@ -71,6 +102,56 @@ def test_account_manager_brief_exposes_authoritative_mechanical_errors(tmp_path:
 
     assert "launch executable is not on PATH" in text
     assert "any mechanical validation error" in text
+
+
+def test_intake_clerk_brief_protects_execution_intent(tmp_path: Path) -> None:
+    raw_path = tmp_path / "order.raw-submitted"
+    output = tmp_path / "clerk-output.json"
+    text = management.intake_clerk_brief(
+        '{"payload": {"harness": "claude", "agent": "qa"}}',
+        raw_path,
+        output,
+    )
+
+    assert str(raw_path) in text and str(output) in text
+    assert '"order": {' in text and '"refusal":' in text
+    assert "NEVER invent or change" in text
+    for field in (
+        "harness/model/effort",
+        "agent/persona",
+        "cwd",
+        "instructions_path",
+        "cockpit_pane/requester",
+        "operation/apply/approval",
+        "env",
+        "timeout",
+        "watchdog",
+    ):
+        assert field in text
+
+
+def test_intake_clerk_stdout_wrapper_quotes_trusted_paths(tmp_path: Path) -> None:
+    directory = tmp_path / "space ; touch SHOULD_NOT_EXIST"
+    directory.mkdir()
+    brief = directory / "brief file.md"
+    output = directory / "response file.json"
+    brief.write_text('{"refusal":"quoted","understood":[],"missing":[]}')
+    role = management.ManagementRole(
+        command='printf %s "$(cat -- {brief_path})"',
+        expected_agent="shell",
+        expected_process="printf",
+        timeout_ms=1000,
+    )
+
+    command = management.render_intake_clerk_command(role, brief, str(directory), output)
+    completed = subprocess.run(
+        ["bash", "-lc", command], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert output.read_text() == brief.read_text()
+    assert not (tmp_path / "SHOULD_NOT_EXIST").exists()
+    assert not list(directory.glob(".*.stdout.tmp"))
 
 
 def test_checker_brief_forbids_authoritative_actions(tmp_path: Path) -> None:

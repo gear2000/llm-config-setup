@@ -22,8 +22,10 @@ Herdr session (with `up --separate-workspaces`)
     └── librarian  (Specialist Hub — sibling module)
 ```
 
-The Recruiter pane is a visible status surface, never a command queue. Requests go directly to
-the durable ledger. A request's manager, worker, and short-lived checkers start beside the
+The Recruiter pane is a visible status surface, not a free-form command queue. Requests go directly
+to the durable ledger. A narrow compatibility function accepts exactly `recruit <order-path>` and
+forwards that opaque path to the normal verified request door; it never evaluates pane text. A
+request's manager, worker, and short-lived checkers start beside the
 `order.cockpit_pane` through atomic `herdr agent start` calls, making the whole dedicated lifecycle
 visible in one workspace. `manager_placement.mode: shared` remains an explicit opt-in for callers
 that truly want a peripheral manager. Pane placement is role-based: workers split right, while
@@ -35,16 +37,44 @@ pane is closed only by its fenced lease owner.
 
 ## Forgiving order intake (short leash)
 
-The submission doors (`recruit`/`dispatch`/`request`) strict-parse first; a near-miss order
-is then mechanically repaired — field aliases mapped (`brief`→`instructions_path`,
-`workdir`→`cwd`, …), missing ids/phase/stage defaulted, a missing result destination
-derived beside the order, relative paths anchored — and the canonical order is rewritten
-**in place** so every downstream reader sees one file, with the raw submission preserved at
-`<order>.raw-submitted.json` and every change recorded at `<order>.intake.json`. Execution
-intent — harness, agent, cwd, instructions_path, cockpit_pane — is **never invented**:
-submissions missing those are refused with the fields named. Orders run code, so unlike
-the Specialist Hub's consult intake there is no LLM clerk here; the leash stays short.
-Repaired orders still face every submission check, including the consult-token door.
+Every submission door (`recruit`/`dispatch`/`request`) uses one conservative ladder:
+
+1. The strict order contract runs first. A canonical order bypasses intake unchanged.
+2. Deterministic repair maps unambiguous field aliases, anchors paths, and supplies only
+   Python-owned bookkeeping defaults. Conflicting aliases, unknown fields, an explicit invalid
+   stage, or an invalid timeout are not silently dropped or rewritten.
+3. When form repair cannot finish, Python launches exactly one short-lived `intake-clerk` support
+   role from the trusted Recruiter pane and a broker-owned scratch cwd. The clerk can flatten or
+   rename a JSON envelope, or explain why prose is incomplete. Prose labels are never execution
+   authority: every required and authority-bearing value must come from an unambiguous JSON object
+   through a known key or alias.
+4. The interpreted order passes Python provenance checks and the unchanged strict contract again.
+   A missing, invented, changed, ambiguous, unavailable, malformed, or unsafe interpretation
+   becomes an actionable refusal, never a
+   worker launch.
+
+The complete paper trail is written before the caller's order is atomically replaced:
+`<order>.raw-submitted` contains the exact bytes, `.interpreted.json` the attempted canonical
+interpretation, `.intake.json` the mode and changes, `.validation.json` the final gate, and
+`.refusal.json` the reason when no safe interpretation exists. No paper trail means no execution.
+The default clerk receives no filesystem, shell, web, or MCP tools. A trusted wrapper shell-quotes
+the broker brief/output paths, feeds the brief to `claude --print --tools ""`, and atomically
+captures the clerk's one-object stdout. `upagent.yaml` is trusted executable configuration: a
+roster owner can override the shipped command and thereby broaden its capabilities. Python does
+not claim to enforce no-tools on an arbitrary trusted override, so every override must be audited.
+The clerk timeout is capped at `300000` ms even for trusted overrides. Persona instructions are
+guidance; Python's structural provenance, typed-response parser, and strict order contract are the
+enforcement boundary.
+
+Each clerk attempt uses an unpredictable broker-created directory with mode `0700`. A pre-launch
+journal records an unguessable agent name, lease token, owner PID and process start time before
+Herdr creates a pane. Reuse requires a hash-matching response, ownership journal, and secure index.
+Cleanup resolves that unique agent name and rechecks agent/process/cwd identity; it never closes a
+stale pane id by itself. The reconciler can recover a crash before the pane id was journaled. A
+not-found lookup while that launch is uncertain keeps the tiny journal open for later sweeps,
+because the in-flight Herdr start may still publish the named agent. Reconciliation also rejects
+symlinked or escaped attempt metadata. Repaired orders still face all submission checks,
+including the Specialist Hub consult-token door.
 
 Phase startup has its own deterministic front door:
 
@@ -159,7 +189,7 @@ harness has no phase-leader template.
 
 ## Tests
 
-`python3 -m pytest .shared-llm/public/extensions/common/upagent/ -q` covers contracts, typed LLM
-responses, request mailboxes, identity/lease fencing, startup health, timeout authority, roster
+`just test` covers contracts, typed LLM responses, strict/mechanical/clerk intake, exact audit
+artifacts, request mailboxes, identity/lease fencing, startup health, timeout authority, roster
 resolution, and cleanup behavior. The socket-driving path is also exercised in a live Herdr
 session before release.

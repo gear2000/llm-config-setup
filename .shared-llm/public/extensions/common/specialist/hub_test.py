@@ -196,8 +196,13 @@ def _run_managed_consult(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     answer_body: dict | None,
+    *,
+    consult_cwd: Path | None = None,
+    repo_root: Path | None = None,
 ) -> tuple[dict, dict, str, Path]:
     consult_id = "consult-managed-1"
+    resolved_consult_cwd = consult_cwd or tmp_path
+    resolved_repo_root = repo_root or tmp_path
     answer_path = tmp_path / "private/answer.json"
     consult_path = tmp_path / "consult.json"
     consult_path.write_text(
@@ -207,14 +212,14 @@ def _run_managed_consult(
                 "specialist": "python",
                 "question": "What is the Python contract?",
                 "answer_path": str(answer_path),
-                "cwd": str(tmp_path),
+                "cwd": str(resolved_consult_cwd),
             }
         )
     )
     runtime_dir = tmp_path / "runtime with spaces"
     (runtime_dir / "consults").mkdir(parents=True)
     prompt_file = runtime_dir / "consults" / f"{consult_id}.prompt.txt"
-    cfg = {"runtime_dir": runtime_dir, "repo_root": tmp_path}
+    cfg = {"runtime_dir": runtime_dir, "repo_root": resolved_repo_root}
     orders: list[dict] = []
 
     monkeypatch.setattr(hub, "_require_herdr", lambda: None)
@@ -235,10 +240,13 @@ def _run_managed_consult(
     monkeypatch.setattr(
         hub,
         "_read_state",
-        lambda _cfg: {"librarian_pane": "librarian-pane", "repo_root": str(tmp_path)},
+        lambda _cfg: {
+            "librarian_pane": "librarian-pane",
+            "repo_root": str(resolved_repo_root),
+        },
     )
     def fake_dispatch(order_path: Path, cwd: str) -> None:
-        assert cwd == str(tmp_path)
+        assert cwd == str(resolved_repo_root)
         orders.append(json.loads(order_path.read_text()))
         if answer_body is None:
             raise hub.subprocess.TimeoutExpired(["recruiter", "dispatch"], 1)
@@ -275,6 +283,37 @@ def test_consult_routes_specialist_through_an_upagent_order(
     assert order["instructions_path"] == str(prompt_file)
     assert prompt.startswith("You are the 'python' specialist answering ONE consult.")
     assert capsys.readouterr().out == "CONSULT consult-managed-1 DONE\n"
+
+
+def test_consult_worker_cwd_does_not_change_recruiter_roster_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An external inspection cwd belongs in the worker order only.
+
+    The Recruiter process must start from the roster repository. Starting the Recruiter from
+    an unrelated repository makes its default private UpAgent roster undiscoverable and causes
+    an otherwise valid consult to fail before a specialist is hired.
+    """
+    repo_root = tmp_path / "roster-repo"
+    consult_cwd = tmp_path / "external-repo"
+    repo_root.mkdir()
+    consult_cwd.mkdir()
+    valid = {
+        "consult_id": "consult-managed-1",
+        "answer": "Use the strict contract.",
+        "citations": ["module.py:10"],
+    }
+
+    answer, order, _prompt, _prompt_file = _run_managed_consult(
+        tmp_path,
+        monkeypatch,
+        valid,
+        consult_cwd=consult_cwd,
+        repo_root=repo_root,
+    )
+
+    assert answer == valid
+    assert order["cwd"] == str(consult_cwd)
 
 
 def test_managed_consult_rejects_malformed_private_answer(

@@ -250,7 +250,7 @@ def load_config() -> dict:
     named = _named_entries(primary["agents"], primary_origin, primary_path)
     overridden: list[str] = []
     cfg = dict(primary)
-    if base is not None:
+    if base is not None and base_path is not None:
         base_named = _named_entries(base["agents"], "kit-base", base_path)
         overridden = sorted(set(base_named) & set(named))
         base_named.update(named)  # overlay clobbers same-named base entries, appends new ones
@@ -1121,7 +1121,10 @@ def cmd_consult(args: argparse.Namespace) -> None:
         Path(consult["answer_path"]).unlink(missing_ok=True)
 
         order_path, _ = _specialist_order(cfg, consult, entry, prompt_file, librarian, cwd)
-        _dispatch_specialist(order_path, cwd)
+        # The worker runs in the consult's requested cwd because that cwd is sealed in the
+        # order. The Recruiter process itself starts in the roster repository so its default
+        # UpAgent roster can always be resolved, even when the consult inspects another repo.
+        _dispatch_specialist(order_path, str(cfg["repo_root"]))
         # The specialist must have written a valid answer.json echoing this consult_id.
         cc.load_answer(consult["answer_path"], expected_consult_id=consult_id)
     except (

@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Iterator
+from typing import cast, Iterator
 import uuid
 
 
@@ -67,6 +67,17 @@ class RequesterDecision:
     action: str
     extension_ms: int | None
     message: str
+
+
+@dataclass(frozen=True)
+class IntakeClerkResponse:
+    """Exactly one bounded interpretation or refusal from the intake clerk."""
+
+    order: dict | None
+    refusal: str | None
+    understood: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 def _require_string(value: object, field: str) -> str:
@@ -166,6 +177,57 @@ def parse_check_assessment(text: str, request_id: str, generation: int) -> Check
         tuple(evidence),
         recommended_action,
         message,
+    )
+
+
+def parse_intake_clerk_response(text: str) -> IntakeClerkResponse:
+    """Validate the clerk's one-of envelope before any value reaches the order contract."""
+    value = _json_object(text, "intake clerk response")
+    outcomes = [key for key in ("order", "refusal") if key in value]
+    if len(outcomes) != 1:
+        raise LifecycleError(
+            "intake clerk response must contain exactly one of order or refusal"
+        )
+    if "order" in value:
+        unknown = set(value) - {"order", "notes"}
+        if unknown:
+            raise LifecycleError(
+                "interpreted intake response has unknown fields: "
+                + ", ".join(sorted(unknown))
+            )
+        order = value["order"]
+        if not isinstance(order, dict):
+            raise LifecycleError("intake clerk order must be a JSON object")
+        notes = value.get("notes", [])
+        if not isinstance(notes, list) or not all(
+            isinstance(item, str) and item.strip() for item in notes
+        ):
+            raise LifecycleError("intake clerk notes must be a list of non-empty strings")
+        return IntakeClerkResponse(order=order, refusal=None, notes=tuple(notes))
+
+    unknown = set(value) - {"refusal", "understood", "missing"}
+    if unknown:
+        raise LifecycleError(
+            "refused intake response has unknown fields: "
+            + ", ".join(sorted(unknown))
+        )
+    refusal = _require_string(value.get("refusal"), "intake clerk refusal")
+    understood = value.get("understood")
+    missing = value.get("missing")
+    for items, field in ((understood, "understood"), (missing, "missing")):
+        if not isinstance(items, list) or not all(
+            isinstance(item, str) and item.strip() for item in items
+        ):
+            raise LifecycleError(
+                f"intake clerk {field} must be a list of non-empty strings"
+            )
+    understood_items = cast(list[str], understood)
+    missing_items = cast(list[str], missing)
+    return IntakeClerkResponse(
+        order=None,
+        refusal=refusal,
+        understood=tuple(understood_items),
+        missing=tuple(missing_items),
     )
 
 

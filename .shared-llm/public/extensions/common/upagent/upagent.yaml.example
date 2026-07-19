@@ -94,6 +94,19 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
+  # Used only after strict parsing and deterministic form repair both fail. Python starts this
+  # support role from the trusted Recruiter pane and a private broker scratch cwd, never from
+  # target values. The shipped command below has no tools. This roster is trusted executable
+  # configuration: audit any override because Python does not restrict an override's tools.
+  # Python always caps this timeout at 300000 ms, shell-quotes the trusted brief path, and
+  # atomically captures the command's one-object stdout at the broker-owned output path.
+  intake_clerk:
+    command: >-
+      claude --print --output-format text --tools "" --agent intake-clerk
+      --model sonnet --effort low < {brief_path}
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
 
 # Optional process-detector overrides. Use these when a harness wrapper changes what Herdr reports.
 # A mismatch fails startup; the Hub never guesses that some unrelated foreground process is healthy.

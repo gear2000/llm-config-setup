@@ -54,8 +54,10 @@ from pathlib import Path
 import signal
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, cast
@@ -2696,9 +2698,8 @@ def _run_order(
     return (1 if fell_back else 0), result, cleanup
 
 
-# Accepted spellings for order fields, first entry canonical. Alias mapping is FORM — the
-# caller plainly said "brief"/"output"; we relabel, we never reinterpret. Part of the
-# forgiving intake: liberal in what the doors accept, conservative in what executes.
+# Accepted spellings for order fields, first entry canonical. Aliases describe form only;
+# values are never changed by this map. Keep the canonical keys in lockstep with parse_order.
 ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "order_id": ("order_id", "id"),
     "request_id": ("request_id", "req_id"),
@@ -2724,10 +2725,6 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "requester": ("requester",),
     "management": ("management",),
     "consult_token": ("consult_token",),
-    # Identity passthroughs for EVERY optional field parse_order recognizes and execution
-    # honors — dropping any of these would silently rewrite the caller's intent (a direct
-    # IaC apply degrading to a phase plan, an approval or watchdog contract vanishing).
-    # Keep this in lockstep with contracts.parse_order; the passthrough test pins it.
     "mode": ("mode",),
     "plan_id": ("plan_id",),
     "step_id": ("step_id",),
@@ -2738,84 +2735,343 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "plan_artifact": ("plan_artifact",),
     "watchdog_terminal": ("watchdog_terminal",),
 }
-# order_id becomes part of derived file names (the defaulted result_path); anything outside
-# this charset is regenerated — ids are form, never intent.
 _SAFE_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-# Execution intent is never invented: these must arrive in the payload (aliases allowed) or
-# the submission is refused. Orders run code in a directory — a shorter leash than consults.
-ORDER_INTAKE_NEVER_INVENTED = ("harness", "agent", "cwd", "instructions_path", "cockpit_pane")
+_ORDER_ENVELOPE_KEYS = frozenset(("payload", "order", "request", "work_order", "data", "body"))
+ORDER_INTAKE_NEVER_INVENTED = (
+    "harness",
+    "agent",
+    "cwd",
+    "instructions_path",
+    "cockpit_pane",
+)
+# Any explicit value in these fields is execution intent. A clerk may move it to the canonical
+# key, but Python proves the exact value came from the submitted bytes and was not omitted.
+ORDER_INTAKE_PROTECTED = (
+    "order_id",
+    "request_id",
+    "phase_id",
+    "stage_id",
+    "harness",
+    "model",
+    "agent",
+    "effort",
+    "cwd",
+    "instructions_path",
+    "result_path",
+    "cockpit_pane",
+    "timeout_ms",
+    "env",
+    "requester",
+    "management",
+    "consult_token",
+    "mode",
+    "plan_id",
+    "step_id",
+    "operation",
+    "requires_apply",
+    "manager_placement",
+    "approval",
+    "plan_artifact",
+    "watchdog_terminal",
+)
 
 
-def _repair_order(order_path: str) -> dict | None:
-    """Deterministic short-leash intake for a near-miss order submission.
+def _intake_artifact_paths(order_path: Path) -> dict[str, Path]:
+    return {
+        "raw": order_path.with_name(order_path.name + ".raw-submitted"),
+        "interpreted": order_path.with_name(order_path.name + ".interpreted.json"),
+        "intake": order_path.with_name(order_path.name + ".intake.json"),
+        "validation": order_path.with_name(order_path.name + ".validation.json"),
+        "refusal": order_path.with_name(order_path.name + ".refusal.json"),
+    }
 
-    Guess the FORM, never the intent: ids, phase/stage bookkeeping, an empty model, and a
-    derivable result destination may be defaulted or anchored; the ORDER_INTAKE_NEVER_INVENTED
-    fields must be present. On success the ORIGINAL order path is atomically rewritten so
-    every downstream reader (awaits, ledger, workers) sees one canonical file — the raw
-    submission is preserved at `<path>.raw-submitted.json` and every change recorded at
-    `<path>.intake.json`. Returns None when repair cannot help (refuse helpfully instead).
-    """
-    path = Path(order_path)
+
+def _write_bytes_atomic(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with temporary.open("wb") as stream:
+        stream.write(value)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_DIRECTORY)
     try:
-        raw_text = path.read_text()
-        raw = json.loads(raw_text)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
-    order: dict = {}
+
+_INTAKE_DIRECTORY_MODE = 0o700
+_INTAKE_FILE_MODE = 0o600
+_INTAKE_ATTEMPT_NAME_RE = re.compile(r"^attempt-[A-Za-z0-9_-]{8,}$")
+
+
+def _open_private_directory(
+    path: Path, *, create: bool = False, repair_mode: bool = False
+) -> int:
+    """Open one broker-owned directory without following a symlink."""
+    if create:
+        try:
+            os.mkdir(path, _INTAKE_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise RecruiterError(f"could not create private intake directory {path}: {error}") from error
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as error:
+        raise RecruiterError(
+            f"intake path {path} must be a real broker-owned directory: {error}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise RecruiterError(
+                f"intake path {path} is not a directory owned by the current user"
+            )
+        mode = stat.S_IMODE(metadata.st_mode)
+        if mode != _INTAKE_DIRECTORY_MODE:
+            if not repair_mode:
+                raise RecruiterError(
+                    f"intake directory {path} has mode {mode:o}; expected 700"
+                )
+            os.fchmod(descriptor, _INTAKE_DIRECTORY_MODE)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _prepare_intake_layout() -> dict[str, Path]:
+    """Create and verify deterministic broker roots; attempt directories remain random."""
+    parent = Path(os.path.abspath(STATE_FILE.parent))
+    if not parent.is_dir():
+        raise RecruiterError(f"Recruiter state directory does not exist: {parent}")
+    root = parent / "intake"
+    paths = {
+        "root": root,
+        "attempts": root / "attempts",
+        "index": root / "index",
+        "locks": root / "locks",
+    }
+    for path in paths.values():
+        descriptor = _open_private_directory(path, create=True, repair_mode=True)
+        os.close(descriptor)
+    return paths
+
+
+def _secure_file_bytes(path: Path) -> bytes:
+    parent_descriptor = _open_private_directory(path.parent)
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_descriptor,
+            )
+        except OSError as error:
+            raise RecruiterError(f"secure intake file {path} is unreadable: {error}") from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise RecruiterError(
+                    f"secure intake file {path} is not a regular owned file"
+                )
+            if stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise RecruiterError(
+                    f"secure intake file {path} is accessible outside its owner"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                return stream.read()
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+def _secure_json(path: Path) -> dict:
+    try:
+        value = json.loads(_secure_file_bytes(path))
+    except json.JSONDecodeError as error:
+        raise RecruiterError(f"secure intake JSON {path} is invalid: {error}") from error
+    if not isinstance(value, dict):
+        raise RecruiterError(f"secure intake JSON {path} must be an object")
+    return value
+
+
+def _secure_file_exists(path: Path) -> bool:
+    parent_descriptor = _open_private_directory(path.parent)
+    try:
+        try:
+            os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise RecruiterError(f"could not inspect secure intake file {path}: {error}") from error
+        return True
+    finally:
+        os.close(parent_descriptor)
+
+
+def _secure_write_bytes(path: Path, value: bytes) -> None:
+    parent_descriptor = _open_private_directory(path.parent)
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            _INTAKE_FILE_MODE,
+            dir_fd=parent_descriptor,
+        )
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.close(descriptor)
+        descriptor = None
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        os.fsync(parent_descriptor)
+    except OSError as error:
+        raise RecruiterError(f"could not write secure intake file {path}: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
+        os.close(parent_descriptor)
+
+
+def _secure_write_json(path: Path, value: dict) -> None:
+    _secure_write_bytes(
+        path, (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    )
+
+
+def _secure_write_text(path: Path, value: str) -> None:
+    _secure_write_bytes(path, value.encode())
+
+
+@contextmanager
+def _intake_attempt_lock(key: str) -> Iterator[None]:
+    layout = _prepare_intake_layout()
+    lock_directory = _open_private_directory(layout["locks"])
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(
+                f"{key}.lock",
+                os.O_RDWR
+                | os.O_CREAT
+                | getattr(os, "O_NOFOLLOW", 0),
+                _INTAKE_FILE_MODE,
+                dir_fd=lock_directory,
+            )
+        except OSError as error:
+            raise RecruiterError(f"could not open secure intake lock for {key}: {error}") from error
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise RecruiterError(f"intake lock for {key} is not a regular owned file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(lock_directory)
+
+
+def _first_alias(raw: dict, canonical: str) -> tuple[object | None, str | None, bool]:
+    present = [(alias, raw[alias]) for alias in ORDER_INTAKE_ALIASES[canonical] if alias in raw]
+    if not present:
+        return None, None, False
+    first_alias, first_value = present[0]
+    if any(value != first_value for _alias, value in present[1:]):
+        return None, None, True
+    return first_value, first_alias, False
+
+
+def _raw_unknown_fields(raw_text: str) -> list[str]:
+    try:
+        document = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return []
+    known = {alias for aliases in ORDER_INTAKE_ALIASES.values() for alias in aliases}
+    unknown: list[str] = []
+
+    def walk(value: object, prefix: str = "") -> None:
+        if isinstance(value, list):
+            for item in value:
+                walk(item, prefix)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if key in known:
+                continue  # nested members belong to this recognized typed field
+            if key in _ORDER_ENVELOPE_KEYS:
+                walk(child, path)
+                continue
+            unknown.append(path)
+            if isinstance(child, (dict, list)):
+                walk(child, path)
+
+    walk(document)
+    return sorted(set(unknown))
+
+
+def _complete_order_form(
+    candidate: dict, raw_text: str, order_path: Path
+) -> tuple[dict, list[str]]:
+    """Apply only Python-owned bookkeeping/path defaults, then run the strict contract."""
+    unknown = set(candidate) - set(ORDER_INTAKE_ALIASES)
+    if unknown:
+        raise ContractError(
+            "order.json: interpreted order has unknown fields: " + ", ".join(sorted(unknown))
+        )
+    order = dict(candidate)
     changes: list[str] = []
-    for canonical, aliases in ORDER_INTAKE_ALIASES.items():
-        for alias in aliases:
-            if alias in raw:
-                order[canonical] = raw[alias]
-                if alias != canonical:
-                    changes.append(f"mapped field {alias!r} -> {canonical!r}")
-                break
-    known_aliases = {alias for aliases in ORDER_INTAKE_ALIASES.values() for alias in aliases}
-    dropped = sorted(key for key in raw if key not in known_aliases)
-    if dropped:
-        changes.append(f"dropped unrecognized fields: {', '.join(dropped)}")
+    order_dir = order_path.resolve().parent
 
-    for field in ORDER_INTAKE_NEVER_INVENTED:
-        value = order.get(field)
-        if not isinstance(value, str) or not value:
-            return None
-
-    order_dir = path.resolve().parent
     order_id = order.get("order_id")
-    if isinstance(order_id, str) and order_id and not _SAFE_ORDER_ID_RE.match(order_id):
+    if isinstance(order_id, str) and order_id and not _SAFE_ORDER_ID_RE.fullmatch(order_id):
         if order_id.startswith("specialist-consult-"):
-            # Never launder a consult-shaped id into a plain order: regenerating it would
-            # strip the marker the token door keys on. Refuse instead of reinterpreting.
-            return None
+            raise ContractError("order.json: unsafe consult-shaped order_id cannot be regenerated")
         order.pop("order_id")
-        changes.append(f"regenerated order_id: {order_id!r} is not filesystem-safe")
+        changes.append(f"regenerated unsafe order_id {order_id!r}")
     if not isinstance(order.get("order_id"), str) or not order["order_id"]:
-        # Derived from the raw bytes so a retry loop resubmitting the same sloppy file gets
-        # the SAME id — the ledger's idempotent-submit dedupe keeps working.
         order["order_id"] = f"intake-{hashlib.sha256(raw_text.encode()).hexdigest()[:12]}"
         changes.append(f"generated order_id {order['order_id']}")
     if not isinstance(order.get("phase_id"), str) or not order["phase_id"]:
         order["phase_id"] = "intake-adhoc"
-        changes.append("defaulted phase_id to intake-adhoc")
-    stage = order.get("stage_id")
-    if not isinstance(stage, str) or stage not in contracts.RECOGNIZED_STAGE_IDS:
-        resolved = None
-        if isinstance(stage, str) and stage:
-            prefixed = [s for s in contracts.RECOGNIZED_STAGE_IDS if s.startswith(stage)]
-            if len(prefixed) == 1:
-                resolved = prefixed[0]
-        order["stage_id"] = resolved or "stage-5-finalization"
-        changes.append(f"resolved stage_id to {order['stage_id']}")
-    if not isinstance(order.get("model"), str):
+        changes.append("defaulted missing phase_id to intake-adhoc")
+    if "stage_id" not in order:
+        order["stage_id"] = "stage-5-finalization"
+        changes.append("defaulted missing stage_id to stage-5-finalization")
+    if "model" not in order:
         order["model"] = ""
-        changes.append("defaulted model to empty (the harness template resolves it)")
+        changes.append("defaulted unspecified model to the harness-resolved empty value")
+
     for field in ("cwd", "instructions_path"):
-        if not Path(order[field]).is_absolute():
-            order[field] = str(order_dir / order[field])
+        value = order.get(field)
+        if isinstance(value, str) and value and not Path(value).is_absolute():
+            order[field] = str(order_dir / value)
             changes.append(f"anchored relative {field} at {order[field]}")
     result = order.get("result_path")
     if not isinstance(result, str) or not result:
@@ -2827,94 +3083,963 @@ def _repair_order(order_path: str) -> dict | None:
     timeout = order.get("timeout_ms")
     if isinstance(timeout, str) and timeout.isdigit():
         order["timeout_ms"] = int(timeout)
-        changes.append("coerced timeout_ms to an integer")
-    elif timeout is not None and (
-        isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0
-    ):
-        order.pop("timeout_ms", None)
-        changes.append("dropped invalid timeout_ms (the default applies)")
+        changes.append("coerced decimal timeout_ms to an integer")
 
-    if not changes:
-        return None
+    contracts.parse_order(json.dumps(order))
+    return order, changes
+
+
+def _mechanical_order_candidate(
+    raw_text: str, order_path: Path
+) -> tuple[dict, list[str]] | None:
+    """Pure form repair. Ambiguity, unknown fields, and invalid explicit values escalate."""
     try:
-        contracts.parse_order(json.dumps(order))
+        raw = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict) or _raw_unknown_fields(raw_text):
+        return None
+
+    candidate: dict[str, object] = {}
+    changes: list[str] = []
+    for canonical in ORDER_INTAKE_ALIASES:
+        value, alias, conflict = _first_alias(raw, canonical)
+        if conflict:
+            return None
+        if alias is None:
+            continue
+        if (
+            canonical == "instructions_path"
+            and alias == "instructions"
+            and isinstance(value, str)
+            and any(character.isspace() for character in value)
+        ):
+            return None  # inline task prose is not silently reinterpreted as a path
+        candidate[canonical] = value
+        if alias != canonical:
+            changes.append(f"mapped field {alias!r} -> {canonical!r}")
+    for field in ORDER_INTAKE_NEVER_INVENTED:
+        if not isinstance(candidate.get(field), str) or not candidate[field]:
+            return None
+    try:
+        order, form_changes = _complete_order_form(candidate, raw_text, order_path)
     except ContractError:
         return None
-
-    raw_copy = path.with_name(path.name + ".raw-submitted.json")
-    try:
-        raw_copy.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
-        path.with_name(path.name + ".intake.json").write_text(
-            json.dumps(
-                {
-                    "at_ns": time.time_ns(),
-                    "mode": "mechanical-repair",
-                    "raw_path": str(raw_copy),
-                    "changes": changes,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        )
-        JobLedger._write_json(path, order)
-    except OSError as error:
-        # No stamp, no repair: a normalization that cannot persist its paper trail is
-        # refused rather than executed unrecorded.
-        sys.stderr.write(
-            f"recruiter: intake could not persist the normalization of {path}: {error}\n"
-        )
+    changes.extend(form_changes)
+    if not changes:
         return None
-    sys.stderr.write(
-        f"recruiter: intake normalized {path} ({len(changes)} change(s)); "
-        f"raw preserved at {raw_copy}\n"
-    )
-    return order
+    return order, changes
 
 
-def _intake_refusal_message(order_path: str, strict_error: ContractError) -> str:
-    """Refuse HELPFULLY: name exactly what is missing after alias mapping, and what the
-    intake will never invent, instead of echoing a bare parse error."""
+def _nested_field_values(value: object, aliases: tuple[str, ...]) -> list[object]:
+    found: list[object] = []
+    if isinstance(value, list):
+        for item in value:
+            found.extend(_nested_field_values(item, aliases))
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            if key in aliases:
+                found.append(child)
+            else:
+                found.extend(_nested_field_values(child, aliases))
+    return found
+
+
+def _raw_field_values(raw_text: str, canonical: str) -> list[object]:
+    """Return structurally keyed JSON values only; prose is never execution authority."""
     try:
-        raw = json.loads(Path(order_path).read_text())
-    except (OSError, json.JSONDecodeError):
-        raw = None
-    if isinstance(raw, dict):
-        aliased = {
-            canonical
-            for canonical, aliases in ORDER_INTAKE_ALIASES.items()
-            if any(alias in raw for alias in aliases)
-        }
-        missing = [k for k in contracts.ORDER_REQUIRED if k not in aliased]
-        detail = (
-            f"missing required fields even after intake repair: {', '.join(missing)}"
-            if missing
-            else str(strict_error)
-        )
-    else:
-        detail = f"not a JSON object ({strict_error})"
-    return (
-        f"invalid order {order_path}: {detail}. The intake maps common field aliases and "
-        "defaults ids, stage, and result destination — but never invents "
-        f"{', '.join(ORDER_INTAKE_NEVER_INVENTED)}. "
-        "Template: upagent.yaml.example (order shape: contracts.ORDER_REQUIRED)."
+        document = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(document, dict):
+        return []
+    return _nested_field_values(document, ORDER_INTAKE_ALIASES[canonical])
+
+
+def _intake_field_summary(raw_text: str) -> tuple[list[str], list[str]]:
+    """Name safely understood required intent and the values still absent or ambiguous."""
+    understood: list[str] = []
+    missing: list[str] = []
+    for field in ORDER_INTAKE_NEVER_INVENTED:
+        values = _raw_field_values(raw_text, field)
+        distinct: list[object] = []
+        for value in values:
+            if value not in distinct:
+                distinct.append(value)
+        if len(distinct) == 1 and isinstance(distinct[0], str) and distinct[0]:
+            understood.append(f"{field}={distinct[0]}")
+        else:
+            missing.append(field)
+    return understood, missing
+
+
+def _clerk_provenance_errors(raw_text: str, candidate: dict) -> list[str]:
+    errors: list[str] = []
+    unknown_candidate = sorted(set(candidate) - set(ORDER_INTAKE_ALIASES))
+    if unknown_candidate:
+        errors.append("interpreted order contains unknown fields: " + ", ".join(unknown_candidate))
+    raw_unknown = _raw_unknown_fields(raw_text)
+    if raw_unknown:
+        errors.append("submission contains unclassified fields: " + ", ".join(raw_unknown))
+
+    for field in ORDER_INTAKE_PROTECTED:
+        supplied = _raw_field_values(raw_text, field)
+        if supplied and field not in candidate:
+            errors.append(f"clerk dropped explicit {field}")
+            continue
+        if field not in candidate:
+            continue
+        value = candidate[field]
+        if field == "model" and value == "" and not supplied:
+            continue  # Python's only execution-profile default: no model selection was made.
+        if not supplied:
+            errors.append(f"clerk invented {field}")
+            continue
+        distinct: list[object] = []
+        for item in supplied:
+            if item not in distinct:
+                distinct.append(item)
+        if len(distinct) > 1:
+            errors.append(f"submission has conflicting values for {field}")
+        elif (
+            field == "timeout_ms"
+            and isinstance(distinct[0], str)
+            and distinct[0].isdigit()
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and int(distinct[0]) == value
+        ):
+            continue  # lossless form coercion, not a deadline change
+        elif value != distinct[0]:
+            errors.append(f"clerk changed {field}")
+    return errors
+
+
+def _intake_record(
+    *, mode: str, raw_path: Path, interpreted_path: Path, changes: list[str],
+    unknown_fields: list[str], clerk: dict | None = None
+) -> dict:
+    return {
+        "at_ns": time.time_ns(),
+        "mode": mode,
+        "raw_path": str(raw_path),
+        "raw_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+        "interpreted_path": str(interpreted_path),
+        "interpreted_sha256": hashlib.sha256(
+            interpreted_path.read_bytes()
+        ).hexdigest(),
+        "changes": changes,
+        "unknown_fields": unknown_fields,
+        **({"clerk": clerk} if clerk is not None else {}),
+    }
+
+
+def _persist_intake_success(
+    order_path: Path,
+    paths: dict[str, Path],
+    order: dict,
+    *,
+    mode: str,
+    strict_error: ContractError,
+    changes: list[str],
+    unknown_fields: list[str],
+    clerk: dict | None,
+) -> None:
+    """Commit the full paper trail before atomically replacing the caller's order."""
+    paths["refusal"].unlink(missing_ok=True)
+    JobLedger._write_json(paths["interpreted"], order)
+    JobLedger._write_json(
+        paths["intake"],
+        _intake_record(
+            mode=mode,
+            raw_path=paths["raw"],
+            interpreted_path=paths["interpreted"],
+            changes=changes,
+            unknown_fields=unknown_fields,
+            clerk=clerk,
+        ),
+    )
+    JobLedger._write_json(
+        paths["validation"],
+        {
+            "at_ns": time.time_ns(),
+            "initial_error": str(strict_error),
+            "valid": True,
+            "errors": [],
+        },
+    )
+    JobLedger._write_json(order_path, order)
+
+
+def _persist_intake_refusal(
+    paths: dict[str, Path],
+    *,
+    strict_error: ContractError,
+    reason: str,
+    missing: list[str],
+    understood: list[str],
+    candidate: dict | None,
+    unknown_fields: list[str],
+    clerk: dict | None,
+    errors: list[str] | None = None,
+) -> None:
+    JobLedger._write_json(paths["interpreted"], candidate if candidate is not None else {"order": None})
+    JobLedger._write_json(
+        paths["intake"],
+        _intake_record(
+            mode="intake-clerk-refusal",
+            raw_path=paths["raw"],
+            interpreted_path=paths["interpreted"],
+            changes=[],
+            unknown_fields=unknown_fields,
+            clerk=clerk,
+        ),
+    )
+    validation_errors = errors or [reason]
+    JobLedger._write_json(
+        paths["validation"],
+        {
+            "at_ns": time.time_ns(),
+            "initial_error": str(strict_error),
+            "valid": False,
+            "errors": validation_errors,
+        },
+    )
+    JobLedger._write_json(
+        paths["refusal"],
+        {
+            "at_ns": time.time_ns(),
+            "error": reason,
+            "missing": missing,
+            "understood": understood,
+        },
     )
 
 
-def _load_order_forgivingly(order_path: str) -> dict:
-    """Strict parse first; a near-miss walks the mechanical repair; what repair cannot fix
-    is refused with the missing fields named. Every door uses this so a sloppy submission
-    meets a helpful answer instead of a bare contract error."""
+def _new_intake_attempt(layout: dict[str, Path]) -> Path:
+    attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=layout["attempts"]))
+    os.chmod(attempt, _INTAKE_DIRECTORY_MODE)
+    descriptor = _open_private_directory(attempt)
+    os.close(descriptor)
+    return attempt
+
+
+def _validated_attempt_directory(attempts_root: Path, attempt_name: object) -> Path:
+    if (
+        not isinstance(attempt_name, str)
+        or not _INTAKE_ATTEMPT_NAME_RE.fullmatch(attempt_name)
+        or Path(attempt_name).name != attempt_name
+    ):
+        raise RecruiterError("intake index contains an invalid attempt directory name")
+    attempt = attempts_root / attempt_name
+    if attempt.parent != attempts_root:
+        raise RecruiterError("intake attempt escaped the trusted attempts root")
+    descriptor = _open_private_directory(attempt)
+    os.close(descriptor)
+    return attempt
+
+
+def _process_start_time(pid: object) -> str | None:
+    """Linux process birth identity. A PID without the same start tick is a different owner."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    close = text.rfind(")")
+    if close < 0:
+        return None
+    fields = text[close + 2 :].split()
+    # The suffix begins at field 3 (state); starttime is field 22.
+    return fields[19] if len(fields) > 19 else None
+
+
+def _same_owner_process(ownership: dict) -> bool:
+    pid = ownership.get("owner_pid")
+    recorded_start = ownership.get("owner_start_time")
+    return (
+        isinstance(recorded_start, str)
+        and bool(recorded_start)
+        and _process_start_time(pid) == recorded_start
+    )
+
+
+def _intake_clerk_agent_name(intake_key: str, lease_token: str) -> str:
+    return _safe_agent_name(
+        "upagent-intake", f"{intake_key[:16]}-{lease_token[:16]}", 1
+    )
+
+
+def _load_reusable_intake_clerk_response(
+    layout: dict[str, Path], intake_key: str
+) -> tuple[object, dict] | None:
+    index_path = layout["index"] / f"{intake_key}.json"
+    if not _secure_file_exists(index_path):
+        return None
+    index = _secure_json(index_path)
+    if index.get("schema_version") != 1 or index.get("intake_key") != intake_key:
+        raise RecruiterError("intake reuse index has the wrong schema or request identity")
+    attempt = _validated_attempt_directory(layout["attempts"], index.get("attempt_name"))
+    ownership_path = attempt / "ownership.json"
+    ownership = _secure_json(ownership_path)
+    lease_token = index.get("lease_token")
+    if (
+        not isinstance(lease_token, str)
+        or not lease_token
+        or ownership.get("lease_token") != lease_token
+        or ownership.get("intake_key") != intake_key
+        or ownership.get("attempt_name") != attempt.name
+        or ownership.get("agent_name")
+        != _intake_clerk_agent_name(intake_key, lease_token)
+    ):
+        raise RecruiterError("intake reuse index does not match its ownership journal")
+    cleanup = ownership.get("cleanup")
+    if (
+        ownership.get("state") != "closed"
+        or not isinstance(cleanup, dict)
+        or cleanup.get("verified_absent") is not True
+    ):
+        raise RecruiterError("intake reuse index points at an unclean clerk attempt")
+    response_path = attempt / "response.json"
+    response_bytes = _secure_file_bytes(response_path)
+    response_sha256 = hashlib.sha256(response_bytes).hexdigest()
+    if (
+        index.get("response_sha256") != response_sha256
+        or ownership.get("response_sha256") != response_sha256
+    ):
+        raise RecruiterError("intake reuse response hash does not match its journal")
+    try:
+        response = lifecycle.parse_intake_clerk_response(response_bytes.decode())
+    except (UnicodeDecodeError, LifecycleError) as error:
+        raise RecruiterError(
+            f"secure intake response {response_path} is invalid: {error}"
+        ) from error
+    return response, {
+        "attempt": 1,
+        "reused": True,
+        "attempt_name": attempt.name,
+        "brief_path": str(attempt / "brief.md"),
+        "output_path": str(response_path),
+        "ownership_path": str(ownership_path),
+        "cleanup": cleanup,
+    }
+
+
+def _matching_intake_process(process_info: object, expected_process: str) -> dict | None:
+    processes = (
+        process_info.get("foreground_processes", [])
+        if isinstance(process_info, dict)
+        else []
+    )
+    return next(
+        (
+            process
+            for process in processes
+            if isinstance(process, dict)
+            and (
+                process.get("name") == expected_process
+                or expected_process in str(process.get("cmdline", ""))
+                or expected_process
+                in " ".join(str(item) for item in process.get("argv", []))
+            )
+        ),
+        None,
+    )
+
+
+def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
+    """Resolve a clerk by its unguessable agent name; a recorded pane id is never authority."""
+    intake_key = ownership.get("intake_key")
+    lease_token = ownership.get("lease_token")
+    agent_name = ownership.get("agent_name")
+    if (
+        not isinstance(intake_key, str)
+        or not isinstance(lease_token, str)
+        or not isinstance(agent_name, str)
+        or agent_name != _intake_clerk_agent_name(intake_key, lease_token)
+    ):
+        return {"status": "blocked", "reason": "invalid intake lease identity"}
+    try:
+        agent = (
+            _herdr_json("agent", "get", agent_name)
+            .get("result", {})
+            .get("agent")
+        )
+    except RecruiterError as error:
+        if "agent_not_found" in str(error):
+            return {"status": "absent", "agent_name": agent_name}
+        return {"status": "blocked", "reason": f"agent lookup failed: {error}"}
+    if not isinstance(agent, dict) or not agent:
+        return {"status": "absent", "agent_name": agent_name}
+    if agent.get("name") != agent_name:
+        return {"status": "blocked", "reason": "Herdr agent name does not match the lease"}
+    pane_id = agent.get("pane_id")
+    if not isinstance(pane_id, str) or not pane_id:
+        return {"status": "absent", "agent_name": agent_name}
+    recorded_pane = ownership.get("pane")
+    if isinstance(recorded_pane, str) and recorded_pane and recorded_pane != pane_id:
+        return {
+            "status": "blocked",
+            "reason": "recorded pane no longer belongs to the intake agent name",
+            "pane": pane_id,
+        }
+    try:
+        pane = (
+            _herdr_json("pane", "get", pane_id).get("result", {}).get("pane", {})
+        )
+        process_info = (
+            _herdr_json("pane", "process-info", "--pane", pane_id)
+            .get("result", {})
+            .get("process_info", {})
+        )
+    except RecruiterError as error:
+        return {"status": "blocked", "reason": f"pane identity lookup failed: {error}"}
+    if not isinstance(pane, dict) or pane.get("pane_id", pane_id) != pane_id:
+        return {"status": "blocked", "reason": "Herdr pane identity changed during cleanup"}
+    expected_agent = ownership.get("expected_agent")
+    expected_process = ownership.get("expected_process")
+    expected_cwd = ownership.get("expected_cwd")
+    detected_agent = pane.get("agent")
+    cwd = pane.get("foreground_cwd", pane.get("cwd"))
+    if (
+        not isinstance(expected_agent, str)
+        or detected_agent != expected_agent
+        or not isinstance(expected_cwd, str)
+        or not isinstance(cwd, str)
+        or os.path.realpath(cwd) != os.path.realpath(expected_cwd)
+    ):
+        return {
+            "status": "blocked",
+            "reason": "pane agent or cwd does not match the intake ownership journal",
+            "pane": pane_id,
+        }
+    current_process = (
+        _matching_intake_process(process_info, expected_process)
+        if isinstance(expected_process, str)
+        else None
+    )
+    health = ownership.get("health")
+    healthy_record: dict | None = None
+    if isinstance(health, dict) and (
+        health.get("healthy") is True
+        and health.get("pane_id") == pane_id
+        and health.get("detected_agent") == expected_agent
+        and health.get("cwd_matches") is True
+    ):
+        healthy_record = health
+    previously_healthy = healthy_record is not None
+    if current_process is not None and healthy_record is not None:
+        recorded_process_pid = healthy_record.get("process_pid")
+        recorded_process_start = healthy_record.get("process_start_time")
+        current_process_pid = current_process.get("pid")
+        if (
+            isinstance(recorded_process_pid, int)
+            and isinstance(recorded_process_start, str)
+            and (
+                current_process_pid != recorded_process_pid
+                or _process_start_time(current_process_pid) != recorded_process_start
+            )
+        ):
+            return {
+                "status": "blocked",
+                "reason": "intake foreground process identity no longer matches its lease",
+                "pane": pane_id,
+            }
+    if current_process is None and not previously_healthy:
+        return {
+            "status": "blocked",
+            "reason": "expected intake process was never verified in the owned pane",
+            "pane": pane_id,
+        }
+    return {
+        "status": "owned",
+        "agent_name": agent_name,
+        "pane": pane_id,
+        "current_process": current_process,
+        "previously_healthy": previously_healthy,
+    }
+
+
+def _cleanup_intake_clerk(ownership: dict) -> dict[str, object]:
+    identity = _resolve_intake_clerk_identity(ownership)
+    if identity.get("status") == "absent":
+        recorded_pane = ownership.get("pane")
+        if (
+            ownership.get("state") != "closed"
+            and not (isinstance(recorded_pane, str) and recorded_pane)
+        ):
+            # `herdr agent start` is a separate socket transaction. The caller can die after
+            # sending it but before Herdr publishes the named agent. One not-found lookup cannot
+            # prove that no pane will appear later, so this tiny journal stays open and is
+            # rechecked by every reconciliation sweep.
+            return {
+                "status": "launch-uncertain",
+                "worker_pane": None,
+                "verified_absent": False,
+                "agent_name": ownership.get("agent_name"),
+                "reason": "named intake launch may still complete after owner loss",
+            }
+        return {
+            "status": "already-absent",
+            "worker_pane": recorded_pane,
+            "verified_absent": True,
+            "agent_name": ownership.get("agent_name"),
+        }
+    if identity.get("status") != "owned":
+        return {
+            "status": "cleanup-blocked",
+            "worker_pane": ownership.get("pane"),
+            "verified_absent": False,
+            "agent_name": ownership.get("agent_name"),
+            "reason": identity.get("reason", "intake identity could not be verified"),
+        }
+    # Resolve twice immediately before close. A stale pane id from the journal is never used.
+    confirmed = _resolve_intake_clerk_identity(ownership)
+    if confirmed.get("status") != "owned" or confirmed.get("pane") != identity.get("pane"):
+        return {
+            "status": "cleanup-blocked",
+            "worker_pane": identity.get("pane"),
+            "verified_absent": False,
+            "agent_name": ownership.get("agent_name"),
+            "reason": "intake identity changed immediately before cleanup",
+        }
+    pane = cast(str, confirmed["pane"])
+    try:
+        cleanup = _close_worker_pane(pane)
+    except RecruiterError as error:
+        return {
+            "status": "cleanup-failed",
+            "worker_pane": pane,
+            "verified_absent": False,
+            "agent_name": ownership.get("agent_name"),
+            "reason": str(error),
+        }
+    after = _resolve_intake_clerk_identity(ownership)
+    if after.get("status") != "absent":
+        return {
+            "status": "cleanup-blocked",
+            "worker_pane": pane,
+            "verified_absent": False,
+            "agent_name": ownership.get("agent_name"),
+            "reason": "intake agent name still resolves after pane close",
+        }
+    return {**cleanup, "agent_name": ownership.get("agent_name")}
+
+
+def _record_started_intake_clerk(
+    ownership_path: Path,
+    ownership: dict,
+    pane: str,
+    workspace_id: str | None,
+    address: str,
+) -> None:
+    ownership.update(
+        {
+            "address": address,
+            "pane": pane,
+            "state": "starting",
+            "workspace_id": workspace_id,
+        }
+    )
+    _secure_write_json(ownership_path, ownership)
+
+
+def _run_order_intake_clerk(
+    raw_text: str, raw_path: Path, roster_path: str, intake_key: str
+) -> tuple[object, dict]:
+    """Launch one journaled support clerk; malformed caller data never controls its launch."""
+    recruiter_pane = _recruiter_pane_from_state()
+    if recruiter_pane is None:
+        raise RecruiterError(
+            f"no live Recruiter state at {STATE_FILE}; run the Hub's up command first"
+        )
+    roster = load_roster(roster_path)
+    config = llm_management.load_management_config(roster)
+    layout = _prepare_intake_layout()
+    reused = _load_reusable_intake_clerk_response(layout, intake_key)
+    if reused is not None:
+        return reused
+
+    attempt = _new_intake_attempt(layout)
+    output_path = attempt / "response.json"
+    brief_path = attempt / "brief.md"
+    ownership_path = attempt / "ownership.json"
+    cwd = str(attempt)
+    _secure_write_text(
+        brief_path,
+        llm_management.intake_clerk_brief(raw_text, raw_path, output_path),
+    )
+    command = llm_management.render_intake_clerk_command(
+        config.intake_clerk, brief_path, cwd, output_path
+    )
+    lease_token = uuid.uuid4().hex
+    agent_name = _intake_clerk_agent_name(intake_key, lease_token)
+    owner_start_time = _process_start_time(os.getpid())
+    if owner_start_time is None:
+        raise RecruiterError("could not record the intake owner's process start identity")
+    ownership: dict[str, object] = {
+        "schema_version": 1,
+        "intake_key": intake_key,
+        "attempt_name": attempt.name,
+        "lease_token": lease_token,
+        "agent_name": agent_name,
+        "owner_pid": os.getpid(),
+        "owner_start_time": owner_start_time,
+        "expected_agent": config.intake_clerk.expected_agent,
+        "expected_process": config.intake_clerk.expected_process,
+        "expected_cwd": cwd,
+        "expires_at": int(time.time())
+        + max(
+            1,
+            (config.startup_timeout_ms + config.intake_clerk.timeout_ms) // 1000
+            + 30,
+        ),
+        "pane": None,
+        "state": "launching",
+    }
+    # This journal exists before Herdr is asked to create anything. A crash at any later point
+    # can resolve the unguessable agent name even when no pane id was written.
+    _secure_write_json(ownership_path, ownership)
+
+    clerk_order = {"cockpit_pane": recruiter_pane, "cwd": cwd}
+    pane: str | None = None
+    cleanup: dict[str, object] = {
+        "status": "launch-uncertain",
+        "worker_pane": None,
+        "verified_absent": False,
+        "agent_name": agent_name,
+    }
+    response: object | None = None
+    failure: BaseException | None = None
+    launch_attempted = False
+    try:
+        launch_attempted = True
+        pane, workspace_id, address = _start_herdr_agent(
+            agent_name,
+            clerk_order,
+            command,
+            split_direction="down",
+            tab_role="oversight",
+        )
+        ownership["pane"] = pane  # local cleanup remains possible if journal update fails
+        _record_started_intake_clerk(
+            ownership_path, ownership, pane, workspace_id, address
+        )
+        _resize_started_pane(
+            pane,
+            split_direction="down",
+            target_fraction=SUPPORT_PANE_FRACTION,
+            role="intake clerk",
+        )
+        health = _wait_for_agent_health(
+            pane,
+            expected_agent=config.intake_clerk.expected_agent,
+            expected_process=config.intake_clerk.expected_process,
+            expected_cwd=cwd,
+            timeout_ms=config.startup_timeout_ms,
+        )
+        process_pid = health.get("process_pid")
+        health["process_start_time"] = _process_start_time(process_pid)
+        ownership.update({"health": health, "state": "active"})
+        _secure_write_json(ownership_path, ownership)
+        response = _wait_typed_file(
+            output_path,
+            config.intake_clerk.timeout_ms,
+            lifecycle.parse_intake_clerk_response,
+        )
+    except (
+        RecruiterError,
+        LifecycleError,
+        ManagementConfigError,
+        OSError,
+        UnicodeDecodeError,
+    ) as error:
+        failure = error
+    finally:
+        if pane is not None:
+            if not isinstance(ownership.get("health"), dict):
+                try:
+                    cleanup_health = _wait_for_agent_health(
+                        pane,
+                        expected_agent=config.intake_clerk.expected_agent,
+                        expected_process=config.intake_clerk.expected_process,
+                        expected_cwd=cwd,
+                        timeout_ms=config.startup_timeout_ms,
+                    )
+                except RecruiterError as error:
+                    if failure is None:
+                        failure = error
+                else:
+                    cleanup_health["process_start_time"] = _process_start_time(
+                        cleanup_health.get("process_pid")
+                    )
+                    ownership["health"] = cleanup_health
+            cleanup = _cleanup_intake_clerk(ownership)
+            if cleanup.get("verified_absent") is not True and failure is None:
+                failure = RecruiterError(str(cleanup.get("reason", "clerk cleanup failed")))
+        elif launch_attempted:
+            # Herdr may have created the named agent before a transport/parsing error prevented
+            # _start_herdr_agent from returning its pane. Resolve the pre-journaled name now;
+            # reconciliation uses the same path if this process dies first.
+            cleanup = _cleanup_intake_clerk(ownership)
+            if cleanup.get("verified_absent") is not True and failure is None:
+                failure = RecruiterError(
+                    str(cleanup.get("reason", "uncertain clerk launch cleanup failed"))
+                )
+        else:
+            cleanup = {
+                "status": "not-created",
+                "worker_pane": None,
+                "verified_absent": True,
+                "agent_name": agent_name,
+            }
+        ownership.update(
+            {
+                "cleanup": cleanup,
+                "state": (
+                    "closed"
+                    if cleanup.get("verified_absent")
+                    else "launch-uncertain"
+                    if cleanup.get("status") == "launch-uncertain"
+                    else "cleanup-failed"
+                ),
+            }
+        )
+        try:
+            _secure_write_json(ownership_path, ownership)
+        except RecruiterError as error:
+            if failure is None:
+                failure = error
+    if failure is not None:
+        raise RecruiterError(f"intake clerk failed: {failure}") from failure
+    assert response is not None
+
+    response_bytes = _secure_file_bytes(output_path)
+    response_sha256 = hashlib.sha256(response_bytes).hexdigest()
+    # Parse the securely opened bytes again; the wait path is only an arrival accelerator.
+    try:
+        response = lifecycle.parse_intake_clerk_response(response_bytes.decode())
+    except (UnicodeDecodeError, LifecycleError) as error:
+        raise RecruiterError(
+            f"secure intake response {output_path} is invalid: {error}"
+        ) from error
+    ownership["response_sha256"] = response_sha256
+    _secure_write_json(ownership_path, ownership)
+    _secure_write_json(
+        layout["index"] / f"{intake_key}.json",
+        {
+            "schema_version": 1,
+            "intake_key": intake_key,
+            "attempt_name": attempt.name,
+            "lease_token": lease_token,
+            "response_sha256": response_sha256,
+        },
+    )
+    return response, {
+        "attempt": 1,
+        "attempt_name": attempt.name,
+        "brief_path": str(brief_path),
+        "output_path": str(output_path),
+        "ownership_path": str(ownership_path),
+        "cleanup": cleanup,
+    }
+
+
+def _intake_refusal_message(
+    order_path: str, reason: str, missing: list[str] | None = None
+) -> str:
+    suffix = f" Missing: {', '.join(missing)}." if missing else ""
+    return (
+        f"invalid order {order_path}: {reason}.{suffix} The intake repaired common form "
+        "issues and asked one bounded intake clerk, but it will not invent or change "
+        + ", ".join(ORDER_INTAKE_NEVER_INVENTED)
+        + ", target model/effort, requester identity, or operation/apply authority. "
+        "Submit a canonical order or add the named missing values."
+    )
+
+
+def _load_order_forgivingly(order_path: str, roster_path: str | None = None) -> dict:
+    """Strict -> mechanical form repair -> one clerk -> strict validation or durable refusal."""
     try:
         return load_order(order_path)
-    except ContractError as strict_error:
-        repaired = _repair_order(order_path)
-        if repaired is not None:
-            return repaired
-        raise RecruiterError(
-            _intake_refusal_message(order_path, strict_error)
-        ) from strict_error
+    except ContractError as error:
+        initial_error = error
+    except (OSError, UnicodeDecodeError) as error:
+        initial_error = ContractError(f"order.json could not be decoded: {error}")
 
+    path = Path(order_path)
+    path_key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+    with _intake_attempt_lock(path_key):
+        # A concurrent submission may already have been normalized while we waited. Read the
+        # bytes only after taking the path lock so the interpretation cannot race a rewrite.
+        try:
+            return load_order(order_path)
+        except (ContractError, OSError, UnicodeDecodeError):
+            pass
+        try:
+            raw_bytes = path.read_bytes()
+            raw_text = raw_bytes.decode()
+        except (OSError, UnicodeDecodeError) as error:
+            raise RecruiterError(
+                f"invalid order {order_path}: could not preserve submitted bytes: {error}"
+            ) from error
+        intake_key = hashlib.sha256(
+            str(path.resolve()).encode() + b"\0" + raw_bytes
+        ).hexdigest()
+        paths = _intake_artifact_paths(path)
+        try:
+            _write_bytes_atomic(paths["raw"], raw_bytes)
+        except OSError as error:
+            raise RecruiterError(
+                f"invalid order {order_path}: intake could not persist the exact raw submission; "
+                f"no paper trail means no execution ({error})"
+            ) from error
+
+        unknown_fields = _raw_unknown_fields(raw_text)
+        mechanical = _mechanical_order_candidate(raw_text, path)
+        if mechanical is not None:
+            order, changes = mechanical
+            try:
+                _persist_intake_success(
+                    path,
+                    paths,
+                    order,
+                    mode="mechanical-repair",
+                    strict_error=initial_error,
+                    changes=changes,
+                    unknown_fields=unknown_fields,
+                    clerk=None,
+                )
+            except OSError as error:
+                raise RecruiterError(
+                    f"invalid order {order_path}: intake could not persist its paper trail; "
+                    f"no execution occurred ({error})"
+                ) from error
+            return order
+
+        clerk_record: dict | None = None
+        reason = "intake clerk unavailable: no typed response was returned"
+        if roster_path is None:
+            reason = "intake clerk unavailable: no trusted roster was supplied"
+            response = None
+        else:
+            try:
+                response, clerk_record = _run_order_intake_clerk(
+                    raw_text, paths["raw"], roster_path, intake_key
+                )
+            except (RecruiterError, LifecycleError, ManagementConfigError, OSError) as error:
+                response = None
+                reason = f"intake clerk unavailable: {error}"
+
+        if response is None:
+            understood, missing = _intake_field_summary(raw_text)
+            try:
+                _persist_intake_refusal(
+                    paths,
+                    strict_error=initial_error,
+                    reason=reason,
+                    missing=missing,
+                    understood=understood,
+                    candidate=None,
+                    unknown_fields=unknown_fields,
+                    clerk=clerk_record,
+                )
+            except OSError as error:
+                raise RecruiterError(
+                    f"invalid order {order_path}: {reason}; refusal paper trail also failed: {error}"
+                ) from error
+            raise RecruiterError(
+                _intake_refusal_message(order_path, reason, missing)
+            ) from initial_error
+
+        refusal = getattr(response, "refusal")
+        if refusal is not None:
+            missing = list(getattr(response, "missing"))
+            understood = list(getattr(response, "understood"))
+            try:
+                _persist_intake_refusal(
+                    paths,
+                    strict_error=initial_error,
+                    reason=refusal,
+                    missing=missing,
+                    understood=understood,
+                    candidate=None,
+                    unknown_fields=unknown_fields,
+                    clerk=clerk_record,
+                )
+            except OSError as error:
+                raise RecruiterError(
+                    f"invalid order {order_path}: {refusal}; refusal paper trail failed: {error}"
+                ) from error
+            raise RecruiterError(
+                _intake_refusal_message(order_path, refusal, missing)
+            ) from initial_error
+
+        candidate = cast(dict, getattr(response, "order"))
+        provenance_errors = _clerk_provenance_errors(raw_text, candidate)
+        if provenance_errors:
+            reason = (
+                "intake clerk interpretation invented or changed execution intent: "
+                + "; ".join(provenance_errors)
+            )
+            try:
+                _persist_intake_refusal(
+                    paths,
+                    strict_error=initial_error,
+                    reason=reason,
+                    missing=[],
+                    understood=[],
+                    candidate=candidate,
+                    unknown_fields=unknown_fields,
+                    clerk=clerk_record,
+                    errors=provenance_errors,
+                )
+            except OSError as error:
+                raise RecruiterError(
+                    f"invalid order {order_path}: {reason}; refusal paper trail failed: {error}"
+                ) from error
+            raise RecruiterError(_intake_refusal_message(order_path, reason)) from initial_error
+
+        try:
+            order, form_changes = _complete_order_form(candidate, raw_text, path)
+        except ContractError as error:
+            reason = f"intake clerk interpretation failed strict validation: {error}"
+            try:
+                _persist_intake_refusal(
+                    paths,
+                    strict_error=initial_error,
+                    reason=reason,
+                    missing=[],
+                    understood=[],
+                    candidate=candidate,
+                    unknown_fields=unknown_fields,
+                    clerk=clerk_record,
+                )
+            except OSError as persistence_error:
+                raise RecruiterError(
+                    f"invalid order {order_path}: {reason}; refusal paper trail failed: {persistence_error}"
+                ) from persistence_error
+            raise RecruiterError(_intake_refusal_message(order_path, reason)) from error
+
+        changes = list(getattr(response, "notes")) + form_changes
+        try:
+            _persist_intake_success(
+                path,
+                paths,
+                order,
+                mode="intake-clerk",
+                strict_error=initial_error,
+                changes=changes,
+                unknown_fields=unknown_fields,
+                clerk=clerk_record,
+            )
+        except OSError as error:
+            raise RecruiterError(
+                f"invalid order {order_path}: intake could not persist its paper trail; "
+                f"no execution occurred ({error})"
+            ) from error
+        return order
 
 def _issued_consult_token() -> str | None:
     """The consult token this Recruiter issued at `up` (from its own STATE_FILE), or None when
@@ -2962,7 +4087,7 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     for the durable receipt without depending on this command's pane output.
     """
     try:
-        order = _load_order_forgivingly(order_path)
+        order = _load_order_forgivingly(order_path, roster_path)
     except RecruiterError as e:
         _reject_legacy_order(order_path, str(e))
         return 1
@@ -3142,13 +4267,92 @@ def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -
     return finalized
 
 
+def _reconcile_intake_clerks(*, force: bool) -> int:
+    """Resolve orphan clerks by journaled agent name; never close a recorded pane id alone."""
+    try:
+        layout = _prepare_intake_layout()
+    except RecruiterError as error:
+        sys.stderr.write(f"recruiter: intake reconciliation unavailable: {error}\n")
+        return 0
+    reconciled = 0
+    try:
+        entries = list(os.scandir(layout["attempts"]))
+    except OSError as error:
+        sys.stderr.write(f"recruiter: could not scan intake attempts: {error}\n")
+        return 0
+    for entry in entries:
+        if not entry.name.startswith("attempt-"):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                raise RecruiterError(
+                    f"intake attempt {entry.name} is not a real directory"
+                )
+            attempt = _validated_attempt_directory(layout["attempts"], entry.name)
+            ownership_path = attempt / "ownership.json"
+            if not _secure_file_exists(ownership_path):
+                continue
+            ownership = _secure_json(ownership_path)
+            journal_key = ownership.get("intake_key")
+            journal_token = ownership.get("lease_token")
+            if (
+                ownership.get("schema_version") != 1
+                or ownership.get("attempt_name") != attempt.name
+                or not isinstance(journal_key, str)
+                or not isinstance(journal_token, str)
+                or ownership.get("agent_name")
+                != _intake_clerk_agent_name(journal_key, journal_token)
+            ):
+                raise RecruiterError(
+                    "intake ownership journal does not match its attempt directory or lease"
+                )
+            if ownership.get("state") == "closed":
+                continue
+            expires_at = ownership.get("expires_at")
+            expired = isinstance(expires_at, int) and expires_at <= int(time.time())
+            if not force and not expired and _same_owner_process(ownership):
+                continue
+            cleanup = _cleanup_intake_clerk(ownership)
+            ownership.update(
+                {
+                    "cleanup": cleanup,
+                    "reconciled_at_ns": time.time_ns(),
+                    "state": (
+                        "closed"
+                        if cleanup.get("verified_absent")
+                        else "launch-uncertain"
+                        if cleanup.get("status") == "launch-uncertain"
+                        else "cleanup-failed"
+                    ),
+                }
+            )
+            _secure_write_json(ownership_path, ownership)
+            if cleanup.get("verified_absent"):
+                reconciled += 1
+        except RecruiterError as error:
+            sys.stderr.write(
+                f"recruiter: unsafe or unreadable intake attempt {entry.name}: {error}\n"
+            )
+    return reconciled
+
+
 def cmd_reconcile(*, force: bool = False) -> int:
     ledger = JobLedger()
     reconciled = 0
     for key, lease in ledger.active_claims():
         if _reconcile_claim(ledger, key, lease, force=force):
             reconciled += 1
-    print(json.dumps({"reconciled": reconciled, "force": force}, sort_keys=True))
+    intake_reconciled = _reconcile_intake_clerks(force=force)
+    print(
+        json.dumps(
+            {
+                "reconciled": reconciled,
+                "intake_clerks_reconciled": intake_reconciled,
+                "force": force,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -3190,7 +4394,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
     Recruiter shell, so adjacent orders cannot interleave. The child process is the zero-poll
     wake-up path; an idempotent duplicate falls back to a bounded ledger wait.
     """
-    order = _load_order_forgivingly(order_path)
+    order = _load_order_forgivingly(order_path, roster_path)
     _reject_unbrokered_consult(order)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
@@ -3271,7 +4475,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
 
 def cmd_request(order_path: str, roster_path: str) -> int:
     """Submit directly and return only after the worker is healthy or terminally rejected."""
-    order = _load_order_forgivingly(order_path)
+    order = _load_order_forgivingly(order_path, roster_path)
     _reject_unbrokered_consult(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
@@ -4006,16 +5210,24 @@ def _find_services_workspace(workspaces_resp: dict) -> dict | None:
 RECRUITER_PANE_LABEL = "recruiter"
 LIBRARIAN_PANE_LABEL = "librarian"
 
-# The Recruiter pane's shell used to arm a working `recruit()` function — a side door that let
-# any agent hire by injecting text into the pane. It is sealed: the stub refuses loudly and
-# names the real doors. Sealing takes effect per pane at arm time, so a pane armed before this
-# change keeps its old function until the next `up`.
-SEALED_RECRUIT_DOOR_STUB = (
-    "recruit() { echo 'recruit door sealed: pane text is not a message queue. Submit orders "
-    "with `just upagent-request <order.json>` (verified startup) or `just upagent-recruit "
-    "<order.json>` (blocking dispatch); specialist consults go through `just specialist-hub "
-    "consult <consult.json>`.' >&2; return 2; }"
-)
+def _recruit_door_command(roster_path: str) -> str:
+    """A narrow compatibility door for the common ``recruit <path>`` pane command.
+
+    It accepts exactly one opaque path, quotes every configured value, and invokes the normal
+    verified request CLI. There is no eval and no free-form shell payload. Malformed order content
+    still walks the same strict/intake/strict ladder as every other public door.
+    """
+    python = shlex.quote(sys.executable)
+    script = shlex.quote(str(Path(__file__).resolve()))
+    roster = shlex.quote(str(Path(roster_path).expanduser().resolve()))
+    return (
+        'recruit() { if [ "$#" -ne 1 ]; then '
+        "echo 'recruit expects exactly one order.json path. Use `recruit <order.json>`; "
+        "specialist questions use `just specialist-hub consult <consult.json>`.' >&2; "
+        "return 2; fi; "
+        f"{python} {script} --roster {roster} request -- \"$1\"; "
+        "} # normal verified request door"
+    )
 
 
 def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, bool]:
@@ -4127,9 +5339,9 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
         except RecruiterError as error:
             _layout_warning("services", recruiter_pane, str(error))
 
-    # Arm the sealed stub (replacing any previously armed working function in this shell) so
-    # pane-injected `recruit <path>` text can never hire again.
-    _herdr("pane", "run", recruiter_pane, SEALED_RECRUIT_DOOR_STUB)
+    # Arm the narrow compatibility function. It accepts one opaque path and calls the verified
+    # request door; arbitrary pane text and extra arguments still cannot become a hire.
+    _herdr("pane", "run", recruiter_pane, _recruit_door_command(roster_path))
 
     supervisor_token = uuid.uuid4().hex
     state = {

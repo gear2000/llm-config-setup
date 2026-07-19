@@ -1,1 +1,1 @@
-Normalizes imperfect broker submissions into the valid schema, or names exactly what is missing; fills in envelopes, never meaning.
+Normalizes imperfect broker envelopes without inventing or changing task, addressee, or execution intent; otherwise names exactly what is missing.

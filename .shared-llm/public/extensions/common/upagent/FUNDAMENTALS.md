@@ -9,8 +9,9 @@ The fundamental separation is:
 
 ```text
 Requester                  owns intent and consequential decisions
-Dedicated Account Manager  owns conversation and interpretation
-Python Recruiter Hub       owns facts, durable state, and execution
+Intake clerk               reshapes one failed envelope; never creates intent or authority
+Dedicated Account Manager  owns conversation and lifecycle interpretation
+Python Recruiter Hub       owns facts, durable state, validation, and execution
 UpAgent worker             owns the requested work and its result
 One-shot check agent       advises on ambiguous evidence only
 ```
@@ -26,7 +27,12 @@ REQUESTER
    ▼
 PYTHON RECRUITER HUB
 │
-├─ validates the request
+├─ strict-validates the request
+├─ on failure, tries deterministic form repair, then at most one bounded intake clerk
+├─ accepts intent provenance only from known keys in a structurally unambiguous JSON object
+├─ writes raw/interpreted/audit/validation artifacts before replacing the order
+├─ refuses when intent is missing, ambiguous, changed, or cannot be audited
+├─ strict-validates the interpreted order again
 ├─ assigns a globally unique request identity and generation
 ├─ persists ownership, deadlines, and an event ledger atomically
 └─ creates one Dedicated Account Manager
@@ -87,7 +93,13 @@ PYTHON RECRUITER HUB
 5. `pane created` is not `worker healthy`. Health requires the expected foreground process,
    detected harness, expected working directory, and a non-terminal agent state.
 6. Python records mechanical facts. An LLM interprets ambiguity but cannot override ownership,
-   invent configuration, or execute an unvalidated lifecycle action.
+   invent configuration, or execute an unvalidated lifecycle action. The shipped intake command
+   gives the clerk no tools, a private random scratch directory, and only the trusted Recruiter
+   pane. The roster is trusted executable configuration and can override that command; Python does
+   not police an override's tool choices, so roster overrides require audit. The clerk timeout is
+   always capped at 300000 ms. A shell-quoting Python-owned wrapper feeds the brief and captures one
+   stdout object. Persona text is guidance; structurally keyed JSON provenance, typed parsing, and
+   the unchanged strict order contract enforce safety. Prose labels cannot authorize execution.
 7. A missing or malformed pre-launch manager decision becomes `needs-requester` or `blocked`; it
    never becomes guessed success. After Python has mechanically proved worker process, harness, and
    cwd health, a missing or malformed advisory startup assessment becomes `worker-healthy-degraded`
@@ -98,7 +110,11 @@ PYTHON RECRUITER HUB
 9. The Hub mechanically supervises Dedicated Account Managers. Managers do not recursively hire
    managers to watch managers.
 10. No manager failure may leave an unowned worker. No cleanup receipt may claim success until
-    the owned pane is verified absent.
+    the owned pane is verified absent. Intake clerk ownership is journaled before launch with a
+    random agent name/lease token and the owner's PID plus process start time. Reconciliation
+    resolves that name and verifies agent, process, cwd, and lease identity; a stale pane id alone
+    is never enough to close a pane. If an owner dies during an in-flight start, one not-found
+    lookup keeps the journal `launch-uncertain` and open for later reconciliation sweeps.
 11. A Dedicated Account Manager defaults to the requester's cockpit workspace, beside its worker.
     Shared-services placement is explicit rather than an invisible default.
 12. Cockpit placement is role-separated without weakening startup atomicity. The `control` tab
@@ -154,8 +170,9 @@ surfaces; pane ids may change or be reused and therefore never serve as durable 
 | May a pane be terminated? | Python, after validating owner authority or hard-deadline policy |
 
 The LLM roles consume bounded evidence snapshots and return typed assessments. Python remains
-correct when an LLM is unavailable: it records the failure, informs the Requester, and follows
-the configured deadline policy without silently losing the request.
+correct when an LLM is unavailable: a failed intake clerk produces a durable actionable refusal
+with no target worker, while lifecycle-role failure is recorded and follows the configured
+deadline policy without silently losing the request.
 
 ## Use case: start one plan
 

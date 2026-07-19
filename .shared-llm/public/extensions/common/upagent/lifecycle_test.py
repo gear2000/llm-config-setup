@@ -14,8 +14,8 @@ sys.modules[_spec.name] = lifecycle
 _spec.loader.exec_module(lifecycle)
 
 
-def _order(**overrides: object) -> dict:
-    value = {
+def _order(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
         "order_id": "stage-1-try-1",
         "result_path": "/tmp/run-a/stage-1/result.json",
         "cockpit_pane": "w1:p2",
@@ -108,6 +108,48 @@ def test_requester_decision_is_scoped_and_bounded() -> None:
     value.update(action="cancel", extension_ms=None, generation=1)
     with pytest.raises(lifecycle.LifecycleError, match="generation"):
         lifecycle.parse_requester_decision(json.dumps(value), "req-abc", 2)
+
+
+def test_intake_clerk_response_accepts_exactly_one_typed_outcome() -> None:
+    interpreted = lifecycle.parse_intake_clerk_response(
+        json.dumps({"order": {"harness": "claude", "agent": "qa"}, "notes": ["flattened payload"]})
+    )
+    assert interpreted.order == {"harness": "claude", "agent": "qa"}
+    assert interpreted.refusal is None
+    assert interpreted.notes == ("flattened payload",)
+
+    refused = lifecycle.parse_intake_clerk_response(
+        json.dumps(
+            {
+                "refusal": "The target agent is missing.",
+                "understood": ["harness=claude"],
+                "missing": ["agent"],
+            }
+        )
+    )
+    assert refused.order is None
+    assert refused.refusal == "The target agent is missing."
+    assert refused.missing == ("agent",)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        "[]",
+        "{}",
+        '{"order": {}, "refusal": "no", "understood": [], "missing": []}',
+        '{"order": [], "notes": []}',
+        '{"order": {}, "notes": [1]}',
+        '{"order": {}, "notes": [], "extra": true}',
+        '{"refusal": "", "understood": [], "missing": []}',
+        '{"refusal": "no", "understood": "x", "missing": []}',
+        '{"refusal": "no", "understood": [], "missing": [1]}',
+    ],
+)
+def test_intake_clerk_response_rejects_malformed_or_ambiguous_output(payload: str) -> None:
+    with pytest.raises(lifecycle.LifecycleError):
+        lifecycle.parse_intake_clerk_response(payload)
 
 
 def test_mailbox_appends_immutable_correlated_messages(tmp_path: Path) -> None:

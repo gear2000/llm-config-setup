@@ -222,7 +222,7 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update a skill, agent definition, CLAUDE.md rule, or any shared-llm layer. Runs the full workflow:… |
 
-### Generic agents (25)
+### Generic agents (26)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agents/`. Adopt them as-is — they contain no project-specific references.
 
@@ -241,6 +241,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `docs-writer` | Use when writing or updating documentation pages. Reads current code to verify accuracy, writes and… |
 | `frontend` | Use when building or modifying the frontend — pages, components, auth flows, or data fetching. |
 | `github` | GitHub specialist for repository state, issues, pull requests, Actions, and evidence-backed… |
+| `intake-clerk` | Normalizes imperfect broker envelopes without inventing or changing task, addressee, or execution… |
 | `monorepo-pkgs` | Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
 | `phase-evaluator` | Optional independent evaluator for one Herdr phase. The phase leader resolves its route profile and… |
