@@ -50,8 +50,9 @@ Every submission door (`recruit`/`dispatch`/`request`) uses one conservative lad
    through a known key or alias.
 4. The interpreted order passes Python provenance checks and the unchanged strict contract again.
    A missing, invented, changed, ambiguous, unavailable, malformed, or unsafe interpretation
-   becomes an actionable refusal, never a
-   worker launch.
+   becomes an actionable refusal, never a worker launch. If a model wraps its one JSON object in
+   exactly one whole-response Markdown JSON fence, Python removes that fence as form normalization;
+   prose outside the fence and multiple objects remain invalid.
 
 The complete paper trail is written before the caller's order is atomically replaced:
 `<order>.raw-submitted` contains the exact bytes, `.interpreted.json` the attempted canonical

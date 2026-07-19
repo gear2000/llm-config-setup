@@ -132,6 +132,17 @@ def test_intake_clerk_response_accepts_exactly_one_typed_outcome() -> None:
     assert refused.missing == ("agent",)
 
 
+def test_intake_clerk_response_unwraps_one_whole_markdown_json_fence() -> None:
+    fenced = lifecycle.parse_intake_clerk_response(
+        """```json
+{"refusal": "Target context is missing.", "understood": [], "missing": ["cwd"]}
+```"""
+    )
+
+    assert fenced.refusal == "Target context is missing."
+    assert fenced.missing == ("cwd",)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -145,6 +156,8 @@ def test_intake_clerk_response_accepts_exactly_one_typed_outcome() -> None:
         '{"refusal": "", "understood": [], "missing": []}',
         '{"refusal": "no", "understood": "x", "missing": []}',
         '{"refusal": "no", "understood": [], "missing": [1]}',
+        'Here is the response:\n```json\n{"refusal": "no", "understood": [], "missing": []}\n```',
+        '```json\n{"refusal": "no", "understood": [], "missing": []}\n```\nextra prose',
     ],
 )
 def test_intake_clerk_response_rejects_malformed_or_ambiguous_output(payload: str) -> None:

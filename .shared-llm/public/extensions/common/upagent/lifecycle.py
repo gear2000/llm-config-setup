@@ -180,9 +180,27 @@ def parse_check_assessment(text: str, request_id: str, generation: int) -> Check
     )
 
 
+def _intake_clerk_json_object(text: str) -> dict:
+    """Accept one JSON object, optionally wrapped in one Markdown JSON fence.
+
+    Models sometimes add a code fence despite being told to return raw JSON. Removing exactly one
+    whole-response fence is form normalization, not interpretation. Any prose outside the fence,
+    multiple fences, or non-object JSON remains a hard typed-response failure.
+    """
+    candidate = text.strip()
+    fenced = re.fullmatch(
+        r"```(?:json)?[ \t]*\r?\n(?P<body>.*)\r?\n```",
+        candidate,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced is not None:
+        candidate = fenced.group("body")
+    return _json_object(candidate, "intake clerk response")
+
+
 def parse_intake_clerk_response(text: str) -> IntakeClerkResponse:
     """Validate the clerk's one-of envelope before any value reaches the order contract."""
-    value = _json_object(text, "intake clerk response")
+    value = _intake_clerk_json_object(text)
     outcomes = [key for key in ("order", "refusal") if key in value]
     if len(outcomes) != 1:
         raise LifecycleError(
