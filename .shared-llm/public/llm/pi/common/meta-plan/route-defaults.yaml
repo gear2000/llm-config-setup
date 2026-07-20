@@ -8,7 +8,9 @@
 #
 # scope_leash: true means every stage brief routed to that profile must carry the
 # scope-discipline block from scope-leash.md (same directory) verbatim. Set it on
-# any model that tends to write far more code and tests than a stage needs.
+# any model that tends to overdo its stage — writing far more code and tests than
+# an implementer stage needs, or taking far more investigation/second-guessing
+# passes than a review/audit/advisory stage needs.
 #
 # Slot → stage mapping:
 #   implementer     → stage-1-implementation
@@ -34,6 +36,7 @@ job_slots:
     harness: codex
     model: gpt-5.6-sol
     effort: high
+    scope_leash: true
 
   judge:
     harness: claude
@@ -44,3 +47,4 @@ job_slots:
     harness: codex
     model: gpt-5.6-sol
     effort: high
+    scope_leash: true
