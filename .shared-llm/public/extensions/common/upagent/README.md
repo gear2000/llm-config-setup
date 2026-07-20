@@ -117,6 +117,13 @@ missing receipt means the phase kickoff (`just upagent-phase-start`) never ran f
 the warning says so plainly, is announced once per phase pass instead of once per order, and is
 stored in the durable request ledger and modern startup responses.
 
+Run-level ownership uses a private token only for mutating lifecycle operations. New starts write
+the token to a per-run hashed 0600 file under `$HERDR_RUN_TOKEN_DIR` or the default same-user
+0700 runtime token directory, then pass only `HERDR_RUN_OWNER_TOKEN_FILE` to the TUI and heartbeat process; `HERDR_RUN_OWNER_TOKEN` remains a
+compatibility fallback. Recovery is explicit: use `just herdr-run-session-snapshot <run-dir>`,
+then `just herdr-run-session-reconcile <run-dir>`, and only then start with stale takeover when
+the reconciliation receipt proves the recorded owner is stale.
+
 ## The order → result contract (`contracts.py`)
 
 Durable files are the source of truth; terminal text is display-only.

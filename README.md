@@ -187,7 +187,7 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 
 When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
-1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, then copies each into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills/` (Codex). Pi standalone planning is `/do-planish` from the extension; the workflow-suite commands are `/do-*` on Pi and the matching `cc-*` on Claude Code — including the standalone `/cc-planish` planner (the Claude Code port of `/do-planish`).
+1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, then copies each into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section) and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent (never clobbers per-machine tweaks).
@@ -222,7 +222,7 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update a skill, agent definition, CLAUDE.md rule, or any shared-llm layer. Runs the full workflow:… |
 
-### Generic agents (26)
+### Generic agents (27)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.
 
@@ -245,6 +245,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `monorepo-pkgs` | Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
 | `phase-evaluator` | Optional independent evaluator for one Herdr phase. The phase leader resolves its route profile and… |
+| `plan-adversary` | Read-only adversarial reviewer for approved candidate plans. Challenges feasibility, missing… |
 | `plan-watchdog` | Optional Herdr phase plan-conformance advisor. The phase leader resolves the route and sends one… |
 | `playwright-cli` | Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend.… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
@@ -255,27 +256,33 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 
-### Slash-command skills (19)
+### Slash-command skills (25)
 
-Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only, and `meta-plan-convert` plus `meta-plan-check` are Pi-only helpers. Other common skills ship to both. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
+Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
 | Name | Description |
 | --- | --- |
-| `cc-full` | Claude Code planning conductor: research and grill a plan, create and check the canonical `plan.md`… |
-| `cc-plan-and-grill` | Claude Code planning front door: research, grill, produce and check `plan.md` + `route.yaml`, then… |
-| `cc-planish` | Standalone lightweight Claude Code planner: grill the user on an annotatable HTML page, then… |
+| `cc-convert` | Claude Code converter: `/cc-convert --herdr <plan.md>` idempotently decomposes an approved big plan… |
+| `cc-full` | Phone-friendly Claude Code composer: run `/cc-plan` exactly once, then either `/cc-implement` once… |
+| `cc-implement` | Claude Code direct implementation: implement an approved `plan.md` in one fresh interactive TUI… |
+| `cc-plan` | Claude Code planning front door: research, conditionally resolve design, grill with Planish, run… |
+| `cc-plan-and-grill` | Deprecated alias for `/cc-plan`. Warns, then delegates to the new Claude Code planning front door;… |
+| `cc-planish` | Deprecated alias for `/cc-plan`. Warns, then delegates; Planish remains the visual grill renderer… |
 | `cc-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `codex-delegate` | Hand a routine substantive coding task to Codex CLI as a peer subagent. Same underlying runtime as… |
-| `do-full` | Pi planning conductor: run the Pi grill, create and check the canonical `plan.md` + `route.yaml`… |
-| `do-plan-and-grill` | Pi planning front door: use the Planish grill, produce and check `plan.md` + `route.yaml`, then… |
+| `do-convert` | Pi converter: `/do-convert --herdr <plan.md>` idempotently decomposes an approved big plan into… |
+| `do-full` | Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for… |
+| `do-implement` | Pi direct implementation: implement an approved `plan.md` in one fresh interactive TUI path. It… |
+| `do-plan` | Pi planning front door: research, conditionally resolve design, grill with Planish, run exactly two… |
+| `do-plan-and-grill` | Deprecated alias for `/do-plan`. Warns, then delegates to the new Pi planning front door; it no… |
 | `do-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
 | `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
+| `herdr-control` | Internal Herdr plan controller for a checked runnable `plan.md + route.yaml` pair. Requires… |
 | `herdr-phase` | Run one canonical plan phase as the Herdr-native phase leader, sent to a cockpit pane by… |
-| `herdr-run` | Kick off a checked runnable `plan.md + route.yaml` pair through the Herdr-native meta runner.… |
-| `meta-cc-plan-and-grill` | Claude Code planning helper: run the normal `cc-plan-and-grill` flow, normalize its approved output… |
-| `meta-plan-check` | Check whether a canonical `plan.md` and `route.yaml` pair is runnable by Herdr. It validates the… |
-| `meta-plan-convert` | Convert a loose Markdown plan into the canonical `plan.md` plus `route.yaml` input pair for Herdr.… |
+| `herdr-run` | Deprecated one-release alias for internal `/herdr-control`. Warns, then delegates with the same… |
+| `meta-plan-check` | Deprecated alias for the converter's internal validation. Warns, then delegates to `/cc-convert… |
+| `meta-plan-convert` | Deprecated alias for `/cc-convert --herdr` or `/do-convert --herdr`. Warns, then delegates to the… |
 | `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
@@ -378,7 +385,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 **What it contains:**
 
-- `extensions/do-planish.ts` — The Pi-native standalone `/do-planish` planner. This is a TypeScript extension/register command, not a markdown skill: it adds browser-backed `planish_grill` and `planish_submit_plan` tools and writes `plan.md` + `plan.html` for review (`planish_submit_plan` auto-freezes each changed submit as `plan-v<k>.*` — plans never mutate in place). The pages are annotation-only — sticky notes → Copy Feedback → paste the block back into the TUI; the tools serve the page and return immediately (no in-page submit, nothing blocks). URLs honor the `host:` field of `.planish.yaml` (remote/Tailscale sessions). The standalone `/cc-planish` Claude Code skill is the markdown port of this planner (same `.planish.yaml` contract). Use `/do-plan-and-grill` or `/cc-plan-and-grill` for workflow-suite planning.
+- `extensions/do-planish.ts` — The Pi Planish runtime. It registers the browser-backed `planish_grill` and `planish_submit_plan` tools used by `/do-plan` for annotation-only planning pages: sticky notes → Copy Feedback → paste the block back into the TUI. The legacy `/do-planish` slash command is a one-release warning alias to `/do-plan`. URLs honor the `host:` field of `.planish.yaml` (remote/Tailscale sessions).
 - `extensions/context-workflow.ts` — A Pi extension that wraps a structured write→test→review→fix→verify loop. Symlinked into `~/.pi/agent/extensions/` (auto-loaded by the Pi agent on startup).
 - `extensions/auto-compact.ts` — A model-relative context policy for Pi's long-lived TUI and RPC modes. After each `agent_settled` event, it reads Pi's authoritative active-model usage and triggers Pi's native compaction at 50% of the actual context window; print and JSON modes are deliberately excluded because their runtimes dispose immediately after a prompt settles. It does not replace Pi's summarizer: custom instructions focus the native summary on goals, constraints, decisions with rationale, evidence pointers, failed approaches, errors, and next steps. The policy re-arms only after fresh post-compaction usage falls below 50%, uses bounded exponential backoff, reports non-UI errors to stderr, invalidates stale callbacks on session/model changes, and exposes `/auto-compact-status` for inspection. Pi's built-in near-overflow compaction remains enabled as a second safety net.
 - `extensions/memsearch/` — A directory Pi extension (`index.ts` + `collection.ts`) that gives Pi memory over the **same shared store** Claude Code builds: per-project daily markdown logs under `<git-root>/.memsearch/memory/<YYYY-MM-DD>.md`, indexed into a per-project Milvus collection. The collection name is derived to **exactly match** memsearch's `derive-collection.sh`, so Pi and Claude converge on the same collection per repo.

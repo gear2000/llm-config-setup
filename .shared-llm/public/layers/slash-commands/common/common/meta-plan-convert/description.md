@@ -1,1 +1,1 @@
-Convert a loose Markdown plan into the canonical `plan.md` plus `route.yaml` input pair for Herdr. Conversion preserves intent but leaves routing values as TODO when they are not explicit; use `meta-plan-check` before the human starts Herdr.
+Deprecated alias for `/cc-convert --herdr` or `/do-convert --herdr`. Warns, then delegates to the harness-specific converter, which validates internally.

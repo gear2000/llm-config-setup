@@ -1,0 +1,9 @@
+type: skill
+name: do-plan
+description: .shared-llm/public/layers/slash-commands/common/common/do-plan/description.md
+frontmatter:
+  argument-hint: "<topic> [@research.md ...] [--dir <path>] [--adversarial-iterations N] [--adversary-profile <profile>]"
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/do-plan/command.md
+  - .shared-llm/public/layers/slash-commands/common/common/plan-core.md
+output: .claude/skills/do-plan/SKILL.md

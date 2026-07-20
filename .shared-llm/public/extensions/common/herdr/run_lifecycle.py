@@ -19,6 +19,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -43,6 +44,8 @@ CLEANUP_SCHEMA = "herdr-run-cleanup.v1"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 300
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60
 HERDR_RUN_OWNER_TOKEN_ENV = "HERDR_RUN_OWNER_TOKEN"
+HERDR_RUN_OWNER_TOKEN_FILE_ENV = "HERDR_RUN_OWNER_TOKEN_FILE"
+HERDR_RUN_TOKEN_DIR_ENV = "HERDR_RUN_TOKEN_DIR"
 HERDR_RUN_DIR_ENV = "HERDR_RUN_DIR"
 SAFE_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 MUTATING_ACTIONS = frozenset(("mutation", "session-start", "stop", "cleanup"))
@@ -109,17 +112,36 @@ def _refuse_symlink(path: Path, label: str) -> None:
         raise LifecycleError(f"{label} must not be a symlink: {path}")
 
 
+def _ensure_private_dir(path: Path, label: str) -> Path:
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as error:
+        raise LifecycleError(
+            f"{label} must be a same-user 0700 directory: {path}"
+        ) from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise LifecycleError(f"{label} must be a same-user 0700 directory: {path}")
+        os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
+    return path
+
+
 def _ensure_control_dir(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
-    info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or path.is_symlink():
-        raise LifecycleError(f"control path must be a real directory: {path}")
+    _ensure_private_dir(path, "control path")
 
 
 def _control_dir(run_dir: Path) -> Path:
     if not run_dir.is_absolute() or not run_dir.is_dir():
-        raise LifecycleError(f"run dir must be an existing absolute directory: {run_dir}")
+        raise LifecycleError(
+            f"run dir must be an existing absolute directory: {run_dir}"
+        )
     control = run_dir / "control"
     _ensure_control_dir(control)
     return control
@@ -149,6 +171,113 @@ def _token_hash(token: object) -> str | None:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _owner_token_dir() -> Path:
+    configured = os.environ.get(HERDR_RUN_TOKEN_DIR_ENV)
+    directory = (
+        Path(configured).expanduser()
+        if configured
+        else Path(tempfile.gettempdir()) / f"herdr-run-tokens-{os.getuid()}"
+    )
+    return _ensure_private_dir(directory, "owner token directory")
+
+
+def owner_token_path(run_dir: Path) -> Path:
+    identity = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()
+    return _owner_token_dir() / f"{identity}.token"
+
+
+def write_owner_token_file(run_dir: Path, token: str) -> Path:
+    token = _validate_token(token)
+    directory = _owner_token_dir()
+    path = owner_token_path(run_dir)
+    _refuse_symlink(path, "owner token file")
+    temporary = directory / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(token)
+            stream.write("\n")
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o600)
+            os.fsync(stream.fileno())
+    except Exception:
+        try:
+            temporary.unlink()
+        finally:
+            raise
+    os.replace(temporary, path)
+    directory_fd = os.open(directory, os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return path
+
+
+def read_owner_token_file(path: Path) -> str:
+    path = path.expanduser()
+    try:
+        info = path.lstat()
+    except FileNotFoundError as error:
+        raise LifecycleError(f"owner token file not found: {path}") from error
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        raise LifecycleError(f"owner token file must be a 0600 regular file: {path}")
+    return _validate_token(path.read_text().strip(), "owner token file")
+
+
+def remove_owner_token_file(run_dir: Path) -> bool:
+    path = owner_token_path(run_dir)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise LifecycleError(
+            f"owner token file is not a same-user regular file: {path}"
+        )
+    path.unlink()
+    directory_fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return True
+
+
+def token_from_env_or_file() -> str | None:
+    token_file = os.environ.get(HERDR_RUN_OWNER_TOKEN_FILE_ENV)
+    if token_file:
+        return read_owner_token_file(Path(token_file))
+    token = os.environ.get(HERDR_RUN_OWNER_TOKEN_ENV)
+    return _validate_token(token) if token else None
+
+
+def resolve_token_sources(
+    direct: str | None,
+    token_file: Path | None,
+    stdin_text: str | None,
+) -> str | None:
+    explicit_count = sum(
+        source is not None for source in (direct, token_file, stdin_text)
+    )
+    if explicit_count > 1:
+        raise LifecycleError(
+            "owner token sources conflict; choose only direct, file, or stdin"
+        )
+    if token_file is not None:
+        return read_owner_token_file(token_file)
+    if stdin_text is not None:
+        value = stdin_text.strip()
+        return _validate_token(value) if value else token_from_env_or_file()
+    if direct:
+        return _validate_token(direct)
+    return token_from_env_or_file()
+
+
 def _generation(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise LifecycleError("owner generation must be a positive integer")
@@ -168,7 +297,11 @@ def _owner_identity_from_health(
 ) -> dict[str, object]:
     process_pid = health.get("process_pid")
     process_start = health.get("process_start_time")
-    if isinstance(process_pid, bool) or not isinstance(process_pid, int) or process_pid <= 0:
+    if (
+        isinstance(process_pid, bool)
+        or not isinstance(process_pid, int)
+        or process_pid <= 0
+    ):
         raise LifecycleError("owner health must include a positive process_pid")
     if not isinstance(process_start, str) or not process_start:
         raise LifecycleError("owner health must include process_start_time")
@@ -193,13 +326,20 @@ def current_process_identity(kind: str = "operator") -> dict[str, object]:
     }
 
 
-def tui_owner_identity(tui: dict[str, object], *, repo: Path, harness: str) -> dict[str, object]:
+def tui_owner_identity(
+    tui: dict[str, object], *, repo: Path, harness: str
+) -> dict[str, object]:
     health = tui.get("health")
     if not isinstance(health, dict):
         raise LifecycleError("TUI receipt has no health block")
     process_pid = health.get("process_pid")
-    if isinstance(process_pid, int) and not isinstance(health.get("process_start_time"), str):
-        health = {**health, "process_start_time": recruiter._process_start_time(process_pid)}
+    if isinstance(process_pid, int) and not isinstance(
+        health.get("process_start_time"), str
+    ):
+        health = {
+            **health,
+            "process_start_time": recruiter._process_start_time(process_pid),
+        }
     pane_id = tui.get("pane_id")
     herdr_session = tui.get("herdr_session")
     if not isinstance(pane_id, str) or not isinstance(herdr_session, str):
@@ -282,7 +422,8 @@ def _pane_identity_verified(identity: dict[str, Any]) -> tuple[bool, str]:
     if isinstance(expected_agent, str) and pane.get("agent") != expected_agent:
         return False, "pane agent does not match owner identity"
     if isinstance(expected_cwd, str) and (
-        not isinstance(cwd, str) or os.path.realpath(cwd) != os.path.realpath(expected_cwd)
+        not isinstance(cwd, str)
+        or os.path.realpath(cwd) != os.path.realpath(expected_cwd)
     ):
         return False, "pane cwd does not match owner identity"
     processes = (
@@ -299,17 +440,17 @@ def _pane_identity_verified(identity: dict[str, Any]) -> tuple[bool, str]:
             and (
                 process.get("name") == expected_process
                 or expected_process in str(process.get("cmdline", ""))
-                or expected_process in " ".join(str(item) for item in process.get("argv", []))
+                or expected_process
+                in " ".join(str(item) for item in process.get("argv", []))
             )
         ),
         None,
     )
     if not isinstance(match, dict):
         return False, "expected foreground process is absent"
-    if (
-        match.get("pid") != identity.get("process_pid")
-        or recruiter._process_start_time(match.get("pid")) != identity.get("process_start_time")
-    ):
+    if match.get("pid") != identity.get("process_pid") or recruiter._process_start_time(
+        match.get("pid")
+    ) != identity.get("process_start_time"):
         return False, "foreground process identity no longer matches owner"
     return True, "identity-verified live pane"
 
@@ -322,7 +463,11 @@ def _owner_live_status(lease: dict[str, Any]) -> dict[str, object]:
         live, reason = _pane_identity_verified(identity)
     else:
         live = _process_identity_live(identity)
-        reason = "identity-verified live process" if live else "owner process is absent or reused"
+        reason = (
+            "identity-verified live process"
+            if live
+            else "owner process is absent or reused"
+        )
     fresh = _fresh(lease)
     return {
         "fresh": fresh,
@@ -347,7 +492,9 @@ def read_owner_lease(run_dir: Path) -> dict[str, Any] | None:
     return lease
 
 
-def _lease_receipt(lease: dict[str, Any], role: str, reason: str | None = None) -> dict[str, object]:
+def _lease_receipt(
+    lease: dict[str, Any], role: str, reason: str | None = None
+) -> dict[str, object]:
     status = _owner_live_status(lease)
     return {
         "generation": lease["generation"],
@@ -388,9 +535,15 @@ def acquire_owner(
                 _write_json_atomic(_lease_path(run_dir), existing)
                 return _lease_receipt(existing, "owner", "same owner refreshed")
             if status["live"] is True and status["fresh"] is True:
-                return _lease_receipt(existing, "observer", "another live owner holds the run")
+                return _lease_receipt(
+                    existing, "observer", "another live owner holds the run"
+                )
             if not takeover_stale:
-                return _lease_receipt(existing, "observer", "owner is stale; reconcile before explicit takeover")
+                return _lease_receipt(
+                    existing,
+                    "observer",
+                    "owner is stale; reconcile before explicit takeover",
+                )
             _require_stale_reconciliation(run_dir, existing)
             generation = _generation(existing["generation"]) + 1
         else:
@@ -481,8 +634,9 @@ def start_background_heartbeat(
     env = {
         **os.environ,
         HERDR_RUN_DIR_ENV: str(run_dir),
-        HERDR_RUN_OWNER_TOKEN_ENV: token,
+        HERDR_RUN_OWNER_TOKEN_FILE_ENV: str(write_owner_token_file(run_dir, token)),
     }
+    env.pop(HERDR_RUN_OWNER_TOKEN_ENV, None)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -525,14 +679,17 @@ def _require_stale_reconciliation(run_dir: Path, stale_lease: dict[str, Any]) ->
     owner = receipt.get("owner")
     if not isinstance(owner, dict):
         raise LifecycleError("reconciliation receipt has no owner block")
-    if (
-        owner.get("token_sha256") != _token_hash(stale_lease.get("token"))
-        or owner.get("generation") != stale_lease.get("generation")
-    ):
-        raise LifecycleError("reconciliation receipt does not cover the current stale lease")
+    if owner.get("token_sha256") != _token_hash(stale_lease.get("token")) or owner.get(
+        "generation"
+    ) != stale_lease.get("generation"):
+        raise LifecycleError(
+            "reconciliation receipt does not cover the current stale lease"
+        )
     status = owner.get("status")
     if not isinstance(status, dict) or status.get("state") != "stale":
-        raise LifecycleError("reconciliation receipt did not classify the owner as stale")
+        raise LifecycleError(
+            "reconciliation receipt did not classify the owner as stale"
+        )
 
 
 def guard(
@@ -546,7 +703,11 @@ def guard(
     lease = read_owner_lease(run_dir)
     if lease is None:
         if action in READ_ACTIONS:
-            return {"allowed": True, "reason": "read allowed without owner", "schema": SCHEMA}
+            return {
+                "allowed": True,
+                "reason": "read allowed without owner",
+                "schema": SCHEMA,
+            }
         raise LifecycleError("mutation refused: run has no owner lease")
     status = _owner_live_status(lease)
     if action in READ_ACTIONS:
@@ -555,9 +716,13 @@ def guard(
         raise LifecycleError("mutation refused: owner token is required")
     token = _validate_token(token)
     if token != lease.get("token"):
-        raise LifecycleError("mutation refused: owner token does not match current lease")
+        raise LifecycleError(
+            "mutation refused: owner token does not match current lease"
+        )
     if status["live"] is not True or status["fresh"] is not True:
-        raise LifecycleError("mutation refused: owner supervision is stale or not identity-verified")
+        raise LifecycleError(
+            "mutation refused: owner supervision is stale or not identity-verified"
+        )
     return {"allowed": True, "owner_status": status, "schema": SCHEMA}
 
 
@@ -594,7 +759,9 @@ def _phase_ids(run_dir: Path) -> list[str]:
 
         route = yaml.safe_load(route_path.read_text())
     except (OSError, ImportError, AttributeError) as error:
-        raise LifecycleError(f"route could not be read for snapshot: {error}") from error
+        raise LifecycleError(
+            f"route could not be read for snapshot: {error}"
+        ) from error
     if not isinstance(route, dict):
         return []
     phases = route.get("phases")
@@ -603,7 +770,9 @@ def _phase_ids(run_dir: Path) -> list[str]:
     return [phase for phase in phases if isinstance(phase, str)]
 
 
-def _phase_receipts(run_dir: Path, errors: list[dict[str, object]]) -> dict[str, object]:
+def _phase_receipts(
+    run_dir: Path, errors: list[dict[str, object]]
+) -> dict[str, object]:
     values: dict[str, object] = {}
     for phase_id in _phase_ids(run_dir):
         phase_dir = run_dir / "phases" / phase_id
@@ -684,19 +853,29 @@ def _derive_run_state(
         terminal = None
     if terminal is not None:
         return terminal
-    phase_values = [cast(dict[str, object], value).get("phase_result") for value in phases.values()]
+    phase_values = [
+        cast(dict[str, object], value).get("phase_result") for value in phases.values()
+    ]
     if phase_values and all(
         isinstance(value, dict) and value.get("verdict") in TERMINAL_VERDICTS
         for value in phase_values
     ):
-        verdicts = [cast(dict[str, object], value).get("verdict") for value in phase_values]
+        verdicts = [
+            cast(dict[str, object], value).get("verdict") for value in phase_values
+        ]
         return {
             "detail": {"phase_verdicts": verdicts},
             "source": "typed-phase-results",
-            "state": "succeeded" if all(verdict == "passed" for verdict in verdicts) else "blocked",
+            "state": "succeeded"
+            if all(verdict == "passed" for verdict in verdicts)
+            else "blocked",
         }
     if owner_status.get("live") is True and owner_status.get("fresh") is True:
-        return {"detail": owner_status, "source": "identity-verified-live-pane", "state": "running"}
+        return {
+            "detail": owner_status,
+            "source": "identity-verified-live-pane",
+            "state": "running",
+        }
     return {
         "detail": "no typed terminal result and no identity-verified fresh owner",
         "source": "prose-untrusted",
@@ -707,7 +886,11 @@ def _derive_run_state(
 def snapshot(run_dir: Path) -> dict[str, object]:
     errors: list[dict[str, object]] = []
     lease = read_owner_lease(run_dir)
-    owner_status = _owner_live_status(lease) if lease is not None else {"state": "absent", "live": False, "fresh": False}
+    owner_status = (
+        _owner_live_status(lease)
+        if lease is not None
+        else {"state": "absent", "live": False, "fresh": False}
+    )
     phases = _phase_receipts(run_dir, errors)
     return {
         "active_leaders": _active_leaders(run_dir, errors),
@@ -725,7 +908,9 @@ def snapshot(run_dir: Path) -> dict[str, object]:
                 _control_dir(run_dir) / "plan-start.json", "plan start receipt", errors
             ),
             "run_terminal": _safe_json_for_snapshot(
-                _control_dir(run_dir) / "run-terminal.json", "run terminal receipt", errors
+                _control_dir(run_dir) / "run-terminal.json",
+                "run terminal receipt",
+                errors,
             ),
         },
         "run_dir": str(run_dir),
@@ -762,10 +947,18 @@ def reconcile(run_dir: Path) -> dict[str, object]:
 
 def _repo_git_state(repo: Path) -> dict[str, object]:
     if not repo.is_absolute() or not repo.is_dir():
-        return {"clean": False, "landed": False, "reason": f"repo must be an existing absolute directory: {repo}"}
+        return {
+            "clean": False,
+            "landed": False,
+            "reason": f"repo must be an existing absolute directory: {repo}",
+        }
     git = shutil.which("git")
     if git is None:
-        return {"clean": False, "landed": False, "reason": "git not found; worktree uninspectable"}
+        return {
+            "clean": False,
+            "landed": False,
+            "reason": "git not found; worktree uninspectable",
+        }
     try:
         status = subprocess.run(
             [git, "-C", str(repo), "status", "--porcelain"],
@@ -786,15 +979,33 @@ def _repo_git_state(repo: Path) -> dict[str, object]:
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        return {"clean": False, "landed": False, "reason": f"git inspection failed: {error}"}
+        return {
+            "clean": False,
+            "landed": False,
+            "reason": f"git inspection failed: {error}",
+        }
     if status.returncode != 0:
-        return {"clean": False, "landed": False, "reason": f"git status failed: {status.stderr.strip()}"}
+        return {
+            "clean": False,
+            "landed": False,
+            "reason": f"git status failed: {status.stderr.strip()}",
+        }
     if head.returncode != 0:
-        return {"clean": False, "landed": False, "reason": f"git HEAD inspection failed: {head.stderr.strip()}"}
+        return {
+            "clean": False,
+            "landed": False,
+            "reason": f"git HEAD inspection failed: {head.stderr.strip()}",
+        }
     if contains.returncode != 0:
-        return {"clean": False, "landed": False, "reason": f"git remote reachability failed: {contains.stderr.strip()}"}
+        return {
+            "clean": False,
+            "landed": False,
+            "reason": f"git remote reachability failed: {contains.stderr.strip()}",
+        }
     dirty = bool(status.stdout.strip())
-    remote_branches = [line.strip() for line in contains.stdout.splitlines() if line.strip()]
+    remote_branches = [
+        line.strip() for line in contains.stdout.splitlines() if line.strip()
+    ]
     landed = bool(remote_branches)
     reason = None
     if dirty:
@@ -830,10 +1041,22 @@ def _cleanup_decisions(
         ]
     decisions: list[dict[str, object]] = []
     if plan is None:
-        return [{"resource": "plan-start", "action": "preserve", "reason": "no plan-start receipt"}]
+        return [
+            {
+                "resource": "plan-start",
+                "action": "preserve",
+                "reason": "no plan-start receipt",
+            }
+        ]
     tui = plan.get("tui")
     if not isinstance(tui, dict):
-        return [{"resource": "tui", "action": "preserve", "reason": "malformed or missing TUI receipt"}]
+        return [
+            {
+                "resource": "tui",
+                "action": "preserve",
+                "reason": "malformed or missing TUI receipt",
+            }
+        ]
     decisions.extend(_resource_cleanup_decisions("tui-pane", tui))
     try:
         leaders = _active_leaders(run_dir)
@@ -864,27 +1087,69 @@ def _cleanup_decisions(
                     }
                 )
                 continue
-            decisions.extend(_resource_cleanup_decisions(f"phase-leader:{phase_id}", leader))
+            decisions.extend(
+                _resource_cleanup_decisions(f"phase-leader:{phase_id}", leader)
+            )
     return decisions
 
 
-def _resource_cleanup_decisions(resource: str, receipt: dict[str, Any]) -> list[dict[str, object]]:
+def _resource_cleanup_decisions(
+    resource: str, receipt: dict[str, Any]
+) -> list[dict[str, object]]:
     ownership = receipt.get("ownership")
     pane = ownership.get("pane") if isinstance(ownership, dict) else None
     if not isinstance(pane, dict):
-        return [{"resource": resource, "action": "preserve", "reason": "missing structural pane ownership"}]
+        return [
+            {
+                "resource": resource,
+                "action": "preserve",
+                "reason": "missing structural pane ownership",
+            }
+        ]
     pane_id = pane.get("pane_id")
     state = pane.get("state")
     session = receipt.get("herdr_session")
     health = receipt.get("health")
     if state == "adopted":
-        return [{"resource": resource, "pane_id": pane_id, "action": "preserve", "reason": "adopted pane"}]
+        return [
+            {
+                "resource": resource,
+                "pane_id": pane_id,
+                "action": "preserve",
+                "reason": "adopted pane",
+            }
+        ]
     if state != "created":
-        return [{"resource": resource, "pane_id": pane_id, "action": "preserve", "reason": "pane ownership is not created/adopted"}]
-    if not isinstance(pane_id, str) or not isinstance(session, str) or session == "default":
-        return [{"resource": resource, "pane_id": pane_id, "action": "preserve", "reason": "missing recorded non-default Herdr session"}]
+        return [
+            {
+                "resource": resource,
+                "pane_id": pane_id,
+                "action": "preserve",
+                "reason": "pane ownership is not created/adopted",
+            }
+        ]
+    if (
+        not isinstance(pane_id, str)
+        or not isinstance(session, str)
+        or session == "default"
+    ):
+        return [
+            {
+                "resource": resource,
+                "pane_id": pane_id,
+                "action": "preserve",
+                "reason": "missing recorded non-default Herdr session",
+            }
+        ]
     if not isinstance(health, dict):
-        return [{"resource": resource, "pane_id": pane_id, "action": "preserve", "reason": "missing startup health identity"}]
+        return [
+            {
+                "resource": resource,
+                "pane_id": pane_id,
+                "action": "preserve",
+                "reason": "missing startup health identity",
+            }
+        ]
     try:
         if pane_id not in _live_pane_ids(session):
             return [
@@ -917,8 +1182,22 @@ def _resource_cleanup_decisions(resource: str, receipt: dict[str, Any]) -> list[
     }
     verified, reason = _pane_identity_verified(cast(dict[str, Any], identity))
     if not verified:
-        return [{"resource": resource, "pane_id": pane_id, "action": "preserve", "reason": reason}]
-    return [{"resource": resource, "pane_id": pane_id, "herdr_session": session, "action": "close"}]
+        return [
+            {
+                "resource": resource,
+                "pane_id": pane_id,
+                "action": "preserve",
+                "reason": reason,
+            }
+        ]
+    return [
+        {
+            "resource": resource,
+            "pane_id": pane_id,
+            "herdr_session": session,
+            "action": "close",
+        }
+    ]
 
 
 def _live_pane_ids(herdr_session: str) -> set[str]:
@@ -936,7 +1215,9 @@ def _live_pane_ids(herdr_session: str) -> set[str]:
     }
 
 
-def cleanup(run_dir: Path, *, repo: Path, token: str | None = None) -> dict[str, object]:
+def cleanup(
+    run_dir: Path, *, repo: Path, token: str | None = None
+) -> dict[str, object]:
     refusal_errors: list[str] = []
     source_errors: list[dict[str, object]] = []
     if token is None:
@@ -944,7 +1225,9 @@ def cleanup(run_dir: Path, *, repo: Path, token: str | None = None) -> dict[str,
     guard(run_dir, action="cleanup", token=token)
     repo_state = _repo_git_state(repo)
     if repo_state.get("clean") is not True or repo_state.get("landed") is not True:
-        refusal_errors.append(str(repo_state.get("reason") or "repo state is not safely landed"))
+        refusal_errors.append(
+            str(repo_state.get("reason") or "repo state is not safely landed")
+        )
     decisions = _cleanup_decisions(run_dir, source_errors)
     for decision in decisions:
         if decision.get("action") not in ("close", "already-absent"):
@@ -979,12 +1262,25 @@ def cleanup(run_dir: Path, *, repo: Path, token: str | None = None) -> dict[str,
                 report = {
                     **report,
                     "closed": closed,
-                    "errors": [*refusal_errors, f"pane {pane_id} remained live after close"],
+                    "errors": [
+                        *refusal_errors,
+                        f"pane {pane_id} remained live after close",
+                    ],
                     "state": "cleanup-failed",
                 }
-                _write_json_atomic(_control_dir(run_dir) / "cleanup-report.json", report)
-                raise LifecycleError(f"cleanup failed: pane {pane_id} remained live after close")
-    report = {**report, "closed": closed, "state": "closed"}
+                _write_json_atomic(
+                    _control_dir(run_dir) / "cleanup-report.json", report
+                )
+                raise LifecycleError(
+                    f"cleanup failed: pane {pane_id} remained live after close"
+                )
+    token_removed = remove_owner_token_file(run_dir)
+    report = {
+        **report,
+        "closed": closed,
+        "owner_token_removed": token_removed,
+        "state": "closed",
+    }
     _write_json_atomic(_control_dir(run_dir) / "cleanup-report.json", report)
     return report
 
@@ -1011,15 +1307,27 @@ def main(argv: list[str] | None = None) -> int:
         child = sub.add_parser(name)
         child.add_argument("run_dir", type=Path)
     sub.choices["session-start"].add_argument("--takeover-stale", action="store_true")
-    sub.choices["session-start"].add_argument("--ttl-seconds", type=int, default=DEFAULT_HEARTBEAT_TTL_SECONDS)
-    sub.choices["heartbeat"].add_argument("--ttl-seconds", type=int, default=DEFAULT_HEARTBEAT_TTL_SECONDS)
-    sub.choices["heartbeat-loop"].add_argument("--interval-seconds", type=int, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
-    sub.choices["heartbeat-loop"].add_argument("--ttl-seconds", type=int, default=DEFAULT_HEARTBEAT_TTL_SECONDS)
-    sub.choices["cleanup"].add_argument("--token", required=True)
+    sub.choices["session-start"].add_argument(
+        "--ttl-seconds", type=int, default=DEFAULT_HEARTBEAT_TTL_SECONDS
+    )
+    sub.choices["heartbeat"].add_argument(
+        "--ttl-seconds", type=int, default=DEFAULT_HEARTBEAT_TTL_SECONDS
+    )
+    sub.choices["heartbeat-loop"].add_argument(
+        "--interval-seconds", type=int, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    )
+    sub.choices["heartbeat-loop"].add_argument(
+        "--ttl-seconds", type=int, default=DEFAULT_HEARTBEAT_TTL_SECONDS
+    )
+    sub.choices["cleanup"].add_argument("--token")
+    sub.choices["cleanup"].add_argument("--token-file", type=Path)
+    sub.choices["cleanup"].add_argument("--token-stdin", action="store_true")
     guard_parser = sub.add_parser("guard")
     guard_parser.add_argument("run_dir", type=Path)
     guard_parser.add_argument("--action", required=True)
     guard_parser.add_argument("--token")
+    guard_parser.add_argument("--token-file", type=Path)
+    guard_parser.add_argument("--token-stdin", action="store_true")
     args = parser.parse_args(argv)
     repo = args.repo.expanduser().resolve()
     run_dir = _resolve_run_dir(args.run_dir, repo)
@@ -1033,16 +1341,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             result = public_owner_receipt(cast(dict[str, object], result))
         elif args.command == "heartbeat":
-            token = os.environ.get(HERDR_RUN_OWNER_TOKEN_ENV)
+            token = token_from_env_or_file()
             if not token:
-                raise LifecycleError(f"{HERDR_RUN_OWNER_TOKEN_ENV} is required")
+                raise LifecycleError(
+                    f"{HERDR_RUN_OWNER_TOKEN_FILE_ENV} or {HERDR_RUN_OWNER_TOKEN_ENV} is required"
+                )
             result = public_owner_receipt(
                 heartbeat_once(run_dir, token=token, ttl_seconds=args.ttl_seconds)
             )
         elif args.command == "heartbeat-loop":
-            token = os.environ.get(HERDR_RUN_OWNER_TOKEN_ENV)
+            token = token_from_env_or_file()
             if not token:
-                raise LifecycleError(f"{HERDR_RUN_OWNER_TOKEN_ENV} is required")
+                raise LifecycleError(
+                    f"{HERDR_RUN_OWNER_TOKEN_FILE_ENV} or {HERDR_RUN_OWNER_TOKEN_ENV} is required"
+                )
             result = heartbeat_loop(
                 run_dir,
                 token=token,
@@ -1054,9 +1366,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "reconcile":
             result = reconcile(run_dir)
         elif args.command == "guard":
-            result = guard(run_dir, action=args.action, token=args.token)
+            token = resolve_token_sources(
+                args.token,
+                args.token_file,
+                sys.stdin.read() if args.token_stdin else None,
+            )
+            result = guard(run_dir, action=args.action, token=token)
         elif args.command == "cleanup":
-            result = cleanup(run_dir, repo=repo, token=args.token)
+            token = resolve_token_sources(
+                args.token,
+                args.token_file,
+                sys.stdin.read() if args.token_stdin else None,
+            )
+            result = cleanup(run_dir, repo=repo, token=token)
         else:
             raise AssertionError(args.command)
     except (LifecycleError, OSError, recruiter.RecruiterError) as error:

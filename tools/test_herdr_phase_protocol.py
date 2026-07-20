@@ -4,12 +4,12 @@ import re
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL = (
-    ROOT / ".shared-llm/public/layers/slash-commands/common/common/herdr-phase/command.md"
+    ROOT
+    / ".shared-llm/public/layers/slash-commands/common/common/herdr-phase/command.md"
 )
-RUNNER = PROTOCOL.parent.parent / "herdr-run/command.md"
+RUNNER = PROTOCOL.parent.parent / "herdr-control/command.md"
 SHARED_PROTOCOL = PROTOCOL.parent.parent / "meta-runner-phase-protocol.md"
 EXTENSIONS = ROOT / ".shared-llm/public/extensions"
 HERDR_JUSTFILE = EXTENSIONS / "common/herdr/justfile"
@@ -65,12 +65,20 @@ def _modules_started_by(recipe: str) -> set[str]:
 def test_result_template_requires_literal_order_identity_and_destination() -> None:
     text = PROTOCOL.read_text()
 
-    assert "The Recruiter-generated final worker brief includes a copy-pasteable result template and its destination." in text
+    assert (
+        "The Recruiter-generated final worker brief includes a copy-pasteable result template and its destination."
+        in text
+    )
     assert "literal `order_id` and literal absolute `result_path`" in text
     assert "never text that may appear in a generated instruction" in text
-    assert "Write result.json exactly to: <literal result_path from this order.json>" in text
+    assert (
+        "Write result.json exactly to: <literal result_path from this order.json>"
+        in text
+    )
     assert '"order_id": "<literal order_id from this order.json>"' in text
-    assert "MUST NOT invent, generate, replace, or otherwise alter the order id." in text
+    assert (
+        "MUST NOT invent, generate, replace, or otherwise alter the order id." in text
+    )
 
 
 def test_phase_dispatch_verifies_startup_then_waits_without_shell_injection() -> None:
@@ -89,7 +97,10 @@ def test_phase_dispatch_verifies_startup_then_waits_without_shell_injection() ->
 def test_tui_runs_one_managed_phase_start_without_a_watchdog() -> None:
     text = RUNNER.read_text()
 
-    assert "just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>" in text
+    assert (
+        "just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>"
+        in text
+    )
     assert "PHASE_STARTED" in text
     assert "`state: ready-degraded` receipt is equally continuable" in text
     assert "`not-configured` by design" in text
@@ -101,7 +112,9 @@ def test_tui_runs_one_managed_phase_start_without_a_watchdog() -> None:
     assert "do not reproduce its pane operations manually" in text
     assert "phase-result.json" in text
     assert "Never use `agent-status=done`" in text
-    assert "Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`" in text
+    assert (
+        "Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`" in text
+    )
     assert "This is mandatory, not guidance." in text
     assert "Do not send `/herdr-phase` to any pane yourself." in text
 
@@ -136,42 +149,77 @@ def test_plan_launcher_owns_tui_startup_and_never_hires_a_watchdog() -> None:
     assert "plan_controller.py" in launcher
     assert 'herdr pane run "$pane"' not in launcher
     assert "--run-tree" in controller
+    assert "/herdr-control --plan" in controller
+    assert "HERDR_RUN_OWNER_TOKEN_FILE" in controller
+    assert "HERDR_RUN_OWNER_TOKEN=" not in controller
+    assert '--working-directory "{{invocation_directory()}}"' in launcher
     assert "_submit_agent_prompt" not in controller
     assert "plan-lifecycle-watchdog" not in controller
     assert 'recruiter._herdr("agent", "send"' not in controller
 
 
-def test_phase_leader_continues_degraded_without_a_controller_watchdog_receipt() -> None:
+def test_phase_leader_continues_degraded_without_a_controller_watchdog_receipt() -> (
+    None
+):
     text = PROTOCOL.read_text()
 
     assert "Inspect controller ownership without making monitoring a work gate." in text
     assert "$UPAGENT_PHASE_START_RECEIPT" in text
-    assert "Monitoring failure must never become an infinite wait or prevent plan work." in text
+    assert (
+        "Monitoring failure must never become an infinite wait or prevent plan work."
+        in text
+    )
 
 
 def test_ordinary_stage3_and_stage5_are_deterministic_controller_stages() -> None:
     text = PROTOCOL.read_text()
 
-    assert "leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders" in text
-    assert "runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence" in text
+    assert (
+        "leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders"
+        in text
+    )
+    assert (
+        "runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence"
+        in text
+    )
     assert "worker orders plus deterministic controller stages" in text
-    assert "Ordinary Stage 3 seam checks and Stage 5 finalization are deterministic controller stages" in text
+    assert (
+        "Ordinary Stage 3 seam checks and Stage 5 finalization are deterministic controller stages"
+        in text
+    )
     assert "Stage 3 — ordinary deterministic local seam/contract checks" in text
-    assert "Hire a fresh verifier through the Recruiter only when a command fails" in text
+    assert (
+        "Hire a fresh verifier through the Recruiter only when a command fails" in text
+    )
     assert "places a work ORDER per stage" not in text
-    assert "The leader runs the shared five-stage worktree lifecycle, ordering one worker per stage" not in text
+    assert (
+        "The leader runs the shared five-stage worktree lifecycle, ordering one worker per stage"
+        not in text
+    )
     assert "A stage is a work order to the Recruiter" not in text
 
 
 def test_phase_result_distinguishes_worker_and_deterministic_stage_evidence() -> None:
     text = PROTOCOL.read_text()
 
-    assert "worker-stage evidence (`stage_id`, `llm_profile`, `agent`, `order_id`, tries, final verdict, and `full_log` pointer)" in text
-    assert "deterministic-stage evidence from `controller-result.json` (`stage_id`, `runner: controller` or equivalent marker, commands, exit codes, log/evidence paths or bounded excerpts, tries, and final verdict)" in text
+    assert (
+        "worker-stage evidence (`stage_id`, `llm_profile`, `agent`, `order_id`, tries, final verdict, and `full_log` pointer)"
+        in text
+    )
+    assert (
+        "deterministic-stage evidence from `controller-result.json` (`stage_id`, `runner: controller` or equivalent marker, commands, exit codes, log/evidence paths or bounded excerpts, tries, and final verdict)"
+        in text
+    )
     assert "write `controller-result.json`" in text
-    assert "do not invent a synthetic `order_id`, worker `result.json`, or worker `full_log`" in text
+    assert (
+        "do not invent a synthetic `order_id`, worker `result.json`, or worker `full_log`"
+        in text
+    )
     assert "record that verifier as separate worker-stage evidence" in text
-    assert "each stage id with `llm_profile`/`agent`/`order_id`/tries/final verdict" not in text
+    assert (
+        "each stage id with `llm_profile`/`agent`/`order_id`/tries/final verdict"
+        not in text
+    )
     assert "commands/evidence/`full_log` pointers" not in text
 
 
@@ -179,8 +227,14 @@ def test_ordinary_stage4_is_not_a_shared_environment_deployment_stage() -> None:
     text = PROTOCOL.read_text()
 
     assert "Stage 4 — no ordinary shared acceptance/deployment stage" in text
-    assert "Do not run per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance checks" in text
-    assert "broad shared acceptance is deferred to the route-owned candidate-level finalization/gate" in text
+    assert (
+        "Do not run per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance checks"
+        in text
+    )
+    assert (
+        "broad shared acceptance is deferred to the route-owned candidate-level finalization/gate"
+        in text
+    )
     assert "Non-ordinary variants keep their explicit contracts, including IaC" in text
     assert "Stage 4 — upstream DAG verification" not in text
 
@@ -189,13 +243,14 @@ def test_stage5_runs_exactly_route_owned_green_checks() -> None:
     text = PROTOCOL.read_text()
 
     assert "run exactly the effective route-owned `green_checks`" in text
-    assert "The leader does not infer or branch on later candidate-level ownership" in text
+    assert (
+        "The leader does not infer or branch on later candidate-level ownership" in text
+    )
     assert "Route authors decide the command set before execution" in text
     assert "omit those generic commands from per-phase `green_checks`" in text
     assert "otherwise retain the repository's normal green checks" in text
     assert "candidate gate follows" not in text
     assert "no candidate gate is configured" not in text
-
 
 
 def test_tui_waits_inside_phase_await_not_pane_watching() -> None:
@@ -204,7 +259,10 @@ def test_tui_waits_inside_phase_await_not_pane_watching() -> None:
     assert "just upagent-phase-await" in text
     assert "just upagent-phase-ack" in text
     assert "re-await with `after=<that event's sequence>`" in text
-    assert "`await-heartbeat` | no | Quiet and healthy: re-await immediately and silently" in text
+    assert (
+        "`await-heartbeat` | no | Quiet and healthy: re-await immediately and silently"
+        in text
+    )
     assert "`leader-missing`" in text
     assert "`leader-stalled`" in text
     assert "`inactivity-checkpoint`" in text
@@ -239,7 +297,9 @@ def test_every_command_the_protocol_names_resolves_to_a_real_recipe() -> None:
     )
     defined = set(summary.stdout.split())
 
-    assert documented <= defined, f"documented but undefined: {sorted(documented - defined)}"
+    assert documented <= defined, (
+        f"documented but undefined: {sorted(documented - defined)}"
+    )
 
 
 def test_every_service_the_runner_health_checks_is_started_by_herdr_up() -> None:

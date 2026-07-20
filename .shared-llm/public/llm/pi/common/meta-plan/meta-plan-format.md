@@ -10,25 +10,22 @@ runnable-meta-job/
 └── route.yaml    # who runs it, when it merges, and how finalization proves green
 ```
 
-The runner only starts when both files pass validation. Herdr automatically assigns a 3-hour worker timeout to `stage-1-implementation` and `stage-2-adversarial-audit`; an order may explicitly override it with `timeout_ms`. There is only ever ONE route file:
-`route.todo.yaml` is not a second file — it is the same route file, named `.todo` while required
-values are still TODO placeholders so the runnable check fails loudly. Fill the TODOs and rename
-it to `route.yaml`; the runner consumes exactly `plan.md` + `route.yaml`.
+The runner only starts when both files pass validation. Herdr automatically assigns a 3-hour worker timeout to `stage-1-implementation` and `stage-2-adversarial-audit`; an order may explicitly override it with `timeout_ms`. There is only ever one live route file for a run: `route.yaml`. Conversion may preserve non-runnable drafts for evidence, but `just herdr-start` consumes exactly `plan.md` + `route.yaml`.
 
 ```text
-plain Markdown plan
+approved big plan
    │
    ▼
-meta-plan convert
+cc/do-convert --herdr
    │
    ├── plan.md
-   └── route.yaml or route.todo.yaml
+   └── route.yaml
           │
           ▼
-meta-plan check
+internal runnable validation
    │
-   ├── PASS → runner may start
-   └── FAIL → human fixes plan or route first
+   ├── PASS → just herdr-start may start
+   └── DESIGN_REQUIRED / FAIL → human fixes design, plan, or route first
 ```
 
 ## `plan.md` schema
@@ -69,7 +66,7 @@ No model names, harness names, agents, teams, worker rosters, stage routing, bra
 ### Strict body rules (enforced by the runtime validator)
 
 The runtime validator (`meta-plan-schema.ts` — the same `validateRunnable` check
-`/meta-plan-check` and `/herdr-run` run before launching any worker) is the authority, and it is stricter
+`/cc-convert --herdr`, `/do-convert --herdr`, and `/herdr-control` run before launching any worker) is the authority, and it is stricter
 than the shape sketch above:
 
 - `##` (H2) headings are for phases ONLY — `## Phase <N> — <title>`, separated by an em dash
@@ -255,11 +252,11 @@ Stage 2 must be independent from Stage 1 by profile, agent, harness, model famil
 
 ### IaC phases (`kind: iac`)
 
-One terraform layer runs as one ordinary phase; the ladder is reused with IaC meanings. Stage-1 writes the terraform (stage workers stay plan-only: `fmt`, `validate`, `init`, `plan`, `show` — never apply). Stage-2 is the adversarial review of the terraform, best on a different model family. Stage-3 runs init and plan, saves the plan artifact, runs `terraform show -json` over it, and builds the approval table (`just iac-plan-table`; replace is broken out because it destroys and recreates). The leader then publishes a `decision-required` event tagged `iac-approval` and waits on durable answer files. The TUI shows the human the table verbatim, collects the typed destroy total when it is above zero, writes the SHA-bound approval file, performs the apply itself with the saved artifact, and writes the apply receipt (see /herdr-run). Stage-4 is that approved apply, recorded from the receipt. Stage-5 finalizes as usual.
+One terraform layer runs as one ordinary phase; the ladder is reused with IaC meanings. Stage-1 writes the terraform (stage workers stay plan-only: `fmt`, `validate`, `init`, `plan`, `show` — never apply). Stage-2 is the adversarial review of the terraform, best on a different model family. Stage-3 runs init and plan, saves the plan artifact, runs `terraform show -json` over it, and builds the approval table (`just iac-plan-table`; replace is broken out because it destroys and recreates). The leader then publishes a `decision-required` event tagged `iac-approval` and waits on durable answer files. The TUI shows the human the table verbatim, collects the typed destroy total when it is above zero, writes the SHA-bound approval file, performs the apply itself with the saved artifact, and writes the apply receipt (see /herdr-control). Stage-4 is that approved apply, recorded from the receipt. Stage-5 finalizes as usual.
 
 IaC layers run strictly in order because a later layer's plan is only truthful after the earlier layer's apply. `parallel_group` is the explicit per-run escape hatch for genuinely independent stacks (urgent fixes) — the human owns that risk.
 
-**Choosing a gear is always the plan author's call — nothing escalates automatically.** As a rule of thumb only: `fast` is not an accuracy value but the no-phase lane (one worker straight through the Recruiter, see the one-shot flow in /herdr-run) for small chores; `medium` is the everyday default; `high` earns its extra alignment stage on unfamiliar or intricate work; `max` is worth considering for auth, destructive infrastructure, migrations, cross-service contracts, or a phase already on its second failed pass.
+**Choosing a gear is always the plan author's call — nothing escalates automatically.** As a rule of thumb only: `medium` is the everyday default; `high` earns its extra alignment stage on unfamiliar or intricate work; `max` is worth considering for auth, destructive infrastructure, migrations, cross-service contracts, or a phase already on its second failed pass.
 
 ### Escalation budgets (optional)
 
@@ -301,12 +298,12 @@ If merge, checks, log review, or cleanup fails, the runner preserves evidence, k
 
 ## Check/convert behavior
 
-- `meta-plan:check <plan.md> [route.yaml]` reports whether the pair is runnable.
-- `/meta-plan-check <plan.md> [route.yaml]` is the Claude Code equivalent.
-- `meta-plan:convert <source.md> <plan-output.md> [route-output.yaml]` converts a loose plan into canonical starter files.
-- `/meta-plan-convert <source.md> <plan-output.md> [route-output.yaml]` is the Claude Code equivalent.
+- `/cc-convert --herdr <approved-plan.md>` and `/do-convert --herdr <approved-plan.md>` convert an approved big plan into a runnable Herdr directory and validate it internally.
+- `just herdr-start <converted-run-dir>` starts the checked run and revalidates before launching `/herdr-control`.
 
-Conversion preserves the source plan's intent. It must not invent model, harness, profile, agent choices, or finalization commands. If route information is missing, conversion writes explicit TODO values and the runnable check fails until a human fills them in. Non-interactive conversion still fills `merge_back_at: stage-3-integration-acceptance-seams` as the safe default local seam/contract merge point.
+Conversion preserves the source plan's intent. It must not invent model, harness, profile, agent choices, finalization commands, environment names, account details, URLs, credentials, or deployment gates. If route information is missing, conversion asks the human or returns a non-runnable result; it does not declare a TODO route runnable. Non-interactive conversion still fills `merge_back_at: stage-3-integration-acceptance-seams` as the safe default local seam/contract merge point.
+
+If the approved plan calls for an external candidate gate such as an exact-SHA shared environment check and the public route inputs do not configure that gate, conversion records it as deferred `not-configured` evidence in the conversion receipt/review and stops short of inventing private infrastructure.
 
 ## Herdr runner gate
 

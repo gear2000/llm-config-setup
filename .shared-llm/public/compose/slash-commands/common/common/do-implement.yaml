@@ -1,0 +1,9 @@
+type: skill
+name: do-implement
+description: .shared-llm/public/layers/slash-commands/common/common/do-implement/description.md
+frontmatter:
+  argument-hint: "<approved-plan.md>"
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/do-implement/command.md
+- .shared-llm/public/layers/slash-commands/common/common/implement-core.md
+output: .claude/skills/do-implement/SKILL.md

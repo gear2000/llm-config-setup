@@ -195,21 +195,23 @@ follows the configured deadline policy without silently losing the request.
 Plan startup is one deterministic transaction; liveness comes from blocking awaits, not observers:
 
 ```text
-just herdr-plan <run-dir>
+just herdr-start <run-dir>
 └─ PYTHON PLAN CONTROLLER
    ├─ takes an exclusive run-start lock
    ├─ creates and health-checks the TUI in a fresh cockpit
    ├─ names the TUI/leader tab `control`
+   ├─ writes a per-run hashed 0600 token file under the same-user 0700 runtime token directory
+   ├─ passes HERDR_RUN_OWNER_TOKEN_FILE, not a raw token, to the TUI
    ├─ writes control/plan-start.json with the TUI address
    └─ writes control/plan-start.json (watchdog block: `not-configured` by design)
    ...
    TUI per phase: upagent-phase-start → blocking upagent-phase-await loop
    ...
    └─ TUI writes the final run-status.md
-      └─ just herdr-plan-finish <run-dir> succeeded|stopped
+      └─ just herdr-run-session-finish <run-dir> succeeded|stopped
          ├─ atomically writes control/run-terminal.json
-         ├─ authorizes the watchdog's final result
-         └─ Recruiter closes only the owned watchdog and Account Manager panes
+         ├─ fences stale owners by token hash
+         └─ cleanup closes only structurally owned, identity-verified panes
 ```
 
 The cockpit tabs appear as their roles become active:
@@ -227,9 +229,15 @@ state every sweep; contradictions surface as typed `leader-missing`/`leader-stal
 surfaces as `inactivity-checkpoint`, and urgent unacknowledged events escalate to the human via
 `herdr notification`. A TUI startup fault is terminal because no run owner exists.
 
-Quiet panes, a completed LLM turn, or the watchdog deciding that its current check is done cannot
+Quiet panes, a completed LLM turn, or a one-shot checker deciding that its current check is done cannot
 end this lifecycle. The plan controller requires the final run summary before it publishes the
 terminal marker.
+
+Recovery is deliberate. A second launcher that finds a fresh live owner becomes an observer; a
+stale owner still requires `just herdr-run-session-snapshot <run-dir>` and
+`just herdr-run-session-reconcile <run-dir>` before takeover. Mutating commands read the owner
+token from `HERDR_RUN_OWNER_TOKEN_FILE` or an explicit `--token-file`; stdin is supported for
+one-off recovery. Avoid passing raw owner tokens in process command lines.
 
 ## Use case: start one phase
 
@@ -250,9 +258,8 @@ PYTHON PHASE CONTROLLER
 ```
 
 Leader validation failures still keep the gate closed and close only the leader created by that
-transaction. A watchdog startup failure is different: it is an observability degradation, not a
-work failure. Python records the cause, releases the healthy leader, returns `ready-degraded`, and
-lets the TUI continue AFK. A live leader recorded by a prior owner is never destroyed by a new
+transaction. There is no standing phase watchdog in coordination v2; the `watchdog` receipt block
+is `not-configured` by design. A live leader recorded by a prior owner is never destroyed by a new
 start.
 
 The roster has separate `phase_leaders:` templates because a controller launch is not a stage

@@ -1,1 +1,0 @@
-Claude Code planning helper: run the normal `cc-plan-and-grill` flow, normalize its approved output into the checked `plan.md` + `route.yaml` pair, then stop with the explicit `herdr-run` handoff. It does not execute the plan.

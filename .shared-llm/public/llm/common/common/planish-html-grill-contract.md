@@ -1,6 +1,6 @@
 # Planish HTML Grill Contract
 
-This is the shared contract for customized planning flows. It applies to the Pi `/do-planish` extension (the Pi command is now `/do-planish`), the standalone `/cc-planish` Claude Code skill, and the suite planners (`/do-plan-and-grill`, `/cc-plan-and-grill`).
+This is the shared contract for customized planning flows. It applies to the primary suite planners (`/do-plan`, `/cc-plan`), their one-release warning aliases (`/do-planish`, `/cc-planish`, `/do-plan-and-grill`, `/cc-plan-and-grill`), and any future planner that serves browser-backed grill or review pages.
 
 ## Non-negotiable
 
@@ -27,7 +27,7 @@ The convention that makes this fast: **a question with no note means "go with th
 
 There is exactly ONE implementation of the sticky-note annotation controls, and it lives at `.shared-llm/public/llm/common/common/toolkits/annotation-toolkit.html` — a harness-neutral common-layer path, so `cc-*`, `do-*`, and the Pi extension all reference the same file (the companion style-only `form-toolkit.html` sits beside it). Every consumer uses that one file — never a fork or an inlined copy:
 
-- **Skills** (`/cc-plan-and-grill`, `/do-plan-and-grill`, the `*-oneshot` / `*-research` variants, `/design-doc`, and any future planner) paste its contents verbatim immediately before `</body>`.
+- **Skills** (`/cc-plan`, `/do-plan`, their one-release aliases, the `*-research` variants, `/design-doc`, and any future planner) paste its contents verbatim immediately before `</body>`.
 - **The Pi planish extension** reads it at serve time (an `import.meta.url`-relative sibling-read of that same file) and injects it verbatim, plus a per-serve `<meta name="desdoc-key">` in `<head>` — so the browser bar is byte-identical to what the skills paste.
 
 The toolkit copies with a `document.execCommand` fallback (so Copy Feedback / Finalize work on `file://` and plain HTTP) and keys notes off `<meta name="desdoc-key">` when present (see "Fresh annotations every round"). A second, divergent copy of this bar anywhere is a regression.

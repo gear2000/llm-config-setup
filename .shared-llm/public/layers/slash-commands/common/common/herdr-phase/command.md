@@ -1,6 +1,6 @@
 # /herdr-phase
 
-Run one phase as the Herdr-native **phase leader**. This command is sent to a cockpit pane by `/herdr-run`, once per phase. The leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders with the UpAgent Recruiter — never by spawning a native or nested subagent — and runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence. It applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
+Run one phase as the Herdr-native **phase leader**. This command is sent to a cockpit pane by `/herdr-control`, once per phase. The leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders with the UpAgent Recruiter — never by spawning a native or nested subagent — and runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence. It applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
 
 ## Invocation
 
@@ -12,7 +12,7 @@ All four flags are required. Fail loud on any missing or unreadable path.
 
 - `--phase` identifies one canonical plan phase, for example `phase-0` or `0`.
 - `--plan` / `--route` are the run-tree frozen copies. During a run, the run-tree `route.yaml` is the only live route: a human profile addition edits that copy only, never the origin.
-- `--run-root` is the run tree root `<run-root>/<date>/<slug>/` that `/herdr-run` created; this leader writes under `phases/<phase-id>/`.
+- `--run-root` is the run tree root `<run-root>/<date>/<slug>/` that `/herdr-control` created; this leader writes under `phases/<phase-id>/`.
 
 ## Pre-flight
 

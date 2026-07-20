@@ -1,1 +1,1 @@
-Pi planning conductor: run the Pi grill, create and check the canonical `plan.md` + `route.yaml` pair, then stop with the explicit Herdr handoff. It does not execute implementation.
+Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for direct work or `/do-convert --herdr` once plus `just herdr-start` once. Prompts for mode when no execution flag is supplied.

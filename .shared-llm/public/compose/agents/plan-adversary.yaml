@@ -1,0 +1,6 @@
+type: agent
+name: plan-adversary
+description: .shared-llm/public/layers/agents/common/plan-adversary.description.md
+inputs:
+- .shared-llm/public/layers/agents/common/plan-adversary.md
+output: .claude/agents/plan-adversary.md

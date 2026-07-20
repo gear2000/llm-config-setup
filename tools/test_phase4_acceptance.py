@@ -90,7 +90,7 @@ _LAYERS = ".shared-llm/public/layers/slash-commands/common/common"
 # The documents that tell an agent which commands to run.
 PROTOCOL_DOCS = (
     f"{_LAYERS}/herdr-phase/command.md",
-    f"{_LAYERS}/herdr-run/command.md",
+    f"{_LAYERS}/herdr-control/command.md",
     f"{_LAYERS}/meta-runner-phase-protocol.md",
 )
 # The gates that must still pass through whichever module owns the capability after the move.

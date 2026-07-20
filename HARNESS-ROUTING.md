@@ -74,10 +74,11 @@ skills from `~/.pi/agent/skills/`, not `<repo>/.pi/skills/`.
 
 ## Planner-to-Herdr inventory
 
-- Claude Code planning front doors: `cc-*`; shared plan helpers: `meta-cc-plan-and-grill`,
-  `meta-plan-convert`, and `meta-plan-check`.
-- Pi planning front doors: `do-*`; `meta-plan-convert` and `meta-plan-check` use the Pi-only
-  helper route, so Codex keeps its existing command surface.
-- Both harnesses use `herdr-run` and `herdr-phase` for execution after planning has produced a
-  checked `plan.md` + `route.yaml` pair.
-- `rphase-*`, `cc-loop`, and `do-loop` are not installed command surfaces.
+- Claude Code primary workflow commands are `cc-plan`, `cc-implement`, `cc-convert`, and `cc-full`.
+- Pi primary workflow commands are `do-plan`, `do-implement`, `do-convert`, and `do-full`.
+- `do-*` remains Pi-only and `cc-*` remains Claude-only. The one-release `meta-plan-convert` and
+  `meta-plan-check` aliases are common-route skills, so Codex can still discover those aliases.
+- `just herdr-start` launches the checked pair into internal `/herdr-control`; that controller
+  creates one internal `/herdr-phase` leader per phase. `/herdr-run` is a one-release warning alias.
+- The redundant `meta-cc-plan-and-grill` wrapper is retired and pruned. `rphase-*`, `cc-loop`, and
+  `do-loop` are not installed command surfaces.

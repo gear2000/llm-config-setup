@@ -11,6 +11,7 @@ common and this_repo inputs, that repo-scoped pi/codex links are created, that a
 stale global Pi link is cleaned up while a global collision is only warned, and
 that a second update is a clean no-op.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,6 +19,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 TOOLS = Path(__file__).resolve().parent
@@ -53,18 +55,26 @@ def _scaffold_dest(dest: Path) -> None:
     this_repo/compose/) that pulls a layer from EACH tree by explicit path."""
     s = dest / ".shared-llm"
     _write(s / "public/layers/skills/common/demo/description.md", "A demo skill.\n")
-    _write(s / "public/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
+    _write(
+        s / "public/layers/skills/common/demo/practices.md", "COMMON practices body.\n"
+    )
     _write(s / "this_repo/layers/skills/this_repo/demo.md", "THIS_REPO overlay body.\n")
-    _write(s / "this_repo/compose/skills/demo.yaml", yaml.safe_dump({
-        "type": "skill",
-        "name": "demo",
-        "description": ".shared-llm/public/layers/skills/common/demo/description.md",
-        "inputs": [
-            ".shared-llm/public/layers/skills/common/demo/practices.md",
-            ".shared-llm/this_repo/layers/skills/this_repo/demo.md",
-        ],
-        "output": ".claude/skills/demo/SKILL.md",
-    }, sort_keys=False))
+    _write(
+        s / "this_repo/compose/skills/demo.yaml",
+        yaml.safe_dump(
+            {
+                "type": "skill",
+                "name": "demo",
+                "description": ".shared-llm/public/layers/skills/common/demo/description.md",
+                "inputs": [
+                    ".shared-llm/public/layers/skills/common/demo/practices.md",
+                    ".shared-llm/this_repo/layers/skills/this_repo/demo.md",
+                ],
+                "output": ".claude/skills/demo/SKILL.md",
+            },
+            sort_keys=False,
+        ),
+    )
 
 
 def _add_slash_skill(dest: Path, name: str, scope: str) -> None:
@@ -74,12 +84,19 @@ def _add_slash_skill(dest: Path, name: str, scope: str) -> None:
     base = f"this_repo/layers/slash-commands/this_repo/{scope}/{name}"
     _write(s / f"{base}/command.md", f"{name} body\n")
     _write(s / f"{base}/description.md", f"{name} desc\n")
-    _write(s / f"this_repo/compose/slash-commands/this_repo/{scope}/{name}.yaml", yaml.safe_dump({
-        "type": "skill", "name": name,
-        "description": f".shared-llm/{base}/description.md",
-        "inputs": [f".shared-llm/{base}/command.md"],
-        "output": f".claude/skills/{name}/SKILL.md",
-    }, sort_keys=False))
+    _write(
+        s / f"this_repo/compose/slash-commands/this_repo/{scope}/{name}.yaml",
+        yaml.safe_dump(
+            {
+                "type": "skill",
+                "name": name,
+                "description": f".shared-llm/{base}/description.md",
+                "inputs": [f".shared-llm/{base}/command.md"],
+                "output": f".claude/skills/{name}/SKILL.md",
+            },
+            sort_keys=False,
+        ),
+    )
 
 
 def _cfg(m, dest: Path, harnesses):
@@ -96,19 +113,32 @@ def _quiet(m):
 
 # --- configure -------------------------------------------------------------
 
+
 def test_configure_creates_and_is_idempotent(tmp_path: Path) -> None:
     m = _load()
     _patch_home(m, tmp_path / "home")
     dest = tmp_path / "dest"
 
-    args = argparse.Namespace(source=None, dest=str(dest), list="cc,pi", global_list=None, exclude=None)
+    args = argparse.Namespace(
+        source=None, dest=str(dest), list="cc,pi", global_list=None, exclude=None
+    )
     m.cmd_configure(args)
     assert m.CONFIG_PATH.exists()
     cfg1 = yaml.safe_load(m.CONFIG_PATH.read_text())
-    assert cfg1["destinations"] == [{"path": str(dest.resolve()), "harnesses": ["cc", "pi"]}]
+    assert cfg1["destinations"] == [
+        {"path": str(dest.resolve()), "harnesses": ["cc", "pi"]}
+    ]
 
     # Re-running with the same dest updates in place (no duplicate entry).
-    m.cmd_configure(argparse.Namespace(source=None, dest=str(dest), list="cc,pi,codex", global_list=None, exclude=None))
+    m.cmd_configure(
+        argparse.Namespace(
+            source=None,
+            dest=str(dest),
+            list="cc,pi,codex",
+            global_list=None,
+            exclude=None,
+        )
+    )
     cfg2 = yaml.safe_load(m.CONFIG_PATH.read_text())
     assert len(cfg2["destinations"]) == 1
     assert cfg2["destinations"][0]["harnesses"] == ["cc", "pi", "codex"]
@@ -118,15 +148,19 @@ def test_configure_rejects_unknown_harness(tmp_path: Path) -> None:
     m = _load()
     _patch_home(m, tmp_path / "home")
 
-    args = argparse.Namespace(source=None, dest=str(tmp_path / "dest"), list="cc,bogus", global_list=None, exclude=None)
-    try:
+    args = argparse.Namespace(
+        source=None,
+        dest=str(tmp_path / "dest"),
+        list="cc,bogus",
+        global_list=None,
+        exclude=None,
+    )
+    with pytest.raises(SystemExit, match="bogus"):
         m.cmd_configure(args)
-        assert False, "expected SystemExit on unknown harness"
-    except SystemExit as e:
-        assert "bogus" in str(e)
 
 
 # --- copy ------------------------------------------------------------------
+
 
 def test_copy_propagates_new_and_flags_changed(tmp_path: Path) -> None:
     m = _load()
@@ -146,11 +180,17 @@ def test_copy_propagates_new_and_flags_changed(tmp_path: Path) -> None:
     m.do_copy(cfg, _quiet(m))
 
     # New common file propagated into the destination's public/ tree.
-    assert (dest / ".shared-llm/public/layers/llm/common/new-common.md").read_text() == "brand new common file.\n"
+    assert (
+        dest / ".shared-llm/public/layers/llm/common/new-common.md"
+    ).read_text() == "brand new common file.\n"
     # The pre-existing common file (public/) was overwritten with the hub version.
-    assert (dest / ".shared-llm/public/layers/skills/common/demo/practices.md").read_text() == "HUB practices v2.\n"
+    assert (
+        dest / ".shared-llm/public/layers/skills/common/demo/practices.md"
+    ).read_text() == "HUB practices v2.\n"
     # The this_repo overlay was NEVER touched by copy.
-    assert (dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
+    assert (
+        dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md"
+    ).read_text() == "THIS_REPO overlay body.\n"
 
 
 def test_copy_prunes_retired_hub_slash_command_layer(tmp_path: Path) -> None:
@@ -160,19 +200,29 @@ def test_copy_prunes_retired_hub_slash_command_layer(tmp_path: Path) -> None:
     _scaffold_dest(dest)
     cfg = _cfg(m, dest, ["cc", "pi"])
     kit = tmp_path / "kit"
-    _write(kit / ".shared-llm/public/layers/slash-commands/common/claude/kept/command.md", "kept\n")
-    setattr(m, "project_root", lambda: kit)
-    _write(m.DEFAULT_SOURCE / "layers/slash-commands/common/claude/kept/command.md", "old kept\n")
+    _write(
+        kit / ".shared-llm/public/layers/slash-commands/common/claude/kept/command.md",
+        "kept\n",
+    )
+    m.__dict__["project_root"] = lambda: kit
+    _write(
+        m.DEFAULT_SOURCE / "layers/slash-commands/common/claude/kept/command.md",
+        "old kept\n",
+    )
     stale = m.DEFAULT_SOURCE / "layers/slash-commands/common/claude/retired/command.md"
     _write(stale, "retired\n")
 
     m.do_copy(cfg, _quiet(m))
 
     assert not stale.exists(), "retired hub command layer must not reach destinations"
-    assert (dest / ".shared-llm/public/layers/slash-commands/common/claude/kept/command.md").exists()
+    assert (
+        dest / ".shared-llm/public/layers/slash-commands/common/claude/kept/command.md"
+    ).exists()
 
 
-def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path) -> None:
+def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(
+    tmp_path: Path,
+) -> None:
     """copy syncs the kit's recipes into public/compose/ (translating flat paths to
     split), prunes a public recipe the kit no longer ships, and never touches a
     this_repo/compose/ recipe."""
@@ -186,26 +236,40 @@ def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path
     # overlay via flat paths (the copy step must translate them).
     kit = tmp_path / "kit"
     kshared = kit / ".shared-llm/public"
-    _write(kshared / "compose/agents/backend.yaml", yaml.safe_dump({
-        "type": "agent", "name": "backend", "model": "sonnet",
-        "description": ".shared-llm/layers/agents/common/backend.description.md",
-        "inputs": [
-            ".shared-llm/layers/agents/common/backend.md",
-            ".shared-llm/layers/agents/this_repo/backend.md",
-        ],
-        "output": ".claude/agents/backend.md",
-    }, sort_keys=False))
-    setattr(m, "project_root", lambda: kit)
+    _write(
+        kshared / "compose/agents/backend.yaml",
+        yaml.safe_dump(
+            {
+                "type": "agent",
+                "name": "backend",
+                "model": "sonnet",
+                "description": ".shared-llm/layers/agents/common/backend.description.md",
+                "inputs": [
+                    ".shared-llm/layers/agents/common/backend.md",
+                    ".shared-llm/layers/agents/this_repo/backend.md",
+                ],
+                "output": ".claude/agents/backend.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    m.__dict__["project_root"] = lambda: kit
     # The recipe's layers must exist at the destination (the sync gates on this).
     # Common layers ride in via the hub (so the public sweep keeps them); the
     # overlay is repo-owned under this_repo/.
     hub = m.DEFAULT_SOURCE
     _write(hub / "layers/agents/common/backend.description.md", "A backend agent.\n")
     _write(hub / "layers/agents/common/backend.md", "common backend body\n")
-    _write(dest / ".shared-llm/this_repo/layers/agents/this_repo/backend.md", "repo backend overlay\n")
+    _write(
+        dest / ".shared-llm/this_repo/layers/agents/this_repo/backend.md",
+        "repo backend overlay\n",
+    )
 
     # A STALE public recipe the kit no longer ships → must be pruned.
-    _write(dest / ".shared-llm/public/compose/agents/gone.yaml", "type: agent\nname: gone\ninputs: []\noutput: x\n")
+    _write(
+        dest / ".shared-llm/public/compose/agents/gone.yaml",
+        "type: agent\nname: gone\ninputs: []\noutput: x\n",
+    )
     # A repo-owned recipe under this_repo/compose/ → must be preserved verbatim.
     this_repo_recipe = dest / ".shared-llm/this_repo/compose/skills/demo.yaml"
     demo_before = this_repo_recipe.read_text()
@@ -218,7 +282,9 @@ def test_copy_syncs_public_recipes_wholesale_and_leaves_this_repo(tmp_path: Path
     # Flat kit paths were translated to split form: common -> public, overlay -> this_repo.
     assert ".shared-llm/public/layers/agents/common/backend.md" in text
     assert ".shared-llm/this_repo/layers/agents/this_repo/backend.md" in text
-    assert ".shared-llm/layers/agents/common/backend.md" not in text  # no lingering flat path
+    assert (
+        ".shared-llm/layers/agents/common/backend.md" not in text
+    )  # no lingering flat path
     # output is NOT translated (lands at the repo root).
     assert "output: .claude/agents/backend.md" in text
     # Stale public recipe pruned; this_repo recipe untouched.
@@ -242,33 +308,56 @@ def test_copy_excludes_configured_recipe_and_prunes_stale_copy(tmp_path: Path) -
     # so a missing python.yaml proves the exclude — not a missing-inputs skip.
     kit = tmp_path / "kit"
     kshared = kit / ".shared-llm/public"
-    _write(kshared / "compose/agents/backend.yaml", yaml.safe_dump({
-        "type": "agent", "name": "backend", "inputs": [],
-        "output": ".claude/agents/backend.md",
-    }, sort_keys=False))
-    _write(kshared / "compose/skills/python.yaml", yaml.safe_dump({
-        "type": "skill", "name": "python", "inputs": [],
-        "output": ".claude/skills/python/SKILL.md",
-    }, sort_keys=False))
-    setattr(m, "project_root", lambda: kit)
+    _write(
+        kshared / "compose/agents/backend.yaml",
+        yaml.safe_dump(
+            {
+                "type": "agent",
+                "name": "backend",
+                "inputs": [],
+                "output": ".claude/agents/backend.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    _write(
+        kshared / "compose/skills/python.yaml",
+        yaml.safe_dump(
+            {
+                "type": "skill",
+                "name": "python",
+                "inputs": [],
+                "output": ".claude/skills/python/SKILL.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    m.__dict__["project_root"] = lambda: kit
 
     # A stale copy of the EXCLUDED recipe already at the destination → must be pruned.
-    _write(dest / ".shared-llm/public/compose/skills/python.yaml",
-           "type: skill\nname: python\ninputs: []\noutput: x\n")
+    _write(
+        dest / ".shared-llm/public/compose/skills/python.yaml",
+        "type: skill\nname: python\ninputs: []\noutput: x\n",
+    )
 
     m.do_copy(cfg, _quiet(m))
 
     # Non-excluded recipe synced normally.
-    assert (dest / ".shared-llm/public/compose/agents/backend.yaml").exists(), \
+    assert (dest / ".shared-llm/public/compose/agents/backend.yaml").exists(), (
         "non-excluded recipe should still sync"
+    )
     # Excluded recipe never synced, and its stale copy was pruned.
-    assert not (dest / ".shared-llm/public/compose/skills/python.yaml").exists(), \
+    assert not (dest / ".shared-llm/public/compose/skills/python.yaml").exists(), (
         "excluded recipe must be absent from the destination (skipped + stale copy pruned)"
+    )
 
 
 # --- compose ---------------------------------------------------------------
 
-def test_compose_reads_destination_shared_llm_and_merges_overlay(tmp_path: Path) -> None:
+
+def test_compose_reads_destination_shared_llm_and_merges_overlay(
+    tmp_path: Path,
+) -> None:
     m = _load()
     _patch_home(m, tmp_path / "home")
     dest = tmp_path / "dest"
@@ -282,6 +371,20 @@ def test_compose_reads_destination_shared_llm_and_merges_overlay(tmp_path: Path)
     assert out.index("COMMON practices body.") < out.index("THIS_REPO overlay body.")
 
 
+def test_compose_prunes_retired_meta_planner_skill(tmp_path: Path) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    stale = dest / ".claude/skills/meta-cc-plan-and-grill/SKILL.md"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("---\nname: meta-cc-plan-and-grill\n---\nold wrapper\n")
+
+    m.do_compose(_cfg(m, dest, ["cc", "pi"]), _quiet(m))
+
+    assert not stale.parent.exists()
+
+
 def test_compose_prunes_removed_legacy_runner_skill(tmp_path: Path) -> None:
     """Removing the old team recipe also removes its generated entrypoint."""
     m = _load()
@@ -289,7 +392,10 @@ def test_compose_prunes_removed_legacy_runner_skill(tmp_path: Path) -> None:
     dest = tmp_path / "dest"
     _scaffold_dest(dest)
     _add_slash_skill(dest, "team", "claude")
-    command = dest / ".shared-llm/this_repo/layers/slash-commands/this_repo/claude/team/command.md"
+    command = (
+        dest
+        / ".shared-llm/this_repo/layers/slash-commands/this_repo/claude/team/command.md"
+    )
     command.write_text("The meta-orchestrator injects ask_brain.\n")
     cfg = _cfg(m, dest, ["cc", "pi"])
 
@@ -297,12 +403,15 @@ def test_compose_prunes_removed_legacy_runner_skill(tmp_path: Path) -> None:
     generated = dest / ".claude/skills/team/SKILL.md"
     assert generated.is_file()
 
-    (dest / ".shared-llm/this_repo/compose/slash-commands/this_repo/claude/team.yaml").unlink()
+    (
+        dest / ".shared-llm/this_repo/compose/slash-commands/this_repo/claude/team.yaml"
+    ).unlink()
     m.do_compose(cfg, _quiet(m))
     assert not generated.exists()
 
 
 # --- link ------------------------------------------------------------------
+
 
 def test_link_creates_global_pi_and_codex(tmp_path: Path) -> None:
     m = _load()
@@ -317,8 +426,14 @@ def test_link_creates_global_pi_and_codex(tmp_path: Path) -> None:
     # Links land in the GLOBAL (no-trust-gate) dirs, not repo-scoped.
     pi_link = home / ".pi/agent/skills/demo"
     codex_link = home / ".agents/skills/demo"
-    assert pi_link.is_symlink() and pi_link.resolve() == (dest / ".claude/skills/demo").resolve()
-    assert codex_link.is_symlink() and codex_link.resolve() == (dest / ".claude/skills/demo").resolve()
+    assert (
+        pi_link.is_symlink()
+        and pi_link.resolve() == (dest / ".claude/skills/demo").resolve()
+    )
+    assert (
+        codex_link.is_symlink()
+        and codex_link.resolve() == (dest / ".claude/skills/demo").resolve()
+    )
     # No repo-scoped .pi/skills is created.
     assert not (dest / ".pi/skills").exists()
     # cc reads .claude/ directly.
@@ -345,8 +460,8 @@ def test_link_prunes_our_stale_global_link_not_foreign(tmp_path: Path) -> None:
 
     m.do_link(cfg, _quiet(m))
 
-    assert (g / "demo").is_symlink()          # desired link created
-    assert not ours_stale.exists()            # our stale link pruned
+    assert (g / "demo").is_symlink()  # desired link created
+    assert not ours_stale.exists()  # our stale link pruned
     assert (g / "foreign/SKILL.md").exists()  # foreign left untouched
 
 
@@ -369,6 +484,7 @@ def test_link_cleans_up_abandoned_repo_scoped_pi(tmp_path: Path) -> None:
 
 # --- update (orchestration + idempotency) ----------------------------------
 
+
 def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     m = _load()
     home = tmp_path / "home"
@@ -378,9 +494,15 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     # A minimal kit that ships the demo's common layers, so the public sweep keeps
     # them (a real destination's public/ layers are always kit-provided).
     kit = tmp_path / "kit"
-    _write(kit / ".shared-llm/public/layers/skills/common/demo/description.md", "A demo skill.\n")
-    _write(kit / ".shared-llm/public/layers/skills/common/demo/practices.md", "COMMON practices body.\n")
-    setattr(m, "project_root", lambda: kit)
+    _write(
+        kit / ".shared-llm/public/layers/skills/common/demo/description.md",
+        "A demo skill.\n",
+    )
+    _write(
+        kit / ".shared-llm/public/layers/skills/common/demo/practices.md",
+        "COMMON practices body.\n",
+    )
+    m.__dict__["project_root"] = lambda: kit
     # Seed the hub so copy has something to propagate.
     _write(m.DEFAULT_SOURCE / "layers/llm/common/x.md", "hub common.\n")
 
@@ -395,17 +517,27 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     assert (home / ".agents/skills/demo").is_symlink()
 
     # Second run: global reconcile is a clean no-op (nothing created/repointed/pruned).
-    c = m._reconcile_global(home / ".pi/agent/skills", m._common_pi_skills(dest), [dest], m.RunLog(verbose=False))
+    c = m._reconcile_global(
+        home / ".pi/agent/skills",
+        m._common_pi_skills(dest),
+        [dest],
+        m.RunLog(verbose=False),
+    )
     assert c["create"] == 0 and c["repoint"] == 0 and c["prune"] == 0
 
 
 # --- global home-skill routing ---------------------------------------------
 
+
 def test_global_routes_by_scope_and_excludes_do_star_from_cc(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
     _patch_home(m, home)
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc", "pi", "codex"], "destinations": []}
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": ["cc", "pi", "codex"],
+        "destinations": [],
+    }
     m.do_global(cfg, _quiet(m))
 
     cc = home / ".claude/skills"
@@ -421,13 +553,13 @@ def test_global_routes_by_scope_and_excludes_do_star_from_cc(tmp_path: Path) -> 
     assert (pi / "qa/SKILL.md").exists()
 
     # do-* workflow commands reach Pi only: not cc, not codex.
-    assert (pi / "do-plan-and-grill/SKILL.md").exists()
-    assert not (cc / "do-plan-and-grill").exists(), "do-* must not land in Claude Code home"
-    assert not (codex / "do-plan-and-grill").exists(), "do-* must not land in Codex home"
+    assert (pi / "do-plan/SKILL.md").exists()
+    assert not (cc / "do-plan").exists(), "do-* must not land in Claude Code home"
+    assert not (codex / "do-plan").exists(), "do-* must not land in Codex home"
 
     # Claude-scoped cc-* command reaches cc only.
-    assert (cc / "cc-plan-and-grill/SKILL.md").exists()
-    assert not (pi / "cc-plan-and-grill").exists()
+    assert (cc / "cc-plan/SKILL.md").exists()
+    assert not (pi / "cc-plan").exists()
 
 
 def test_global_respects_configured_harness_subset(tmp_path: Path) -> None:
@@ -461,10 +593,10 @@ def test_do_star_is_pi_only_cc_star_is_claude_only(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _patch_home(m, home)
     dest = tmp_path / "dest"
-    _scaffold_dest(dest)                        # 'demo' = common
-    _add_slash_skill(dest, "do-plan-and-grill", "common")   # do-* (recipe scope common)
-    _add_slash_skill(dest, "do-loop", "claude")             # do-* even if recipe is claude-scoped
-    _add_slash_skill(dest, "cc-plan-and-grill", "claude")   # cc-*
+    _scaffold_dest(dest)  # 'demo' = common
+    _add_slash_skill(dest, "do-plan-and-grill", "common")  # do-* (recipe scope common)
+    _add_slash_skill(dest, "do-loop", "claude")  # do-* even if recipe is claude-scoped
+    _add_slash_skill(dest, "cc-plan-and-grill", "claude")  # cc-*
     cfg = _cfg(m, dest, ["cc", "pi", "codex"])
     m.do_compose(cfg, _quiet(m))
     m.do_link(cfg, _quiet(m))
@@ -476,7 +608,9 @@ def test_do_star_is_pi_only_cc_star_is_claude_only(tmp_path: Path) -> None:
     # Claude Code (.claude/skills): cc-* + common present, NO do-*
     assert (cs / "cc-plan-and-grill/SKILL.md").exists()
     assert (cs / "demo/SKILL.md").exists()
-    assert not (cs / "do-plan-and-grill").exists(), "do-* must be routed OUT of Claude's dir"
+    assert not (cs / "do-plan-and-grill").exists(), (
+        "do-* must be routed OUT of Claude's dir"
+    )
     assert not (cs / "do-loop").exists()
     # do-* routed to the Pi-only source dir
     assert (dest / ".pi-skills/do-plan-and-grill/SKILL.md").exists()
@@ -530,7 +664,9 @@ def test_repo_pi_front_door_overrides_portable_do_recipe(tmp_path: Path) -> None
     assert "PORTABLE PI FRONT DOOR" not in pi_front_door.read_text()
     assert not (dest / ".claude/skills/do-full").exists()
     assert m.harness_of(dest, "do-full") == "pi"
-    assert (home / ".pi/agent/skills/do-full").resolve() == pi_front_door.parent.resolve()
+    assert (
+        home / ".pi/agent/skills/do-full"
+    ).resolve() == pi_front_door.parent.resolve()
 
 
 def test_route_do_skills_prunes_removed_command_output(tmp_path: Path) -> None:
@@ -561,17 +697,21 @@ def test_compose_prunes_removed_cc_command_output(tmp_path: Path) -> None:
     m.do_compose(_cfg(m, dest, ["cc"]), _quiet(m))
 
     assert (dest / ".claude/skills/cc-kept/SKILL.md").exists()
-    assert not stale.exists(), "removed cc-* output must not remain discoverable by Claude Code"
+    assert not stale.exists(), (
+        "removed cc-* output must not remain discoverable by Claude Code"
+    )
 
 
-def test_pi_discovers_portable_meta_plan_helpers(tmp_path: Path) -> None:
+def test_common_meta_plan_aliases_reach_all_non_prefix_harnesses(
+    tmp_path: Path,
+) -> None:
     m = _load()
     home = tmp_path / "home"
     _patch_home(m, home)
     dest = tmp_path / "dest"
     _scaffold_dest(dest)
-    _add_slash_skill(dest, "meta-plan-convert", "pi")
-    _add_slash_skill(dest, "meta-plan-check", "pi")
+    _add_slash_skill(dest, "meta-plan-convert", "common")
+    _add_slash_skill(dest, "meta-plan-check", "common")
     cfg = _cfg(m, dest, ["pi", "codex"])
 
     m.do_compose(cfg, _quiet(m))
@@ -581,8 +721,8 @@ def test_pi_discovers_portable_meta_plan_helpers(tmp_path: Path) -> None:
     codex = home / ".agents/skills"
     assert (pi / "meta-plan-convert").is_symlink()
     assert (pi / "meta-plan-check").is_symlink()
-    assert not (codex / "meta-plan-convert").exists()
-    assert not (codex / "meta-plan-check").exists()
+    assert (codex / "meta-plan-convert").is_symlink()
+    assert (codex / "meta-plan-check").is_symlink()
 
 
 def test_check_passes_after_update_and_fails_on_violation(tmp_path: Path) -> None:
@@ -606,11 +746,16 @@ def test_check_passes_after_update_and_fails_on_violation(tmp_path: Path) -> Non
 
 # --- global home runtime (agents + claude/pi runtime) ----------------------
 
+
 def test_home_runtime_copies_agents_and_excludes_codex(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
     _patch_home(m, home)
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc", "pi", "codex"], "destinations": []}
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": ["cc", "pi", "codex"],
+        "destinations": [],
+    }
     m.do_home_runtime(cfg, _quiet(m))
 
     # Generic agents land in the cc + pi home agent dirs (a known persona: backend).
@@ -634,8 +779,12 @@ def test_home_runtime_migrates_legacy_pi_agents_dir(tmp_path: Path) -> None:
     m.do_home_runtime(cfg, _quiet(m))
     legacy = home / ".pi/agents"
     legacy.mkdir(parents=True)
-    (legacy / "backend.md").write_bytes((home / ".pi/agent/agents/backend.md").read_bytes())
-    persona = m.project_root() / ".shared-llm/public/llm/pi/common/agents/doc-reviewer.md"
+    (legacy / "backend.md").write_bytes(
+        (home / ".pi/agent/agents/backend.md").read_bytes()
+    )
+    persona = (
+        m.project_root() / ".shared-llm/public/llm/pi/common/agents/doc-reviewer.md"
+    )
     (legacy / "doc-reviewer.md").symlink_to(persona)
     # A DIVERGENT same-name file: qa IS a composed persona, but this copy has been
     # hand-edited and no longer matches the staged output. Nothing proves the kit
@@ -643,7 +792,9 @@ def test_home_runtime_migrates_legacy_pi_agents_dir(tmp_path: Path) -> None:
     # alone would be irreversible data loss.
     divergent = "---\nname: qa\ndescription: hand-edited local override\n---\n"
     (legacy / "qa.md").write_text(divergent)
-    assert (legacy / "qa.md").read_text() != (home / ".pi/agent/agents/qa.md").read_text()
+    assert (legacy / "qa.md").read_text() != (
+        home / ".pi/agent/agents/qa.md"
+    ).read_text()
     (legacy / "someone-elses.md").write_text("---\nname: someone-elses\n---\n")
 
     m.do_home_runtime(cfg, _quiet(m))
@@ -694,8 +845,13 @@ def test_home_runtime_reconciles_managed_herdr_config(tmp_path: Path) -> None:
     assert target.is_symlink()
     assert target.resolve() == (m.project_root() / "herdr-config.toml").resolve()
 
-    counts = m.reconcile(m.plan_herdr_config(m.project_root()), m.repo_family(m.project_root()),
-                         plan_only=False, force=False, repo_root=m.project_root())
+    counts = m.reconcile(
+        m.plan_herdr_config(m.project_root()),
+        m.repo_family(m.project_root()),
+        plan_only=False,
+        force=False,
+        repo_root=m.project_root(),
+    )
     assert counts["create"] == counts["repoint"] == counts["prune"] == 0
 
 
@@ -706,8 +862,13 @@ def test_herdr_config_preserves_foreign_destination(tmp_path: Path) -> None:
     target = home / ".config/herdr/config.toml"
     _write(target, "mine = true\n")
 
-    counts = m.reconcile(m.plan_herdr_config(m.project_root()), m.repo_family(m.project_root()),
-                         plan_only=False, force=False, repo_root=m.project_root())
+    counts = m.reconcile(
+        m.plan_herdr_config(m.project_root()),
+        m.repo_family(m.project_root()),
+        plan_only=False,
+        force=False,
+        repo_root=m.project_root(),
+    )
     assert target.read_text() == "mine = true\n"
     assert counts["skip-foreign"] == 1
 
@@ -723,14 +884,24 @@ def test_herdr_config_repoints_and_prunes_managed_stale_link(tmp_path: Path) -> 
     target.parent.mkdir(parents=True)
     target.symlink_to(kit / "old/herdr-config.toml")
 
-    counts = m.reconcile(m.plan_herdr_config(kit), m.repo_family(kit),
-                         plan_only=False, force=False, repo_root=kit)
+    counts = m.reconcile(
+        m.plan_herdr_config(kit),
+        m.repo_family(kit),
+        plan_only=False,
+        force=False,
+        repo_root=kit,
+    )
     assert target.resolve() == source.resolve()
     assert counts["repoint"] == 1
 
     source.unlink()
-    counts = m.reconcile(m.plan_herdr_config(kit), m.repo_family(kit),
-                         plan_only=False, force=False, repo_root=kit)
+    counts = m.reconcile(
+        m.plan_herdr_config(kit),
+        m.repo_family(kit),
+        plan_only=False,
+        force=False,
+        repo_root=kit,
+    )
     assert not target.exists() and not target.is_symlink()
     assert counts["prune"] == 1
 
@@ -740,20 +911,33 @@ def test_home_runtime_exclude_by_source_path_skips_install(tmp_path: Path) -> No
     home = tmp_path / "home"
     _patch_home(m, home)
     # Baseline: without exclude, hooks + statusline install.
-    base_cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": [], "exclude": []}
+    base_cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": ["cc"],
+        "destinations": [],
+        "exclude": [],
+    }
     m.do_home_runtime(base_cfg, _quiet(m))
     assert (home / ".claude/statusline.sh").exists()
     hooks_dir = home / ".claude/hooks"
-    assert hooks_dir.is_dir() and any(hooks_dir.iterdir()), "hooks should install without exclude"
+    assert hooks_dir.is_dir() and any(hooks_dir.iterdir()), (
+        "hooks should install without exclude"
+    )
 
     # Now a fresh home WITH hooks excluded by source path.
     home2 = tmp_path / "home2"
     _patch_home(m, home2)
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": [],
-           "exclude": ["llm/claude/common/hooks"]}
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": ["cc"],
+        "destinations": [],
+        "exclude": ["llm/claude/common/hooks"],
+    }
     m.do_home_runtime(cfg, _quiet(m))
     # hooks skipped, statusline still installed (not excluded)
-    assert not (home2 / ".claude/hooks").exists() or not any((home2 / ".claude/hooks").iterdir())
+    assert not (home2 / ".claude/hooks").exists() or not any(
+        (home2 / ".claude/hooks").iterdir()
+    )
     assert (home2 / ".claude/statusline.sh").exists()
 
 
@@ -761,8 +945,12 @@ def test_home_runtime_exclude_drops_pi_extension(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
     _patch_home(m, home)
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["pi"], "destinations": [],
-           "exclude": ["llm/pi/common/extensions/do-planish.ts"]}
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": ["pi"],
+        "destinations": [],
+        "exclude": ["llm/pi/common/extensions/do-planish.ts"],
+    }
     m.do_home_runtime(cfg, _quiet(m))
     # do-planish.ts excluded, but other extensions still linked (dir not empty)
     ext = home / ".pi/agent/extensions"
@@ -783,6 +971,7 @@ def test_home_runtime_scaffold_never_clobbers_existing_settings(tmp_path: Path) 
 
 # --- public sweep / this_repo isolation ------------------------------------
 
+
 def test_public_layers_swept_and_this_repo_untouched(tmp_path: Path) -> None:
     """copy sweeps public/layers/ wholesale (a layer the hub no longer ships is
     pruned) and never prunes anything under this_repo/."""
@@ -793,7 +982,7 @@ def test_public_layers_swept_and_this_repo_untouched(tmp_path: Path) -> None:
     # Empty kit so the recipe sync is a no-op — isolate the layer sweep.
     empty_kit = tmp_path / "emptykit"
     (empty_kit / ".shared-llm").mkdir(parents=True)
-    setattr(m, "project_root", lambda: empty_kit)
+    m.__dict__["project_root"] = lambda: empty_kit
     cfg = _cfg(m, dest, ["cc"])
 
     hub = m.DEFAULT_SOURCE
@@ -803,31 +992,52 @@ def test_public_layers_swept_and_this_repo_untouched(tmp_path: Path) -> None:
 
     m.do_copy(cfg, _quiet(m))
 
-    assert not (dest / ".shared-llm/public/layers/skills/common/stale/old.md").exists(), "stale public layer not swept"
+    assert not (
+        dest / ".shared-llm/public/layers/skills/common/stale/old.md"
+    ).exists(), "stale public layer not swept"
     # this_repo layer untouched by the sweep.
-    assert (dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md").read_text() == "THIS_REPO overlay body.\n"
+    assert (
+        dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md"
+    ).read_text() == "THIS_REPO overlay body.\n"
 
 
 # --- build-time placeholder fill -------------------------------------------
+
 
 def _scaffold_placeholder_dest(dest: Path, *, template: bool = False) -> None:
     """A destination whose composed skill pulls a public/ layer carrying a
     {{PROJECT_NAME}} placeholder. With `template`, the body layer is a TEMPLATE.*
     stub under this_repo/ (exempt from the unfilled check)."""
     s = dest / ".shared-llm"
-    _write(s / "public/layers/skills/common/tok/description.md", "desc for {{PROJECT_NAME}}\n")
+    _write(
+        s / "public/layers/skills/common/tok/description.md",
+        "desc for {{PROJECT_NAME}}\n",
+    )
     if template:
         body = ".shared-llm/this_repo/layers/skills/this_repo/TEMPLATE.tok.md"
-        _write(s / "this_repo/layers/skills/this_repo/TEMPLATE.tok.md", "Fill {{PROJECT_NAME}} here.\n")
+        _write(
+            s / "this_repo/layers/skills/this_repo/TEMPLATE.tok.md",
+            "Fill {{PROJECT_NAME}} here.\n",
+        )
     else:
         body = ".shared-llm/public/layers/skills/common/tok/practices.md"
-        _write(s / "public/layers/skills/common/tok/practices.md", "Build {{PROJECT_NAME}} the right way.\n")
-    _write(s / "this_repo/compose/skills/tok.yaml", yaml.safe_dump({
-        "type": "skill", "name": "tok",
-        "description": ".shared-llm/public/layers/skills/common/tok/description.md",
-        "inputs": [body],
-        "output": ".claude/skills/tok/SKILL.md",
-    }, sort_keys=False))
+        _write(
+            s / "public/layers/skills/common/tok/practices.md",
+            "Build {{PROJECT_NAME}} the right way.\n",
+        )
+    _write(
+        s / "this_repo/compose/skills/tok.yaml",
+        yaml.safe_dump(
+            {
+                "type": "skill",
+                "name": "tok",
+                "description": ".shared-llm/public/layers/skills/common/tok/description.md",
+                "inputs": [body],
+                "output": ".claude/skills/tok/SKILL.md",
+            },
+            sort_keys=False,
+        ),
+    )
 
 
 def test_placeholder_filled_from_config(tmp_path: Path) -> None:
@@ -835,13 +1045,21 @@ def test_placeholder_filled_from_config(tmp_path: Path) -> None:
     _patch_home(m, tmp_path / "home")
     dest = tmp_path / "dest"
     _scaffold_placeholder_dest(dest)
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [],
-           "destinations": [{"path": str(dest), "harnesses": ["cc"],
-                             "placeholders": {"PROJECT_NAME": "Acme"}}]}
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": [],
+        "destinations": [
+            {
+                "path": str(dest),
+                "harnesses": ["cc"],
+                "placeholders": {"PROJECT_NAME": "Acme"},
+            }
+        ],
+    }
     m.do_compose(cfg, _quiet(m))
     out = (dest / ".claude/skills/tok/SKILL.md").read_text()
-    assert "Build Acme the right way." in out          # body filled
-    assert "description: desc for Acme" in out          # frontmatter description filled
+    assert "Build Acme the right way." in out  # body filled
+    assert "description: desc for Acme" in out  # frontmatter description filled
     assert "{{PROJECT_NAME}}" not in out
 
 
@@ -851,13 +1069,14 @@ def test_unfilled_placeholder_fails_loud(tmp_path: Path, capsys) -> None:
     dest = tmp_path / "dest"
     _scaffold_placeholder_dest(dest)
     # No placeholders map → {{PROJECT_NAME}} cannot be filled.
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [],
-           "destinations": [{"path": str(dest), "harnesses": ["cc"]}]}
-    try:
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": [],
+        "destinations": [{"path": str(dest), "harnesses": ["cc"]}],
+    }
+    with pytest.raises(SystemExit) as error:
         m.do_compose(cfg, _quiet(m))
-        assert False, "expected SystemExit on unfilled placeholder"
-    except SystemExit as e:
-        assert e.code not in (0, None)
+    assert error.value.code not in (0, None)
     err = capsys.readouterr().err
     assert "PROJECT_NAME" in err
     assert "tok/SKILL.md" in err
@@ -872,8 +1091,11 @@ def test_template_input_exempt_from_placeholder_check(tmp_path: Path) -> None:
     _patch_home(m, tmp_path / "home")
     dest = tmp_path / "dest"
     _scaffold_placeholder_dest(dest, template=True)
-    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [],
-           "destinations": [{"path": str(dest), "harnesses": ["cc"]}]}
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": [],
+        "destinations": [{"path": str(dest), "harnesses": ["cc"]}],
+    }
     m.do_compose(cfg, _quiet(m))  # must NOT raise
     out = (dest / ".claude/skills/tok/SKILL.md").read_text()
     assert "{{PROJECT_NAME}}" in out  # left unfilled, exempt
@@ -881,4 +1103,5 @@ def test_template_input_exempt_from_placeholder_check(tmp_path: Path) -> None:
 
 if __name__ == "__main__":
     import subprocess
+
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-q"]))

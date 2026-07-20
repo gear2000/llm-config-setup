@@ -1,6 +1,6 @@
 # Shared meta-runner phase protocol
 
-This is the shared execution contract for the Herdr-native runners: `/herdr-run` (the TUI) and `/herdr-phase` (the phase leader). It is deliberately generic and public: examples use placeholder model and agent names only.
+This is the shared execution contract for the Herdr-native runners: `/herdr-control` (the TUI) and `/herdr-phase` (the phase leader). It is deliberately generic and public: examples use placeholder model and agent names only.
 
 The defining rule of this protocol: **LLM implementation, audit, verifier, advisor, and consult work is always a work ORDER placed to the UpAgent Recruiter, which hires a fresh worker for it — never a native or nested subagent of the leader.** The ordinary deterministic stages are controller actions with durable result receipts, not native subagents. The phase leader does not call the harness's own agent/task tool to run stage work. It writes durable order/result files, drives the Recruiter over the Herdr socket when a worker is needed, and reads typed worker `result.json`, controller `controller-result.json`, and `phase-result.json` files as the authoritative outcomes. Everything else — the two-file input, the five-stage worktree lifecycle, the Stage 2 audit gate, the adversarial-evaluator persona — is transport-agnostic substrate that survives unchanged.
 

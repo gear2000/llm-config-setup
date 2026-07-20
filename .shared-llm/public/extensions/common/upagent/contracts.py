@@ -67,7 +67,7 @@ ORDER_REQUIRED = (
     "result_path",  # absolute path the worker MUST write result.json to
     "cockpit_pane",  # id of an existing pane IN the cockpit workspace to split the worker
     # from (Herdr `pane split` takes a source pane, not a workspace label).
-    # /herdr-run creates the cockpit and threads this pane id down.
+    # /herdr-control creates the cockpit and threads this pane id down.
 )
 
 # Required keys on a result.json the worker writes.

@@ -1,0 +1,1 @@
+Pi planning front door: research, conditionally resolve design, grill with Planish, run exactly two fresh full-plan `plan-adversary` rounds by default, then promote `plan.md` only after final human approval. It does not convert for Herdr or implement.

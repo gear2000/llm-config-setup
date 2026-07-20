@@ -15,9 +15,9 @@
 # over the Herdr unix socket, so these work from any shell (HERDR_ENV is set
 # explicitly where an engine insists on it).
 #
-# FUTURE: a `herdr-plan-from-issue <github-or-linear-ref>` recipe can fetch the
+# FUTURE: a `herdr-start-from-issue <github-or-linear-ref>` recipe can fetch the
 # plan/details from a GitHub or Linear issue into a run dir (plan.md +
-# route.yaml) and then delegate to `herdr-plan` — the kickoff below stays the
+# route.yaml) and then delegate to `herdr-start` — the kickoff below stays the
 # single entry seam, so issue-driven runs are an additive fetcher, not a fork.
 
 _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/recruiter.py"
@@ -101,37 +101,42 @@ herdr-down:
 # inherits `--separate-workspaces` (per-run `<slug>` workspace) when `herdr-up`
 # chose that mode, or when passed here explicitly.
 #
-#   just herdr-plan ops/work-log/2026-07-12/my-feature
-#   just herdr-plan ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
-#   just herdr-plan ops/work-log/2026-07-12/my-feature "" pi
-herdr-plan dir slug="" harness="claude" *FLAGS="":
+#   just herdr-start ops/work-log/2026-07-12/my-feature
+#   just herdr-start ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
+#   just herdr-start ops/work-log/2026-07-12/my-feature "" pi
+herdr-start dir slug="" harness="claude" *FLAGS="":
     ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}" {{FLAGS}}
+
+# One-release warning alias for the old launcher name.
+herdr-plan dir slug="" harness="claude" *FLAGS="":
+    @echo "WARNING: just herdr-plan is deprecated; use 'just herdr-start <converted-run-dir>'." >&2
+    @{{just_executable()}} --working-directory "{{invocation_directory()}}" --justfile "{{justfile()}}" herdr-start "{{dir}}" "{{slug}}" "{{harness}}" {{FLAGS}}
 
 # Publish the plan's durable terminal fact after run-status.md is complete. It is the run's
 # only terminal authority (and lets any in-flight legacy watchdog retire safely).
-herdr-plan-finish dir state slug="" owner_token="":
-    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}" {{ if owner_token != "" { "--owner-token " + quote(owner_token) } else { "" } }}
+herdr-run-session-finish dir state slug="" owner_token_file="":
+    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}" {{ if owner_token_file != "" { "--owner-token-file " + quote(owner_token_file) } else { "" } }}
 
 # Durable run lifecycle operations. `session-start` acquires or observes, `heartbeat` refreshes
 # the owner token, `snapshot` is read-only, `reconcile` writes the typed recovery receipt,
 # `guard` refuses blind mutation, and `cleanup` preserves anything not structurally owned.
-session-start dir *FLAGS:
+herdr-run-session-start dir *FLAGS:
     ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" session-start "{{dir}}" --repo "{{invocation_directory()}}" {{FLAGS}}
 
-heartbeat dir *FLAGS:
+herdr-run-session-heartbeat dir *FLAGS:
     ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" heartbeat "{{dir}}" --repo "{{invocation_directory()}}" {{FLAGS}}
 
-snapshot dir:
+herdr-run-session-snapshot dir:
     ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" snapshot "{{dir}}" --repo "{{invocation_directory()}}"
 
-reconcile dir:
+herdr-run-session-reconcile dir:
     ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" reconcile "{{dir}}" --repo "{{invocation_directory()}}"
 
-guard dir action token="":
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" guard "{{dir}}" --repo "{{invocation_directory()}}" --action "{{action}}" {{ if token != "" { "--token " + quote(token) } else { "" } }}
+herdr-run-session-guard dir action token_file="":
+    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" guard "{{dir}}" --repo "{{invocation_directory()}}" --action "{{action}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
 
-cleanup dir token:
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" cleanup "{{dir}}" --repo "{{invocation_directory()}}" --token {{ quote(token) }}
+herdr-run-session-cleanup dir token_file="":
+    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" cleanup "{{dir}}" --repo "{{invocation_directory()}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
 
 # Guarded non-default Herdr lab/session helper for smoke tests.
 # Generate a name first, then provision/run/teardown through that exact name:

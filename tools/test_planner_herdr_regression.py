@@ -1,4 +1,4 @@
-"""Regression coverage for the generated planner-to-Herdr handoff surface.
+"""Regression coverage for the generated planner-to-Herdr command surface.
 
 This deliberately exercises the configured-destination policy instead of testing
 only source layers: public content is copied through the hub, a repository
@@ -15,34 +15,42 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parent
 HARNESS = TOOLS / "harness.py"
-HANDOFF = "/herdr-run --plan <plan.md> --route <route.yaml> --run-root <work-log-dir>"
 
-PLANNERS = {
+CLAUDE_SKILLS = {
+    "cc-convert": ".claude/skills/cc-convert/SKILL.md",
     "cc-full": ".claude/skills/cc-full/SKILL.md",
+    "cc-implement": ".claude/skills/cc-implement/SKILL.md",
+    "cc-plan": ".claude/skills/cc-plan/SKILL.md",
     "cc-plan-and-grill": ".claude/skills/cc-plan-and-grill/SKILL.md",
     "cc-planish": ".claude/skills/cc-planish/SKILL.md",
-    "meta-cc-plan-and-grill": ".claude/skills/meta-cc-plan-and-grill/SKILL.md",
+}
+PI_SKILLS = {
+    "do-convert": ".pi-skills/do-convert/SKILL.md",
     "do-full": ".pi-skills/do-full/SKILL.md",
+    "do-implement": ".pi-skills/do-implement/SKILL.md",
+    "do-plan": ".pi-skills/do-plan/SKILL.md",
     "do-plan-and-grill": ".pi-skills/do-plan-and-grill/SKILL.md",
 }
-PI_REQUIRED_SKILLS = {
-    "do-full": ".pi-skills/do-full",
-    "do-plan-and-grill": ".pi-skills/do-plan-and-grill",
+COMMON_REQUIRED_SKILLS = {
+    "herdr-control": ".claude/skills/herdr-control",
     "herdr-phase": ".claude/skills/herdr-phase",
     "herdr-run": ".claude/skills/herdr-run",
     "meta-plan-check": ".claude/skills/meta-plan-check",
     "meta-plan-convert": ".claude/skills/meta-plan-convert",
 }
+PI_REQUIRED_SKILLS = {
+    **{name: path.rsplit("/SKILL.md", 1)[0] for name, path in PI_SKILLS.items()},
+    **COMMON_REQUIRED_SKILLS,
+}
 FORBIDDEN_SKILL_NAMES = {
-    "cc-implement",
     "cc-loop",
     "cc-oneshot",
-    "do-implement",
     "do-loop",
     "do-oneshot",
     "meta-auto-run",
     "meta-autorun",
     "meta-cc",
+    "meta-cc-plan-and-grill",
     "meta-connect",
     "meta-herdr",
     "meta-herdr-phase",
@@ -56,9 +64,7 @@ FORBIDDEN_SKILL_NAMES = {
     "team",
 }
 FORBIDDEN_TEXT = (
-    "/cc-implement",
     "/cc-oneshot",
-    "/do-implement",
     "/do-oneshot",
     "/meta-auto-run",
     "/meta-autorun",
@@ -97,12 +103,7 @@ def _write(path: Path, text: str) -> None:
 
 
 def _add_repository_overlay(destination: Path) -> None:
-    """Compose one repository-owned agent after the public recipe set.
-
-    The normal policy composes public recipes first and a destination's
-    ``this_repo`` recipes second. Keeping this overlay in the fixture proves the
-    generated surfaces below use that policy without relying on a real project.
-    """
+    """Compose one repository-owned agent after the public recipe set."""
     overlay = destination / ".shared-llm/this_repo"
     _write(
         overlay / "layers/agents/this_repo/plan-watchdog.description.md",
@@ -158,15 +159,29 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
     }
     log = harness.RunLog(verbose=False)
 
-    # This is the normal consumer path, not a direct single-recipe compose.
     harness.do_copy(config, log)
     harness.do_compose(config, log)
     harness.do_link(config, log)
 
-    for name, relative in PLANNERS.items():
+    for name, relative in CLAUDE_SKILLS.items():
         text = (destination / relative).read_text()
-        for required in ("plan.md", "route.yaml", "/meta-plan-check", HANDOFF):
-            assert required in text, f"{name} missing {required!r}"
+        if name not in {"cc-plan-and-grill", "cc-planish"}:
+            assert "plan.md" in text, name
+        assert not (destination / ".pi-skills" / name).exists(), f"{name} leaked to Pi"
+
+    for name, relative in PI_SKILLS.items():
+        text = (destination / relative).read_text()
+        if name != "do-plan-and-grill":
+            assert "plan.md" in text, name
+        assert not (destination / ".claude/skills" / name).exists(), f"{name} leaked to Claude"
+
+    assert "Do not create `route.yaml`" in (destination / ".claude/skills/cc-plan/SKILL.md").read_text()
+    assert "Do not create `route.yaml`" in (destination / ".pi-skills/do-plan/SKILL.md").read_text()
+    assert "DESIGN_REQUIRED" in (destination / ".claude/skills/cc-convert/SKILL.md").read_text()
+    assert "DESIGN_REQUIRED" in (destination / ".pi-skills/do-convert/SKILL.md").read_text()
+    assert "just herdr-start" in (destination / ".claude/skills/herdr-control/SKILL.md").read_text()
+    assert "/herdr-control <same arguments>" in (destination / ".claude/skills/herdr-run/SKILL.md").read_text()
+    assert not (destination / ".claude/skills/meta-cc-plan-and-grill").exists()
 
     active = _active_artifacts(destination)
     active_names = {path.parent.name for path in active if path.name == "SKILL.md"}
@@ -178,6 +193,7 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
     assert "Repository-specific reporting" in (
         destination / ".claude/agents/plan-watchdog.md"
     ).read_text()
+    assert (destination / ".claude/agents/plan-adversary.md").exists()
 
     for name, relative in PI_REQUIRED_SKILLS.items():
         link = home / ".pi/agent/skills" / name

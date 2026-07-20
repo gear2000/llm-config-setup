@@ -1,1 +1,1 @@
-Pi planning front door: use the Planish grill, produce and check `plan.md` + `route.yaml`, then stop with the explicit `herdr-run` handoff. The command does not execute implementation.
+Deprecated alias for `/do-plan`. Warns, then delegates to the new Pi planning front door; it no longer creates `route.yaml`, checks, implements, or starts Herdr.

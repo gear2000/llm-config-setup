@@ -25,7 +25,7 @@ The engine lives **only** in the kit and is never copied into your repo. You dri
    just configure -g cc,pi
    ```
 
-   The **global** step (run as part of `just update` when `-g` is set) installs the general home skills (`python`, `nextjs`, `backend`, `golang`) plus routed slash-command skills into `~/.claude/skills`, `~/.pi/agent/skills`, and `~/.agents/skills`. Pi standalone planning is `/do-planish` from the TypeScript extension; Pi workflow-suite commands are `/do-research`, `/do-plan-and-grill`, and `/do-full`; Claude Code gets the matching `cc-*` commands, including the standalone `/cc-planish` planner (the port of `/do-planish`). The global step also installs the generic agents (see the Inventory section in README) into `~/.claude/agents` and `~/.pi/agent/agents`, the Pi runtime into `~/.pi`, and the Claude hooks/statusline/settings into `~/.claude`. It is idempotent and non-clobbering. Third-party Pi extensions are a separate step: `just pi-extensions`.
+   The **global** step (run as part of `just update` when `-g` is set) installs the general home skills (`python`, `nextjs`, `backend`, `golang`) plus routed slash-command skills into `~/.claude/skills`, `~/.pi/agent/skills`, and `~/.agents/skills`. Pi workflow-suite commands are `/do-research`, `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full`; Claude Code gets the matching `/cc-research`, `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands. Legacy planish / plan-and-grill / meta names are one-release warning aliases. The global step also installs the generic agents (see the Inventory section in README) into `~/.claude/agents` and `~/.pi/agent/agents`, the Pi runtime into `~/.pi`, and the Claude hooks/statusline/settings into `~/.claude`. It is idempotent and non-clobbering. Third-party Pi extensions are a separate step: `just pi-extensions`.
 
 2. **Set up your target repo (per repo):**
    - Seed the repo-owned tree: copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and any repo-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. Leave `public/` alone — the engine creates it.
@@ -178,12 +178,12 @@ Then run `just update` to (re)generate every registered destination's output fil
 
 ## I — Pi planning output directory (optional)
 
-The Pi `/do-planish` command is the standalone TypeScript extension/register planner with browser-backed grill/review tools (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). It writes a `plan.md` + `plan.html` pair somewhere. Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. For workflow-suite planning, use `/do-plan-and-grill` in Pi or `/cc-plan-and-grill` in Claude Code. The standalone `/cc-planish` Claude Code skill mirrors this `/do-planish` flow against the same `.planish.yaml`.
+The Planish runtime provides the browser-backed grill/review tools used by `/do-plan` (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. Use `/do-plan` in Pi or `/cc-plan` in Claude Code for workflow-suite planning; `/do-planish` and `/cc-planish` are one-release warning aliases.
 
 Put a `.planish.yaml` at your repo root (or any ancestor directory) to control where plans land and which hostname URLs use:
 
 ```yaml
-# .planish.yaml — controls where /do-planish writes plan.md + plan.html,
+# .planish.yaml — controls where Planish-backed planning writes plan.md + plan.html,
 # and the hostname planning-flow URLs use (remote/Tailscale sessions)
 dir: docs/plans/{date}/{slug}/v{n}
 host: your-machine-name   # optional — default localhost
@@ -206,7 +206,7 @@ ops/mkdocs/docs/work-log/2026-06-29/redesign-auth-flow/plan/plan.md
 ops/mkdocs/docs/work-log/2026-06-29/redesign-auth-flow/plan/plan.html
 ```
 
-You can override the config file for a single run with `--dir <path>` passed to `/do-planish`, or by setting `$PLANISH_DIR`.
+You can override the config file for a single run with `--dir <path>` passed through the planning command, or by setting `$PLANISH_DIR`.
 
 1. **Review outputs** — open the generated `CLAUDE.md`, `AGENTS.md`, and skill files at the repo root. Read them as an LLM would. Adjust the layer prose until the generated content reads naturally and accurately describes your project, then recompose.
 

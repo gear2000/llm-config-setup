@@ -1,0 +1,9 @@
+type: skill
+name: cc-plan
+description: .shared-llm/public/layers/slash-commands/common/claude/cc-plan/description.md
+frontmatter:
+  argument-hint: "<topic> [@research.md ...] [--dir <path>] [--adversarial-iterations N] [--adversary-profile <profile>]"
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/claude/cc-plan/command.md
+  - .shared-llm/public/layers/slash-commands/common/common/plan-core.md
+output: .claude/skills/cc-plan/SKILL.md

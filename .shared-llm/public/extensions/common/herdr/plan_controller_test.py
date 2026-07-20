@@ -19,7 +19,10 @@ PlanStartError = plan_controller.PlanStartError
 
 
 @pytest.fixture(autouse=True)
-def _resolved_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def _resolved_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        plan_controller.run_lifecycle.HERDR_RUN_TOKEN_DIR_ENV, str(tmp_path / "tokens")
+    )
     monkeypatch.setattr(
         plan_controller.recruiter,
         "_resolve_current_herdr_session_name",
@@ -141,7 +144,13 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
     assert "--remote-control=sample-run" in run_call[3]
-    assert "HERDR_RUN_OWNER_TOKEN=tok-test" in run_call[3]
+    assert "/herdr-control --plan" in run_call[3]
+    assert "HERDR_RUN_OWNER_TOKEN_FILE=" in run_call[3]
+    assert "tok-test" not in run_call[3]
+    token_file = plan_controller.run_lifecycle.owner_token_path(run_dir)
+    assert token_file.parent == tmp_path / "tokens"
+    assert token_file.read_text().strip() == "tok-test"
+    assert oct(token_file.stat().st_mode & 0o777) == "0o600"
 
 
 def test_claude_tui_always_gets_remote_control_and_pi_does_not(
@@ -414,7 +423,7 @@ def test_finish_plan_requires_env_or_cli_owner_token_for_new_receipts(
     run_dir, _roster = _inputs(tmp_path)
     control = run_dir / "control"
     control.mkdir()
-    token = "owner-token"
+    token = plan_controller.uuid.uuid4().hex
     (control / "plan-start.json").write_text(
         json.dumps(
             {
@@ -430,18 +439,22 @@ def test_finish_plan_requires_env_or_cli_owner_token_for_new_receipts(
         )
     )
     (run_dir / "run-status.md").write_text("# Stopped\n")
-    monkeypatch.delenv(plan_controller.run_lifecycle.HERDR_RUN_OWNER_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(
+        plan_controller.run_lifecycle.HERDR_RUN_OWNER_TOKEN_ENV, raising=False
+    )
     monkeypatch.setattr(
         plan_controller.run_lifecycle,
         "guard",
-        lambda *args, **kwargs: pytest.fail("finish must not depend on heartbeat guard"),
+        lambda *args, **kwargs: pytest.fail(
+            "finish must not depend on heartbeat guard"
+        ),
     )
 
-    with pytest.raises(PlanStartError, match="requires HERDR_RUN_OWNER_TOKEN"):
+    with pytest.raises(PlanStartError, match="requires HERDR_RUN_OWNER_TOKEN_FILE"):
         plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
     with pytest.raises(PlanStartError, match="does not match"):
         plan_controller.finish_plan(
-            run_dir=run_dir, slug=None, state="stopped", owner_token="wrong"
+            run_dir=run_dir, slug=None, state="stopped", owner_token=f"{token}x"
         )
 
     marker = plan_controller.finish_plan(
@@ -450,6 +463,41 @@ def test_finish_plan_requires_env_or_cli_owner_token_for_new_receipts(
 
     assert marker["state"] == "stopped"
     assert json.loads((control / "run-terminal.json").read_text()) == marker
+
+
+def test_finish_plan_accepts_0600_owner_token_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    token = plan_controller.uuid.uuid4().hex
+    token_file = control / "run-owner.token"
+    token_file.write_text(f"{token}\n")
+    token_file.chmod(0o600)
+    (control / "plan-start.json").write_text(
+        json.dumps(
+            {
+                "run_owner": {
+                    "generation": 1,
+                    "role": "owner",
+                    "token_sha256": plan_controller.run_lifecycle._token_hash(token),
+                },
+                "slug": "sample-run",
+                "state": "ready",
+                "tui": {"herdr_session": "llm-lab-test"},
+            }
+        )
+    )
+    (run_dir / "run-status.md").write_text("# Stopped\n")
+    monkeypatch.setenv(
+        plan_controller.run_lifecycle.HERDR_RUN_OWNER_TOKEN_FILE_ENV,
+        str(token_file),
+    )
+
+    marker = plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+
+    assert marker["state"] == "stopped"
 
 
 def test_finish_plan_rejects_a_non_object_start_receipt(tmp_path: Path) -> None:

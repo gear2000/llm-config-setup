@@ -1,16 +1,33 @@
-# /do-full — Pi planning to a Herdr handoff
+# /do-full
 
-`/do-full` conducts Pi planning only. It does not execute implementation.
+Phone-friendly Pi composer for the approved plan workflow.
+
+## Invocation
+
+```text
+/do-full "<ask>" [--execute-direct | --execute-with-herdr] [--adversarial-iterations N] [--adversary-profile <profile>]
+```
 
 ## Workflow
 
-1. Invoke `/do-plan-and-grill <title>` and preserve its Pi Planish grill behavior.
-2. Use `/meta-plan-convert` to produce canonical `plan.md` and `route.yaml` in the work-log directory. Gather missing route values from the user; never invent profiles, models, agents, or checks.
-3. Run `/meta-plan-check <plan.md> <route.yaml>`. Resolve all reported errors and repeat until `PLAN_CHECK: PASS`.
-4. Stop and show the human the checked files and this exact next command:
+1. Resume from durable receipts if this command already has a plan directory. Do not redo completed research, grill, adversarial review, conversion, or execution-start steps.
+2. Run `/do-plan <same planning arguments>` exactly once. Wait for final human plan approval. The planning command owns Planish grill, conditional design, and the default two-round plan-adversary loop.
+3. After the final approved `plan.md` exists, choose the path:
+   - `--execute-direct` preselects direct implementation.
+   - `--execute-with-herdr` preselects Herdr conversion/execution.
+   - With neither flag, prompt the human once: direct implementation, Herdr execution, or stop after planning.
+4. Direct path: run `/do-implement <approved-plan.md>` exactly once. Do not convert for Herdr.
+5. Herdr path: run `/do-convert --herdr <approved-plan.md>` exactly once. If it returns `DESIGN_REQUIRED`, stop and send the work back to the planner with the evidence; do not start Herdr. If conversion passes, run exactly one shell launcher:
 
    ```text
-   /herdr-run --plan <plan.md> --route <route.yaml> --run-root <work-log-dir>
+   just herdr-start <converted-run-dir>
    ```
 
-The human starts Herdr deliberately after review. Do not create phase JSON, start workers, or continue into an execution loop.
+6. Report the resulting direct implementation session or Herdr controller name.
+
+## Hard rules
+
+- Do not implement a second planning review loop here; the planning command owns it.
+- Do not run a standalone check command; conversion validates internally and Herdr rechecks at startup.
+- Do not call both execution paths.
+- Execution flags never bypass final human approval of the plan.

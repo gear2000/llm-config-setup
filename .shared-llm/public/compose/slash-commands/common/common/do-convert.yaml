@@ -1,0 +1,10 @@
+type: skill
+name: do-convert
+description: .shared-llm/public/layers/slash-commands/common/common/do-convert/description.md
+frontmatter:
+  argument-hint: "--herdr <plan.md> [--out <converted-run-dir>] [--non-interactive]"
+inputs:
+- .shared-llm/public/llm/pi/common/meta-plan/meta-plan-format.md
+- .shared-llm/public/layers/slash-commands/common/common/do-convert/command.md
+- .shared-llm/public/layers/slash-commands/common/common/convert-herdr-core.md
+output: .claude/skills/do-convert/SKILL.md

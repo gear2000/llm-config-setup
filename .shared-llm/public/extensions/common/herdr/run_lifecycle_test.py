@@ -24,21 +24,21 @@ def _run_tree(tmp_path: Path) -> Path:
     run_dir.mkdir()
     (run_dir / "plan.md").write_text("# Plan\n")
     (run_dir / "route.yaml").write_text(
-        "phases:\n"
-        "  phase-0:\n"
-        "    lead:\n"
-        "      llm_profile: cheap\n"
+        "phases:\n  phase-0:\n    lead:\n      llm_profile: cheap\n"
     )
     return run_dir
 
 
-def _owner(pid: int = 11, start: str = "start-11", kind: str = "operator") -> dict[str, object]:
+def _owner(
+    pid: int = 11, start: str = "start-11", kind: str = "operator"
+) -> dict[str, object]:
     return {"kind": kind, "process_pid": pid, "process_start_time": start}
 
 
 @pytest.fixture(autouse=True)
 def _isolated_recruiter_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setenv(life.HERDR_RUN_TOKEN_DIR_ENV, str(tmp_path / "tokens"))
     monkeypatch.setattr(life.recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
 
 
@@ -72,7 +72,9 @@ def test_stale_pid_reuse_requires_reconciliation_before_takeover(
     first = life.acquire_owner(run_dir, owner=_owner(11, "original"))
     monkeypatch.setattr(life.recruiter, "_process_start_time", lambda pid: "reused")
 
-    observer = life.acquire_owner(run_dir, owner=_owner(22, "new"), takeover_stale=False)
+    observer = life.acquire_owner(
+        run_dir, owner=_owner(22, "new"), takeover_stale=False
+    )
     assert observer["role"] == "observer"
     assert "reconcile" in observer["reason"]
 
@@ -81,7 +83,11 @@ def test_stale_pid_reuse_requires_reconciliation_before_takeover(
 
     receipt = life.reconcile(run_dir)
     assert receipt["owner"]["status"]["state"] == "stale"
-    monkeypatch.setattr(life.recruiter, "_process_start_time", lambda pid: "new" if pid == 22 else "reused")
+    monkeypatch.setattr(
+        life.recruiter,
+        "_process_start_time",
+        lambda pid: "new" if pid == 22 else "reused",
+    )
     takeover = life.acquire_owner(run_dir, owner=_owner(22, "new"), takeover_stale=True)
 
     assert takeover["role"] == "owner"
@@ -122,7 +128,9 @@ def test_snapshot_schema_errors_and_precedence(
     assert life.snapshot(run_dir)["run_state"]["source"] == "typed-phase-results"
 
     (run_dir / "control/run-terminal.json").write_text(
-        json.dumps({"state": "succeeded", "plan_id": "run", "summary_path": "run-status.md"})
+        json.dumps(
+            {"state": "succeeded", "plan_id": "run", "summary_path": "run-status.md"}
+        )
     )
     terminal = life.snapshot(run_dir)["run_state"]
     assert terminal["source"] == "typed-terminal"
@@ -165,7 +173,86 @@ def test_heartbeat_loop_exits_when_identity_or_token_stops_matching(
     assert "token does not match" in result["reason"]
 
 
-def test_snapshot_reads_active_leaders_from_run_root_not_control(tmp_path: Path) -> None:
+def test_owner_token_file_is_0600_and_env_file_is_preferred(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _run_tree(tmp_path)
+    token_file = life.write_owner_token_file(run_dir, "safe-token")
+
+    assert token_file.read_text().strip() == "safe-token"
+    assert oct(token_file.stat().st_mode & 0o777) == "0o600"
+
+    monkeypatch.setenv(life.HERDR_RUN_OWNER_TOKEN_FILE_ENV, str(token_file))
+    monkeypatch.setenv(life.HERDR_RUN_OWNER_TOKEN_ENV, "mismatched-capability")
+
+    assert life.token_from_env_or_file() == "safe-token"
+
+
+def test_owner_token_file_refuses_permissive_or_symlinked_files(tmp_path: Path) -> None:
+    permissive = tmp_path / "token"
+    permissive.write_text("safe-token\n")
+    permissive.chmod(0o644)
+    with pytest.raises(LifecycleError, match="0600 regular file"):
+        life.read_owner_token_file(permissive)
+
+    target = tmp_path / "target"
+    target.write_text("safe-token\n")
+    target.chmod(0o600)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(LifecycleError, match="0600 regular file"):
+        life.read_owner_token_file(link)
+
+
+def test_owner_token_writer_refuses_existing_symlink(tmp_path: Path) -> None:
+    run_dir = _run_tree(tmp_path)
+    outside = tmp_path / "outside-token"
+    outside.write_text("old-token\n")
+    token_path = life.owner_token_path(run_dir)
+    token_path.symlink_to(outside)
+
+    with pytest.raises(LifecycleError, match="owner token file must not be a symlink"):
+        life.write_owner_token_file(run_dir, "safe-token")
+
+
+def test_owner_token_directory_refuses_symlink_before_chmod(tmp_path: Path) -> None:
+    target = tmp_path / "target-dir"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    (tmp_path / "tokens").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(LifecycleError, match="same-user 0700 directory"):
+        life._owner_token_dir()
+
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_control_directory_refuses_symlink_before_chmod(tmp_path: Path) -> None:
+    run_dir = _run_tree(tmp_path)
+    target = tmp_path / "control-target"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    (run_dir / "control").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(LifecycleError, match="same-user 0700 directory"):
+        life._control_dir(run_dir)
+
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_token_source_conflicts_fail_and_empty_stdin_uses_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = life.uuid.uuid4().hex
+    monkeypatch.setenv(life.HERDR_RUN_OWNER_TOKEN_ENV, capability)
+    assert life.resolve_token_sources(None, None, "") == capability
+    with pytest.raises(LifecycleError, match="sources conflict"):
+        life.resolve_token_sources(capability, Path("other"), None)
+
+
+def test_snapshot_reads_active_leaders_from_run_root_not_control(
+    tmp_path: Path,
+) -> None:
     run_dir = _run_tree(tmp_path)
     (run_dir / "active-leader-panes.json").write_text(
         json.dumps({"phase-0": {"pane_id": "root-pane"}})
@@ -189,8 +276,10 @@ def test_guard_allows_reads_and_blocks_wrong_or_stale_mutations(
 
     assert life.guard(run_dir, action="snapshot")["allowed"] is True
     with pytest.raises(LifecycleError, match="does not match"):
-        life.guard(run_dir, action="mutation", token="wrong-token")
-    assert life.guard(run_dir, action="mutation", token=owner["token"])["allowed"] is True
+        life.guard(run_dir, action="mutation", token=f"{owner['token']}-other")
+    assert (
+        life.guard(run_dir, action="mutation", token=owner["token"])["allowed"] is True
+    )
 
     lease_path = run_dir / "control/run-owner.json"
     lease = json.loads(lease_path.read_text())
@@ -218,8 +307,14 @@ def test_cleanup_refuses_adopted_resources_and_writes_report(
         )
     )
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("adopted pane must not close"))
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
+    monkeypatch.setattr(
+        life.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: pytest.fail("adopted pane must not close"),
+    )
 
     with pytest.raises(LifecycleError, match="adopted pane"):
         life.cleanup(run_dir, repo=tmp_path, token="tok")
@@ -241,18 +336,29 @@ def test_cleanup_preflight_is_atomic_before_any_close(
 ) -> None:
     run_dir = _run_tree(tmp_path)
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": False, "landed": False, "reason": "dirty"})
+    monkeypatch.setattr(
+        life,
+        "_repo_git_state",
+        lambda _repo: {"clean": False, "landed": False, "reason": "dirty"},
+    )
     monkeypatch.setattr(
         life,
         "_cleanup_decisions",
         lambda _run_dir, _source_errors: [{"action": "close", "pane_id": "pane-1"}],
     )
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("dirty cleanup must not mutate"))
+    monkeypatch.setattr(
+        life.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: pytest.fail("dirty cleanup must not mutate"),
+    )
 
     with pytest.raises(LifecycleError, match="dirty"):
         life.cleanup(run_dir, repo=tmp_path, token="tok")
 
-    assert json.loads((run_dir / "control/cleanup-report.json").read_text())["state"] == "refused"
+    assert (
+        json.loads((run_dir / "control/cleanup-report.json").read_text())["state"]
+        == "refused"
+    )
 
 
 def test_cleanup_preserves_ambiguous_created_resource(
@@ -272,8 +378,14 @@ def test_cleanup_preserves_ambiguous_created_resource(
         )
     )
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("ambiguous pane must not close"))
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
+    monkeypatch.setattr(
+        life.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: pytest.fail("ambiguous pane must not close"),
+    )
 
     with pytest.raises(LifecycleError, match="missing startup health identity"):
         life.cleanup(run_dir, repo=tmp_path, token="tok")
@@ -306,10 +418,20 @@ def test_cleanup_preserves_all_when_phase_leader_is_ambiguous(
         json.dumps({"phase-0": {"pane_id": "leader-pane"}})
     )
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
     monkeypatch.setattr(life, "_pane_identity_verified", lambda _identity: (True, "ok"))
-    monkeypatch.setattr(life, "_live_pane_ids", lambda _session: {"tui-pane", "leader-pane"})
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("no pane should close when any leader is ambiguous"))
+    monkeypatch.setattr(
+        life, "_live_pane_ids", lambda _session: {"tui-pane", "leader-pane"}
+    )
+    monkeypatch.setattr(
+        life.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: pytest.fail(
+            "no pane should close when any leader is ambiguous"
+        ),
+    )
 
     with pytest.raises(LifecycleError, match="missing structural pane ownership"):
         life.cleanup(run_dir, repo=tmp_path, token="tok")
@@ -340,10 +462,18 @@ def test_cleanup_malformed_active_leader_map_writes_report_before_refusing(
     )
     (run_dir / "active-leader-panes.json").write_text("[]\n")
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
     monkeypatch.setattr(life, "_live_pane_ids", lambda _session: {"tui-pane"})
     monkeypatch.setattr(life, "_pane_identity_verified", lambda _identity: (True, "ok"))
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("malformed leader map must block all closes"))
+    monkeypatch.setattr(
+        life.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed leader map must block all closes"
+        ),
+    )
 
     with pytest.raises(LifecycleError, match="active leader map is malformed"):
         life.cleanup(run_dir, repo=tmp_path, token="tok")
@@ -378,16 +508,24 @@ def test_cleanup_closes_only_identity_validated_created_resource(
         )
     )
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
     monkeypatch.setattr(life, "_pane_identity_verified", lambda _identity: (True, "ok"))
     closed: list[tuple[str, ...]] = []
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: closed.append(args))
+    monkeypatch.setattr(
+        life.recruiter, "_herdr", lambda *args, **kwargs: closed.append(args)
+    )
     live_results = iter([{"pane-1"}, set()])
     monkeypatch.setattr(life, "_live_pane_ids", lambda _session: next(live_results))
+    capability = life.uuid.uuid4().hex
+    token_file = life.write_owner_token_file(run_dir, capability)
 
-    report = life.cleanup(run_dir, repo=tmp_path, token="tok")
+    report = life.cleanup(run_dir, repo=tmp_path, token=capability)
 
     assert report["state"] == "closed"
+    assert report["owner_token_removed"] is True
+    assert not token_file.exists()
     assert closed == [("pane", "close", "pane-1")]
 
 
@@ -426,19 +564,25 @@ def test_cleanup_treats_identity_recorded_absent_phase_leader_as_safe(
                         "process_start_time": "start-456",
                     },
                     "herdr_session": "llm-lab-test",
-                    "ownership": {"pane": {"pane_id": "leader-pane", "state": "created"}},
+                    "ownership": {
+                        "pane": {"pane_id": "leader-pane", "state": "created"}
+                    },
                     "pane_id": "leader-pane",
                 }
             }
         )
     )
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
     monkeypatch.setattr(life, "_pane_identity_verified", lambda _identity: (True, "ok"))
     live_results = iter([{"tui-pane"}, {"tui-pane"}, set()])
     monkeypatch.setattr(life, "_live_pane_ids", lambda _session: next(live_results))
     closed: list[tuple[str, ...]] = []
-    monkeypatch.setattr(life.recruiter, "_herdr", lambda *args, **kwargs: closed.append(args))
+    monkeypatch.setattr(
+        life.recruiter, "_herdr", lambda *args, **kwargs: closed.append(args)
+    )
 
     report = life.cleanup(run_dir, repo=tmp_path, token="tok")
 
@@ -456,7 +600,9 @@ def test_cleanup_reports_failure_when_closed_pane_remains_live(
 ) -> None:
     run_dir = _run_tree(tmp_path)
     monkeypatch.setattr(life, "guard", lambda *args, **kwargs: {"allowed": True})
-    monkeypatch.setattr(life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True})
+    monkeypatch.setattr(
+        life, "_repo_git_state", lambda _repo: {"clean": True, "landed": True}
+    )
     monkeypatch.setattr(
         life,
         "_cleanup_decisions",
@@ -482,20 +628,38 @@ def test_cleanup_reports_failure_when_closed_pane_remains_live(
 def test_repo_git_state_preserves_clean_but_unpushed_head(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)], check=True, capture_output=True
+    )
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
-    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test User"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True
+    )
     (repo / "file.txt").write_text("one\n")
     subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "one"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", "HEAD"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "one"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "push", "-u", "origin", "HEAD"],
+        check=True,
+        capture_output=True,
+    )
 
     assert life._repo_git_state(repo)["landed"] is True
 
     (repo / "file.txt").write_text("two\n")
-    subprocess.run(["git", "-C", str(repo), "commit", "-am", "two"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-am", "two"],
+        check=True,
+        capture_output=True,
+    )
     state = life._repo_git_state(repo)
 
     assert state["clean"] is True
@@ -507,12 +671,16 @@ def test_restart_takeover_fences_old_owner_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir = _run_tree(tmp_path)
-    monkeypatch.setattr(life.recruiter, "_process_start_time", lambda pid: "old" if pid == 1 else None)
+    monkeypatch.setattr(
+        life.recruiter, "_process_start_time", lambda pid: "old" if pid == 1 else None
+    )
     old = life.acquire_owner(run_dir, owner=_owner(1, "old"))
     assert life.guard(run_dir, action="mutation", token=old["token"])["allowed"] is True
     monkeypatch.setattr(life.recruiter, "_process_start_time", lambda pid: None)
     life.reconcile(run_dir)
-    monkeypatch.setattr(life.recruiter, "_process_start_time", lambda pid: "new" if pid == 2 else None)
+    monkeypatch.setattr(
+        life.recruiter, "_process_start_time", lambda pid: "new" if pid == 2 else None
+    )
     new = life.acquire_owner(run_dir, owner=_owner(2, "new"), takeover_stale=True)
 
     with pytest.raises(LifecycleError, match="does not match"):

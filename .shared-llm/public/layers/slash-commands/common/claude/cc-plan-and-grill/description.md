@@ -1,1 +1,1 @@
-Claude Code planning front door: research, grill, produce and check `plan.md` + `route.yaml`, then stop with the explicit `herdr-run` handoff. The command does not execute implementation.
+Deprecated alias for `/cc-plan`. Warns, then delegates to the new Claude Code planning front door; it no longer creates `route.yaml`, checks, implements, or starts Herdr.

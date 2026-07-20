@@ -1,1 +1,1 @@
-Claude Code planning conductor: research and grill a plan, create and check the canonical `plan.md` + `route.yaml` pair, then stop with the explicit Herdr handoff. It does not execute implementation.
+Phone-friendly Claude Code composer: run `/cc-plan` exactly once, then either `/cc-implement` once for direct work or `/cc-convert --herdr` once plus `just herdr-start` once. Prompts for mode when no execution flag is supplied.

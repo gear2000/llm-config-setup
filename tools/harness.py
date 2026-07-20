@@ -53,15 +53,16 @@ from __future__ import annotations
 
 import argparse
 import collections
-from dataclasses import dataclass
 import filecmp
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 try:
@@ -83,7 +84,10 @@ def find_shared_llm(arg: str | None) -> Path:
     if arg:
         candidate = Path(arg).expanduser().resolve()
         if not candidate.is_dir():
-            print(f"error: --shared-llm path is not a directory: {candidate}", file=sys.stderr)
+            print(
+                f"error: --shared-llm path is not a directory: {candidate}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         return candidate
 
@@ -92,7 +96,10 @@ def find_shared_llm(arg: str | None) -> Path:
     if env:
         candidate = Path(env).expanduser().resolve()
         if not candidate.is_dir():
-            print(f"error: $SHARED_LLM_DIR is not a directory: {candidate}", file=sys.stderr)
+            print(
+                f"error: $SHARED_LLM_DIR is not a directory: {candidate}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         return candidate
 
@@ -155,7 +162,10 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
 
     compose_type = data.get("type", "")
     if compose_type and compose_type not in VALID_TYPES:
-        print(f"error: {path} has invalid type '{compose_type}' (valid: {VALID_TYPES})", file=sys.stderr)
+        print(
+            f"error: {path} has invalid type '{compose_type}' (valid: {VALID_TYPES})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     for field in ("inputs", "output"):
@@ -164,7 +174,10 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
             sys.exit(1)
 
     if compose_type == "copy" and len(data.get("inputs", [])) != 1:
-        print(f"error: {path} type 'copy' needs exactly one input (a single file)", file=sys.stderr)
+        print(
+            f"error: {path} type 'copy' needs exactly one input (a single file)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if compose_type not in PLAIN_TYPES and compose_type not in STRUCTURED_TYPES:
@@ -179,7 +192,10 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
             print(f"error: {path} 'frontmatter' must be a mapping", file=sys.stderr)
             sys.exit(1)
         if "resources" in data and not isinstance(data["resources"], str):
-            print(f"error: {path} 'resources' must be a string (a source directory path)", file=sys.stderr)
+            print(
+                f"error: {path} 'resources' must be a string (a source directory path)",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     if not isinstance(data["inputs"], list):
@@ -196,6 +212,7 @@ def load_compose_yaml(path: Path) -> dict[str, Any]:
 # Output handlers
 # ---------------------------------------------------------------------------
 
+
 class ClaudeSkill:
     """Produces a skill .md file with name + description frontmatter.
 
@@ -205,10 +222,18 @@ class ClaudeSkill:
     its hand-authored SKILL.md had without the composer dropping it.
     """
 
-    def build_frontmatter(self, name: str, description: str, extra: dict[str, Any]) -> str:
+    def build_frontmatter(
+        self, name: str, description: str, extra: dict[str, Any]
+    ) -> str:
         fm: dict[str, Any] = {"name": name, "description": description}
         fm.update(extra)
-        return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True, width=2**31)
+        return yaml.dump(
+            fm,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+            width=2**31,
+        )
 
     def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
@@ -229,13 +254,21 @@ class ClaudeAgent:
     profile) rather than hardwired.
     """
 
-    def build_frontmatter(self, name: str, description: str, model: str | None, color: str | None) -> str:
+    def build_frontmatter(
+        self, name: str, description: str, model: str | None, color: str | None
+    ) -> str:
         fm: dict[str, Any] = {"name": name, "description": description}
         if model is not None:
             fm["model"] = model
         if color is not None:
             fm["color"] = color
-        return yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True, width=2**31)
+        return yaml.dump(
+            fm,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+            width=2**31,
+        )
 
     def write(self, data: dict[str, Any], body: str, output_path: Path) -> None:
         description = data["_description_content"]
@@ -342,6 +375,7 @@ class SettingsMerge:
 # Composer
 # ---------------------------------------------------------------------------
 
+
 class Composer:
     """Discovers compose YAMLs and dispatches to the right output handler.
 
@@ -362,12 +396,18 @@ class Composer:
     defaults to `repo_root/.shared-llm` and never affects path resolution.
     """
 
-    def __init__(self, repo_root: Path, output_base: Path | None = None,
-                 shared_root: Path | None = None,
-                 placeholders: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        output_base: Path | None = None,
+        shared_root: Path | None = None,
+        placeholders: dict[str, str] | None = None,
+    ) -> None:
         self.repo_root = repo_root
         self.output = output_base if output_base is not None else repo_root
-        self.shared = shared_root if shared_root is not None else repo_root / ".shared-llm"
+        self.shared = (
+            shared_root if shared_root is not None else repo_root / ".shared-llm"
+        )
         # Per-destination build-time fill values for kit-synced layers that carry
         # {{TOKEN}} placeholders. Empty for the low-level compose CLI and the
         # kit's own self-compose (whose layers carry no placeholders).
@@ -414,8 +454,9 @@ class Composer:
                 refs.append(v)
         return any(Path(r).name.startswith("TEMPLATE.") for r in refs)
 
-    def _assert_filled(self, text: str, output_path: Path, yaml_path: Path,
-                       exempt: bool) -> None:
+    def _assert_filled(
+        self, text: str, output_path: Path, yaml_path: Path, exempt: bool
+    ) -> None:
         """Fail loud (non-zero exit) if composed output still holds a {{TOKEN}}
         that no placeholder filled — naming the token(s), the output, and the
         recipe. Exempt when the recipe pulls a TEMPLATE.* stub."""
@@ -480,7 +521,9 @@ class Composer:
 
         if compose_type not in PLAIN_TYPES:
             desc_path = self.resolve_input(data["description"])
-            data["_description_content"] = self._fill_placeholders(read_file(desc_path).strip())
+            data["_description_content"] = self._fill_placeholders(
+                read_file(desc_path).strip()
+            )
 
         parts: list[str] = []
         # Inject shared catalog partial FIRST when declared (single-source pattern).
@@ -502,7 +545,9 @@ class Composer:
         exempt = self._pulls_template(data)
         self._assert_filled(body, output_path, yaml_path, exempt)
         if compose_type not in PLAIN_TYPES:
-            self._assert_filled(data["_description_content"], output_path, yaml_path, exempt)
+            self._assert_filled(
+                data["_description_content"], output_path, yaml_path, exempt
+            )
 
         print(f"  {compose_type}: {label} -> {output_path}")
 
@@ -525,7 +570,10 @@ class Composer:
         if resources_rel:
             src_dir = self.resolve_input(resources_rel)
             if not src_dir.is_dir():
-                print(f"error: resources path is not a directory: {src_dir}", file=sys.stderr)
+                print(
+                    f"error: resources path is not a directory: {src_dir}",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             for item in src_dir.rglob("*"):
                 if item.is_dir():
@@ -657,8 +705,8 @@ def repo_family(root: Path) -> str:
 
 @dataclass
 class LinkPlan:
-    desired: dict[Path, Path]   # dest link path -> source path it should point at
-    dest_dirs: list[Path]       # dirs scanned for orphaned / dangling managed links
+    desired: dict[Path, Path]  # dest link path -> source path it should point at
+    dest_dirs: list[Path]  # dirs scanned for orphaned / dangling managed links
 
 
 def harness_of(root: Path, name: str) -> str:
@@ -713,7 +761,9 @@ def link_is_ours(dest: Path, family: str, repo_root: Path | None = None) -> bool
             return True
     # Also ours if it resolves inside the repo we're reconciling.
     try:
-        Path(resolved).relative_to(repo_root if repo_root is not None else project_root())
+        Path(resolved).relative_to(
+            repo_root if repo_root is not None else project_root()
+        )
         return True
     except ValueError:
         return False
@@ -723,7 +773,11 @@ def _skill_dirs(root: Path) -> list[Path]:
     skills = root / ".claude/skills"
     if not skills.is_dir():
         return []
-    return [d for d in sorted(skills.iterdir()) if d.is_dir() and not d.name.startswith(".") and d.name != "_archived"]
+    return [
+        d
+        for d in sorted(skills.iterdir())
+        if d.is_dir() and not d.name.startswith(".") and d.name != "_archived"
+    ]
 
 
 def plan_pi_runtime(root: Path) -> LinkPlan:
@@ -763,8 +817,14 @@ def plan_herdr_config(root: Path) -> LinkPlan:
     return LinkPlan(desired, [destination.parent])
 
 
-def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool,
-              repo_root: Path | None = None) -> collections.Counter:
+def reconcile(
+    plan: LinkPlan,
+    family: str,
+    *,
+    plan_only: bool,
+    force: bool,
+    repo_root: Path | None = None,
+) -> collections.Counter:
     counts: collections.Counter = collections.Counter()
     tag = "plan" if plan_only else "done"
 
@@ -834,6 +894,7 @@ def reconcile(plan: LinkPlan, family: str, *, plan_only: bool, force: bool,
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _parse_placeholder_args(items: list[str] | None) -> dict[str, str]:
     """Parse repeated `--placeholder NAME=VALUE` CLI args into a fill map.
 
@@ -861,8 +922,12 @@ def cmd_compose(args: argparse.Namespace) -> None:
     repo_root = shared_root.parent
     output_base = Path(args.target).expanduser().resolve() if args.target else repo_root
     placeholders = _parse_placeholder_args(getattr(args, "placeholder", None))
-    composer = Composer(repo_root, output_base=output_base, shared_root=shared_root,
-                        placeholders=placeholders)
+    composer = Composer(
+        repo_root,
+        output_base=output_base,
+        shared_root=shared_root,
+        placeholders=placeholders,
+    )
 
     print(f"shared-llm source: {shared_root}")
     print(f"repo root: {repo_root}")
@@ -975,7 +1040,7 @@ def translate_shared_path(path: str) -> str:
     through unchanged."""
     if not path.startswith(SHARED_PREFIX):
         return path
-    rest = path[len(SHARED_PREFIX):]
+    rest = path[len(SHARED_PREFIX) :]
     first = rest.split("/", 1)[0]
     if first in (PUBLIC_DIR, THIS_REPO_DIR):
         return path  # already split
@@ -993,7 +1058,7 @@ def _translate_recipe_text(text: str, data: dict) -> str:
     YAML round-trip). Paths are replaced longest-first so a shorter path can never
     corrupt a longer one that contains it as a prefix."""
     paths: set[str] = set()
-    for rel in (data.get("inputs") or []):
+    for rel in data.get("inputs") or []:
         if isinstance(rel, str):
             paths.add(rel)
     for key in RECIPE_PATH_FIELDS:
@@ -1074,7 +1139,9 @@ def parse_harnesses(spec: str) -> list[str]:
         if not h:
             continue
         if h not in VALID_HARNESSES:
-            sys.exit(f"error: unknown harness '{h}' (valid: {', '.join(VALID_HARNESSES)})")
+            sys.exit(
+                f"error: unknown harness '{h}' (valid: {', '.join(VALID_HARNESSES)})"
+            )
         if h not in out:
             out.append(h)
     return out
@@ -1098,7 +1165,9 @@ def cmd_configure(args: argparse.Namespace) -> None:
     if args.global_list is not None:
         cfg["global"] = parse_harnesses(args.global_list)
     if args.exclude is not None:
-        cfg["exclude"] = [p.strip().strip("/") for p in args.exclude.split(",") if p.strip()]
+        cfg["exclude"] = [
+            p.strip().strip("/") for p in args.exclude.split(",") if p.strip()
+        ]
     if args.dest:
         path = str(Path(args.dest).expanduser().resolve())
         harnesses = parse_harnesses(args.list) if args.list else ["cc", "pi"]
@@ -1124,10 +1193,18 @@ def cmd_init(args: argparse.Namespace) -> None:
             print(f"  ✗ {tool}: NOT FOUND")
             missing.append(tool)
     if missing:
-        hint = {"mac": "brew install", "ubuntu": "sudo apt install"}.get(args.os, "install")
-        sys.exit(f"error: missing prerequisite(s): {', '.join(missing)}  (try: {hint} {' '.join(missing)})")
-    print("init: all prerequisites present. Next: `just configure -d <repo> -l cc,pi` then `just update`.")
-    print("init: for the Pi harness, also run `just pi-extensions` to install the pinned third-party extensions.")
+        hint = {"mac": "brew install", "ubuntu": "sudo apt install"}.get(
+            args.os, "install"
+        )
+        sys.exit(
+            f"error: missing prerequisite(s): {', '.join(missing)}  (try: {hint} {' '.join(missing)})"
+        )
+    print(
+        "init: all prerequisites present. Next: `just configure -d <repo> -l cc,pi` then `just update`."
+    )
+    print(
+        "init: for the Pi harness, also run `just pi-extensions` to install the pinned third-party extensions."
+    )
 
 
 # --- copy ------------------------------------------------------------------
@@ -1149,17 +1226,26 @@ def _git_ignored_common_rels(kit_shared: Path) -> frozenset[str]:
     cwd = kit_shared.parent
     try:
         out = subprocess.run(
-            ["git", "-C", str(cwd), "ls-files", "--others", "--ignored",
-             "--exclude-standard", "-z", "--", str(kit_shared)],
-            capture_output=True, text=True, check=True,
+            [
+                "git",
+                "-C",
+                str(cwd),
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+                "--",
+                str(kit_shared),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return frozenset()
     prefix = kit_shared.name + "/"  # "public/"
-    return frozenset(
-        p[len(prefix):] for p in out.split("\0")
-        if p.startswith(prefix)
-    )
+    return frozenset(p[len(prefix) :] for p in out.split("\0") if p.startswith(prefix))
 
 
 def _iter_common_rels(shared: Path, exclude_rels: frozenset[str] = frozenset()):
@@ -1183,9 +1269,13 @@ def _iter_common_rels(shared: Path, exclude_rels: frozenset[str] = frozenset()):
             yield rel
 
 
-def _copy_common(src_shared: Path, dst_shared: Path, log: RunLog,
-                 dst_subdir: str = "",
-                 exclude_rels: frozenset[str] = frozenset()) -> collections.Counter:
+def _copy_common(
+    src_shared: Path,
+    dst_shared: Path,
+    log: RunLog,
+    dst_subdir: str = "",
+    exclude_rels: frozenset[str] = frozenset(),
+) -> collections.Counter:
     """Copy every common file from one `.shared-llm/` dir to another. Overwrites;
     FLAGS (does not block) when an existing dest file's content differs before it
     is overwritten. Never touches this_repo/. `exclude_rels` (git-ignored kit
@@ -1218,12 +1308,13 @@ def _prune_empty_dirs(root: Path) -> None:
     """Remove now-empty directories under `root` (bottom-up), leaving `root`."""
     if not root.is_dir():
         return
-    for d in sorted((p for p in root.rglob("*") if p.is_dir()),
-                    key=lambda p: len(p.parts), reverse=True):
-        try:
-            d.rmdir()
-        except OSError:
-            pass  # not empty — keep
+    for d in sorted(
+        (p for p in root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        with suppress(OSError):
+            d.rmdir()  # not empty — keep
 
 
 def _prune_hub_slash_command_layers(kit_shared: Path, hub: Path, log: RunLog) -> int:
@@ -1259,7 +1350,8 @@ def _prune_public_layers(src_shared: Path, dst_shared: Path, log: RunLog) -> int
     if not pub_layers.is_dir():
         return 0
     wanted = {
-        rel for rel in _iter_common_rels(src_shared)
+        rel
+        for rel in _iter_common_rels(src_shared)
         if rel.parts and rel.parts[0] == PRUNABLE_PUBLIC_LAYER_PREFIX
     }
     if not wanted:
@@ -1308,8 +1400,9 @@ def _recipe_layer_refs(data: dict) -> list[str]:
     return [r for r in refs if r.startswith(SHARED_PREFIX)]
 
 
-def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog,
-                         exclude: list[str]) -> collections.Counter:
+def _sync_public_recipes(
+    kit_shared: Path, dest_shared: Path, log: RunLog, exclude: list[str]
+) -> collections.Counter:
     """Wholesale-sync the kit's recipes into a destination's public/compose/,
     translating each recipe's input-side paths from flat to split form, and prune
     any public/compose/ recipe the kit no longer ships. this_repo/compose/ is
@@ -1350,11 +1443,16 @@ def _sync_public_recipes(kit_shared: Path, dest_shared: Path, log: RunLog,
             if not isinstance(data, dict):
                 counts["skipped"] += 1
                 continue
-            missing = [translate_shared_path(r) for r in _recipe_layer_refs(data)
-                       if not (dest_root / translate_shared_path(r)).is_file()]
+            missing = [
+                translate_shared_path(r)
+                for r in _recipe_layer_refs(data)
+                if not (dest_root / translate_shared_path(r)).is_file()
+            ]
             if missing:
                 counts["skipped"] += 1
-                log(f"    ! recipe skipped (missing inputs at destination): {rel} -> {', '.join(missing)}")
+                log(
+                    f"    ! recipe skipped (missing inputs at destination): {rel} -> {', '.join(missing)}"
+                )
                 continue
             wanted.add(dst)
             translated = _translate_recipe_text(text, data)
@@ -1395,7 +1493,9 @@ def do_copy(cfg: dict, log: RunLog) -> None:
         dest_shared = dest / ".shared-llm"
         name = Path(d["path"]).name
         log.always(f"copy: hub -> {d['path']}/.shared-llm/{PUBLIC_DIR}")
-        c = _copy_common(hub, dest_shared, log, dst_subdir=PUBLIC_DIR, exclude_rels=ignored)
+        c = _copy_common(
+            hub, dest_shared, log, dst_subdir=PUBLIC_DIR, exclude_rels=ignored
+        )
         pruned_layers = _prune_public_layers(hub, dest_shared, log)
         log.always(
             f"  {name}: {c['new']} new, {c['changed']} changed, "
@@ -1435,7 +1535,10 @@ def _declared_skill_names(dest: Path, prefix: str) -> set[str]:
     """Return composer-managed slash-command skill names with ``prefix``."""
     names: set[str] = set()
     shared = dest / ".shared-llm"
-    for compose_root in (shared / PUBLIC_DIR / "compose", shared / THIS_REPO_DIR / "compose"):
+    for compose_root in (
+        shared / PUBLIC_DIR / "compose",
+        shared / THIS_REPO_DIR / "compose",
+    ):
         if not compose_root.is_dir():
             continue
         for recipe in compose_root.rglob("*.yaml"):
@@ -1458,7 +1561,11 @@ def _prune_removed_cc_skills(dest: Path, log: RunLog) -> int:
     if not claude_skills.is_dir():
         return removed
     for stale in sorted(claude_skills.iterdir()):
-        if stale.is_dir() and stale.name.startswith("cc-") and stale.name not in declared:
+        if (
+            stale.is_dir()
+            and stale.name.startswith("cc-")
+            and stale.name not in declared
+        ):
             shutil.rmtree(stale)
             removed += 1
             log(f"    - pruned stale Claude cc-* skill: .claude/skills/{stale.name}")
@@ -1470,6 +1577,7 @@ def _prune_removed_cc_skills(dest: Path, log: RunLog) -> int:
 # never removed.
 LEGACY_RUNNER_SKILL_MARKERS = {
     "team": ("ask_brain", "meta-orchestrator"),
+    "meta-cc-plan-and-grill": ("name: meta-cc-plan-and-grill",),
 }
 
 
@@ -1518,14 +1626,21 @@ def _route_do_skills(dest: Path, log: RunLog) -> int:
     # executable stale Pi command or a global link to it.
     if pi_src.is_dir():
         for stale in sorted(pi_src.iterdir()):
-            if stale.is_dir() and stale.name.startswith("do-") and stale.name not in declared:
+            if (
+                stale.is_dir()
+                and stale.name.startswith("do-")
+                and stale.name not in declared
+            ):
                 shutil.rmtree(stale)
-                log(f"    - pruned stale routed do-* skill: {PI_ONLY_SKILLS_DIR}/{stale.name}")
+                log(
+                    f"    - pruned stale routed do-* skill: {PI_ONLY_SKILLS_DIR}/{stale.name}"
+                )
     return moved
 
 
-def _compose_destination(dest: Path, log: RunLog,
-                         placeholders: dict[str, str] | None = None) -> None:
+def _compose_destination(
+    dest: Path, log: RunLog, placeholders: dict[str, str] | None = None
+) -> None:
     shared = dest / ".shared-llm"
     if not shared.is_dir():
         log.always(f"compose: skip {dest} — no .shared-llm/ (run copy/configure first)")
@@ -1537,7 +1652,7 @@ def _compose_destination(dest: Path, log: RunLog,
         # Compose the public/ (kit) tree FIRST, then the this_repo/ (repo-owned)
         # tree — same-output recipes let the this_repo copy win, so a repo can
         # override a kit recipe by name. A group absent from a tree is skipped.
-        rel = group[len("compose/"):]
+        rel = group[len("compose/") :]
         for tree in (PUBLIC_DIR, THIS_REPO_DIR):
             path = shared / tree / "compose" / rel
             if path.is_dir():
@@ -1552,15 +1667,20 @@ def _compose_destination(dest: Path, log: RunLog,
     if pruned_cc:
         log.always(f"  pruned {pruned_cc} stale cc-* skill(s) from .claude/skills")
     if pruned_legacy:
-        log.always(f"  pruned {pruned_legacy} stale legacy runner skill(s) from .claude/skills")
+        log.always(
+            f"  pruned {pruned_legacy} stale legacy runner skill(s) from .claude/skills"
+        )
     if moved:
-        log.always(f"  routed {moved} do-* skill(s) to {PI_ONLY_SKILLS_DIR}/ (Pi-only, out of Claude's .claude/skills)")
+        log.always(
+            f"  routed {moved} do-* skill(s) to {PI_ONLY_SKILLS_DIR}/ (Pi-only, out of Claude's .claude/skills)"
+        )
 
 
 def do_compose(cfg: dict, log: RunLog) -> None:
     for d in cfg["destinations"]:
-        _compose_destination(Path(d["path"]).expanduser(), log,
-                             placeholders=d.get("placeholders") or {})
+        _compose_destination(
+            Path(d["path"]).expanduser(), log, placeholders=d.get("placeholders") or {}
+        )
 
 
 # --- link (GLOBAL per-harness skill dirs) ----------------------------------
@@ -1575,6 +1695,7 @@ def do_compose(cfg: dict, log: RunLog) -> None:
 # All destinations' skills are aggregated into ONE reconcile per global dir, so a
 # second destination does not prune the first's links. On a same-name collision
 # the last destination wins and we WARN (we can't control it; just surface it).
+
 
 # Computed from HOME at call time (NOT module-level constants) so a test that
 # redirects HOME reaches the right dirs and never touches the real home.
@@ -1639,8 +1760,9 @@ def _resolves_into(link: Path, roots: list[Path]) -> bool:
     return False
 
 
-def _reconcile_global(link_dir: Path, desired: dict[str, Path],
-                      owned_roots: list[Path], log: RunLog) -> collections.Counter:
+def _reconcile_global(
+    link_dir: Path, desired: dict[str, Path], owned_roots: list[Path], log: RunLog
+) -> collections.Counter:
     """Reconcile a GLOBAL skill dir against `desired` (name -> source). Creates and
     re-points our links, prunes links we own that are no longer desired, and never
     touches a foreign link or real file."""
@@ -1727,15 +1849,21 @@ def do_link(cfg: dict, log: RunLog) -> None:
     if want_pi:
         pi_dir = _pi_global_skills()
         c = _reconcile_global(pi_dir, pi_desired, dests, log)
-        log.always(f"  pi (global {pi_dir}): created {c['create']}, "
-                   f"repointed {c['repoint']}, pruned {c['prune']}, skipped-foreign {c['skip-foreign']}")
+        log.always(
+            f"  pi (global {pi_dir}): created {c['create']}, "
+            f"repointed {c['repoint']}, pruned {c['prune']}, skipped-foreign {c['skip-foreign']}"
+        )
     if want_codex:
         codex_dir = _codex_global_skills()
         c = _reconcile_global(codex_dir, codex_desired, dests, log)
-        log.always(f"  codex (global {codex_dir}): created {c['create']}, "
-                   f"repointed {c['repoint']}, pruned {c['prune']}, skipped-foreign {c['skip-foreign']}")
+        log.always(
+            f"  codex (global {codex_dir}): created {c['create']}, "
+            f"repointed {c['repoint']}, pruned {c['prune']}, skipped-foreign {c['skip-foreign']}"
+        )
     for c in sorted(set(collisions)):
-        log.always(f"  ⚠ name collision across destinations: {c} (last destination wins)")
+        log.always(
+            f"  ⚠ name collision across destinations: {c} (last destination wins)"
+        )
 
 
 # --- global home-skill flow (ported from the retired install-global.sh) ----
@@ -1757,10 +1885,9 @@ GLOBAL_CONVENTION_SKILLS = {
 }
 
 # Home-dir skill names to prune when found (matched by their SKILL.md `name:` so we
-# never delete a foreign dir of the same name). Currently empty: cc-planish is a live
-# skill again, and do-planish is the Pi extension command /do-planish, not a global
-# skill (extensions are symlinked into ~/.pi/, never composed as skills).
-DEPRECATED_GLOBAL_SKILLS: tuple[str, ...] = ()
+# never delete a foreign dir of the same name). The redundant meta wrapper is retired now;
+# other legacy planner names remain one-release aliases.
+DEPRECATED_GLOBAL_SKILLS: tuple[str, ...] = ("meta-cc-plan-and-grill",)
 
 
 def _global_home_dirs() -> dict[str, Path]:
@@ -1814,8 +1941,9 @@ def _install_skill_dir(staged: Path, target: Path, log: RunLog) -> str:
     return "installed"
 
 
-def _prune_stale_skill(name: str, staged: Path, keep: set[str],
-                       home_dirs: dict[str, Path], log: RunLog) -> int:
+def _prune_stale_skill(
+    name: str, staged: Path, keep: set[str], home_dirs: dict[str, Path], log: RunLog
+) -> int:
     """Remove byte-identical copies from home dirs whose token is NOT in keep."""
     removed = 0
     for tok, base in home_dirs.items():
@@ -1866,8 +1994,12 @@ def do_global(cfg: dict, log: RunLog) -> None:
     home_dirs = {tok: d for tok, d in _global_home_dirs().items() if tok in wanted}
     log.always(f"global: routing home skills to {', '.join(wanted)}")
 
-    composer = Composer(kit, output_base=staging, shared_root=kit_shared,
-                        placeholders=KIT_SELF_PLACEHOLDERS)
+    composer = Composer(
+        kit,
+        output_base=staging,
+        shared_root=kit_shared,
+        placeholders=KIT_SELF_PLACEHOLDERS,
+    )
     # Family A — convention skills (staged under examples/global-staging/skills/).
     for recipe in GLOBAL_CONVENTION_SKILLS.values():
         composer.compose_one(kit_shared / recipe)
@@ -1971,7 +2103,9 @@ def _install_claude_runtime(kit_shared: Path, log: RunLog, exclude: list[str]) -
     if (src / "statusline.sh").is_file() and not skip(src / "statusline.sh"):
         _install_file(src / "statusline.sh", claude_home / "statusline.sh", log)
     if not skip(src / "settings.template.json"):
-        _scaffold_settings(src / "settings.template.json", claude_home / "settings.json", log)
+        _scaffold_settings(
+            src / "settings.template.json", claude_home / "settings.json", log
+        )
 
 
 def _migrate_legacy_pi_agents(kit: Path, staged_agents: Path, log: RunLog) -> None:
@@ -1992,10 +2126,14 @@ def _migrate_legacy_pi_agents(kit: Path, staged_agents: Path, log: RunLog) -> No
     legacy = HOME / LEGACY_PI_AGENTS_REL
     if not legacy.is_dir():
         return
-    composed = {p.name for p in staged_agents.glob("*.md")} if staged_agents.is_dir() else set()
+    composed = (
+        {p.name for p in staged_agents.glob("*.md")}
+        if staged_agents.is_dir()
+        else set()
+    )
     removed = 0
-    foreign = []      # names the kit does not compose — genuinely not ours
-    divergent = []    # same name as a persona, but the bytes are not what we ship
+    foreign = []  # names the kit does not compose — genuinely not ours
+    divergent = []  # same name as a persona, but the bytes are not what we ship
     for entry in sorted(legacy.iterdir()):
         if entry.is_symlink():
             ours = link_is_ours(entry, repo_family(kit), kit)
@@ -2006,7 +2144,9 @@ def _migrate_legacy_pi_agents(kit: Path, staged_agents: Path, log: RunLog) -> No
                 ours = True
             else:
                 divergent.append(entry)
-                log(f"    legacy: kept {entry} (differs from composed {entry.name} — not deleting)")
+                log(
+                    f"    legacy: kept {entry} (differs from composed {entry.name} — not deleting)"
+                )
                 continue
         else:
             ours = False
@@ -2019,7 +2159,8 @@ def _migrate_legacy_pi_agents(kit: Path, staged_agents: Path, log: RunLog) -> No
             log(f"    legacy: left {entry} (not ours)")
     if divergent:
         log.always(
-            "  legacy ~/.pi/agents: PRESERVED " + ", ".join(e.name for e in divergent)
+            "  legacy ~/.pi/agents: PRESERVED "
+            + ", ".join(e.name for e in divergent)
             + " — same name as a composed persona but the bytes differ, so the kit will "
             "not delete them; review and remove by hand if they are stale"
         )
@@ -2041,13 +2182,18 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
     kit_shared = kit / ".shared-llm" / PUBLIC_DIR
     staging = kit / "examples"
     exclude = cfg.get("exclude", [])
-    log.always(f"home-runtime: {', '.join(wanted)}" + (f"  (exclude: {', '.join(exclude)})" if exclude else ""))
+    log.always(
+        f"home-runtime: {', '.join(wanted)}"
+        + (f"  (exclude: {', '.join(exclude)})" if exclude else "")
+    )
 
     # 1. Generic agents — compose to staging, copy into the wanted home agent dirs.
     composer = Composer(kit, output_base=staging, shared_root=kit_shared)
     composer.compose_dir(kit_shared / "compose/agents")
     staged_agents = staging / ".claude/agents"
-    agent_bases = [HOME / rel for tok, rel in GENERIC_AGENT_HOME.items() if tok in wanted]
+    agent_bases = [
+        HOME / rel for tok, rel in GENERIC_AGENT_HOME.items() if tok in wanted
+    ]
     a_ins = a_up = a_sk = 0
     if staged_agents.is_dir():
         for staged in sorted(staged_agents.glob("*.md")):
@@ -2056,7 +2202,9 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
                 a_ins += r == "installed"
                 a_up += r == "uptodate"
                 a_sk += r == "skip"
-    log.always(f"  agents: {a_ins} copied, {a_up} current, {a_sk} skipped (foreign/divergent)")
+    log.always(
+        f"  agents: {a_ins} copied, {a_up} current, {a_sk} skipped (foreign/divergent)"
+    )
 
     # 2. Claude runtime — hooks + statusline + settings scaffold (exclude-aware).
     if "cc" in wanted:
@@ -2067,25 +2215,41 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
     if "pi" in wanted:
         plan = plan_pi_runtime(kit)
         if exclude:
-            kept = {dst: src for dst, src in plan.desired.items()
-                    if not _is_excluded(src, kit_shared, exclude)}
+            kept = {
+                dst: src
+                for dst, src in plan.desired.items()
+                if not _is_excluded(src, kit_shared, exclude)
+            }
             dropped = len(plan.desired) - len(kept)
             if dropped:
-                log.always(f"  pi runtime: excluded {dropped} source(s) via exclude list")
+                log.always(
+                    f"  pi runtime: excluded {dropped} source(s) via exclude list"
+                )
             plan = LinkPlan(kept, plan.dest_dirs)
-        counts = reconcile(plan, repo_family(kit),
-                           plan_only=False, force=False, repo_root=kit)
+        counts = reconcile(
+            plan, repo_family(kit), plan_only=False, force=False, repo_root=kit
+        )
         log.always(
             f"  pi runtime: created {counts['create']}, repointed {counts['repoint']}, "
             f"pruned {counts['prune']}, skipped-foreign {counts['skip-foreign']}"
         )
         _migrate_legacy_pi_agents(kit, staged_agents, log)
-        if not _is_excluded(kit_shared / "llm/pi/common/settings.template.json", kit_shared, exclude):
-            _scaffold_settings(kit_shared / "llm/pi/common/settings.template.json",
-                               HOME / ".pi/agent/settings.json", log)
+        if not _is_excluded(
+            kit_shared / "llm/pi/common/settings.template.json", kit_shared, exclude
+        ):
+            _scaffold_settings(
+                kit_shared / "llm/pi/common/settings.template.json",
+                HOME / ".pi/agent/settings.json",
+                log,
+            )
 
-        herdr_counts = reconcile(plan_herdr_config(kit), repo_family(kit),
-                                 plan_only=False, force=False, repo_root=kit)
+        herdr_counts = reconcile(
+            plan_herdr_config(kit),
+            repo_family(kit),
+            plan_only=False,
+            force=False,
+            repo_root=kit,
+        )
         log.always(
             f"  herdr config: created {herdr_counts['create']}, "
             f"repointed {herdr_counts['repoint']}, pruned {herdr_counts['prune']}, "
@@ -2095,8 +2259,10 @@ def do_home_runtime(cfg: dict, log: RunLog) -> None:
 
 # --- update (copy -> compose -> link, with a full run log) -----------------
 
+
 def _log_path() -> Path:
     from datetime import datetime
+
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     return Path("/tmp/.shared-llm/log") / f"{stamp}.log"
 
@@ -2136,13 +2302,20 @@ def do_check(cfg: dict, log: RunLog) -> bool:
     def names(d: Path, pred) -> list[str]:
         return [p.name for p in d.iterdir() if pred(p)] if d.is_dir() else []
 
-    uses_pi = any("pi" in d.get("harnesses", []) for d in cfg["destinations"]) or "pi" in cfg.get("global", [])
-    uses_codex = any("codex" in d.get("harnesses", []) for d in cfg["destinations"]) or "codex" in cfg.get("global", [])
+    uses_pi = any(
+        "pi" in d.get("harnesses", []) for d in cfg["destinations"]
+    ) or "pi" in cfg.get("global", [])
+    uses_codex = any(
+        "codex" in d.get("harnesses", []) for d in cfg["destinations"]
+    ) or "codex" in cfg.get("global", [])
 
     if uses_pi:
         pi = _pi_global_skills()
         report(f"Pi {pi} has NO cc-*", names(pi, lambda p: p.name.startswith("cc-")))
-        report(f"Pi {pi} has no broken links", names(pi, lambda p: p.is_symlink() and not p.exists()))
+        report(
+            f"Pi {pi} has no broken links",
+            names(pi, lambda p: p.is_symlink() and not p.exists()),
+        )
     if uses_codex:
         cx = _codex_global_skills()
         report(f"Codex {cx} has NO do-*", names(cx, lambda p: p.name.startswith("do-")))
@@ -2152,10 +2325,14 @@ def do_check(cfg: dict, log: RunLog) -> bool:
         dest = Path(d["path"]).expanduser()
         cs = dest / ".claude/skills"
         ps = dest / PI_ONLY_SKILLS_DIR
-        report(f"[{dest.name}] .claude/skills has NO do-*",
-               names(cs, lambda p: p.is_dir() and p.name.startswith("do-")))
-        report(f"[{dest.name}] .pi-skills is do-* only",
-               names(ps, lambda p: not p.name.startswith(("do-", "."))))
+        report(
+            f"[{dest.name}] .claude/skills has NO do-*",
+            names(cs, lambda p: p.is_dir() and p.name.startswith("do-")),
+        )
+        report(
+            f"[{dest.name}] .pi-skills is do-* only",
+            names(ps, lambda p: not p.name.startswith(("do-", "."))),
+        )
     return ok
 
 
@@ -2169,7 +2346,9 @@ def cmd_check(args: argparse.Namespace) -> None:
 def cmd_update(args: argparse.Namespace) -> None:
     cfg = load_config()
     if not cfg["destinations"] and not cfg["global"]:
-        sys.exit("error: nothing configured. Run `just configure -d <repo> -l cc,pi` first.")
+        sys.exit(
+            "error: nothing configured. Run `just configure -d <repo> -l cc,pi` first."
+        )
     log_path = _log_path()
     log = RunLog(verbose=args.verbose, path=log_path)
     log.always(f"update: log -> {log_path}")
@@ -2196,7 +2375,9 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    pc = sub.add_parser("compose", help="Assemble skills/agents/CLAUDE.md from layer recipes.")
+    pc = sub.add_parser(
+        "compose", help="Assemble skills/agents/CLAUDE.md from layer recipes."
+    )
     pc.add_argument(
         "recipe",
         nargs="?",
@@ -2206,7 +2387,9 @@ def main() -> None:
         ),
     )
     pc.add_argument("--shared-llm", help="Path to the .shared-llm source root.")
-    pc.add_argument("--target", help="Output base dir where 'output:' paths land (default: cwd).")
+    pc.add_argument(
+        "--target", help="Output base dir where 'output:' paths land (default: cwd)."
+    )
     pc.add_argument(
         "--placeholder",
         action="append",
@@ -2226,30 +2409,63 @@ def main() -> None:
     pi.set_defaults(func=cmd_init)
 
     pcfg = sub.add_parser("configure", help="Create/update ~/.shared-llm.yaml.")
-    pcfg.add_argument("-s", "--source", help="Set the source hub path (default ~/.shared-llm).")
+    pcfg.add_argument(
+        "-s", "--source", help="Set the source hub path (default ~/.shared-llm)."
+    )
     pcfg.add_argument("-d", "--dest", help="Add/update a destination repo path.")
-    pcfg.add_argument("-l", "--list", help="Harnesses for -d (comma-separated: cc,pi,codex). Default cc,pi.")
-    pcfg.add_argument("-g", "--global-list", help="Set the global harness list (comma-separated).")
-    pcfg.add_argument("-x", "--exclude", help="Set the home-install exclude list: source paths under .shared-llm/ (comma-separated).")
+    pcfg.add_argument(
+        "-l",
+        "--list",
+        help="Harnesses for -d (comma-separated: cc,pi,codex). Default cc,pi.",
+    )
+    pcfg.add_argument(
+        "-g", "--global-list", help="Set the global harness list (comma-separated)."
+    )
+    pcfg.add_argument(
+        "-x",
+        "--exclude",
+        help="Set the home-install exclude list: source paths under .shared-llm/ (comma-separated).",
+    )
     pcfg.set_defaults(func=cmd_configure)
 
-    pcp = sub.add_parser("copy", help="Kit -> hub -> each destination's .shared-llm/ (common only).")
+    pcp = sub.add_parser(
+        "copy", help="Kit -> hub -> each destination's .shared-llm/ (common only)."
+    )
     pcp.set_defaults(func=cmd_copy)
 
-    pcd = sub.add_parser("compose-dests", help="Compose every configured destination from its own .shared-llm/.")
+    pcd = sub.add_parser(
+        "compose-dests",
+        help="Compose every configured destination from its own .shared-llm/.",
+    )
     pcd.set_defaults(func=cmd_compose_cfg)
 
-    pl = sub.add_parser("link", help="Reconcile repo-scoped pi/codex skill links per destination.")
+    pl = sub.add_parser(
+        "link", help="Reconcile repo-scoped pi/codex skill links per destination."
+    )
     pl.set_defaults(func=cmd_link)
 
-    pg = sub.add_parser("global", help="Compose + route the global home skills into ~/.claude, ~/.pi/agent, ~/.agents.")
+    pg = sub.add_parser(
+        "global",
+        help="Compose + route the global home skills into ~/.claude, ~/.pi/agent, ~/.agents.",
+    )
     pg.set_defaults(func=cmd_global)
 
-    pck = sub.add_parser("check", help="Verify skill placement per harness (do-* Pi-only, cc-* Claude-only).")
+    pck = sub.add_parser(
+        "check",
+        help="Verify skill placement per harness (do-* Pi-only, cc-* Claude-only).",
+    )
     pck.set_defaults(func=cmd_check)
 
-    pup = sub.add_parser("update", help="copy -> compose -> link (+ global) across all configured destinations.")
-    pup.add_argument("-v", "--verbose", action="store_true", help="Print per-file detail (always written to the log).")
+    pup = sub.add_parser(
+        "update",
+        help="copy -> compose -> link (+ global) across all configured destinations.",
+    )
+    pup.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print per-file detail (always written to the log).",
+    )
     pup.set_defaults(func=cmd_update)
 
     args = parser.parse_args()

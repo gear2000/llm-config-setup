@@ -1,0 +1,1 @@
+Claude Code converter: `/cc-convert --herdr <plan.md>` idempotently decomposes an approved big plan into Herdr `plan.md` + `route.yaml`, runs conversion-time visual review and validation, and returns `DESIGN_REQUIRED` instead of inventing unresolved architecture.

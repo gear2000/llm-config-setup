@@ -1,1 +1,1 @@
-Check whether a canonical `plan.md` and `route.yaml` pair is runnable by Herdr. It validates the work plan, route profiles, finalization checks, per-phase merge timing, and every required stage route. It never starts execution.
+Deprecated alias for the converter's internal validation. Warns, then delegates to `/cc-convert --herdr` or `/do-convert --herdr`; Herdr also rechecks at `just herdr-start`.

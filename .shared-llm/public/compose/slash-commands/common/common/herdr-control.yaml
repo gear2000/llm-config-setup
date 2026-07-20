@@ -1,0 +1,10 @@
+type: skill
+name: herdr-control
+description: .shared-llm/public/layers/slash-commands/common/common/herdr-control/description.md
+frontmatter:
+  argument-hint: "--plan <plan.md> --route <route.yaml> [--run-tree <exact-dir> | --run-root <parent-dir>] [--slug <name>] [--start-phase <N>] [--max-phases <N>]"
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/meta-runner-phase-protocol.md
+  - .shared-llm/public/layers/slash-commands/common/common/meta-runner-handoff-protocol.md
+  - .shared-llm/public/layers/slash-commands/common/common/herdr-control/command.md
+output: .claude/skills/herdr-control/SKILL.md

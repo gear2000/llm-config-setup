@@ -2,7 +2,7 @@ type: skill
 name: cc-planish
 description: .shared-llm/public/layers/slash-commands/common/claude/cc-planish/description.md
 frontmatter:
-  argument-hint: "<topic> | --review <path> [--dir <path>]"
+  argument-hint: "<topic> [--dir <path>] [--adversarial-iterations N] [--adversary-profile <profile>]"
 inputs:
-- .shared-llm/public/layers/slash-commands/common/claude/cc-planish/command.md
+  - .shared-llm/public/layers/slash-commands/common/claude/cc-planish/command.md
 output: .claude/skills/cc-planish/SKILL.md
