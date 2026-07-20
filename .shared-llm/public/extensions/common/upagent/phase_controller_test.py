@@ -107,8 +107,13 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
         phase_controller,
         "_leader_health",
         lambda pane, cwd, profile, roster, herdr_session: {
+            "cwd": str(cwd),
+            "expected_agent": "claude",
+            "expected_process": "claude",
             "healthy": True,
             "pane_id": pane,
+            "process_pid": 123,
+            "process_start_time": "start-123",
         },
     )
     monkeypatch.setattr(
@@ -142,9 +147,14 @@ def test_phase_start_releases_verified_leader_without_a_watchdog(
     assert receipt["state"] == "ready"
     assert receipt["watchdog"]["state"] == "not-configured"
     assert not (control.parent / "watchdog").exists()
-    assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
-        "phase-0": {"pane_id": "leader-pane", "herdr_session": "llm-lab-test"}
+    active = json.loads((run_root / "active-leader-panes.json").read_text())
+    assert active["phase-0"]["pane_id"] == "leader-pane"
+    assert active["phase-0"]["herdr_session"] == "llm-lab-test"
+    assert active["phase-0"]["ownership"] == {
+        "pane": {"pane_id": "leader-pane", "state": "created"}
     }
+    assert active["phase-0"]["health"]["process_start_time"] == "start-123"
+    assert active["phase-0"]["workspace_id"] == "workspace-1"
 
 
 def test_phase_start_publishes_receipt_before_releasing_leader(

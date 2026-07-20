@@ -38,6 +38,14 @@ if _recruiter_spec is None or _recruiter_spec.loader is None:
 recruiter = cast(Any, importlib.util.module_from_spec(_recruiter_spec))
 _recruiter_spec.loader.exec_module(recruiter)
 
+_lifecycle_spec = importlib.util.spec_from_file_location(
+    "herdr_run_lifecycle", HERE / "run_lifecycle.py"
+)
+if _lifecycle_spec is None or _lifecycle_spec.loader is None:
+    raise RuntimeError("could not load Herdr run lifecycle")
+run_lifecycle = cast(Any, importlib.util.module_from_spec(_lifecycle_spec))
+_lifecycle_spec.loader.exec_module(run_lifecycle)
+
 STARTUP_TIMEOUT_MS = 45_000
 TUI_LAUNCHES = {
     "claude": (
@@ -71,7 +79,8 @@ def _exclusive_plan_start(path: Path) -> Iterator[None]:
 
 
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with temporary.open("w", encoding="utf-8") as stream:
         json.dump(value, stream, indent=2, sort_keys=True)
@@ -179,6 +188,7 @@ def _create_tui(
     route_path: Path,
     slug: str,
     harness: str,
+    owner_token: str,
     separate_workspaces: bool = False,
 ) -> dict[str, object]:
     if harness not in TUI_LAUNCHES:
@@ -219,7 +229,13 @@ def _create_tui(
         workspace_id = (
             root_pane.get("workspace_id") if isinstance(root_pane, dict) else None
         )
-    command = f"cd {shlex.quote(str(repo))} && {launch} " + shlex.quote(
+    env_prefix = " ".join(
+        [
+            f"{run_lifecycle.HERDR_RUN_DIR_ENV}={shlex.quote(str(plan_path.parent))}",
+            f"{run_lifecycle.HERDR_RUN_OWNER_TOKEN_ENV}={shlex.quote(owner_token)}",
+        ]
+    )
+    command = f"cd {shlex.quote(str(repo))} && {env_prefix} {launch} " + shlex.quote(
         f"/herdr-run --plan {plan_path} --route {route_path} "
         f"--run-tree {plan_path.parent} --slug {slug}"
     )
@@ -277,6 +293,9 @@ def _create_tui(
             timeout_ms=STARTUP_TIMEOUT_MS,
             herdr_session=herdr_session,
         )
+        process_pid = health.get("process_pid")
+        if isinstance(process_pid, int):
+            health["process_start_time"] = recruiter._process_start_time(process_pid)
     except (OSError, PlanStartError, recruiter.RecruiterError) as error:
         cleanup_error: str | None = None
         try:
@@ -311,7 +330,13 @@ def _create_tui(
     }
 
 
-def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, object]:
+def finish_plan(
+    *,
+    run_dir: Path,
+    slug: str | None,
+    state: str,
+    owner_token: str | None = None,
+) -> dict[str, object]:
     """Publish the durable plan terminal fact that authorizes watchdog cleanup."""
     if not run_dir.is_absolute() or not run_dir.is_dir():
         raise PlanStartError(
@@ -340,6 +365,13 @@ def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, obj
         raise PlanStartError(f"plan-start receipt does not belong to plan {slug!r}")
     if receipt.get("state") not in ("ready", "ready-degraded"):
         raise PlanStartError("plan-start receipt is not in a finishable ready state")
+    run_owner = receipt.get("run_owner")
+    if isinstance(run_owner, dict) and isinstance(run_owner.get("token_sha256"), str):
+        token = owner_token or os.environ.get(run_lifecycle.HERDR_RUN_OWNER_TOKEN_ENV)
+        if not token:
+            raise PlanStartError("finish requires HERDR_RUN_OWNER_TOKEN or --owner-token")
+        if run_lifecycle._token_hash(token) != run_owner.get("token_sha256"):
+            raise PlanStartError("finish owner token does not match the plan-start receipt")
     tui = receipt.get("tui")
     if not isinstance(tui, dict):
         raise PlanStartError("plan-start receipt has no TUI identity")
@@ -480,10 +512,42 @@ def _start_plan_locked(
         {
             "at_ns": time.time_ns(),
             "run_dir": str(run_dir),
+            "run_owner": None,
             "slug": slug,
             "state": "preparing",
         },
     )
+    try:
+        owner_receipt = run_lifecycle.acquire_owner(
+            run_dir,
+            owner=run_lifecycle.current_process_identity("plan-launcher"),
+        )
+    except run_lifecycle.LifecycleError as error:
+        _write_json_atomic(
+            receipt_path,
+            {
+                "at_ns": time.time_ns(),
+                "reason": str(error),
+                "run_dir": str(run_dir),
+                "run_owner": None,
+                "slug": slug,
+                "state": "failed",
+            },
+        )
+        raise PlanStartError(f"run owner acquisition failed: {error}") from error
+    if owner_receipt.get("role") != "owner":
+        _write_json_atomic(
+            receipt_path,
+            {
+                "at_ns": time.time_ns(),
+                "reason": owner_receipt.get("reason", "another run owner is active"),
+                "run_dir": str(run_dir),
+                "run_owner": run_lifecycle.public_owner_receipt(owner_receipt),
+                "slug": slug,
+                "state": "observer",
+            },
+        )
+        raise PlanStartError("another live run owner holds this run; observer mode only")
     try:
         tui = _create_tui(
             repo=repo,
@@ -491,24 +555,56 @@ def _start_plan_locked(
             route_path=route_path,
             slug=slug,
             harness=tui_harness,
+            owner_token=owner_receipt["token"],
             separate_workspaces=separate_workspaces,
         )
-    except (OSError, PlanStartError, recruiter.RecruiterError) as error:
+    except (OSError, PlanStartError, recruiter.RecruiterError, run_lifecycle.LifecycleError) as error:
         _write_json_atomic(
             receipt_path,
             {
                 "at_ns": time.time_ns(),
                 "reason": str(error),
                 "run_dir": str(run_dir),
+                "run_owner": run_lifecycle.public_owner_receipt(owner_receipt),
                 "slug": slug,
                 "state": "failed",
             },
         )
         raise
+    try:
+        owner_receipt = run_lifecycle.refresh_owner(
+            run_dir,
+            token=owner_receipt["token"],
+            owner=run_lifecycle.tui_owner_identity(
+                tui,
+                repo=repo,
+                harness=tui_harness,
+            ),
+        )
+        heartbeat = run_lifecycle.start_background_heartbeat(
+            run_dir,
+            token=owner_receipt["token"],
+        )
+    except run_lifecycle.LifecycleError as error:
+        _write_json_atomic(
+            receipt_path,
+            {
+                "at_ns": time.time_ns(),
+                "reason": str(error),
+                "run_dir": str(run_dir),
+                "run_owner": run_lifecycle.public_owner_receipt(owner_receipt),
+                "slug": slug,
+                "state": "failed",
+                "tui": tui,
+            },
+        )
+        raise PlanStartError(f"run owner transfer failed: {error}") from error
 
     receipt: dict[str, object] = {
         "at_ns": time.time_ns(),
+        "heartbeat": heartbeat,
         "run_dir": str(run_dir),
+        "run_owner": run_lifecycle.public_owner_receipt(owner_receipt),
         "slug": slug,
         "state": "ready",
         "tui": tui,
@@ -534,6 +630,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--roster", default=recruiter.default_roster_path())
     parser.add_argument("--finish-state", choices=PLAN_TERMINAL_STATES)
     parser.add_argument(
+        "--owner-token",
+        help="run owner token for --finish-state; defaults to HERDR_RUN_OWNER_TOKEN",
+    )
+    parser.add_argument(
         "--separate-workspaces",
         action="store_true",
         help="create a per-run <slug> workspace instead of joining the unified `herdr` "
@@ -551,6 +651,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_dir=run_dir,
                 slug=args.slug,
                 state=args.finish_state,
+                owner_token=args.owner_token,
             )
             print(f"PLAN_FINISHED {json.dumps(result, sort_keys=True)}", flush=True)
             return 0
@@ -563,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
             separate_workspaces=args.separate_workspaces
             or _services_separate_workspaces(),
         )
-    except (OSError, PlanStartError, recruiter.RecruiterError) as error:
+    except (OSError, PlanStartError, recruiter.RecruiterError, run_lifecycle.LifecycleError) as error:
         sys.exit(f"herdr-plan-start: {error}")
     print(f"PLAN_STARTED {json.dumps(result, sort_keys=True)}", flush=True)
     return 0

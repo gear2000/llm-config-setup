@@ -246,7 +246,7 @@ def _live_panes(herdr_session: str | None = None) -> set[str]:
     }
 
 
-def _active_leaders(path: Path) -> dict[str, dict[str, str]]:
+def _active_leaders(path: Path) -> dict[str, dict[str, Any]]:
     if not path.is_file():
         return {}
     try:
@@ -259,7 +259,7 @@ def _active_leaders(path: Path) -> dict[str, dict[str, str]]:
         raise PhaseStartError(
             f"active leader map {path} must contain phase-id leader records"
         )
-    leaders: dict[str, dict[str, str]] = {}
+    leaders: dict[str, dict[str, Any]] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not isinstance(item, dict):
             raise PhaseStartError(
@@ -273,12 +273,18 @@ def _active_leaders(path: Path) -> dict[str, dict[str, str]]:
                 f"active leader map {path} has a legacy or malformed entry; inspect it "
                 "and repair or remove it only after confirming the recorded pane is safe"
             )
-        leaders[key] = {"pane_id": pane_id, "herdr_session": herdr_session}
+        leaders[key] = item
     return leaders
 
 
 def _set_active_leader(
-    path: Path, phase_id: str, pane_id: str | None, herdr_session: str | None
+    path: Path,
+    phase_id: str,
+    pane_id: str | None,
+    herdr_session: str | None,
+    *,
+    health: dict[str, object] | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     with _exclusive_phase_start(path.with_name(".active-leader-panes.lock")):
         leaders = _active_leaders(path)
@@ -288,8 +294,11 @@ def _set_active_leader(
             if herdr_session is None:
                 raise PhaseStartError("active leader record requires herdr_session")
             leaders[phase_id] = {
+                "health": health,
                 "pane_id": pane_id,
                 "herdr_session": herdr_session,
+                "ownership": {"pane": {"pane_id": pane_id, "state": "created"}},
+                **({"workspace_id": workspace_id} if workspace_id else {}),
             }
         _write_json_atomic(path, cast(dict[str, object], leaders))
 
@@ -369,7 +378,7 @@ def _leader_health(
     herdr_session: str,
 ) -> dict[str, object]:
     health = roster.get("health", {}).get(profile["harness"], {})
-    return recruiter._wait_for_agent_health(
+    result = recruiter._wait_for_agent_health(
         pane_id,
         expected_agent=health.get(
             "expected_agent", recruiter.EXPECTED_HARNESS_AGENT[profile["harness"]]
@@ -381,6 +390,27 @@ def _leader_health(
         timeout_ms=STARTUP_TIMEOUT_MS,
         herdr_session=herdr_session,
     )
+    process_pid = result.get("process_pid")
+    if isinstance(process_pid, int):
+        result["process_start_time"] = recruiter._process_start_time(process_pid)
+    return result
+
+
+def _leader_expected_health(
+    cwd: Path, profile: dict[str, str], roster: dict[str, Any], pane_id: str
+) -> dict[str, object]:
+    health = roster.get("health", {}).get(profile["harness"], {})
+    return {
+        "cwd": str(cwd),
+        "expected_agent": health.get(
+            "expected_agent", recruiter.EXPECTED_HARNESS_AGENT[profile["harness"]]
+        ),
+        "expected_process": health.get(
+            "expected_process", recruiter.EXPECTED_HARNESS_PROCESS[profile["harness"]]
+        ),
+        "healthy": False,
+        "pane_id": pane_id,
+    }
 
 
 def _safe_name(slug: str, phase_id: str, pass_number: int) -> str:
@@ -535,7 +565,17 @@ def start_phase(
                 herdr_session,
             )
             _verify_gated_leader(leader_pane, script_path, herdr_session)
-            _set_active_leader(active_path, phase_id, leader_pane, herdr_session)
+            expected_health = _leader_expected_health(
+                cwd, lead_profile, roster, leader_pane
+            )
+            _set_active_leader(
+                active_path,
+                phase_id,
+                leader_pane,
+                herdr_session,
+                health=expected_health,
+                workspace_id=workspace_id,
+            )
             watchdog_receipt: dict[str, object] = {
                 "reason": "coordination v2: phase-await owns delivery and reconciliation; no standing watchdog is created",
                 "state": "not-configured",
@@ -544,10 +584,12 @@ def start_phase(
                 receipt_path,
                 {
                     "at_ns": time.time_ns(),
+                    "health": expected_health,
                     "leader_pane": leader_pane,
                     "herdr_session": herdr_session,
                     "ownership": {
-                        "leader": {"pane_id": leader_pane, "state": "created"}
+                        "leader": {"pane_id": leader_pane, "state": "created"},
+                        "pane": {"pane_id": leader_pane, "state": "created"},
                     },
                     "pass": pass_number,
                     "phase_id": phase_id,
@@ -561,12 +603,24 @@ def start_phase(
             leader_health = _leader_health(
                 leader_pane, cwd, lead_profile, roster, herdr_session
             )
+            _set_active_leader(
+                active_path,
+                phase_id,
+                leader_pane,
+                herdr_session,
+                health=leader_health,
+                workspace_id=workspace_id,
+            )
             receipt = {
                 "at_ns": time.time_ns(),
+                "health": leader_health,
                 "leader_health": leader_health,
                 "leader_pane": leader_pane,
                 "herdr_session": herdr_session,
-                "ownership": {"leader": {"pane_id": leader_pane, "state": "created"}},
+                "ownership": {
+                    "leader": {"pane_id": leader_pane, "state": "created"},
+                    "pane": {"pane_id": leader_pane, "state": "created"},
+                },
                 "pass": pass_number,
                 "phase_id": phase_id,
                 "state": "ready",

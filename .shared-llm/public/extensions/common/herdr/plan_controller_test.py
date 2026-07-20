@@ -25,6 +25,14 @@ def _resolved_session(monkeypatch: pytest.MonkeyPatch) -> None:
         "_resolve_current_herdr_session_name",
         lambda: "llm-lab-test",
     )
+    monkeypatch.setattr(
+        plan_controller.run_lifecycle,
+        "start_background_heartbeat",
+        lambda run_dir, token: {
+            "state": "started",
+            "token_sha256": plan_controller.run_lifecycle._token_hash(token),
+        },
+    )
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
@@ -56,7 +64,11 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
 def _healthy_tui(**_: object) -> dict[str, object]:
     return {
         "herdr_session": "llm-lab-test",
-        "health": {"healthy": True},
+        "health": {
+            "healthy": True,
+            "process_pid": 123,
+            "process_start_time": "start-123",
+        },
         "pane_id": "tui-pane",
         "workspace_id": "workspace-1",
     }
@@ -120,6 +132,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
         route_path=run_dir / "route.yaml",
         slug="sample-run",
         harness="claude",
+        owner_token="tok-test",
     )
 
     assert tui["workspace_id"] == "workspace-1"
@@ -128,6 +141,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
     assert "--remote-control=sample-run" in run_call[3]
+    assert "HERDR_RUN_OWNER_TOKEN=tok-test" in run_call[3]
 
 
 def test_claude_tui_always_gets_remote_control_and_pi_does_not(
@@ -168,6 +182,7 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
             route_path=run_dir / "route.yaml",
             slug="sample-run",
             harness=harness,
+            owner_token="tok-test",
         )
         return next(call for call in calls if call[:2] == ("pane", "run"))[3]
 
@@ -232,6 +247,7 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
         route_path=run_dir / "route.yaml",
         slug="sample-run",
         harness="claude",
+        owner_token="tok-test",
     )
 
     assert tui["workspace_id"] == "ws-herdr"
@@ -278,6 +294,7 @@ def test_separate_workspaces_mode_creates_the_per_run_workspace(
         route_path=run_dir / "route.yaml",
         slug="sample-run",
         harness="claude",
+        owner_token="tok-test",
         separate_workspaces=True,
     )
 
@@ -315,6 +332,7 @@ def test_tui_metadata_failure_closes_created_pane(
             route_path=run_dir / "route.yaml",
             slug="sample-run",
             harness="claude",
+            owner_token="tok-test",
         )
 
     assert calls == [("pane", "close", "orphan-pane")]
@@ -335,11 +353,15 @@ def test_starts_tui_without_a_watchdog(
     )
 
     assert receipt["state"] == "ready"
+    assert receipt["heartbeat"]["state"] == "started"
+    assert "token" not in receipt["run_owner"]
+    assert isinstance(receipt["run_owner"]["token_sha256"], str)
     assert receipt["tui"]["pane_id"] == "tui-pane"
     assert receipt["watchdog"]["state"] == "not-configured"
     assert not (run_dir / "plan-watchdog").exists()
     persisted = json.loads((run_dir / "control/plan-start.json").read_text())
     assert persisted == receipt
+    assert oct((run_dir / "control").stat().st_mode & 0o777) == "0o700"
     with pytest.raises(PlanStartError, match="startup artifacts already exist"):
         plan_controller.start_plan(
             run_dir=run_dir,
@@ -383,6 +405,50 @@ def test_finish_plan_writes_the_terminal_marker_only_after_summary_exists(
     assert marker["plan_id"] == "sample-run"
     assert marker["state"] == "succeeded"
     assert marker["summary_path"] == str(run_dir / "run-status.md")
+    assert json.loads((control / "run-terminal.json").read_text()) == marker
+
+
+def test_finish_plan_requires_env_or_cli_owner_token_for_new_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    token = "owner-token"
+    (control / "plan-start.json").write_text(
+        json.dumps(
+            {
+                "run_owner": {
+                    "generation": 1,
+                    "role": "owner",
+                    "token_sha256": plan_controller.run_lifecycle._token_hash(token),
+                },
+                "slug": "sample-run",
+                "state": "ready",
+                "tui": {"herdr_session": "llm-lab-test"},
+            }
+        )
+    )
+    (run_dir / "run-status.md").write_text("# Stopped\n")
+    monkeypatch.delenv(plan_controller.run_lifecycle.HERDR_RUN_OWNER_TOKEN_ENV, raising=False)
+    monkeypatch.setattr(
+        plan_controller.run_lifecycle,
+        "guard",
+        lambda *args, **kwargs: pytest.fail("finish must not depend on heartbeat guard"),
+    )
+
+    with pytest.raises(PlanStartError, match="requires HERDR_RUN_OWNER_TOKEN"):
+        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+    with pytest.raises(PlanStartError, match="does not match"):
+        plan_controller.finish_plan(
+            run_dir=run_dir, slug=None, state="stopped", owner_token="wrong"
+        )
+
+    marker = plan_controller.finish_plan(
+        run_dir=run_dir, slug=None, state="stopped", owner_token=token
+    )
+
+    assert marker["state"] == "stopped"
     assert json.loads((control / "run-terminal.json").read_text()) == marker
 
 
@@ -507,6 +573,33 @@ def test_tui_failure_is_terminal_and_durable(
     receipt = json.loads((run_dir / "control/plan-start.json").read_text())
     assert receipt["state"] == "failed"
     assert receipt["reason"] == "no TUI process"
+    assert "token" not in receipt["run_owner"]
+
+
+def test_lifecycle_error_during_start_is_durable_failed_not_preparing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, roster = _inputs(tmp_path)
+    monkeypatch.setattr(
+        plan_controller.run_lifecycle,
+        "acquire_owner",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            plan_controller.run_lifecycle.LifecycleError("bad lease")
+        ),
+    )
+
+    with pytest.raises(PlanStartError, match="bad lease"):
+        plan_controller.start_plan(
+            run_dir=run_dir,
+            slug="sample-run",
+            tui_harness="claude",
+            repo=tmp_path,
+            roster_path=str(roster),
+        )
+
+    receipt = json.loads((run_dir / "control/plan-start.json").read_text())
+    assert receipt["state"] == "failed"
+    assert receipt["reason"] == "bad lease"
 
 
 def test_start_plan_never_touches_agent_panes_for_notification(

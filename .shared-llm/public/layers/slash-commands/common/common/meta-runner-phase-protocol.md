@@ -126,7 +126,7 @@ Every run writes a filesystem tree that is the source of truth for what happened
 <date>/<slug>/
 ├── plan.md · route.yaml · research.md      # frozen run inputs; route.yaml is this run's single live copy
 ├── run-status.md                           # TUI rolling log: phase order, passes, backtracks, why
-├── active-leader-panes.json                # optional phase-id → {pane_id, herdr_session} ownership map
+├── active-leader-panes.json                # optional phase-id → {pane_id, herdr_session, ownership.pane:{state:"created"}, health} map
 └── phases/<phase-id>/
     ├── phase-status.md                     # leader rolling log across this phase's passes/stages
     ├── phase-result.json                   # latest verdict + revisit:[phase-ids]  ← the TUI reads this
