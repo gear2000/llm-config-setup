@@ -65,6 +65,72 @@ def test_stage2_audit_requires_multi_angle_detection() -> None:
     assert "semantically inspect tests and implementation" in text
 
 
+def test_ordinary_stage3_is_deterministic_local_seam_verification() -> None:
+    text = PHASE_PROTOCOL.read_text()
+
+    assert "Stage 3 is deterministic changed-scope local seam/contract verification" in text
+    assert "not a second semantic reviewer" in text
+    assert "not a shared-environment acceptance stage" in text
+    assert "A fresh LLM verifier is hired through the Recruiter only when" in text
+    assert "residual cross-slice production work belongs in an explicit integration-construction phase" in text
+
+
+def test_execution_model_distinguishes_worker_orders_from_controller_stages() -> None:
+    text = PHASE_PROTOCOL.read_text()
+
+    assert "## Execution model — worker orders and deterministic controller stages" in text
+    assert "runs all LLM work by placing a **work order**" in text
+    assert "Ordinary Stage 3 seam checks, ordinary Stage 4 deferral/merge records, and Stage 5 finalization are deterministic controller actions" in text
+    assert "## Execution model — a stage is a work order, not a subagent" not in text
+    assert "The phase leader runs each stage by placing a **work order**" not in text
+
+
+def test_deterministic_stage_evidence_does_not_invent_worker_fields() -> None:
+    text = PHASE_PROTOCOL.read_text()
+
+    assert "A deterministic controller stage writes `controller-result.json` with this shape instead" in text
+    assert "stage id, `runner: controller`" in text
+    assert "commands run, exit codes, log/evidence paths or bounded excerpts" in text
+    assert "Do not invent a synthetic `order_id`" in text
+    assert "worker `result.json`" in text
+    assert "worker `full_log`" in text
+    assert "deterministic-stage evidence from `controller-result.json`: stage id" in text
+    assert "worker-stage evidence: stage id, `llm_profile`, `agent`, `order_id`" in text
+    assert "each stage id with `llm_profile` and `agent` used, plus its `order_id`" not in text
+    assert "commands run and evidence paths/log excerpts (`full_log` pointers)" not in text
+
+
+def test_ordinary_stage4_is_not_per_phase_deployment_or_acceptance() -> None:
+    text = PHASE_PROTOCOL.read_text()
+
+    assert "Stage 4 must not become a per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance stage" in text
+    assert "Broad shared acceptance belongs once at candidate level" in text
+    assert "route-owned candidate-level finalization/gate" in text
+    assert "TUI-owned apply receipt" in text
+    assert "/herdr-phase`'s \"IaC phases (kind: iac)\" section" in text
+    assert "meta-plan format's \"IaC phases (`kind: iac`)\" section" in text
+    assert "described below" not in text
+    assert "Stage 4 — upstream DAG dependent build/deploy/test verification" not in text
+    assert "Trace every upstream dependent" not in text
+    assert "deployment or deployment dry-run" not in text
+    assert "acceptance/live checks" not in text
+
+
+def test_stage5_runs_exactly_route_owned_green_checks() -> None:
+    for doc in (PHASE_PROTOCOL, META_PLAN_FORMAT):
+        text = doc.read_text()
+        assert "always runs exactly the effective route-owned `green_checks`" in text
+        assert "does not infer" in text
+        assert "At plan/conversion time" in text
+        assert "omit those generic commands from per-phase `green_checks`" in text
+        assert (
+            "retains the repository's normal green checks" in text
+            or "retain the repository's normal green-check command" in text
+        )
+        assert "candidate gate is configured" not in text
+        assert "no candidate gate is configured" not in text
+
+
 def test_adversarial_evaluator_source_hunts_accepted_but_ignored_inputs() -> None:
     text = ADVERSARIAL_EVALUATOR_SRC.read_text()
 

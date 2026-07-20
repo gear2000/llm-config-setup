@@ -235,11 +235,11 @@ In a meta run, every `lead.agent` is `herdr-phase-leader`. That dedicated Claude
 
 Every route phase has the same five base stage ids:
 
-1. `stage-1-implementation` — create/use the temporary worktree branch, write unit tests, and write the code.
-2. `stage-2-adversarial-audit` — independent hostile audit of Stage 1 on the same temporary worktree branch, including a hard gate for unused intake / accepted-but-ignored inputs.
-3. `stage-3-integration-acceptance-seams` — integration/acceptance/seam checks; merge here only when `merge_back_at` is this stage.
-4. `stage-4-upstream-dag-verification` — dependent build/deploy/test verification; merge here only when `merge_back_at` is this stage.
-5. `stage-5-finalization` — merge if not already merged, verify main, destroy the temporary worktree/branch, run green checks, inspect logs for hidden failures, and record evidence.
+1. `stage-1-implementation` — LLM implementation plus focused local tests on the temporary worktree branch.
+2. `stage-2-adversarial-audit` — independent semantic/adversarial audit of Stage 1 on the same temporary worktree branch, including a hard gate for unused intake / accepted-but-ignored inputs.
+3. `stage-3-integration-acceptance-seams` — deterministic changed-scope local seam/contract checks; a verifier is hired only on failure or ambiguity; merge here only when `merge_back_at` is this stage.
+4. `stage-4-upstream-dag-verification` — compatibility slot and merge point only for ordinary phases; it is not a per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance stage. Broad shared acceptance belongs at candidate level; real residual cross-slice production wiring is an explicit integration-construction phase.
+5. `stage-5-finalization` — deterministic merge if not already merged, verify main, run exactly the effective route-owned `green_checks`, inspect logs for hidden failures, destroy the temporary worktree/branch, and record evidence. At plan/conversion time, when an explicit later candidate-level finalization/gate owns repository-wide test/lint/static-analysis, omit those generic commands from per-phase `green_checks`; otherwise retain the repository's normal green checks.
 
 ### Accuracy: `medium` (default) vs `high` vs `max`
 
@@ -271,7 +271,7 @@ IaC layers run strictly in order because a later layer's plan is only truthful a
 - `stage-4-upstream-dag-verification`
 - `stage-5-finalization`
 
-Runtime leads do not decide merge timing. If the plan is created interactively, the planner must ask the user when each phase merges. Non-interactive conversion defaults to `stage-3-integration-acceptance-seams` because integration/acceptance work often needs main/staging infrastructure.
+Runtime leads do not decide merge timing. If the plan is created interactively, the planner must ask the user when each phase merges. Non-interactive conversion defaults to `stage-3-integration-acceptance-seams` because local seam/contract evidence is the earliest ordinary deterministic merge point.
 
 ## Worktree lifecycle
 
@@ -290,10 +290,12 @@ stage-5-finalization
 ├── if not merged: merge now
 ├── if already merged: verify main contains the change
 ├── destroy temporary worktree and temporary branch
-├── run green checks
+├── run configured green checks
 ├── inspect build/deploy/runner logs for hidden errors
 └── write final evidence
 ```
+
+The leader always runs exactly the effective route-owned `green_checks`; it does not infer or branch on later candidate-level ownership. At plan/conversion time, when an explicit later candidate-level finalization/gate owns repository-wide test/lint/static-analysis, omit those generic commands from per-phase `green_checks`; otherwise retain the repository's normal green-check command so configured validation is not dropped.
 
 If merge, checks, log review, or cleanup fails, the runner preserves evidence, keeps the temporary branch when needed, and reports `failed` or `blocked`. It must not silently clean up and claim success.
 
@@ -304,7 +306,7 @@ If merge, checks, log review, or cleanup fails, the runner preserves evidence, k
 - `meta-plan:convert <source.md> <plan-output.md> [route-output.yaml]` converts a loose plan into canonical starter files.
 - `/meta-plan-convert <source.md> <plan-output.md> [route-output.yaml]` is the Claude Code equivalent.
 
-Conversion preserves the source plan's intent. It must not invent model, harness, profile, agent choices, or finalization commands. If route information is missing, conversion writes explicit TODO values and the runnable check fails until a human fills them in. Non-interactive conversion still fills `merge_back_at: stage-3-integration-acceptance-seams` as the safe default.
+Conversion preserves the source plan's intent. It must not invent model, harness, profile, agent choices, or finalization commands. If route information is missing, conversion writes explicit TODO values and the runnable check fails until a human fills them in. Non-interactive conversion still fills `merge_back_at: stage-3-integration-acceptance-seams` as the safe default local seam/contract merge point.
 
 ## Herdr runner gate
 

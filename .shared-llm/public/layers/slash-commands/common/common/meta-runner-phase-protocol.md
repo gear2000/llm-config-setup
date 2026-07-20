@@ -2,7 +2,7 @@
 
 This is the shared execution contract for the Herdr-native runners: `/herdr-run` (the TUI) and `/herdr-phase` (the phase leader). It is deliberately generic and public: examples use placeholder model and agent names only.
 
-The defining rule of this protocol: **a stage is a work ORDER placed to the UpAgent Recruiter, which hires a fresh worker for it — never a native or nested subagent of the leader.** The phase leader does not call the harness's own agent/task tool to run stage work. It writes durable order/result files, drives the Recruiter over the Herdr socket, and reads the worker's `result.json` as the authoritative outcome. Everything else — the two-file input, the five-stage worktree lifecycle, the Stage 2 audit gate, the adversarial-evaluator persona — is transport-agnostic substrate that survives unchanged.
+The defining rule of this protocol: **LLM implementation, audit, verifier, advisor, and consult work is always a work ORDER placed to the UpAgent Recruiter, which hires a fresh worker for it — never a native or nested subagent of the leader.** The ordinary deterministic stages are controller actions with durable result receipts, not native subagents. The phase leader does not call the harness's own agent/task tool to run stage work. It writes durable order/result files, drives the Recruiter over the Herdr socket when a worker is needed, and reads typed worker `result.json`, controller `controller-result.json`, and `phase-result.json` files as the authoritative outcomes. Everything else — the two-file input, the five-stage worktree lifecycle, the Stage 2 audit gate, the adversarial-evaluator persona — is transport-agnostic substrate that survives unchanged.
 
 ## Runnable input is two files
 
@@ -80,24 +80,24 @@ phases:
     stages:
       # stage-0-alignment goes here ONLY when accuracy: high (independent from stage-1)
       stage-1-implementation:
-        purpose: "unit tests + implementation in a TDD coding loop on the temp worktree branch"
+        purpose: "LLM implementation plus focused local tests in a TDD coding loop on the temp worktree branch"
         llm_profile: codex-implementation
         agent: backend
       stage-2-adversarial-audit:
-        purpose: "hostile audit of Stage 1 code on the same temp worktree branch"
+        purpose: "independent semantic/adversarial audit of Stage 1 code on the same temp worktree branch"
         llm_profile: claude-auditor
         agent: adversarial-evaluator
         must_differ_from: stage-1-implementation
       stage-3-integration-acceptance-seams:
-        purpose: "determine/create/update/run higher-level tests at module seams; merge here iff merge_back_at selects this stage"
+        purpose: "run deterministic changed-scope local seam/contract checks; hire verifier only on failure or ambiguity; merge here iff merge_back_at selects this stage"
         llm_profile: claude-low
         agent: qa
       stage-4-upstream-dag-verification:
-        purpose: "build/deploy/test upstream dependents; merge here iff merge_back_at selects this stage"
+        purpose: "ordinary phases do not deploy or run broad shared acceptance here; route-owned candidate-level finalization owns that when present; explicit integration-construction is a separate phase"
         llm_profile: pi-default
         agent: monorepo-pkgs
       stage-5-finalization:
-        purpose: "merge if needed, verify main, destroy temp worktree/branch, run green checks, inspect logs"
+        purpose: "deterministically merge if needed, run configured green checks, inspect logs, and clean up"
         llm_profile: claude-low
         agent: qa
 ```
@@ -113,7 +113,9 @@ Rules:
 - Prefer domain or feature-specific agents when available. Use `agent: general` only when generic behavior is intentional.
 - Repeated templates are allowed only if resolved to explicit phase/stage entries before execution begins.
 - Stage 2 must be independent from Stage 1 by profile, agent, harness, model family, or persona. When `accuracy: high`, `stage-0-alignment`'s audit reviewer follows the same independence rule against `stage-1-implementation`.
-- Stage 5 must have effective green checks and log checks from `finalization_defaults` or phase-level `finalization` overrides/additions.
+- Stage 3 and Stage 5 route entries remain required so the route has an explicit fallback verifier profile/agent for failures or ambiguity, but ordinary Stage 3 and Stage 5 work is deterministic controller work, not an automatic LLM hire.
+- Stage 4 remains a required route slot for compatibility and for non-ordinary variants such as IaC approval/apply records. In an ordinary phase it is not a per-phase shared-environment, deployment, CI, or global acceptance stage.
+- Stage 5 must have effective green checks and log checks from `finalization_defaults` or phase-level `finalization` overrides/additions. The leader always runs exactly the effective route-owned `green_checks`; it does not infer whether a later candidate-level finalization exists. At plan/conversion time, if an explicit later candidate-level finalization/gate owns repository-wide test/lint/static-analysis, the route author omits those generic commands from per-phase `green_checks`; otherwise the route retains the repository's normal green checks.
 - Advisor settings may be used by a phase leader or by a stage worker when the selected harness supports advisors. Advisors are advisory only.
 
 ## The run tree — the durable record
@@ -134,7 +136,8 @@ Every run writes a filesystem tree that is the source of truth for what happened
             └── try-<m>/                    # leader's stage retry within the pass
                 ├── order.json              # what the leader asked the Recruiter (type, cwd, refs, budgets)
                 ├── instructions.md         # the stage brief the worker reads
-                ├── result.json             # SOURCE OF TRUTH: verdict + revisit:[stage-ids] + full_log ptr
+                ├── result.json             # worker-order source of truth: verdict + revisit:[stage-ids] + full_log ptr
+                ├── controller-result.json  # deterministic-controller source of truth when no worker order ran
                 ├── compacted.md            # worker's own short summary back to the leader
                 └── log/
                     ├── full_log →          # POINTER to the worker's harness transcript
@@ -142,21 +145,26 @@ Every run writes a filesystem tree that is the source of truth for what happened
 ```
 
 - **run** / **pass** / **try**: a *run* is the whole plan; a *pass* is one TUI execution of a phase (forward only); a *try* is a leader retry of a stage inside a pass.
-- **Durable vs heavy.** `order.json`, `instructions.md`, `result.json`, `compacted.md`, the handoffs, and the `*-status.md` logs are durable in the work-log. The heavy harness transcript stays where the harness writes it; `result.json.full_log` points to it. OTel is captured only when `OTEL_*` env is injected into the order.
+- **Durable vs heavy.** `order.json`, `instructions.md`, worker `result.json`, `compacted.md`, the handoffs, controller `controller-result.json`, and the `*-status.md` logs are durable in the work-log. The heavy harness transcript stays where the harness writes it; worker `result.json.full_log` points to it. OTel is captured only when `OTEL_*` env is injected into the order.
+- **Deterministic controller stages.** Ordinary Stage 3/5 controller actions write `controller-result.json` under their stage try directory, not worker `result.json`. They do not have `order.json`, `instructions.md`, `compacted.md`, a handoff, or a worker `full_log` unless a separate anomaly verifier order was hired. Their `controller-result.json` uses the deterministic-stage evidence shape defined below.
 - **Rolling summaries are the connective tissue.** `phase-status.md` gets one line per stage per pass (for example `pass1 stage-2 failed — reason X, revisit stage-1`). At the start of a new pass or try, the controller reads it, sees where work failed, and replays the pointed units forward. `run-status.md` is the TUI's phase-level equivalent.
 - **The route copy is frozen from the origin but live inside the run.** Once the run tree is created, its `route.yaml` is the single live routing source; the origin is historical/read-only. Every leader receives the run-tree plan/route paths, and every mid-run edit (including the last-writer marker) touches only the run-tree route.
 
-## Execution model — a stage is a work order, not a subagent
+## Execution model — worker orders and deterministic controller stages
 
-The phase leader runs each stage by placing a **work order** to the always-up UpAgent Recruiter, which hires exactly one fresh worker for that order and releases it when the order is done. The leader never spawns a native subagent, team, or nested harness session to do stage work.
+The phase leader runs all LLM work by placing a **work order** to the always-up UpAgent Recruiter, which hires exactly one fresh worker for that order and releases it when the order is done. This includes Stage 1 implementation, Stage 2 audit, `stage-0-alignment` workers, anomaly verifiers, advisors, and consults. The leader never spawns a native subagent, team, or nested harness session to do LLM work.
 
-The order/result contract (the exact JSON fields the leader and worker exchange) is fixed by the UpAgent `contracts.py` module. The leader writes `order.json` (required: `order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`; lifecycle fields: a caller-stable globally scoped `request_id` and `requester: {id, kind, address}`; optional `env`), and the worker writes `result.json` (required: `order_id` echoing the order, `verdict` — one of `passed` / `failed` / `blocked`, `full_log` — the pointer to the worker's own harness transcript; optional `revisit` — a list of recognized stage ids, required non-empty when `verdict` is `failed`).
+Ordinary Stage 3 seam checks, ordinary Stage 4 deferral/merge records, and Stage 5 finalization are deterministic controller actions. They still write typed stage evidence to `controller-result.json` and participate in `phase-status.md` / `phase-result.json`, but they are not worker orders. Do not invent a synthetic `order_id`, `instructions.md`, `compacted.md`, worker `result.json`, or worker `full_log` for a deterministic controller stage.
+
+The worker order/result contract (the exact JSON fields the leader and worker exchange) is fixed by the UpAgent `contracts.py` module. The leader writes `order.json` (required: `order_id`, `phase_id`, `stage_id`, `harness`, `model`, `agent`, `cwd`, `instructions_path`, `result_path`, `cockpit_pane`; lifecycle fields: a caller-stable globally scoped `request_id` and `requester: {id, kind, address}`; optional `env`), and the worker writes `result.json` (required: `order_id` echoing the order, `verdict` — one of `passed` / `failed` / `blocked`, `full_log` — the pointer to the worker's own harness transcript; optional `revisit` — a list of recognized stage ids, required non-empty when `verdict` is `failed`).
+
+A deterministic controller stage writes `controller-result.json` with this shape instead: stage id, `runner: controller` (or an equivalent controller marker), commands run, exit codes, log/evidence paths or bounded excerpts, try number, and final verdict. If it escalates to an anomaly verifier, that verifier is a normal worker order with its own `order_id`, worker `result.json`, and `full_log`; the controller result records the verifier evidence separately instead of pretending the controller stage had a worker transcript.
 
 `cockpit_pane` is the id of an existing pane in the cockpit workspace to split the worker from — Herdr's `pane split` takes a source pane, not a workspace label, so the runner threads a live cockpit pane id (the phase leader's own pane) down into every order.
 
 The Recruiter is brought up once per run by `just upagent-up`. Its services pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. Each request uses direct Python-owned lifecycle by default; optional dedicated Account Managers remain available by roster opt-in. Python owns facts, state transitions, pane operations, durable requester mailboxes, and lease fencing. The leader submits with `just upagent-request`, then waits with `just upagent-await` or `just upagent-await-any`; shell pane input is never used as a queue.
 
-The order round-trip, all over the Herdr socket:
+The worker-order round-trip, all over the Herdr socket:
 
 ```text
 leader:    write pass-<p>/stages/<stage>/try-<m>/order.json  +  instructions.md  (order.cockpit_pane = the leader's cockpit pane)
@@ -190,7 +198,7 @@ Every worker writes a short, versioned handoff before its pane closes so the nex
 Backtracking has two levels; both replay **forward, in order**, and neither reverts. A failing unit emits a structured `revisit: [ids]` pointer, and the controller replays from the earliest pointed id forward.
 
 ```text
-stage fails → result.json.verdict=failed, revisit=[stage-ids], reason recorded in phase-status.md
+stage fails → worker result.json or controller-result.json verdict=failed, revisit=[stage-ids], reason recorded in phase-status.md
 leader: replay from the earliest revisit stage-id forward; increment try
   stage_try_budget hit → advisor configured? place an advisor order (context = phase-status.md)
                             advisor result.json: verdict=passed, decision = continue | loop | stop-ask-human
@@ -227,12 +235,13 @@ A meta run creates one phase leader per phase (created, then destroyed at phase 
 - validates the route profile entries for its phase;
 - performs the pre-flight boundary/dependency check before any stage writes code;
 - runs `stage-0-alignment` first when `accuracy: high`;
-- places exactly one stage work order at a time to the Recruiter, and reads the worker's `result.json`;
+- places exactly one worker order at a time to the Recruiter for LLM-run stages or anomaly verifiers, and reads the worker's `result.json`;
+- runs deterministic changed-scope Stage 3 seam/contract checks and Stage 5 merge/check/log/cleanup commands itself, writing typed stage evidence instead of hiring an ordinary LLM worker;
 - injects the stage instructions, route details, worktree branch, deterministic merge timing, the non-delegation rule, and the specialist phone book — the VERBATIM output of `just upagent-specialists` (merged roster + exact consult mechanics + the mandatory-consult rule) — into `instructions.md`;
 - records evidence and stage outcomes in `phase-status.md`;
 - enforces stage-level `revisit` backtracking (replay forward, increment try) and the `stage_try_budget` → advisor → human ladder;
 - enforces loops back to Stage 1 when Stage 2 raises blocking audit findings;
-- enforces the Stage 3/4/5 merge point from `merge_back_at`;
+- enforces the Stage 3/4/5 merge point from `merge_back_at`, without treating ordinary Stage 4 as a shared-environment or deployment acceptance gate;
 - enforces Stage 5 finalization, cleanup, green checks, and log review;
 - writes `phase-result.json` (verdict plus `revisit:[phase-ids]` when it gives up).
 
@@ -264,9 +273,9 @@ tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
 
 Refuse to reuse an existing dirty temp worktree. Record the temp worktree path, branch, base commit, and current main branch identity in evidence. The worktree path becomes the `cwd` on each stage's order.
 
-### Stage 1 — unit tests + implementation on the temp worktree
+### Stage 1 — LLM implementation plus focused local tests on the temp worktree
 
-This is the implementation stage. The worker hired for the stage writes/updates unit tests and production code in one TDD loop on the temporary worktree branch:
+This is the implementation stage. The worker hired for the stage writes/updates focused local tests and production code in one TDD loop on the temporary worktree branch:
 
 1. write or update the relevant unit test;
 2. verify expected failure when practical;
@@ -276,7 +285,7 @@ This is the implementation stage. The worker hired for the stage writes/updates 
 
 No hardcoding, bypassing validation, empty stubs, or goal cheating just to pass tests.
 
-### Stage 2 — adversarial audit of Stage 1 code on the same temp worktree
+### Stage 2 — independent semantic/adversarial audit of Stage 1 code on the same temp worktree
 
 Run an independent hostile reviewer against the files modified in Stage 1 on the same temporary worktree branch. It checks signature mismatches, unused/dead code, goal cheating, and **unused intake / accepted-but-ignored inputs**.
 
@@ -297,31 +306,26 @@ Intentional unused inputs are allowed only when explicit and auditable: undersco
 - Non-blocking notes are reported but do not fail the phase.
 - Each blocking unused-intake finding must name the input, where it is accepted, the expected behavioral role, evidence that it is ignored, any affected call-site/public surface, and the recommended fix.
 
-### Stage 3 — integration/acceptance seam testing
+### Stage 3 — deterministic local seam/contract checks
 
 If `merge_back_at` is `stage-3-integration-acceptance-seams`, merge the temporary worktree branch back to main at this stage and run Stage 3 from main. If that merge updates refs without touching a dirty primary checkout, immediately reconcile the primary checkout/index before continuing: `git checkout HEAD -- <phase-touched-files>`, using only the recorded phase-owned manifest. Otherwise, continue on the temporary worktree branch.
 
-Review deep module surfaces and seams affected by the Stage 1 change. Determine whether higher-level tests need to be created or updated:
+Stage 3 is deterministic changed-scope local seam/contract verification, not a second semantic reviewer and not a shared-environment acceptance stage. The leader derives the changed scope from the phase diff, dependency metadata, and phase-owned manifest, then runs only declared local commands that prove affected boundaries. Suitable checks include:
 
-- integration tests;
-- acceptance tests;
-- seam tests where modules/packages/services interact.
+- local contract tests;
+- component or package seam tests;
+- hermetic integration tests that do not deploy or mutate shared services;
+- targeted build/type checks required to exercise the touched public boundary.
 
-Do not write tests for their own sake. If no public/deep-module seam changed, record the reason and pass the stage. These are not unit tests; they verify behavior where modules interact.
+Do not write tests for their own sake, do not rerun broad generic lint already owned by Stage 5's route-owned `green_checks`, and do not deploy or mutate shared infrastructure. If no public/deep-module seam changed, record the reason and pass the stage. A fresh LLM verifier is hired through the Recruiter only when a deterministic command fails, the output is ambiguous, or attribution to Stage 1 versus pre-existing state is unclear. Missing production wiring fails back to Stage 1; residual cross-slice production work belongs in an explicit integration-construction phase with its own Stage 1 implementation and independent Stage 2 audit, not in Stage 3 verification.
 
-### Stage 4 — upstream DAG dependent build/deploy/test verification
+### Stage 4 — ordinary-phase shared acceptance is out of scope
 
-If `merge_back_at` is `stage-4-upstream-dag-verification`, merge the temporary worktree branch back to main at this stage and run Stage 4 from main. If that merge is ref-only, immediately run `git checkout HEAD -- <phase-touched-files>` in the primary checkout using the recorded phase-owned manifest before continuing. If the branch was already merged in Stage 3, run Stage 4 from main. Otherwise, continue on the temporary worktree branch.
+If `merge_back_at` is `stage-4-upstream-dag-verification`, merge the temporary worktree branch back to main at this stage. If that merge is ref-only, immediately run `git checkout HEAD -- <phase-touched-files>` in the primary checkout using the recorded phase-owned manifest before continuing. If the branch was already merged in Stage 3, verify main contains the expected change. Otherwise, continue on the temporary worktree branch.
 
-Locate the modified package/layer/module in the dependency DAG. Trace every upstream dependent that imports, builds on, deploys with, or otherwise depends on the changed layer. For each upstream node, sequentially run the repo-declared equivalent of:
+For ordinary phases, Stage 4 must not become a per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance stage. Broad shared acceptance belongs once at candidate level, after planned phase work has accumulated into a candidate branch and the runner has yielded custody to the route-owned candidate-level finalization/gate. If that gate fails later, it returns evidence to the responsible phase and the run replays forward.
 
-- build;
-- unit tests;
-- integration/seam tests;
-- deployment or deployment dry-run where required;
-- acceptance/live checks where applicable and safe.
-
-If an upstream build/deploy/test fails, save logs outside the repo when possible, stop the pipeline, and trigger rollback policy. Do not blindly fix upstream from the current phase context.
+Real residual cross-slice production wiring is construction, not verification. Add it as an explicit integration-construction phase only when the plan identifies production code still to write across slices. That phase uses the normal Stage 1 implementation plus Stage 2 independent audit path, then the same deterministic Stage 3/5 checks. Non-ordinary variants keep their explicit contracts; in particular, IaC phases still use the Stage 3 plan/approval table, TUI-owned apply receipt, and Stage 5 finalization described in `/herdr-phase`'s "IaC phases (kind: iac)" section and the meta-plan format's "IaC phases (`kind: iac`)" section.
 
 ### Stage 5 — finalization, green checks, log review, and cleanup
 
@@ -329,7 +333,8 @@ Stage 5 always runs.
 
 - If `merge_back_at` is `stage-5-finalization`, merge the temporary worktree branch back to main now; after a ref-only merge, immediately run `git checkout HEAD -- <phase-touched-files>` in the primary checkout using the recorded phase-owned manifest.
 - If the branch was already merged in Stage 3 or Stage 4, verify main contains the expected change.
-- Run the effective `green_checks` from `finalization_defaults` plus any phase-level additions/overrides.
+- Run exactly the effective `green_checks` from `finalization_defaults` plus any phase-level additions/overrides, scoped to this phase's configured finalization contract. The leader does not infer or branch on later candidate-level ownership.
+- Route authors decide the command set before execution: when an explicit later candidate-level finalization/gate owns repository-wide test/lint/static-analysis, omit those generic commands from per-phase `green_checks`; otherwise retain the repository's normal green checks.
 - Inspect the effective `log_checks` sources for hidden failures. Treat obvious fatal/error/traceback/uncaught/deploy-failure patterns as hard failures unless an explicit allowlist explains them.
 - Destroy/prune the temporary worktree and temporary branch only after merge, green checks, and log review succeed.
 - Write final evidence: merge point, main commit, cleanup actions, green-check output, and log-review summary.
@@ -340,7 +345,7 @@ If merge, green checks, log review, or cleanup fails, preserve evidence, keep th
 
 At phase start, record a Git baseline: branch/worktree identity, status, and phase-owned file manifest.
 
-- Temporary worktree branch: Stage 4 regression may use a hard reset after logs are saved.
+- Temporary worktree branch: a failed deterministic check may use a hard reset after logs are saved, scoped to the phase-owned temporary worktree only.
 - Main branch: inspect whether uncommitted changes include files outside the phase-owned manifest. The scoped post-ref-only-merge checkout is allowed only after that merge and only for recorded phase-owned paths; ask the human before any broader destructive rollback.
 - Stage 5 cleanup is not allowed until merge/final checks/log review have succeeded.
 - Because passes are forward-only, a `revisit` never rewinds merged history. A true revert is a human decision surfaced through the `stop-ask-human` path, never an automated step.
@@ -356,11 +361,13 @@ Never reset unrelated human or agent work without an explicit safety check and h
 - `accuracy` and, when high, the stage-0-alignment outcome;
 - `merge_back_at` value and actual merge stage;
 - temporary worktree branch/path and cleanup result;
-- each stage id with `llm_profile` and `agent` used, plus its `order_id`, tries, and final verdict;
+- worker-stage evidence: stage id, `llm_profile`, `agent`, `order_id`, tries, final verdict, and `full_log` pointer;
+- deterministic-stage evidence from `controller-result.json`: stage id, `runner: controller` or equivalent marker, commands, exit codes, log/evidence paths or bounded excerpts, tries, and final verdict;
+- no synthetic `order_id`, worker `result.json`, or worker `full_log` for deterministic Stage 3/5 controller actions; if an anomaly verifier was hired, record that verifier as separate worker evidence;
 - advisor status when applicable;
 - dependency graph source;
-- commands run and evidence paths/log excerpts (`full_log` pointers);
-- upstream verification result;
+- commands run and evidence paths/log excerpts;
+- Stage 4 ordinary-phase deferral or non-ordinary variant result;
 - Stage 5 green-check and log-review result;
 - rollback or cleanup actions;
 - the pass number and any `revisit:[phase-ids]` on a non-passing verdict.

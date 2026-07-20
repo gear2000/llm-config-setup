@@ -149,6 +149,54 @@ def test_phase_leader_continues_degraded_without_a_controller_watchdog_receipt()
     assert "Monitoring failure must never become an infinite wait or prevent plan work." in text
 
 
+def test_ordinary_stage3_and_stage5_are_deterministic_controller_stages() -> None:
+    text = PROTOCOL.read_text()
+
+    assert "leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders" in text
+    assert "runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence" in text
+    assert "worker orders plus deterministic controller stages" in text
+    assert "Ordinary Stage 3 seam checks and Stage 5 finalization are deterministic controller stages" in text
+    assert "Stage 3 — ordinary deterministic local seam/contract checks" in text
+    assert "Hire a fresh verifier through the Recruiter only when a command fails" in text
+    assert "places a work ORDER per stage" not in text
+    assert "The leader runs the shared five-stage worktree lifecycle, ordering one worker per stage" not in text
+    assert "A stage is a work order to the Recruiter" not in text
+
+
+def test_phase_result_distinguishes_worker_and_deterministic_stage_evidence() -> None:
+    text = PROTOCOL.read_text()
+
+    assert "worker-stage evidence (`stage_id`, `llm_profile`, `agent`, `order_id`, tries, final verdict, and `full_log` pointer)" in text
+    assert "deterministic-stage evidence from `controller-result.json` (`stage_id`, `runner: controller` or equivalent marker, commands, exit codes, log/evidence paths or bounded excerpts, tries, and final verdict)" in text
+    assert "write `controller-result.json`" in text
+    assert "do not invent a synthetic `order_id`, worker `result.json`, or worker `full_log`" in text
+    assert "record that verifier as separate worker-stage evidence" in text
+    assert "each stage id with `llm_profile`/`agent`/`order_id`/tries/final verdict" not in text
+    assert "commands/evidence/`full_log` pointers" not in text
+
+
+def test_ordinary_stage4_is_not_a_shared_environment_deployment_stage() -> None:
+    text = PROTOCOL.read_text()
+
+    assert "Stage 4 — no ordinary shared acceptance/deployment stage" in text
+    assert "Do not run per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance checks" in text
+    assert "broad shared acceptance is deferred to the route-owned candidate-level finalization/gate" in text
+    assert "Non-ordinary variants keep their explicit contracts, including IaC" in text
+    assert "Stage 4 — upstream DAG verification" not in text
+
+
+def test_stage5_runs_exactly_route_owned_green_checks() -> None:
+    text = PROTOCOL.read_text()
+
+    assert "run exactly the effective route-owned `green_checks`" in text
+    assert "The leader does not infer or branch on later candidate-level ownership" in text
+    assert "Route authors decide the command set before execution" in text
+    assert "omit those generic commands from per-phase `green_checks`" in text
+    assert "otherwise retain the repository's normal green checks" in text
+    assert "candidate gate follows" not in text
+    assert "no candidate gate is configured" not in text
+
+
 
 def test_tui_waits_inside_phase_await_not_pane_watching() -> None:
     text = RUNNER.read_text()

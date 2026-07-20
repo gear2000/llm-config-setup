@@ -1,6 +1,6 @@
 # /herdr-phase
 
-Run one phase as the Herdr-native **phase leader**. This command is sent to a cockpit pane by `/herdr-run`, once per phase. The leader runs the phase's stages by placing a work ORDER per stage with the UpAgent Recruiter — never by spawning a native or nested subagent — applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
+Run one phase as the Herdr-native **phase leader**. This command is sent to a cockpit pane by `/herdr-run`, once per phase. The leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders with the UpAgent Recruiter — never by spawning a native or nested subagent — and runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence. It applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
 
 ## Invocation
 
@@ -32,9 +32,11 @@ All four flags are required. Fail loud on any missing or unreadable path.
 6. Run the pre-flight dependency/import safety check before any code stage (see the shared phase protocol). On a confirmed circular dependency, write a `blocked` `phase-result.json` and stop.
 7. Create or select the temporary worktree branch from the route template and record its path, branch, and base commit. This path is the `cwd` on every stage order.
 
-## Stage execution — one work order per stage
+## Stage execution — worker orders plus deterministic controller stages
 
-The leader runs the phase's stages in order — `stage-1` … `stage-5` for `accuracy: medium`, with `stage-0-alignment` first for `accuracy: high` and `max` (and, under `max`, a doubled stage-2 audit — see the five-stage lifecycle below). For each stage it places exactly one work order to the Recruiter and reads back the worker's `result.json`:
+The leader runs the phase's stages in order — `stage-1` … `stage-5` for `accuracy: medium`, with `stage-0-alignment` first for `accuracy: high` and `max` (and, under `max`, a doubled stage-2 audit — see the five-stage lifecycle below). Stage 1, Stage 2, Stage 0 alignment workers, advisors, consults, and any anomaly verifier are work orders to the Recruiter. Ordinary Stage 3 seam checks and Stage 5 finalization are deterministic controller stages with typed evidence; Stage 4 is not an ordinary shared-environment or deployment verification stage.
+
+When a worker is needed, the leader places exactly one work order to the Recruiter and reads back the worker's `result.json`:
 
 ```text
 leader:    write pass-<p>/stages/<stage-id>/try-<m>/order.json + instructions.md   (order.cockpit_pane = this leader's pane)
@@ -109,13 +111,13 @@ Misaligned ⇒ loop stage-0 (redo the mini-plan) within the stage-try budget. Un
 
 ## Five-stage lifecycle and merge timing
 
-The leader runs the shared five-stage worktree lifecycle, ordering one worker per stage:
+The leader runs the shared five-stage worktree lifecycle. It orders workers for LLM implementation/audit work and for anomaly verifiers; it runs deterministic local seam/finalization commands itself.
 
-1. **Stage 1 — implementation** on the temporary worktree branch (unit tests + code, TDD loop, no goal cheating).
-2. **Stage 2 — adversarial audit** of Stage 1 on the same branch, including the hard gate for **unused intake / accepted-but-ignored inputs** and the **consult-receipt check**: compare the brief's specialist phone book against the Stage 1 `result.json` `consults` list — deciding in an area a listed specialist owns with no matching consult receipt is a blocking finding. Read `consults_verified` on the phase receipt, not the worker's own list: the Recruiter resolves every claimed entry against its own record of what it brokered, so a verified entry is a Python-checked fact and anything in `consults_unverified` is a claim with nothing behind it. What the stamp cannot decide is whether a consult was OWED — that is this audit's judgement, and a verified consult proves a question was asked, not that it was the right one. A verification-passed audit outcome advances; its worker `result.json` still uses the enum `verdict=passed`. Blocking findings return `verdict=failed`, `revisit=[stage-1-implementation]` with the raw findings; non-blocking notes are recorded. Stage 2 must be run by a worker independent from Stage 1. Under `accuracy: max` the leader places TWO independent stage-2 orders — the primary `llm_profile` and the route's `second_llm_profile` (a different harness or model) — and blocks over both with `upagent-await-any`. Both must return `passed` to advance. On disagreement, consult `finalization_defaults.advisor_profile` as the judge when set (its `result.json.decision`: `continue` accepts the work, `loop` replays stage-1 with both sets of findings, `stop-ask-human` gives the phase up); with no advisor, write `phase-result.json` verdict `blocked` for the human. Each auditor's order reuses the stage-2 `stage_id` with its own try and order id, and both results are recorded in `phase-status.md`.
-3. **Stage 3 — integration/acceptance seams**; merge the worktree back to main here iff `merge_back_at` selects Stage 3.
-4. **Stage 4 — upstream DAG verification**; merge here iff `merge_back_at` selects Stage 4 (or run from main if already merged at Stage 3).
-5. **Stage 5 — finalization**: merge if not already merged, verify main, run green checks, inspect logs for hidden failures, destroy the temporary worktree/branch, and write final evidence. Stage 5 always runs.
+1. **Stage 1 — LLM implementation plus focused local tests** on the temporary worktree branch (TDD loop, no goal cheating).
+2. **Stage 2 — independent semantic/adversarial audit** of Stage 1 on the same branch, including the hard gate for **unused intake / accepted-but-ignored inputs** and the **consult-receipt check**: compare the brief's specialist phone book against the Stage 1 `result.json` `consults` list — deciding in an area a listed specialist owns with no matching consult receipt is a blocking finding. Read `consults_verified` on the phase receipt, not the worker's own list: the Recruiter resolves every claimed entry against its own record of what it brokered, so a verified entry is a Python-checked fact and anything in `consults_unverified` is a claim with nothing behind it. What the stamp cannot decide is whether a consult was OWED — that is this audit's judgement, and a verified consult proves a question was asked, not that it was the right one. A verification-passed audit outcome advances; its worker `result.json` still uses the enum `verdict=passed`. Blocking findings return `verdict=failed`, `revisit=[stage-1-implementation]` with the raw findings; non-blocking notes are recorded. Stage 2 must be run by a worker independent from Stage 1. Under `accuracy: max` the leader places TWO independent stage-2 orders — the primary `llm_profile` and the route's `second_llm_profile` (a different harness or model) — and blocks over both with `upagent-await-any`. Both must return `passed` to advance. On disagreement, consult `finalization_defaults.advisor_profile` as the judge when set (its `result.json.decision`: `continue` accepts the work, `loop` replays stage-1 with both sets of findings, `stop-ask-human` gives the phase up); with no advisor, write `phase-result.json` verdict `blocked` for the human. Each auditor's order reuses the stage-2 `stage_id` with its own try and order id, and both results are recorded in `phase-status.md`.
+3. **Stage 3 — ordinary deterministic local seam/contract checks**; merge the worktree back to main here iff `merge_back_at` selects Stage 3. Run only changed-scope local contract, component, hermetic integration, or targeted boundary checks. Hire a fresh verifier through the Recruiter only when a command fails, output is ambiguous, or attribution is unclear. Missing production wiring revisits Stage 1; residual cross-slice production work belongs in an explicit integration-construction phase, not in Stage 3. Non-ordinary variants keep their explicit contracts, including IaC.
+4. **Stage 4 — no ordinary shared acceptance/deployment stage**; merge here iff `merge_back_at` selects Stage 4, then record that broad shared acceptance is deferred to the route-owned candidate-level finalization/gate. Do not run per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance checks here for ordinary phases. Non-ordinary variants keep their explicit contracts, including IaC.
+5. **Stage 5 — deterministic finalization**: merge if not already merged, verify main, run exactly the effective route-owned `green_checks`, inspect logs for hidden failures, destroy the temporary worktree/branch, and write final evidence. The leader does not infer or branch on later candidate-level ownership. Route authors decide the command set before execution: when an explicit later candidate-level finalization/gate owns repository-wide test/lint/static-analysis, omit those generic commands from per-phase `green_checks`; otherwise retain the repository's normal green checks. Stage 5 always runs.
 
 The full stage rules, the Stage 2 multi-angle audit detail, and rollback safety live in the shared phase protocol; follow them exactly.
 
@@ -140,7 +142,7 @@ just upagent-phase-publish $UPAGENT_PHASE_START_RECEIPT decision-required "IaC l
 Backtracking replays **forward, in order** — nothing is reverted.
 
 ```text
-stage result.json.verdict=failed, revisit=[stage-ids] → record the reason in phase-status.md
+stage worker result.json or controller-result.json verdict=failed, revisit=[stage-ids] → record the reason in phase-status.md
 leader: replay from the earliest revisit stage-id forward; increment try (try-<m+1>)
   stage_try_budget hit (default 3) →
     advisor_profile set?  place an advisor order via the Recruiter (context = phase-status.md);
@@ -155,17 +157,19 @@ When the leader gives up on the phase, it writes `phase-result.json` with `verdi
 ## phase-status.md and phase-result.json
 
 - `phase-status.md` — one line per stage per pass, appended as work happens: `pass<p> <stage-id> try<m> <verdict> — <reason>, revisit <ids>`. This rolling log is how a later pass or try knows where it failed.
-- `phase-result.json` — the latest phase verdict the TUI reads. Write and validate it, then as the literal final action before going idle print to this leader pane: `PHASE_RESULT: <phase-id> verdict=<passed|failed|blocked> pass=<n>`. Map `partial` to `blocked` for this completion marker while retaining the detailed file verdict. Include: phase id; pass number; `verdict` (`passed`/`partial`/`blocked`/`failed`); `revisit:[phase-ids]` on any non-passing verdict; lead `llm_profile`/`agent`; `accuracy` and the stage-0 outcome when high; `merge_back_at` and actual merge stage; temporary worktree branch/path and cleanup result; each stage id with `llm_profile`/`agent`/`order_id`/tries/final verdict; advisor status; dependency graph source; commands/evidence/`full_log` pointers; Stage 3 seam decision; Stage 4 upstream result; Stage 5 green-check and log-review result; rollback/cleanup actions.
+- `phase-result.json` — the latest phase verdict the TUI reads. Write and validate it, then as the literal final action before going idle print to this leader pane: `PHASE_RESULT: <phase-id> verdict=<passed|failed|blocked> pass=<n>`. Map `partial` to `blocked` for this completion marker while retaining the detailed file verdict. Include: phase id; pass number; `verdict` (`passed`/`partial`/`blocked`/`failed`); `revisit:[phase-ids]` on any non-passing verdict; lead `llm_profile`/`agent`; `accuracy` and the stage-0 outcome when high; `merge_back_at` and actual merge stage; temporary worktree branch/path and cleanup result; worker-stage evidence (`stage_id`, `llm_profile`, `agent`, `order_id`, tries, final verdict, and `full_log` pointer); deterministic-stage evidence from `controller-result.json` (`stage_id`, `runner: controller` or equivalent marker, commands, exit codes, log/evidence paths or bounded excerpts, tries, and final verdict); advisor status; dependency graph source; Stage 3 seam decision; Stage 4 ordinary-phase deferral or non-ordinary variant result; Stage 5 green-check and log-review result; rollback/cleanup actions.
+
+For deterministic Stage 3/5 evidence, write `controller-result.json`; do not invent a synthetic `order_id`, worker `result.json`, or worker `full_log`. If the leader hires an anomaly verifier, record that verifier as separate worker-stage evidence and link it from the controller result.
 
 Only write `passed` when every required stage passed and Stage 5 cleanup, green checks, and log review passed.
 
 ## Hard rules
 
 1. Herdr-only: require `HERDR_ENV=1`.
-2. A stage is a work order to the Recruiter — never a native subagent, team, pane, or nested harness session created by the leader, and no Claude team mode.
+2. LLM implementation, audit, verifier, advisor, and consult work is a work order to the Recruiter; deterministic Stage 3/5 controller work writes typed evidence directly. Neither path may create a native subagent, team, pane, or nested harness session, and there is no Claude team mode.
 3. Workers are terminal and non-delegating; a worker that needs more help returns `blocked`, and a worker that has written its required files exits its session.
 4. The route is authoritative and deterministic per stage; the leader resolves `harness`/`model`/`agent` from it and never lets the Recruiter pick.
-5. `result.json` / `phase-result.json` are the source of truth; pane scrollback is evidence only.
+5. Worker `result.json`, controller `controller-result.json`, and `phase-result.json` are the source of truth; pane scrollback is evidence only.
 6. Forward-only: replay forward on `revisit`; never revert merged history from this phase — escalate a true revert to the TUI.
 7. Do not close the worker pane until its evidence is persisted; do not reset shared/main branches without checking for unrelated changes and asking the human.
 8. Only the Hub executes lifecycle actions, and only this requester authorizes extension/cancellation before the hard-deadline grace expires. In the default direct lifecycle there is no Dedicated Account Manager; a roster may opt into `management.mode: dedicated`.
