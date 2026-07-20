@@ -20,7 +20,10 @@ SCOPE DISCIPLINE (mandatory)
 - Reviewing, auditing, advising, or judging: reach your verdict as soon as you have
   enough evidence for it. Do not add extra investigation passes, extra re-reads, or
   extra rounds of second-guessing beyond what this stage's decision requires.
-- If you believe more work is genuinely required, say so in your result notes instead
-  of doing it.
+- If you believe more work is genuinely required, or you're simply uncertain whether
+  this stage's scope is too much or too little, do not guess — say so plainly in your
+  result notes instead of resolving it yourself. A flagged uncertainty costs far less
+  than work that turns out unusable or unmaintainable because it solved a
+  differently-sized problem than the stage actually needed.
 
 ---

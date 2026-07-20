@@ -21,8 +21,12 @@ review.
   here" cleanups.
 - Tests proportionate to the change: cover the contract, not every permutation.
 - Prefer extending existing code over inventing new files, patterns, or layers.
-- If you believe more work is genuinely required than what was asked, say so and
-  stop — do not silently go do it.
+- If you believe more work is genuinely required than what was asked, or you're
+  simply uncertain whether you're doing too much or too little, stop and ask the
+  human in the loop — state it in one line and let them decide. Do not guess and
+  keep going: a paused question costs far less than code that turns out unusable or
+  unmaintainable because it solved a differently-sized problem than the one asked
+  for.
 
 Less that fully does the job beats more that also does the job: less is more. Work
 added beyond the ask costs more than it gives once you count the time spent reviewing
