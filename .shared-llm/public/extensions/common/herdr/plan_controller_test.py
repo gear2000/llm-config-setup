@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 _spec = importlib.util.spec_from_file_location(
     "herdr_plan_controller_tested", Path(__file__).with_name("plan_controller.py")
 )
@@ -17,6 +16,15 @@ assert _spec and _spec.loader
 plan_controller = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(plan_controller)
 PlanStartError = plan_controller.PlanStartError
+
+
+@pytest.fixture(autouse=True)
+def _resolved_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        plan_controller.recruiter,
+        "_resolve_current_herdr_session_name",
+        lambda: "llm-lab-test",
+    )
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
@@ -47,6 +55,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
 
 def _healthy_tui(**_: object) -> dict[str, object]:
     return {
+        "herdr_session": "llm-lab-test",
         "health": {"healthy": True},
         "pane_id": "tui-pane",
         "workspace_id": "workspace-1",
@@ -84,7 +93,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     monkeypatch.setattr(
         plan_controller.recruiter,
         "_herdr_json",
-        lambda *args: {
+        lambda *args, **kwargs: {
             "result": {
                 "root_pane": {
                     "pane_id": "tui-pane",
@@ -95,7 +104,9 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
         },
     )
     monkeypatch.setattr(
-        plan_controller.recruiter, "_herdr", lambda *args: calls.append(args)
+        plan_controller.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: calls.append(args),
     )
     monkeypatch.setattr(
         plan_controller.recruiter,
@@ -130,7 +141,7 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
         monkeypatch.setattr(
             plan_controller.recruiter,
             "_herdr_json",
-            lambda *args: {
+            lambda *args, **kwargs: {
                 "result": {
                     "workspaces": [],
                     "root_pane": {
@@ -142,7 +153,9 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
             },
         )
         monkeypatch.setattr(
-            plan_controller.recruiter, "_herdr", lambda *args: calls.append(args)
+            plan_controller.recruiter,
+            "_herdr",
+            lambda *args, **kwargs: calls.append(args),
         )
         monkeypatch.setattr(
             plan_controller.recruiter,
@@ -174,7 +187,7 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
     calls: list[tuple[str, ...]] = []
     placements: list[tuple[str, ...]] = []
 
-    def herdr_json(*args: str) -> dict:
+    def herdr_json(*args: str, **kwargs: object) -> dict:
         if args[:2] == ("workspace", "list"):
             return {
                 "result": {
@@ -195,12 +208,14 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
 
     monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
     monkeypatch.setattr(
-        plan_controller.recruiter, "_herdr", lambda *args: calls.append(args)
+        plan_controller.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: calls.append(args),
     )
     monkeypatch.setattr(
         plan_controller.recruiter,
         "_place_started_agent_in_role_tab",
-        lambda pane_id, workspace_id, tab_role, split_direction: (
+        lambda pane_id, workspace_id, tab_role, split_direction, **kwargs: (
             placements.append((pane_id, workspace_id, tab_role, split_direction))
             or pane_id
         ),
@@ -233,7 +248,7 @@ def test_separate_workspaces_mode_creates_the_per_run_workspace(
     run_dir, _ = _inputs(tmp_path)
     created: list[tuple[str, ...]] = []
 
-    def herdr_json(*args: str) -> dict:
+    def herdr_json(*args: str, **kwargs: object) -> dict:
         if args[:2] == ("workspace", "create"):
             created.append(args)
             return {
@@ -248,7 +263,9 @@ def test_separate_workspaces_mode_creates_the_per_run_workspace(
         raise AssertionError(args)
 
     monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
-    monkeypatch.setattr(plan_controller.recruiter, "_herdr", lambda *args: None)
+    monkeypatch.setattr(
+        plan_controller.recruiter, "_herdr", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(
         plan_controller.recruiter,
         "_wait_for_agent_health",
@@ -275,7 +292,7 @@ def test_tui_metadata_failure_closes_created_pane(
     run_dir, _ = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
 
-    def herdr_json(*args: str) -> dict:
+    def herdr_json(*args: str, **kwargs: object) -> dict:
         if args[:2] == ("workspace", "list"):
             return {"result": {"workspaces": []}}
         if args[:2] == ("workspace", "create"):
@@ -286,7 +303,9 @@ def test_tui_metadata_failure_closes_created_pane(
 
     monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
     monkeypatch.setattr(
-        plan_controller.recruiter, "_herdr", lambda *args: calls.append(args)
+        plan_controller.recruiter,
+        "_herdr",
+        lambda *args, **kwargs: calls.append(args),
     )
 
     with pytest.raises(PlanStartError, match="has no workspace_id"):
@@ -338,7 +357,13 @@ def test_finish_plan_writes_the_terminal_marker_only_after_summary_exists(
     control = run_dir / "control"
     control.mkdir()
     (control / "plan-start.json").write_text(
-        json.dumps({"slug": "sample-run", "state": "ready"})
+        json.dumps(
+            {
+                "slug": "sample-run",
+                "state": "ready",
+                "tui": {"herdr_session": "llm-lab-test"},
+            }
+        )
     )
 
     with pytest.raises(PlanStartError, match="run summary not found"):
@@ -372,7 +397,7 @@ def test_finish_plan_rejects_a_non_object_start_receipt(tmp_path: Path) -> None:
         plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
 
 
-def test_legacy_degraded_receipt_is_still_finishable(tmp_path: Path) -> None:
+def test_finish_plan_rejects_missing_tui_session(tmp_path: Path) -> None:
     run_dir, _roster = _inputs(tmp_path)
     control = run_dir / "control"
     control.mkdir()
@@ -381,6 +406,70 @@ def test_legacy_degraded_receipt_is_still_finishable(tmp_path: Path) -> None:
             {
                 "slug": "sample-run",
                 "state": "ready-degraded",
+                "watchdog": {"state": "unavailable"},
+            }
+        )
+    )
+    (run_dir / "run-status.md").write_text("# Complete\n")
+    phase_result = run_dir / "phases/phase-0/phase-result.json"
+    phase_result.parent.mkdir(parents=True)
+    phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
+
+    with pytest.raises(PlanStartError, match="TUI identity"):
+        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+
+
+def test_finish_plan_rejects_tui_without_session(tmp_path: Path) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    (control / "plan-start.json").write_text(
+        json.dumps(
+            {
+                "slug": "sample-run",
+                "state": "ready",
+                "tui": {"pane_id": "tui-pane"},
+            }
+        )
+    )
+    (run_dir / "run-status.md").write_text("# Complete\n")
+
+    with pytest.raises(PlanStartError, match="no recorded Herdr session"):
+        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+
+
+def test_finish_plan_rejects_tui_session_mismatch(tmp_path: Path) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    (control / "plan-start.json").write_text(
+        json.dumps(
+            {
+                "slug": "sample-run",
+                "state": "ready",
+                "tui": {"herdr_session": "other-session"},
+            }
+        )
+    )
+    (run_dir / "run-status.md").write_text("# Complete\n")
+    phase_result = run_dir / "phases/phase-0/phase-result.json"
+    phase_result.parent.mkdir(parents=True)
+    phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
+
+    with pytest.raises(PlanStartError, match="different Herdr session"):
+        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+
+
+def test_ready_degraded_receipt_with_tui_session_is_finishable(tmp_path: Path) -> None:
+    run_dir, _roster = _inputs(tmp_path)
+    control = run_dir / "control"
+    control.mkdir()
+    (control / "plan-start.json").write_text(
+        json.dumps(
+            {
+                "slug": "sample-run",
+                "state": "ready-degraded",
+                "tui": {"herdr_session": "llm-lab-test"},
                 "watchdog": {"state": "unavailable"},
             }
         )

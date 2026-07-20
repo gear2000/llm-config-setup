@@ -39,29 +39,29 @@ Pure stdlib + PyYAML. No Go hub, no tmux — Herdr only.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
 import errno
 import fcntl
 import hashlib
-import re
 import hmac
 import importlib.util
 import json
 import math
 import os
-from pathlib import Path
-import signal
+import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from typing import Any, cast
 import uuid
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
+from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
@@ -159,6 +159,9 @@ LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
 WATCHDOG_CONTINUATION_TIMEOUT_MS = 120_000
 COCKPIT_TAB_ROLES = frozenset(("workers", "oversight", "services", "control"))
 COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
+HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
+HERDR_SESSION_ENV = "HERDR_SESSION"
+HERDR_SESSION_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
 def default_roster_path() -> str:
@@ -761,7 +764,7 @@ class JobLedger:
             self._snapshot(key, "manager-starting", **lease)
             return True
 
-    def mark_manager_ready(self, key: str, token: str, decision: object) -> bool:
+    def mark_manager_ready(self, key: str, token: str, decision: Any) -> bool:
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
             if not claim_dir.is_dir():
@@ -770,9 +773,9 @@ class JobLedger:
             if lease["token"] != token:
                 return False
             detail = {
-                "decision": getattr(decision, "decision"),
-                "generation": getattr(decision, "generation"),
-                "message": getattr(decision, "message"),
+                "decision": decision.decision,
+                "generation": decision.generation,
+                "message": decision.message,
             }
             self._event(key, "manager-ready", **detail)
             self._snapshot(key, "manager-ready", **{**lease, **detail})
@@ -821,7 +824,7 @@ class JobLedger:
             return expires_at
 
     def record_requester_decision(
-        self, key: str, token: str, nonce: str, decision: object
+        self, key: str, token: str, nonce: str, decision: Any
     ) -> Path:
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
@@ -836,11 +839,11 @@ class JobLedger:
             if path.exists():
                 raise RecruiterError("this timeout decision has already been answered")
             value = {
-                "request_id": getattr(decision, "request_id"),
-                "generation": getattr(decision, "generation"),
-                "action": getattr(decision, "action"),
-                "extension_ms": getattr(decision, "extension_ms"),
-                "message": getattr(decision, "message"),
+                "request_id": decision.request_id,
+                "generation": decision.generation,
+                "action": decision.action,
+                "extension_ms": decision.extension_ms,
+                "message": decision.message,
             }
             self._write_json(path, value)
             self._event(
@@ -1417,11 +1420,26 @@ def _herdr_available() -> None:
         )
 
 
-def _herdr_json(*args: str, timeout_seconds: float | None = None) -> dict:
-    """Run a herdr subcommand expected to print JSON; return the parsed object. Fail-loud."""
+def _validate_herdr_session_name(value: object, field: str = "herdr session") -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise RecruiterError(f"{field} must be a non-empty string")
+    if value.strip() != value or HERDR_SESSION_NAME_RE.fullmatch(value) is None:
+        raise RecruiterError(
+            f"{field} contains unsupported characters: {value!r}"
+        )
+    return value
+
+
+def _herdr_command_display(session: str, args: Sequence[str]) -> str:
+    return " ".join(["herdr", "--session", session, *args])
+
+
+def _run_raw_herdr(
+    args: Sequence[str], *, timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
     _herdr_available()
     try:
-        proc = subprocess.run(
+        return subprocess.run(
             ["herdr", *args],
             capture_output=True,
             text=True,
@@ -1433,29 +1451,166 @@ def _herdr_json(*args: str, timeout_seconds: float | None = None) -> dict:
         ) from error
     except OSError as error:
         raise RecruiterError(f"herdr {' '.join(args)} could not run: {error}") from error
+
+
+def _herdr_session_list() -> dict:
+    process = _run_raw_herdr(("session", "list", "--json"), timeout_seconds=15)
+    if process.returncode != 0:
+        raise RecruiterError(
+            f"herdr session list --json failed: {process.stderr.strip()}"
+        )
+    try:
+        value = json.loads(process.stdout)
+    except json.JSONDecodeError as error:
+        raise RecruiterError(
+            f"herdr session list --json did not print JSON: {process.stdout[:200]}"
+        ) from error
+    if not isinstance(value, dict):
+        raise RecruiterError("herdr session list --json must return an object")
+    return value
+
+
+def _active_herdr_socket_from_status(session_hint: str | None) -> str:
+    args: list[str] = []
+    if session_hint is not None:
+        args.extend(
+            ("--session", _validate_herdr_session_name(session_hint, HERDR_SESSION_ENV))
+        )
+    args.extend(("status", "--json"))
+    process = _run_raw_herdr(args, timeout_seconds=15)
+    if process.returncode != 0:
+        raise RecruiterError(f"herdr {' '.join(args)} failed: {process.stderr.strip()}")
+    try:
+        status = json.loads(process.stdout)
+    except json.JSONDecodeError as error:
+        raise RecruiterError(
+            f"herdr {' '.join(args)} did not print JSON: {process.stdout[:200]}"
+        ) from error
+    server = status.get("server") if isinstance(status, dict) else None
+    if not isinstance(server, dict) or server.get("running") is not True:
+        raise RecruiterError("could not resolve Herdr session: server is not running")
+    socket = server.get("socket") or server.get("socket_path")
+    if not isinstance(socket, str) or not socket:
+        raise RecruiterError("could not resolve Herdr session: status returned no socket")
+    return socket
+
+
+def _herdr_session_name_for_socket(socket_path: str, session_hint: str | None) -> str:
+    if not socket_path:
+        raise RecruiterError("could not resolve Herdr session: socket path is empty")
+    sessions = _herdr_session_list().get("sessions")
+    if not isinstance(sessions, list):
+        raise RecruiterError("herdr session list --json returned no sessions list")
+    matches = [
+        session
+        for session in sessions
+        if isinstance(session, dict)
+        and session.get("running") is True
+        and session.get("socket_path") == socket_path
+    ]
+    if len(matches) != 1:
+        raise RecruiterError(
+            f"could not resolve Herdr session for socket {socket_path!r}: "
+            f"expected exactly one running match, found {len(matches)}"
+        )
+    name = _validate_herdr_session_name(matches[0].get("name"))
+    if session_hint is not None and name != session_hint:
+        raise RecruiterError(
+            f"resolved Herdr socket belongs to session {name!r}, not {session_hint!r}"
+        )
+    return name
+
+
+def _resolve_current_herdr_session_name() -> str:
+    """Resolve the active Herdr session by socket identity, never by default fallback."""
+    raw_hint = os.environ.get(HERDR_SESSION_ENV)
+    session_hint = (
+        _validate_herdr_session_name(raw_hint, HERDR_SESSION_ENV)
+        if isinstance(raw_hint, str) and raw_hint
+        else None
+    )
+    socket_path = os.environ.get(HERDR_SOCKET_ENV)
+    if not isinstance(socket_path, str) or not socket_path:
+        socket_path = _active_herdr_socket_from_status(session_hint)
+    return _herdr_session_name_for_socket(socket_path, session_hint)
+
+
+def _herdr_owner_record() -> dict[str, object]:
+    return {"herdr_session": _resolve_current_herdr_session_name()}
+
+
+def _recorded_herdr_session(value: object, operation: str) -> str:
+    try:
+        return _validate_herdr_session_name(value, "recorded Herdr session")
+    except RecruiterError as error:
+        raise RecruiterError(
+            f"{operation} requires an explicit recorded Herdr session"
+        ) from error
+
+
+def _herdr_argv(
+    args: Sequence[str], herdr_session: str | None = None
+) -> tuple[str, list[str]]:
+    session = (
+        _resolve_current_herdr_session_name()
+        if herdr_session is None
+        else _validate_herdr_session_name(herdr_session, "Herdr session")
+    )
+    return session, ["herdr", "--session", session, *args]
+
+
+def _herdr_json(
+    *args: str,
+    timeout_seconds: float | None = None,
+    herdr_session: str | None = None,
+) -> dict:
+    """Run a herdr subcommand expected to print JSON; return the parsed object. Fail-loud."""
+    _herdr_available()
+    session, argv = _herdr_argv(args, herdr_session)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, args)} timed out after {timeout_seconds} seconds"
+        ) from error
+    except OSError as error:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, args)} could not run: {error}"
+        ) from error
     if proc.returncode != 0:
-        raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
+        raise RecruiterError(
+            f"{_herdr_command_display(session, args)} failed: {proc.stderr.strip()}"
+        )
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as e:
         raise RecruiterError(
-            f"herdr {' '.join(args)} did not print JSON: {proc.stdout[:200]}"
+            f"{_herdr_command_display(session, args)} did not print JSON: {proc.stdout[:200]}"
         ) from e
 
 
-def _herdr(*args: str) -> None:
+def _herdr(*args: str, herdr_session: str | None = None) -> None:
     """Run a herdr subcommand that prints nothing on success. Fail-loud on non-zero."""
     _herdr_available()
-    proc = subprocess.run(["herdr", *args], capture_output=True, text=True)
+    session, argv = _herdr_argv(args, herdr_session)
+    proc = subprocess.run(argv, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RecruiterError(f"herdr {' '.join(args)} failed: {proc.stderr.strip()}")
+        raise RecruiterError(
+            f"{_herdr_command_display(session, args)} failed: {proc.stderr.strip()}"
+        )
 
 
-def _pane_recent_output(pane: str, lines: int = 80) -> str:
+def _pane_recent_output(
+    pane: str, lines: int = 80, *, herdr_session: str | None = None
+) -> str:
     _herdr_available()
-    process = subprocess.run(
-        [
-            "herdr",
+    session, argv = _herdr_argv(
+        (
             "pane",
             "read",
             pane,
@@ -1463,12 +1618,18 @@ def _pane_recent_output(pane: str, lines: int = 80) -> str:
             "recent-unwrapped",
             "--lines",
             str(lines),
-        ],
+        ),
+        herdr_session,
+    )
+    process = subprocess.run(
+        argv,
         capture_output=True,
         text=True,
     )
     if process.returncode != 0:
-        raise RecruiterError(f"herdr pane read {pane} failed: {process.stderr.strip()}")
+        raise RecruiterError(
+            f"{_herdr_command_display(session, ('pane', 'read', pane))} failed: {process.stderr.strip()}"
+        )
     return process.stdout
 
 
@@ -1520,6 +1681,7 @@ def _place_started_agent_in_role_tab(
     tab_role: str,
     *,
     split_direction: str,
+    herdr_session: str | None = None,
 ) -> str:
     """Move a live agent into one uniquely labeled role tab before publishing its address."""
     if tab_role not in COCKPIT_TAB_ROLES:
@@ -1534,6 +1696,7 @@ def _place_started_agent_in_role_tab(
                 "--workspace",
                 workspace_id,
                 timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+                herdr_session=herdr_session,
             )
             .get("result", {})
             .get("tabs", [])
@@ -1560,6 +1723,7 @@ def _place_started_agent_in_role_tab(
                     "--workspace",
                     workspace_id,
                     timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+                    herdr_session=herdr_session,
                 )
                 .get("result", {})
                 .get("panes", [])
@@ -1600,6 +1764,7 @@ def _place_started_agent_in_role_tab(
                 target,
                 "--no-focus",
                 timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+                herdr_session=herdr_session,
             )
         else:
             response = _herdr_json(
@@ -1613,6 +1778,7 @@ def _place_started_agent_in_role_tab(
                 tab_role,
                 "--no-focus",
                 timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+                herdr_session=herdr_session,
             )
         move = response.get("result", {}).get("move_result", {})
         moved_pane = move.get("pane", {}) if isinstance(move, dict) else {}
@@ -1640,6 +1806,7 @@ def _start_herdr_agent(
     *,
     split_direction: str = "right",
     tab_role: str | None = None,
+    herdr_session: str | None = None,
 ) -> tuple[str, str | None, str]:
     """Atomically create a named Herdr pane and start its process.
 
@@ -1651,8 +1818,9 @@ def _start_herdr_agent(
         raise RecruiterError(
             f"agent split direction must be right or down, got {split_direction!r}"
         )
+    session = _recorded_herdr_session(herdr_session, "agent startup")
     cockpit = (
-        _herdr_json("pane", "get", order["cockpit_pane"])
+        _herdr_json("pane", "get", order["cockpit_pane"], herdr_session=session)
         .get("result", {})
         .get("pane", {})
     )
@@ -1674,7 +1842,7 @@ def _start_herdr_agent(
     for key, value in (order.get("env") or {}).items():
         args.extend(("--env", f"{key}={value}"))
     args.extend(("--", "bash", "-lc", launch))
-    response = _herdr_json(*args)
+    response = _herdr_json(*args, herdr_session=session)
     agent = response.get("result", {}).get("agent", {})
     pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
@@ -1699,6 +1867,7 @@ def _start_herdr_agent(
                     workspace_id,
                     tab_role,
                     split_direction=split_direction,
+                    herdr_session=session,
                 )
             except RecruiterError as error:
                 _layout_warning(tab_role, pane_id, str(error))
@@ -1718,6 +1887,7 @@ def _resize_started_pane(
     split_direction: str,
     target_fraction: float,
     role: str,
+    herdr_session: str | None = None,
 ) -> None:
     """Shrink a new 50/50 split without making presentation part of worker correctness.
 
@@ -1744,6 +1914,7 @@ def _resize_started_pane(
             "--pane",
             pane_id,
             timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+            herdr_session=herdr_session,
         )
     except RecruiterError as error:
         _layout_warning(role, pane_id, str(error))
@@ -1771,6 +1942,7 @@ def _resize_started_pane(
             "--amount",
             amount,
             timeout_seconds=LAYOUT_COMMAND_TIMEOUT_SECONDS,
+            herdr_session=herdr_session,
         )
     except RecruiterError as error:
         _layout_warning(role, pane_id, str(error))
@@ -1796,6 +1968,7 @@ def _wait_for_agent_health(
     expected_cwd: str,
     timeout_ms: int,
     completion_order: dict | None = None,
+    herdr_session: str | None = None,
 ) -> dict[str, object]:
     """Prove an expected harness actually started; pane creation alone is insufficient."""
     resolved_cwd = os.path.realpath(expected_cwd)
@@ -1803,9 +1976,19 @@ def _wait_for_agent_health(
     started = time.monotonic()
     latest: dict[str, object] = {}
     while time.monotonic() < deadline:
-        pane = _herdr_json("pane", "get", pane_id).get("result", {}).get("pane", {})
+        pane = (
+            _herdr_json("pane", "get", pane_id, herdr_session=herdr_session)
+            .get("result", {})
+            .get("pane", {})
+        )
         process_info = (
-            _herdr_json("pane", "process-info", "--pane", pane_id)
+            _herdr_json(
+                "pane",
+                "process-info",
+                "--pane",
+                pane_id,
+                herdr_session=herdr_session,
+            )
             .get("result", {})
             .get("process_info", {})
         )
@@ -1879,7 +2062,7 @@ def _wait_for_agent_health(
             matching_process is None
             and time.monotonic() - started >= STARTUP_FAILURE_SETTLE_SECONDS
         ):
-            output = _pane_recent_output(pane_id)
+            output = _pane_recent_output(pane_id, herdr_session=herdr_session)
             raise RecruiterError(
                 f"agent pane {pane_id} did not start expected {expected_process} process; recent output: {output[-1000:]}"
             )
@@ -1890,7 +2073,12 @@ def _wait_for_agent_health(
 
 
 def _wait_for_worker_health(
-    worker_pane: str, order: dict, timeout_ms: int, roster: dict | None = None
+    worker_pane: str,
+    order: dict,
+    timeout_ms: int,
+    roster: dict | None = None,
+    *,
+    herdr_session: str | None = None,
 ) -> dict[str, object]:
     override = (roster or {}).get("health", {}).get(order["harness"], {})
     return _wait_for_agent_health(
@@ -1904,11 +2092,12 @@ def _wait_for_worker_health(
         expected_cwd=order["cwd"],
         timeout_ms=timeout_ms,
         completion_order=order,
+        herdr_session=herdr_session,
     )
 
 
-def _live_pane_ids() -> set[str]:
-    response = _herdr_json("pane", "list")
+def _live_pane_ids(*, herdr_session: str | None = None) -> set[str]:
+    response = _herdr_json("pane", "list", herdr_session=herdr_session)
     panes = response.get("result", {}).get("panes", [])
     return {
         pane["pane_id"]
@@ -1917,22 +2106,30 @@ def _live_pane_ids() -> set[str]:
     }
 
 
-def _close_worker_pane(worker_pane: str) -> dict[str, object]:
+def _close_worker_pane(
+    worker_pane: str, *, herdr_session: str | None = None
+) -> dict[str, object]:
     """Close one known-owned worker and prove its pane id is no longer live.
 
     A failed close is recoverable only when a fresh pane listing proves the target was already
     absent. Other close/list faults propagate; terminal publication must not hide leaked panes.
     """
+    session = _recorded_herdr_session(herdr_session, "pane cleanup")
     close_status = "closed"
     try:
-        _herdr("pane", "close", worker_pane)
+        _herdr("pane", "close", worker_pane, herdr_session=session)
     except RecruiterError:
-        if worker_pane in _live_pane_ids():
+        if worker_pane in _live_pane_ids(herdr_session=session):
             raise
         close_status = "already-absent"
-    if worker_pane in _live_pane_ids():
+    if worker_pane in _live_pane_ids(herdr_session=session):
         raise RecruiterError(f"worker pane {worker_pane} is still live after close")
-    return {"status": close_status, "worker_pane": worker_pane, "verified_absent": True}
+    return {
+        "herdr_session": session,
+        "status": close_status,
+        "worker_pane": worker_pane,
+        "verified_absent": True,
+    }
 
 
 def _write_worker_instructions(
@@ -1969,7 +2166,11 @@ def _write_worker_instructions(
 
 
 def _wait_for_agent_status(
-    worker_pane: str, timeout_ms: int, monitor_finalized: threading.Event | None
+    worker_pane: str,
+    timeout_ms: int,
+    monitor_finalized: threading.Event | None,
+    *,
+    herdr_session: str | None = None,
 ) -> bool:
     """Race one event-driven Herdr wait against the private-result monitor.
 
@@ -1987,8 +2188,9 @@ def _wait_for_agent_status(
         "--timeout",
         str(timeout_ms),
     )
+    _session, argv = _herdr_argv(args, herdr_session)
     process = subprocess.Popen(
-        ["herdr", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     while process.poll() is None:
         remaining = deadline - time.monotonic()
@@ -2018,10 +2220,16 @@ def _wait_for_agent_status(
         return True
     if monitor_finalized is not None and monitor_finalized.is_set():
         return False
-    raise RecruiterError(f"herdr {' '.join(args)} failed: {(stderr or stdout).strip()}")
+    raise RecruiterError(f"{' '.join(argv)} failed: {(stderr or stdout).strip()}")
 
 
-def _report_state(pane: str | None, state: str, message: str) -> None:
+def _report_state(
+    pane: str | None,
+    state: str,
+    message: str,
+    *,
+    herdr_session: str | None = None,
+) -> None:
     """Surface the Recruiter in Herdr's agents sidebar (`pane report-agent`). BEST-EFFORT:
     status display must never break a hire, so herdr faults are swallowed. `pane` may be
     None when the caller cannot know its own pane (then this is a no-op)."""
@@ -2040,6 +2248,7 @@ def _report_state(pane: str | None, state: str, message: str) -> None:
             state,
             "--message",
             message,
+            herdr_session=herdr_session,
         )
 
 
@@ -2233,8 +2442,8 @@ def _write_text_atomic(path: Path, text_value: str) -> None:
 
 
 def _wait_typed_file(
-    path: Path, timeout_ms: int, parser: Callable[[str], object]
-) -> object:
+    path: Path, timeout_ms: int, parser: Callable[[str], Any]
+) -> Any:
     """Wait for one atomically replaceable LLM response and reject stable malformed output."""
     deadline = time.monotonic() + timeout_ms / 1000
     invalid_signature: tuple[int, int] | None = None
@@ -2266,7 +2475,13 @@ def _wait_typed_file(
 _PROMPT_SUBMISSION_LOCK = threading.Lock()
 
 
-def _submit_agent_prompt(target: str, message: str, idle_timeout_ms: int) -> None:
+def _submit_agent_prompt(
+    target: str,
+    message: str,
+    idle_timeout_ms: int,
+    *,
+    herdr_session: str | None = None,
+) -> None:
     """Submit one prompt only after Herdr proves the dedicated target is idle.
 
     ``herdr agent send`` intentionally pastes without Enter. The Hub resolves the target to its
@@ -2282,12 +2497,17 @@ def _submit_agent_prompt(target: str, message: str, idle_timeout_ms: int) -> Non
             "idle",
             "--timeout",
             str(idle_timeout_ms),
+            herdr_session=herdr_session,
         )
-        agent = _herdr_json("agent", "get", target).get("result", {}).get("agent", {})
+        agent = (
+            _herdr_json("agent", "get", target, herdr_session=herdr_session)
+            .get("result", {})
+            .get("agent", {})
+        )
         pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
         if not isinstance(pane_id, str) or not pane_id:
             raise RecruiterError(f"Herdr agent target {target!r} has no current pane")
-        _herdr("pane", "run", pane_id, message)
+        _herdr("pane", "run", pane_id, message, herdr_session=herdr_session)
 
 
 def _notify_requester(
@@ -2308,7 +2528,8 @@ def _notify_requester(
             request_id, generation, message_type, message, detail
         )
 
-def _manager_anchor_pane(order: dict) -> str:
+
+def _manager_anchor_pane(order: dict, *, herdr_session: str | None = None) -> str:
     """Resolve where the dedicated manager belongs.
 
     Managers default to their requester's cockpit so the lifecycle owner is visible beside the
@@ -2331,7 +2552,9 @@ def _manager_anchor_pane(order: dict) -> str:
         raise RecruiterError(f"unsupported manager placement mode: {mode}")
 
     workspaces = (
-        _herdr_json("workspace", "list").get("result", {}).get("workspaces", [])
+        _herdr_json("workspace", "list", herdr_session=herdr_session)
+        .get("result", {})
+        .get("workspaces", [])
     )
     workspace_id = placement.get("workspace_id")
     if workspace_id is None:
@@ -2351,14 +2574,20 @@ def _manager_anchor_pane(order: dict) -> str:
 
     anchor = placement.get("anchor_pane")
     if isinstance(anchor, str) and anchor:
-        pane = _herdr_json("pane", "get", anchor).get("result", {}).get("pane", {})
+        pane = (
+            _herdr_json("pane", "get", anchor, herdr_session=herdr_session)
+            .get("result", {})
+            .get("pane", {})
+        )
         if not isinstance(pane, dict) or pane.get("workspace_id") != workspace_id:
             raise RecruiterError(
                 f"manager anchor pane {anchor} is not in requested workspace {workspace_id}"
             )
         return anchor
     panes = (
-        _herdr_json("pane", "list", "--workspace", workspace_id)
+        _herdr_json(
+            "pane", "list", "--workspace", workspace_id, herdr_session=herdr_session
+        )
         .get("result", {})
         .get("panes", [])
     )
@@ -2375,7 +2604,13 @@ def _manager_anchor_pane(order: dict) -> str:
     return anchor
 
 
-def _direct_manager(config: object, order: dict, generation: int = 1) -> dict[str, object]:
+def _direct_manager(
+    config: object,
+    order: dict,
+    generation: int = 1,
+    *,
+    herdr_session: str | None = None,
+) -> dict[str, object]:
     """Default direct lifecycle owner: no standing manager LLM pane."""
     request_id = lifecycle.request_identity(order)
     return {
@@ -2389,6 +2624,7 @@ def _direct_manager(config: object, order: dict, generation: int = 1) -> dict[st
         ),
         "generation": generation,
         "health": None,
+        "herdr_session": herdr_session,
         "pane": None,
         "workspace_id": None,
     }
@@ -2402,7 +2638,9 @@ def _start_account_manager(
     roster: dict,
     generation: int = 1,
     mechanical_validation: dict[str, object] | None = None,
+    herdr_session: str | None = None,
 ) -> dict[str, object]:
+    session = _recorded_herdr_session(herdr_session, "account manager lifecycle")
     config = llm_management.load_management_config(roster)
     request_id = lifecycle.request_identity(order)
     directory = ledger.manager_dir(key, generation)
@@ -2419,18 +2657,22 @@ def _start_account_manager(
         config.account_manager, brief_path, order["cwd"], decision_path
     )
     name = _safe_agent_name("upagent-manager", request_id, generation)
-    manager_order = {**order, "cockpit_pane": _manager_anchor_pane(order)}
+    manager_order = {
+        **order,
+        "cockpit_pane": _manager_anchor_pane(order, herdr_session=session),
+    }
     manager_pane, workspace_id, manager_address = _start_herdr_agent(
         name,
         manager_order,
         command,
         split_direction="down",
         tab_role="oversight",
+        herdr_session=session,
     )
     if not ledger.record_manager(
         key, token, manager_pane, manager_address, workspace_id, generation
     ):
-        _close_worker_pane(manager_pane)
+        _close_worker_pane(manager_pane, herdr_session=session)
         raise RecruiterError(
             f"lease ownership changed before manager {manager_address} was recorded"
         )
@@ -2439,6 +2681,7 @@ def _start_account_manager(
         split_direction="down",
         target_fraction=SUPPORT_PANE_FRACTION,
         role="account manager",
+        herdr_session=session,
     )
     try:
         health = _wait_for_agent_health(
@@ -2447,6 +2690,7 @@ def _start_account_manager(
             expected_process=config.account_manager.expected_process,
             expected_cwd=order["cwd"],
             timeout_ms=config.startup_timeout_ms,
+            herdr_session=session,
         )
         decision = _wait_typed_file(
             decision_path,
@@ -2456,10 +2700,10 @@ def _start_account_manager(
             ),
         )
     except (RecruiterError, OSError):
-        _close_worker_pane(manager_pane)
+        _close_worker_pane(manager_pane, herdr_session=session)
         raise
     if not ledger.mark_manager_ready(key, token, decision):
-        _close_worker_pane(manager_pane)
+        _close_worker_pane(manager_pane, herdr_session=session)
         raise RecruiterError(
             f"lease ownership changed before manager {manager_address} became ready"
         )
@@ -2469,7 +2713,7 @@ def _start_account_manager(
         order,
         generation,
         "account-manager-ready",
-        getattr(decision, "message"),
+        decision.message,
         {
             "manager_address": manager_address,
             "manager_pane": manager_pane,
@@ -2482,6 +2726,7 @@ def _start_account_manager(
         "decision": decision,
         "generation": generation,
         "health": health,
+        "herdr_session": session,
         "pane": manager_pane,
         "workspace_id": workspace_id,
     }
@@ -2493,7 +2738,7 @@ def _ask_manager_about_startup(
     order: dict,
     manager: dict[str, object],
     worker_evidence: dict[str, object],
-) -> object:
+) -> Any:
     generation = cast(int, manager["generation"])
     request_id = lifecycle.request_identity(order)
     directory = ledger.manager_dir(key, generation)
@@ -2509,6 +2754,7 @@ def _ask_manager_about_startup(
         cast(str, manager["address"]),
         message,
         idle_timeout_ms=config.account_manager.timeout_ms,
+        herdr_session=cast(str | None, manager.get("herdr_session")),
     )
     assessment = _wait_typed_file(
         output_path,
@@ -2520,9 +2766,9 @@ def _ask_manager_about_startup(
     ledger._event(
         key,
         "worker-startup-assessed",
-        assessment=getattr(assessment, "assessment"),
-        confidence=getattr(assessment, "confidence"),
-        recommended_action=getattr(assessment, "recommended_action"),
+        assessment=assessment.assessment,
+        confidence=assessment.confidence,
+        recommended_action=assessment.recommended_action,
     )
     return assessment
 
@@ -2540,13 +2786,22 @@ def _run_one_shot_checker(
     generation = cast(int, manager["generation"])
     request_id = lifecycle.request_identity(order)
     config = cast(Any, manager["config"])
+    herdr_session = _recorded_herdr_session(
+        manager.get("herdr_session"), "checker cleanup"
+    )
     directory = ledger.request_dir(key) / "checks" / f"{check_number:06d}"
     evidence_path = directory / "evidence.json"
     output_path = directory / "assessment.json"
     output_path.unlink(missing_ok=True)
-    pane = _herdr_json("pane", "get", worker_pane).get("result", {}).get("pane", {})
+    pane = (
+        _herdr_json("pane", "get", worker_pane, herdr_session=herdr_session)
+        .get("result", {})
+        .get("pane", {})
+    )
     process_info = (
-        _herdr_json("pane", "process-info", "--pane", worker_pane)
+        _herdr_json(
+            "pane", "process-info", "--pane", worker_pane, herdr_session=herdr_session
+        )
         .get("result", {})
         .get("process_info", {})
     )
@@ -2560,7 +2815,9 @@ def _run_one_shot_checker(
         "check_number": check_number,
         "pane": pane,
         "process_info": process_info,
-        "recent_output": _pane_recent_output(worker_pane, lines=120)[-8000:],
+        "recent_output": _pane_recent_output(
+            worker_pane, lines=120, herdr_session=herdr_session
+        )[-8000:],
         "request_id": request_id,
         "result_valid": valid_result,
         "worker_pane": worker_pane,
@@ -2577,7 +2834,9 @@ def _run_one_shot_checker(
         config.checker, brief_path, order["cwd"], output_path
     )
     name = _safe_agent_name(f"upagent-check-{check_number}", request_id, generation)
-    checker_anchor = manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
+    checker_anchor = (
+        manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
+    )
     checker_order = {**order, "cockpit_pane": cast(str, checker_anchor)}
     checker_pane, _, _ = _start_herdr_agent(
         name,
@@ -2585,6 +2844,7 @@ def _run_one_shot_checker(
         command,
         split_direction="down",
         tab_role="oversight",
+        herdr_session=herdr_session,
     )
     try:
         _resize_started_pane(
@@ -2592,6 +2852,7 @@ def _run_one_shot_checker(
             split_direction="down",
             target_fraction=SUPPORT_PANE_FRACTION,
             role="one-shot checker",
+            herdr_session=herdr_session,
         )
         _wait_for_agent_health(
             checker_pane,
@@ -2599,6 +2860,7 @@ def _run_one_shot_checker(
             expected_process=config.checker.expected_process,
             expected_cwd=order["cwd"],
             timeout_ms=config.startup_timeout_ms,
+            herdr_session=herdr_session,
         )
         assessment = _wait_typed_file(
             output_path,
@@ -2608,35 +2870,36 @@ def _run_one_shot_checker(
             ),
         )
     finally:
-        _close_worker_pane(checker_pane)
+        _close_worker_pane(checker_pane, herdr_session=herdr_session)
     ledger._event(
         key,
         "worker-checked",
-        assessment=getattr(assessment, "assessment"),
+        assessment=assessment.assessment,
         check_number=check_number,
-        confidence=getattr(assessment, "confidence"),
-        recommended_action=getattr(assessment, "recommended_action"),
+        confidence=assessment.confidence,
+        recommended_action=assessment.recommended_action,
     )
     if manager["address"] is not None:
         with suppress(RecruiterError):
             _submit_agent_prompt(
                 cast(str, manager["address"]),
                 f"Check {check_number} assessed worker {worker_pane} as "
-                f"{getattr(assessment, 'assessment')}: {getattr(assessment, 'message')}",
+                f"{assessment.assessment}: {assessment.message}",
                 idle_timeout_ms=config.account_manager.timeout_ms,
+                herdr_session=herdr_session,
             )
-    if getattr(assessment, "assessment") not in ("healthy", "completed"):
+    if assessment.assessment not in ("healthy", "completed"):
         _notify_requester(
             ledger,
             key,
             order,
             generation,
             "worker-check-alert",
-            getattr(assessment, "message"),
+            assessment.message,
             {
-                "assessment": getattr(assessment, "assessment"),
+                "assessment": assessment.assessment,
                 "check_number": check_number,
-                "confidence": getattr(assessment, "confidence"),
+                "confidence": assessment.confidence,
                 "worker_pane": worker_pane,
             },
         )
@@ -2677,6 +2940,7 @@ def _await_requester_timeout_decision(
                 cast(str, manager["address"]),
                 message,
                 idle_timeout_ms=config.account_manager.timeout_ms,
+                herdr_session=cast(str | None, manager.get("herdr_session")),
             )
     _notify_requester(
         ledger,
@@ -2782,6 +3046,9 @@ def _startup_rescue_advice(
     name = _safe_agent_name("upagent-rescue", request_id, generation)
     anchor = manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
     rescue_order = {**order, "cockpit_pane": cast(str, anchor)}
+    herdr_session = _recorded_herdr_session(
+        manager.get("herdr_session"), "startup rescue cleanup"
+    )
     try:
         # Every filesystem step lives inside this guard: this function must never raise —
         # its caller runs in a detached job runner whose stderr goes nowhere.
@@ -2798,7 +3065,12 @@ def _startup_rescue_advice(
         )
         output_path.unlink(missing_ok=True)
         rescue_pane, _, _ = _start_herdr_agent(
-            name, rescue_order, command, split_direction="down", tab_role="oversight"
+            name,
+            rescue_order,
+            command,
+            split_direction="down",
+            tab_role="oversight",
+            herdr_session=herdr_session,
         )
         try:
             _wait_for_agent_health(
@@ -2807,6 +3079,7 @@ def _startup_rescue_advice(
                 expected_process=config.checker.expected_process,
                 expected_cwd=order["cwd"],
                 timeout_ms=config.startup_timeout_ms,
+                herdr_session=herdr_session,
             )
             assessment = _wait_typed_file(
                 output_path,
@@ -2816,19 +3089,19 @@ def _startup_rescue_advice(
                 ),
             )
         finally:
-            _close_worker_pane(rescue_pane)
+            _close_worker_pane(rescue_pane, herdr_session=herdr_session)
     except (RecruiterError, LifecycleError, ContractError, OSError) as error:
         # The event is telemetry; the advice is the contract. A broken ledger write must
         # not turn "broker unavailable" into a raised exception.
         with suppress(OSError):
             ledger._event(key, "startup-rescue-advice-unavailable", reason=str(error))
         return "retry-startup"
-    action = cast(str, getattr(assessment, "recommended_action"))
+    action = cast(str, assessment.recommended_action)
     with suppress(OSError):
         ledger._event(
             key,
             "startup-rescue-assessed",
-            assessment=getattr(assessment, "assessment"),
+            assessment=assessment.assessment,
             recommended_action=action,
         )
     return action
@@ -2844,6 +3117,7 @@ def _run_order(
     on_timeout: Callable[[int, threading.Event | None], int | None] | None = None,
     before_worker_cleanup: Callable[[], None] | None = None,
     attempt: int = 1,
+    herdr_session: str | None = None,
 ) -> tuple[int, dict, dict[str, object]]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -2851,6 +3125,7 @@ def _run_order(
     to the public result path and emit the terminal state/DONE contract.
     """
     order = load_order(order_path)
+    session = _recorded_herdr_session(herdr_session, "worker lifecycle")
     order_id = order["order_id"]
     fell_back = False
     execution_order = {**order, "result_path": str(worker_result_path)}
@@ -2866,7 +3141,7 @@ def _run_order(
     # Direct dispatch runs in the phase leader's environment; never report Recruiter state onto
     # that pane. Resolve the broker's explicit persisted address instead.
     my_pane = _recruiter_pane_from_state()
-    _report_state(my_pane, "working", f"hiring for {order_id}")
+    _report_state(my_pane, "working", f"hiring for {order_id}", herdr_session=session)
     try:
         # Everything that can fail lives INSIDE the fallback block, now that order_id is known, so
         # a bad roster / launch / Herdr call still writes a blocked result and durable receipt rather
@@ -2889,7 +3164,11 @@ def _run_order(
         worker_name = _safe_agent_name("upagent", request_id, attempt)
         worker_tab = _worker_tab_role(execution_order)
         worker_pane, workspace_id, worker_address = _start_herdr_agent(
-            worker_name, execution_order, launch, tab_role=worker_tab
+            worker_name,
+            execution_order,
+            launch,
+            tab_role=worker_tab,
+            herdr_session=session,
         )
         if on_worker_launched is not None:
             monitor_finalized = on_worker_launched(
@@ -2902,11 +3181,16 @@ def _run_order(
                 split_direction="right",
                 target_fraction=worker_fraction,
                 role="watchdog",
+                herdr_session=session,
             )
         # The pane address is durably owned before health validation. A failed launch can
         # therefore be cleaned without guessing, while nobody is told "running" prematurely.
         health = _wait_for_worker_health(
-            worker_pane, execution_order, management_config.startup_timeout_ms, roster
+            worker_pane,
+            execution_order,
+            management_config.startup_timeout_ms,
+            roster,
+            herdr_session=session,
         )
         if on_worker_healthy is not None:
             on_worker_healthy(health)
@@ -2920,8 +3204,13 @@ def _run_order(
                 remaining_ms = max(
                     1, math.ceil((wait_deadline - time.monotonic()) * 1000)
                 )
-                _wait_for_agent_status(worker_pane, remaining_ms, monitor_finalized)
-            except AgentWaitTimeout:
+                _wait_for_agent_status(
+                    worker_pane,
+                    remaining_ms,
+                    monitor_finalized,
+                    herdr_session=session,
+                )
+            except AgentWaitTimeout as error:
                 timeout_number += 1
                 if on_timeout is None:
                     raise
@@ -2929,7 +3218,7 @@ def _run_order(
                 if extension_ms is None:
                     raise AgentWaitTimeout(
                         f"worker {worker_pane} exceeded its cap and no extension was authorized"
-                    )
+                    ) from error
                 wait_deadline = time.monotonic() + extension_ms / 1000
                 continue
 
@@ -2954,6 +3243,7 @@ def _run_order(
                 f"{premature_reason}. Resume monitoring now. Do not write another result "
                 "until the authoritative terminal record exists and matches this assignment.",
                 idle_timeout_ms=WATCHDOG_CONTINUATION_TIMEOUT_MS,
+                herdr_session=session,
             )
     except (RecruiterError, ContractError, KeyError, TypeError, OSError) as e:
         # A dedicated manager's explicit refusal is a ruling, not a launch flake — callers
@@ -2985,7 +3275,7 @@ def _run_order(
             before_worker_cleanup()
         if worker_pane is not None:
             try:
-                cleanup = _close_worker_pane(worker_pane)
+                cleanup = _close_worker_pane(worker_pane, herdr_session=session)
             except RecruiterError as e:
                 result = _write_blocked_result(
                     order,
@@ -3006,7 +3296,12 @@ def _run_order(
     cleanup["startup_validated"] = startup_validated
     cleanup["startup_rejected"] = startup_rejected
     final_label = "blocked" if fell_back else "done"
-    _report_state(my_pane, "idle", f"last order: {order_id} ({final_label})")
+    _report_state(
+        my_pane,
+        "idle",
+        f"last order: {order_id} ({final_label})",
+        herdr_session=session,
+    )
     return (1 if fell_back else 0), result, cleanup
 
 
@@ -3339,10 +3634,8 @@ def _secure_write_bytes(path: Path, value: bytes) -> None:
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(temporary_name, dir_fd=parent_descriptor)
-        except FileNotFoundError:
-            pass
         os.close(parent_descriptor)
 
 
@@ -3825,8 +4118,14 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
     ):
         return {"status": "blocked", "reason": "invalid intake lease identity"}
     try:
+        herdr_session = _recorded_herdr_session(
+            ownership.get("herdr_session"), "intake cleanup"
+        )
+    except RecruiterError as error:
+        return {"status": "blocked", "reason": str(error)}
+    try:
         agent = (
-            _herdr_json("agent", "get", agent_name)
+            _herdr_json("agent", "get", agent_name, herdr_session=herdr_session)
             .get("result", {})
             .get("agent")
         )
@@ -3850,10 +4149,14 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
         }
     try:
         pane = (
-            _herdr_json("pane", "get", pane_id).get("result", {}).get("pane", {})
+            _herdr_json("pane", "get", pane_id, herdr_session=herdr_session)
+            .get("result", {})
+            .get("pane", {})
         )
         process_info = (
-            _herdr_json("pane", "process-info", "--pane", pane_id)
+            _herdr_json(
+                "pane", "process-info", "--pane", pane_id, herdr_session=herdr_session
+            )
             .get("result", {})
             .get("process_info", {})
         )
@@ -3969,8 +4272,11 @@ def _cleanup_intake_clerk(ownership: dict) -> dict[str, object]:
             "reason": "intake identity changed immediately before cleanup",
         }
     pane = cast(str, confirmed["pane"])
+    herdr_session = _recorded_herdr_session(
+        ownership.get("herdr_session"), "intake cleanup"
+    )
     try:
-        cleanup = _close_worker_pane(pane)
+        cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
     except RecruiterError as error:
         return {
             "status": "cleanup-failed",
@@ -4018,7 +4324,7 @@ def _run_order_intake_clerk(
     attempt_number: int = 1,
     unknown_fields: Sequence[str] = (),
     correction: dict | None = None,
-) -> tuple[object, dict]:
+) -> tuple[Any, dict]:
     """Launch one journaled support clerk, or reuse a clean prior attempt's validated response for a
     byte-identical resubmission (same `intake_key`); malformed caller data never controls its launch."""
     recruiter_pane = _recruiter_pane_from_state()
@@ -4055,6 +4361,7 @@ def _run_order_intake_clerk(
     )
     lease_token = uuid.uuid4().hex
     agent_name = _intake_clerk_agent_name(intake_key, lease_token)
+    herdr_session = _resolve_current_herdr_session_name()
     owner_start_time = _process_start_time(os.getpid())
     if owner_start_time is None:
         raise RecruiterError("could not record the intake owner's process start identity")
@@ -4069,6 +4376,7 @@ def _run_order_intake_clerk(
         "expected_agent": config.intake_clerk.expected_agent,
         "expected_process": config.intake_clerk.expected_process,
         "expected_cwd": cwd,
+        "herdr_session": herdr_session,
         "expires_at": int(time.time())
         + max(
             1,
@@ -4101,6 +4409,7 @@ def _run_order_intake_clerk(
             command,
             split_direction="down",
             tab_role="oversight",
+            herdr_session=herdr_session,
         )
         ownership["pane"] = pane  # local cleanup remains possible if journal update fails
         _record_started_intake_clerk(
@@ -4111,6 +4420,7 @@ def _run_order_intake_clerk(
             split_direction="down",
             target_fraction=SUPPORT_PANE_FRACTION,
             role="intake clerk",
+            herdr_session=herdr_session,
         )
         health = _wait_for_agent_health(
             pane,
@@ -4118,6 +4428,7 @@ def _run_order_intake_clerk(
             expected_process=config.intake_clerk.expected_process,
             expected_cwd=cwd,
             timeout_ms=config.startup_timeout_ms,
+            herdr_session=herdr_session,
         )
         process_pid = health.get("process_pid")
         health["process_start_time"] = _process_start_time(process_pid)
@@ -4146,6 +4457,7 @@ def _run_order_intake_clerk(
                         expected_process=config.intake_clerk.expected_process,
                         expected_cwd=cwd,
                         timeout_ms=config.startup_timeout_ms,
+                        herdr_session=herdr_session,
                     )
                 except RecruiterError as error:
                     if failure is None:
@@ -4392,7 +4704,7 @@ def _interpret_submission(
                 attempts=attempt,
             ) from error
 
-        refusal = getattr(response, "refusal")
+        refusal = response.refusal
         if refusal is not None:
             raise _refuse_intake(
                 paths,
@@ -4403,11 +4715,11 @@ def _interpret_submission(
                 unknown_fields=unknown_fields,
                 clerk=clerk_record,
                 attempts=attempt,
-                missing=list(getattr(response, "missing")),
-                understood=list(getattr(response, "understood")),
+                missing=list(response.missing),
+                understood=list(response.understood),
             )
 
-        candidate = cast(dict, getattr(response, "order"))
+        candidate = cast(dict, response.order)
         errors = _clerk_provenance_errors(raw_text, candidate)
         if errors:
             reason = (
@@ -4426,7 +4738,7 @@ def _interpret_submission(
                         path,
                         paths,
                         order,
-                        changes=list(getattr(response, "notes")) + form_changes,
+                        changes=list(response.notes) + form_changes,
                         unknown_fields=unknown_fields,
                         clerk=clerk_record,
                         attempts=attempt,
@@ -4500,14 +4812,23 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         "run-job",
         key,
     ]
+    owner: dict[str, object] = {"runner_pid": os.getpid()}
     try:
+        # Resolve session ownership before launch so a correlated launch/session failure still
+        # reaches the durable blocked-result path below.
+        owner.update(_herdr_owner_record())
         # Inherit the Recruiter pane's output: the per-job owner emits its terminal marker there.
         subprocess.Popen(command, start_new_session=True)
-    except OSError as e:
-        # A duplicate Popen failure is not an owner.  Claim first; only the successful claimant
+    except (OSError, RecruiterError) as e:
+        # A duplicate launch failure is not an owner. Claim first; only the successful claimant
         # may publish a fallback result and terminal state for this request.
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
-        token = ledger.claim(key, order["order_id"], timeout_ms)
+        token = ledger.claim(
+            key,
+            order["order_id"],
+            timeout_ms,
+            owner=owner,
+        )
         if token is None:
             ledger._event(key, "start-failed-unowned", reason=str(e))
             return 1
@@ -4580,6 +4901,15 @@ def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
     """Close every pane explicitly recorded by one lease generation, and no others."""
     outcomes: dict[str, object] = {}
     failures = []
+    try:
+        herdr_session = _recorded_herdr_session(
+            lease.get("herdr_session"), "lease pane cleanup"
+        )
+    except RecruiterError as error:
+        herdr_session = None
+        session_error = str(error)
+    else:
+        session_error = None
     for role, field in (("worker", "worker_pane"), ("manager", "manager_pane")):
         pane = lease.get(field)
         if not isinstance(pane, str) or not pane:
@@ -4589,11 +4919,21 @@ def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
                 "verified_absent": True,
             }
             continue
+        if herdr_session is None:
+            outcomes[role] = {
+                "status": "cleanup-blocked",
+                "worker_pane": pane,
+                "verified_absent": False,
+                "reason": session_error,
+            }
+            failures.append(session_error or "missing Herdr session")
+            continue
         try:
-            outcomes[role] = _close_worker_pane(pane)
+            outcomes[role] = _close_worker_pane(pane, herdr_session=herdr_session)
         except RecruiterError as error:
             outcomes[role] = {
                 "status": "cleanup-failed",
+                "herdr_session": herdr_session,
                 "worker_pane": pane,
                 "verified_absent": False,
                 "reason": str(error),
@@ -4603,6 +4943,7 @@ def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
         **outcomes,
         "status": "closed" if not failures else "cleanup-failed",
         "verified_absent": not failures,
+        **({"herdr_session": herdr_session} if herdr_session is not None else {}),
         "worker_pane": lease.get("worker_pane"),
         **({"reason": "; ".join(failures)} if failures else {}),
     }
@@ -4798,6 +5139,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
                 order["order_id"],
                 timeout_ms,
                 owner={
+                    **_herdr_owner_record(),
                     "runner_pid": os.getpid(),
                     "phase_leader_pane": order["cockpit_pane"],
                     "recruiter_pane": _recruiter_pane_from_state(),
@@ -4826,7 +5168,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
         if process is not None:
             try:
                 process.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as error:
                 matching = next(
                     (
                         lease
@@ -4840,7 +5182,7 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
                 ):
                     raise RecruiterError(
                         f"job runner for {order['order_id']} exceeded its lease window"
-                    )
+                    ) from error
         # Normal jobs publish before exiting. A killed/crashed runner may need the standing
         # reconciler to publish a blocked receipt; this short bounded wait is anomaly-only.
         while (
@@ -4931,10 +5273,8 @@ def _notify_order_completion(order_id: str, verdict: str) -> None:
         "--sound",
         "request",
     ]
-    try:
+    with suppress(OSError, subprocess.SubprocessError):
         subprocess.run(command, check=False, capture_output=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def _maybe_notify_completion(
@@ -5220,12 +5560,14 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     request_id = lifecycle.request_identity(order)
     generation = 1
     owner = {
+        **_herdr_owner_record(),
         "generation": generation,
         "request_id": request_id,
         "runner_pid": os.getpid(),
         "phase_leader_pane": order["cockpit_pane"],
         "recruiter_pane": _recruiter_pane_from_state(),
     }
+    herdr_session = cast(str, owner["herdr_session"])
     lease_window_ms = (
         timeout_ms
         + management_config.account_manager.timeout_ms
@@ -5254,9 +5596,12 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 roster,
                 generation,
                 mechanical_validation,
+                herdr_session=herdr_session,
             )
         else:
-            manager = _direct_manager(management_config, order, generation)
+            manager = _direct_manager(
+                management_config, order, generation, herdr_session=herdr_session
+            )
     except (RecruiterError, ManagementConfigError, LifecycleError, OSError) as error:
         _notify_requester(
             ledger,
@@ -5285,11 +5630,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         )
         return 1
 
-    decision = manager["decision"]
+    decision = cast(Any, manager["decision"])
     configuration_errors = cast(list[str], mechanical_validation["errors"])
-    if getattr(decision, "decision") != "approved" or configuration_errors:
-        message = getattr(decision, "message")
-        message_type = getattr(decision, "decision")
+    if decision.decision != "approved" or configuration_errors:
+        message = decision.message
+        message_type = decision.decision
         if configuration_errors:
             message_type = "needs-requester"
             message = f"Worker configuration is invalid: {'; '.join(configuration_errors)}. {message}"
@@ -5298,7 +5643,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             order, f"account manager: {message}", worker_result_path
         )
         manager_cleanup = (
-            _close_worker_pane(cast(str, manager["pane"]))
+            _close_worker_pane(cast(str, manager["pane"]), herdr_session=herdr_session)
             if manager["pane"] is not None
             else {"status": "not-created", "worker_pane": None, "verified_absent": True}
         )
@@ -5447,8 +5792,8 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 {"assessment_error": str(error), **evidence},
             )
             return
-        if getattr(assessment, "assessment") not in ("healthy", "completed"):
-            message = getattr(assessment, "message")
+        if assessment.assessment not in ("healthy", "completed"):
+            message = assessment.message
             _notify_requester(
                 ledger,
                 key,
@@ -5456,7 +5801,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 generation,
                 "startup-needs-requester",
                 message,
-                {"assessment": getattr(assessment, "assessment")},
+                {"assessment": assessment.assessment},
             )
             raise StartupRejectedByManager(
                 f"account manager did not validate worker startup: {message}"
@@ -5471,7 +5816,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             order,
             generation,
             "worker-healthy",
-            getattr(assessment, "message"),
+            assessment.message,
             evidence,
         )
 
@@ -5486,6 +5831,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             handle_timeout,
             finish_monitor_before_cleanup,
             attempt=attempt,
+            herdr_session=herdr_session,
         )
 
     result_code, result, cleanup = run_order_once(1)
@@ -5525,7 +5871,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             )
     try:
         manager_cleanup = (
-            _close_worker_pane(cast(str, manager["pane"]))
+            _close_worker_pane(cast(str, manager["pane"]), herdr_session=herdr_session)
             if manager["pane"] is not None
             else {"status": "not-created", "worker_pane": None, "verified_absent": True}
         )
@@ -5612,9 +5958,11 @@ def _recruit_door_command(roster_path: str) -> str:
     )
 
 
-def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, bool]:
-    """Resolve (workspace_id, pane_id, reused) for THIS engine's role pane in the single services
-    workspace (`workspace_label`), claiming ONLY a pane labeled `role_label` — never an arbitrary
+def _ensure_role_pane(
+    role_label: str, workspace_label: str, herdr_session: str
+) -> tuple[str, str, bool, bool]:
+    """Resolve ``(workspace_id, pane_id, workspace_created, pane_created)`` for this engine's
+    role pane in the services workspace, claiming ONLY a pane labeled `role_label` — never an arbitrary
     pane. Claiming by role label keeps bring-up idempotent and lets the service coexist with a
     run's own panes in the unified workspace without fighting over them:
       - if services are already up under the OTHER mode's label, fail loud (run `just herdr-down`
@@ -5628,10 +5976,18 @@ def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, 
         if workspace_label == UNIFIED_WORKSPACE_LABEL
         else UNIFIED_WORKSPACE_LABEL
     )
-    other = _find_workspace(_herdr_json("workspace", "list"), other_label)
+    other = _find_workspace(
+        _herdr_json("workspace", "list", herdr_session=herdr_session), other_label
+    )
     if other is not None and isinstance(other.get("workspace_id"), str):
         other_panes = (
-            _herdr_json("pane", "list", "--workspace", other["workspace_id"])
+            _herdr_json(
+                "pane",
+                "list",
+                "--workspace",
+                other["workspace_id"],
+                herdr_session=herdr_session,
+            )
             .get("result", {})
             .get("panes", [])
         )
@@ -5644,19 +6000,28 @@ def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, 
                 f"services are already up in workspace {other_label!r}; "
                 "run `just herdr-down` first to switch workspace modes"
             )
-    existing = _find_workspace(_herdr_json("workspace", "list"), workspace_label)
+    existing = _find_workspace(
+        _herdr_json("workspace", "list", herdr_session=herdr_session), workspace_label
+    )
     if existing is None:
         created = _herdr_json(
-            "workspace", "create", "--label", workspace_label, "--no-focus"
+            "workspace",
+            "create",
+            "--label",
+            workspace_label,
+            "--no-focus",
+            herdr_session=herdr_session,
         )["result"]
         workspace_id = created["workspace"]["workspace_id"]
         pane_id = created["root_pane"]["pane_id"]
-        _herdr("pane", "rename", pane_id, role_label)
-        return workspace_id, pane_id, False
+        _herdr("pane", "rename", pane_id, role_label, herdr_session=herdr_session)
+        return workspace_id, pane_id, True, True
 
     workspace_id = existing["workspace_id"]
     panes = (
-        _herdr_json("pane", "list", "--workspace", workspace_id)
+        _herdr_json(
+            "pane", "list", "--workspace", workspace_id, herdr_session=herdr_session
+        )
         .get("result", {})
         .get("panes", [])
     )
@@ -5664,7 +6029,7 @@ def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, 
         (p for p in panes if p.get("label") == role_label and p.get("pane_id")), None
     )
     if mine is not None:
-        return workspace_id, mine["pane_id"], True
+        return workspace_id, mine["pane_id"], False, False
     # Split my role pane off an existing pane so the service stays in this tab even when the
     # unified workspace already holds a run's own panes.
     anchor = next((p["pane_id"] for p in panes if p.get("pane_id")), None)
@@ -5673,10 +6038,16 @@ def _ensure_role_pane(role_label: str, workspace_label: str) -> tuple[str, str, 
             f"services workspace {workspace_id} has no pane to split from"
         )
     new_pane = _herdr_json(
-        "pane", "split", anchor, "--direction", "down", "--no-focus"
+        "pane",
+        "split",
+        anchor,
+        "--direction",
+        "down",
+        "--no-focus",
+        herdr_session=herdr_session,
     )["result"]["pane"]["pane_id"]
-    _herdr("pane", "rename", new_pane, role_label)
-    return workspace_id, new_pane, True
+    _herdr("pane", "rename", new_pane, role_label, herdr_session=herdr_session)
+    return workspace_id, new_pane, False, True
 
 
 def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
@@ -5695,8 +6066,9 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     workspace_label = (
         SHARED_SERVICES_WORKSPACE if separate_workspaces else UNIFIED_WORKSPACE_LABEL
     )
-    workspace_id, recruiter_pane, reused = _ensure_role_pane(
-        RECRUITER_PANE_LABEL, workspace_label
+    herdr_session = _resolve_current_herdr_session_name()
+    workspace_id, recruiter_pane, workspace_created, pane_created = _ensure_role_pane(
+        RECRUITER_PANE_LABEL, workspace_label, herdr_session
     )
     if not separate_workspaces:
         # Presentation-only: keep the Recruiter in the `services` role tab (joined when present,
@@ -5708,18 +6080,32 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
                 workspace_id,
                 SERVICES_TAB_LABEL,
                 split_direction="down",
+                herdr_session=herdr_session,
             )
         except RecruiterError as error:
             _layout_warning("services", recruiter_pane, str(error))
 
     # Arm the narrow compatibility function. It accepts one opaque path and calls the verified
     # request door; arbitrary pane text and extra arguments still cannot become a hire.
-    _herdr("pane", "run", recruiter_pane, _recruit_door_command(roster_path))
+    _herdr(
+        "pane",
+        "run",
+        recruiter_pane,
+        _recruit_door_command(roster_path),
+        herdr_session=herdr_session,
+    )
 
     supervisor_token = uuid.uuid4().hex
     state = {
         "workspace_id": workspace_id,
         "workspace_label": workspace_label,
+        "herdr_session": herdr_session,
+        "ownership": {
+            "pane": {
+                "pane_id": recruiter_pane,
+                "state": "created" if pane_created else "adopted",
+            },
+        },
         "separate_workspaces": separate_workspaces,
         "recruiter_pane": recruiter_pane,
         "roster": roster_path,
@@ -5743,31 +6129,115 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     state["supervisor_pid"] = supervisor.pid
     JobLedger._write_json(STATE_FILE, state)
     # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
-    _report_state(recruiter_pane, "idle", "armed — waiting for work orders")
-    print(json.dumps({**state, "reused": reused}))
+    _report_state(
+        recruiter_pane,
+        "idle",
+        "armed — waiting for work orders",
+        herdr_session=herdr_session,
+    )
+    # Preserve the public meaning of `reused`: the services workspace pre-existed.
+    print(json.dumps({**state, "reused": not workspace_created}))
     return 0
+
+
+def _recruiter_pane_cleanup_decision(state: dict, recruiter_pane: object) -> dict[str, object]:
+    if not isinstance(recruiter_pane, str) or not recruiter_pane:
+        return {
+            "status": "not-created",
+            "worker_pane": None,
+            "verified_absent": True,
+        }
+    ownership = state.get("ownership")
+    pane = ownership.get("pane") if isinstance(ownership, dict) else None
+    if not isinstance(pane, dict):
+        raise RecruiterError(
+            "Recruiter teardown requires structural pane ownership; inspect the state file "
+            "and repair or remove it only after confirming the recorded pane is safe"
+        )
+    pane_id = pane.get("pane_id")
+    pane_state = pane.get("state")
+    if pane_id != recruiter_pane:
+        raise RecruiterError("Recruiter teardown pane ownership does not match state")
+    if pane_state == "adopted":
+        return {
+            "status": "skipped-adopted",
+            "worker_pane": recruiter_pane,
+            "verified_absent": False,
+        }
+    if pane_state != "created":
+        raise RecruiterError("Recruiter teardown pane ownership is not created/adopted")
+    return {
+        "status": "close-created",
+        "worker_pane": recruiter_pane,
+        "verified_absent": False,
+    }
 
 
 def cmd_down() -> int:
     """Terminalize all owned jobs, close the Recruiter pane, and retire its supervisor."""
     cmd_reconcile(force=True)
-    recruiter_pane = _recruiter_pane_from_state()
-    if recruiter_pane:
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except FileNotFoundError:
+        state = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(f"Recruiter state is invalid: {error}") from error
+    if not isinstance(state, dict):
+        raise RecruiterError("Recruiter state must be an object")
+    recruiter_pane = (
+        state.get("recruiter_pane") if isinstance(state, dict) else None
+    )
+    cleanup = _recruiter_pane_cleanup_decision(state, recruiter_pane)
+    if cleanup["status"] == "close-created":
+        herdr_session = _recorded_herdr_session(
+            state.get("herdr_session"), "Recruiter teardown"
+        )
         try:
-            _herdr("pane", "close", recruiter_pane)
+            _herdr(
+                "pane",
+                "close",
+                cast(str, recruiter_pane),
+                herdr_session=herdr_session,
+            )
         except RecruiterError:
-            if recruiter_pane in _live_pane_ids():
+            if cast(str, recruiter_pane) in _live_pane_ids(herdr_session=herdr_session):
                 raise
+        cleanup = {
+            "herdr_session": herdr_session,
+            "status": "closed",
+            "worker_pane": recruiter_pane,
+            "verified_absent": True,
+        }
     STATE_FILE.unlink(missing_ok=True)
-    print(json.dumps({"down": True, "recruiter_pane": recruiter_pane}, sort_keys=True))
+    print(
+        json.dumps(
+            {"cleanup": cleanup, "down": True, "recruiter_pane": recruiter_pane},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
 def cmd_status() -> int:
-    services = _find_services_workspace(_herdr_json("workspace", "list"))
+    if STATE_FILE.is_file():
+        try:
+            state = json.loads(STATE_FILE.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(f"Recruiter state is invalid: {error}") from error
+        if not isinstance(state, dict):
+            raise RecruiterError("Recruiter state must be an object")
+        herdr_session = _recorded_herdr_session(
+            state.get("herdr_session"), "Recruiter status"
+        )
+    else:
+        state = None
+        herdr_session = None
+    services = _find_services_workspace(
+        _herdr_json("workspace", "list", herdr_session=herdr_session)
+    )
     label = services.get("label") if services else None
     print(f"services: {'up (' + str(label) + ')' if services else 'down'}")
-    if STATE_FILE.is_file():
+    if state is not None:
         print(STATE_FILE.read_text())
     return 0
 

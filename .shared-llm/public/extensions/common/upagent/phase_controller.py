@@ -12,23 +12,23 @@ the leader process itself is healthy.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import errno
 import fcntl
 import importlib.util
 import json
 import os
-from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Iterator, cast
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, cast
 
 import yaml
-
 
 HERE = Path(__file__).resolve().parent
 _recruiter_spec = importlib.util.spec_from_file_location(
@@ -236,8 +236,8 @@ def _resolve_leader_launch(
     return launch
 
 
-def _live_panes() -> set[str]:
-    response = recruiter._herdr_json("pane", "list")
+def _live_panes(herdr_session: str | None = None) -> set[str]:
+    response = recruiter._herdr_json("pane", "list", herdr_session=herdr_session)
     panes = response.get("result", {}).get("panes", [])
     return {
         pane["pane_id"]
@@ -246,7 +246,7 @@ def _live_panes() -> set[str]:
     }
 
 
-def _active_leaders(path: Path) -> dict[str, str]:
+def _active_leaders(path: Path) -> dict[str, dict[str, str]]:
     if not path.is_file():
         return {}
     try:
@@ -255,30 +255,52 @@ def _active_leaders(path: Path) -> dict[str, str]:
         raise PhaseStartError(
             f"active leader map {path} is unreadable: {error}"
         ) from error
-    if not isinstance(value, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
-    ):
+    if not isinstance(value, dict):
         raise PhaseStartError(
-            f"active leader map {path} must contain only phase-id to pane-id strings"
+            f"active leader map {path} must contain phase-id leader records"
         )
-    return value
+    leaders: dict[str, dict[str, str]] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, dict):
+            raise PhaseStartError(
+                f"active leader map {path} has a legacy or malformed entry; inspect it "
+                "and repair or remove it only after confirming the recorded pane is safe"
+            )
+        pane_id = item.get("pane_id")
+        herdr_session = item.get("herdr_session")
+        if not isinstance(pane_id, str) or not isinstance(herdr_session, str):
+            raise PhaseStartError(
+                f"active leader map {path} has a legacy or malformed entry; inspect it "
+                "and repair or remove it only after confirming the recorded pane is safe"
+            )
+        leaders[key] = {"pane_id": pane_id, "herdr_session": herdr_session}
+    return leaders
 
 
-def _set_active_leader(path: Path, phase_id: str, pane_id: str | None) -> None:
+def _set_active_leader(
+    path: Path, phase_id: str, pane_id: str | None, herdr_session: str | None
+) -> None:
     with _exclusive_phase_start(path.with_name(".active-leader-panes.lock")):
         leaders = _active_leaders(path)
         if pane_id is None:
             leaders.pop(phase_id, None)
         else:
-            leaders[phase_id] = pane_id
+            if herdr_session is None:
+                raise PhaseStartError("active leader record requires herdr_session")
+            leaders[phase_id] = {
+                "pane_id": pane_id,
+                "herdr_session": herdr_session,
+            }
         _write_json_atomic(path, cast(dict[str, object], leaders))
 
 
 def _start_gated_leader(
-    name: str, tui_pane: str, cwd: Path, script_path: Path
+    name: str, tui_pane: str, cwd: Path, script_path: Path, herdr_session: str
 ) -> tuple[str, str]:
     tui = (
-        recruiter._herdr_json("pane", "get", tui_pane).get("result", {}).get("pane", {})
+        recruiter._herdr_json("pane", "get", tui_pane, herdr_session=herdr_session)
+        .get("result", {})
+        .get("pane", {})
     )
     tab_id = tui.get("tab_id") if isinstance(tui, dict) else None
     workspace_id = tui.get("workspace_id") if isinstance(tui, dict) else None
@@ -298,6 +320,7 @@ def _start_gated_leader(
         "--",
         "bash",
         str(script_path),
+        herdr_session=herdr_session,
     )
     agent = response.get("result", {}).get("agent", {})
     pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
@@ -315,9 +338,13 @@ def _start_gated_leader(
     return pane_id, returned_workspace if isinstance(returned_workspace, str) else ""
 
 
-def _verify_gated_leader(pane_id: str, script_path: Path) -> None:
+def _verify_gated_leader(
+    pane_id: str, script_path: Path, herdr_session: str
+) -> None:
     process_info = (
-        recruiter._herdr_json("pane", "process-info", "--pane", pane_id)
+        recruiter._herdr_json(
+            "pane", "process-info", "--pane", pane_id, herdr_session=herdr_session
+        )
         .get("result", {})
         .get("process_info", {})
     )
@@ -337,7 +364,11 @@ def _verify_gated_leader(pane_id: str, script_path: Path) -> None:
 
 
 def _leader_health(
-    pane_id: str, cwd: Path, profile: dict[str, str], roster: dict[str, Any]
+    pane_id: str,
+    cwd: Path,
+    profile: dict[str, str],
+    roster: dict[str, Any],
+    herdr_session: str,
 ) -> dict[str, object]:
     health = roster.get("health", {}).get(profile["harness"], {})
     return recruiter._wait_for_agent_health(
@@ -350,6 +381,7 @@ def _leader_health(
         ),
         expected_cwd=str(cwd),
         timeout_ms=STARTUP_TIMEOUT_MS,
+        herdr_session=herdr_session,
     )
 
 
@@ -381,6 +413,7 @@ def start_phase(
         raise PhaseStartError(
             f"owning TUI pane {tui_pane} does not match current Herdr pane {current_pane}"
         )
+    herdr_session = recruiter._resolve_current_herdr_session_name()
     if pass_number <= 0:
         raise PhaseStartError("pass must be a positive integer")
     if not run_root.is_absolute() or not run_root.is_dir():
@@ -413,8 +446,15 @@ def start_phase(
                     f"phase-start receipt {receipt_path} is unreadable: {error}"
                 ) from error
             if isinstance(existing, dict) and existing.get("state") == "ready":
-                leader_pane = existing.get("leader_pane")
-                if isinstance(leader_pane, str) and leader_pane in _live_panes():
+                if existing.get("herdr_session") != herdr_session:
+                    raise PhaseStartError(
+                        "phase-start receipt belongs to a different Herdr session"
+                    )
+                existing_leader_pane = existing.get("leader_pane")
+                if (
+                    isinstance(existing_leader_pane, str)
+                    and existing_leader_pane in _live_panes(herdr_session)
+                ):
                     return cast(dict[str, object], existing)
                 raise PhaseStartError(
                     "phase-start receipt says ready but its leader is no longer live"
@@ -425,12 +465,22 @@ def start_phase(
 
         leaders = _active_leaders(active_path)
         prior = leaders.get(phase_id)
-        if prior is not None and prior in _live_panes():
+        prior_pane = prior.get("pane_id") if isinstance(prior, dict) else None
+        prior_session = prior.get("herdr_session") if isinstance(prior, dict) else None
+        if prior is not None and prior_session != herdr_session:
             raise PhaseStartError(
-                f"phase {phase_id} already has live leader {prior}; only its owning TUI may end that lifecycle"
+                f"phase {phase_id} has an active leader in a different Herdr session"
             )
-        if prior is not None:
-            _set_active_leader(active_path, phase_id, None)
+        if (
+            isinstance(prior_pane, str)
+            and prior_pane
+            and prior_pane in _live_panes(herdr_session)
+        ):
+            raise PhaseStartError(
+                f"phase {phase_id} already has live leader {prior_pane}; only its owning TUI may end that lifecycle"
+            )
+        if prior_pane is not None:
+            _set_active_leader(active_path, phase_id, None, None)
         if gate_path.exists():
             raise PhaseStartError(
                 f"phase-start artifacts already exist under {control_dir.parent}"
@@ -471,15 +521,20 @@ def start_phase(
                     "at_ns": time.time_ns(),
                     "pass": pass_number,
                     "phase_id": phase_id,
+                    "herdr_session": herdr_session,
                     "state": "preparing",
                     "tui_pane": tui_pane,
                 },
             )
             leader_pane, workspace_id = _start_gated_leader(
-                _safe_name(slug, phase_id, pass_number), tui_pane, cwd, script_path
+                _safe_name(slug, phase_id, pass_number),
+                tui_pane,
+                cwd,
+                script_path,
+                herdr_session,
             )
-            _verify_gated_leader(leader_pane, script_path)
-            _set_active_leader(active_path, phase_id, leader_pane)
+            _verify_gated_leader(leader_pane, script_path, herdr_session)
+            _set_active_leader(active_path, phase_id, leader_pane, herdr_session)
             watchdog_receipt: dict[str, object] = {
                 "reason": "coordination v2: phase-await owns delivery and reconciliation; no standing watchdog is created",
                 "state": "not-configured",
@@ -489,6 +544,10 @@ def start_phase(
                 {
                     "at_ns": time.time_ns(),
                     "leader_pane": leader_pane,
+                    "herdr_session": herdr_session,
+                    "ownership": {
+                        "leader": {"pane_id": leader_pane, "state": "created"}
+                    },
                     "pass": pass_number,
                     "phase_id": phase_id,
                     "state": "leader-gated",
@@ -498,11 +557,17 @@ def start_phase(
                 },
             )
             _release_leader_gate(gate_path, release_token)
-            leader_health = _leader_health(leader_pane, cwd, lead_profile, roster)
+            leader_health = _leader_health(
+                leader_pane, cwd, lead_profile, roster, herdr_session
+            )
             receipt = {
                 "at_ns": time.time_ns(),
                 "leader_health": leader_health,
                 "leader_pane": leader_pane,
+                "herdr_session": herdr_session,
+                "ownership": {
+                    "leader": {"pane_id": leader_pane, "state": "created"}
+                },
                 "pass": pass_number,
                 "phase_id": phase_id,
                 "state": "ready",
@@ -525,6 +590,7 @@ def start_phase(
                 {
                     "at_ns": time.time_ns(),
                     "leader_pane": leader_pane,
+                    "herdr_session": herdr_session,
                     "pass": pass_number,
                     "phase_id": phase_id,
                     "reason": str(error),
@@ -538,14 +604,21 @@ def start_phase(
                 gate_path.unlink(missing_ok=True)
                 if leader_pane is not None:
                     try:
-                        recruiter._close_worker_pane(leader_pane)
+                        recruiter._close_worker_pane(
+                            leader_pane, herdr_session=herdr_session
+                        )
                     except (recruiter.RecruiterError, OSError, subprocess.SubprocessError) as close_error:
                         # Never let cleanup mask the startup error that got us here.
                         sys.stderr.write(
                             f"phase-start cleanup: could not close gated leader {leader_pane}: {close_error}\n"
                         )
-                    if _active_leaders(active_path).get(phase_id) == leader_pane:
-                        _set_active_leader(active_path, phase_id, None)
+                    active = _active_leaders(active_path).get(phase_id)
+                    if (
+                        isinstance(active, dict)
+                        and active.get("pane_id") == leader_pane
+                        and active.get("herdr_session") == herdr_session
+                    ):
+                        _set_active_leader(active_path, phase_id, None, None)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="upagent-phase-start")

@@ -13,20 +13,20 @@ to the human via `herdr notification`. The plan-start receipt keeps a `watchdog`
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import fcntl
 import importlib.util
 import json
 import os
-from pathlib import Path
 import shlex
 import sys
 import time
-from typing import Any, cast, Iterator
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, cast
 
 import yaml
-
 
 HERE = Path(__file__).resolve().parent
 UPAGENT_DIR = HERE.parent / "upagent"
@@ -115,10 +115,10 @@ def _safe_name(value: str) -> str:
     )[:80]
 
 
-def _find_unified_workspace() -> dict | None:
+def _find_unified_workspace(herdr_session: str) -> dict | None:
     """The unified `herdr` workspace from a live `workspace list`, or None if absent."""
     workspaces = (
-        recruiter._herdr_json("workspace", "list")
+        recruiter._herdr_json("workspace", "list", herdr_session=herdr_session)
         .get("result", {})
         .get("workspaces", [])
     )
@@ -133,12 +133,14 @@ def _find_unified_workspace() -> dict | None:
     return None
 
 
-def _split_pane_into_control_tab(workspace_id: str) -> str:
+def _split_pane_into_control_tab(workspace_id: str, herdr_session: str) -> str:
     """A fresh pane for this TUI in the unified workspace's `control` tab (joined when present,
     created otherwise). Concurrent runs share the tab; the Recruiter's layout lock serializes
     the placement."""
     panes = (
-        recruiter._herdr_json("pane", "list", "--workspace", workspace_id)
+        recruiter._herdr_json(
+            "pane", "list", "--workspace", workspace_id, herdr_session=herdr_session
+        )
         .get("result", {})
         .get("panes", [])
     )
@@ -150,13 +152,23 @@ def _split_pane_into_control_tab(workspace_id: str) -> str:
             f"unified workspace {workspace_id} has no pane to split from"
         )
     split = recruiter._herdr_json(
-        "pane", "split", anchor, "--direction", "right", "--no-focus"
+        "pane",
+        "split",
+        anchor,
+        "--direction",
+        "right",
+        "--no-focus",
+        herdr_session=herdr_session,
     )
     pane_id = split.get("result", {}).get("pane", {}).get("pane_id")
     if not isinstance(pane_id, str) or not pane_id:
         raise PlanStartError("herdr pane split returned no pane_id")
     return recruiter._place_started_agent_in_role_tab(
-        pane_id, workspace_id, CONTROL_TAB_LABEL, split_direction="right"
+        pane_id,
+        workspace_id,
+        CONTROL_TAB_LABEL,
+        split_direction="right",
+        herdr_session=herdr_session,
     )
 
 
@@ -180,17 +192,25 @@ def _create_tui(
         # Remote Control session named after the run (= form keeps the trailing prompt
         # argument from being read as the session name).
         launch += f" --remote-control={shlex.quote(_safe_name(slug) or 'herdr-run')}"
+    herdr_session = recruiter._resolve_current_herdr_session_name()
     pane_id: str | None = None
     tab_id: str | None = None
     workspace_id: str | None = None
-    unified = None if separate_workspaces else _find_unified_workspace()
+    unified = None if separate_workspaces else _find_unified_workspace(herdr_session)
     created_workspace = unified is None
     if created_workspace:
         # Separate mode gets a per-run `<slug>` workspace; the unified default creates the
         # one `herdr` workspace only when nothing (services included) has created it yet.
         label = slug if separate_workspaces else recruiter.UNIFIED_WORKSPACE_LABEL
         response = recruiter._herdr_json(
-            "workspace", "create", "--cwd", str(repo), "--label", label, "--no-focus"
+            "workspace",
+            "create",
+            "--cwd",
+            str(repo),
+            "--label",
+            label,
+            "--no-focus",
+            herdr_session=herdr_session,
         )
         result = response.get("result", {})
         root_pane = result.get("root_pane", {}) if isinstance(result, dict) else {}
@@ -205,8 +225,11 @@ def _create_tui(
     )
     try:
         if not created_workspace and unified is not None:
-            workspace_id = unified["workspace_id"]
-            pane_id = _split_pane_into_control_tab(workspace_id)
+            found_workspace_id = unified.get("workspace_id")
+            if not isinstance(found_workspace_id, str) or not found_workspace_id:
+                raise PlanStartError("unified workspace has no workspace_id")
+            workspace_id = found_workspace_id
+            pane_id = _split_pane_into_control_tab(workspace_id, herdr_session)
         if not isinstance(pane_id, str) or not pane_id:
             raise PlanStartError("herdr workspace create returned no root pane_id")
         if (
@@ -216,7 +239,9 @@ def _create_tui(
             or not tab_id
         ):
             pane = (
-                recruiter._herdr_json("pane", "get", pane_id)
+                recruiter._herdr_json(
+                    "pane", "get", pane_id, herdr_session=herdr_session
+                )
                 .get("result", {})
                 .get("pane", {})
             )
@@ -231,15 +256,26 @@ def _create_tui(
         if not isinstance(tab_id, str) or not tab_id:
             raise PlanStartError(f"TUI pane {pane_id} has no tab_id")
         if created_workspace:
-            recruiter._herdr("tab", "rename", tab_id, CONTROL_TAB_LABEL)
-        recruiter._herdr("pane", "rename", pane_id, "tui-agent")
-        recruiter._herdr("pane", "run", pane_id, command)
+            recruiter._herdr(
+                "tab",
+                "rename",
+                tab_id,
+                CONTROL_TAB_LABEL,
+                herdr_session=herdr_session,
+            )
+        recruiter._herdr(
+            "pane", "rename", pane_id, "tui-agent", herdr_session=herdr_session
+        )
+        recruiter._herdr(
+            "pane", "run", pane_id, command, herdr_session=herdr_session
+        )
         health = recruiter._wait_for_agent_health(
             pane_id,
             expected_agent=expected_agent,
             expected_process=expected_process,
             expected_cwd=str(repo),
             timeout_ms=STARTUP_TIMEOUT_MS,
+            herdr_session=herdr_session,
         )
     except (OSError, PlanStartError, recruiter.RecruiterError) as error:
         cleanup_error: str | None = None
@@ -247,9 +283,11 @@ def _create_tui(
             # Close the workspace only when this startup created it; a reused unified
             # workspace still hosts the services (and possibly other runs).
             if created_workspace and isinstance(workspace_id, str) and workspace_id:
-                recruiter._herdr("workspace", "close", workspace_id)
+                recruiter._herdr(
+                    "workspace", "close", workspace_id, herdr_session=herdr_session
+                )
             elif isinstance(pane_id, str) and pane_id:
-                recruiter._herdr("pane", "close", pane_id)
+                recruiter._herdr("pane", "close", pane_id, herdr_session=herdr_session)
         except recruiter.RecruiterError as cleanup:
             cleanup_error = str(cleanup)
         detail = f"TUI startup failed: {error}"
@@ -258,7 +296,15 @@ def _create_tui(
         raise PlanStartError(detail) from error
     return {
         "control_tab_id": tab_id,
+        "herdr_session": herdr_session,
         "health": health,
+        "ownership": {
+            "pane": {"pane_id": pane_id, "state": "created"},
+            "workspace": {
+                "state": "created" if created_workspace else "adopted",
+                "workspace_id": workspace_id,
+            },
+        },
         "pane_id": pane_id,
         "workspace_id": workspace_id,
         "workspace_mode": "separate" if separate_workspaces else "single",
@@ -294,6 +340,17 @@ def finish_plan(*, run_dir: Path, slug: str | None, state: str) -> dict[str, obj
         raise PlanStartError(f"plan-start receipt does not belong to plan {slug!r}")
     if receipt.get("state") not in ("ready", "ready-degraded"):
         raise PlanStartError("plan-start receipt is not in a finishable ready state")
+    tui = receipt.get("tui")
+    if not isinstance(tui, dict):
+        raise PlanStartError("plan-start receipt has no TUI identity")
+    recorded_session = tui.get("herdr_session")
+    if not isinstance(recorded_session, str) or not recorded_session:
+        raise PlanStartError("plan-start receipt has no recorded Herdr session")
+    current_session = recruiter._resolve_current_herdr_session_name()
+    if recorded_session != current_session:
+        raise PlanStartError(
+            "plan-start receipt belongs to a different Herdr session"
+        )
     plan_id = slug or receipt_slug
     if state == "succeeded":
         route_path = run_dir / "route.yaml"

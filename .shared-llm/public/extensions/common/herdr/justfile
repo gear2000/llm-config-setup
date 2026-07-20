@@ -22,6 +22,7 @@
 
 _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/recruiter.py"
 _PLAN_CONTROLLER := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/plan_controller.py"
+_HERDR_LAB := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/lab_session.py"
 
 # Bring up the always-up shared service (the UpAgent Recruiter, in its own role-labeled pane,
 # registered in Herdr's agents sidebar), then print the status table so you can SEE it is up.
@@ -109,3 +110,12 @@ herdr-plan dir slug="" harness="claude" *FLAGS="":
 # only terminal authority (and lets any in-flight legacy watchdog retire safely).
 herdr-plan-finish dir state slug="":
     ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}"
+
+# Guarded non-default Herdr lab/session helper for smoke tests.
+# Generate a name first, then provision/run/teardown through that exact name:
+#   just herdr-lab name smoke
+#   just herdr-lab provision <generated-session>
+#   just herdr-lab run <generated-session> workspace list
+#   just herdr-lab teardown <generated-session>
+herdr-lab *ARGS:
+    ${PYTHON_BIN:-python3} "{{_HERDR_LAB}}" {{ARGS}}

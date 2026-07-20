@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import os
 import stat
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +28,14 @@ recruiter = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(recruiter)
 RecruiterError = recruiter.RecruiterError
 ContractError = recruiter.ContractError
+
+
+@pytest.fixture(autouse=True)
+def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        recruiter, "_herdr_owner_record", lambda: {"herdr_session": "llm-lab-test"}
+    )
+
 
 # Every submission door now hires a fresh intake clerk, so the real launcher is captured here for
 # the tests that prove its own behavior. Everything else gets the deterministic double below.
@@ -326,7 +334,7 @@ def test_worker_health_requires_expected_process_agent_and_cwd(monkeypatch) -> N
             }
         },
     }
-    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args: responses[args])
+    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args, **kwargs: responses[args])
     evidence = recruiter._wait_for_worker_health("worker-pane", _order(), 100)
     assert evidence["healthy"] is True
     assert evidence["process_pid"] == 42
@@ -351,7 +359,7 @@ def test_worker_health_detector_can_be_overridden_by_roster(monkeypatch) -> None
             }
         },
     }
-    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args: responses[args])
+    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args, **kwargs: responses[args])
     roster = {
         "health": {
             "claude": {"expected_agent": "wrapped-agent", "expected_process": "wrapper"}
@@ -381,10 +389,12 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
             "result": {"process_info": {"foreground_processes": []}}
         },
     }
-    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args: responses[args])
+    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args, **kwargs: responses[args])
     monkeypatch.setattr(recruiter, "STARTUP_FAILURE_SETTLE_SECONDS", 0)
     monkeypatch.setattr(
-        recruiter, "_pane_recent_output", lambda _pane: "unknown model: nope"
+        recruiter,
+        "_pane_recent_output",
+        lambda _pane, **kwargs: "unknown model: nope",
     )
     with pytest.raises(RecruiterError, match="expected claude process"):
         recruiter._wait_for_worker_health("worker-pane", _order(), 100)
@@ -395,7 +405,7 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
-        assert kwargs == {}
+        assert kwargs == {"herdr_session": "llm-lab-test"}
         if args == ("pane", "get", "leader-pane"):
             return {
                 "result": {"pane": {"tab_id": "tab-1", "workspace_id": "workspace-1"}}
@@ -415,6 +425,7 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
         "upagent-req-abc-g1",
         _order(cockpit_pane="leader-pane"),
         "claude --model some-model",
+        herdr_session="llm-lab-test",
     )
     assert (pane, workspace, address) == (
         "worker-pane",
@@ -432,7 +443,7 @@ def test_start_herdr_agent_honors_downward_role_placement(monkeypatch) -> None:
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
-        assert kwargs == {}
+        assert kwargs == {"herdr_session": "llm-lab-test"}
         if args == ("pane", "get", "leader-pane"):
             return {"result": {"pane": {"tab_id": "tab-1"}}}
         return {
@@ -452,6 +463,7 @@ def test_start_herdr_agent_honors_downward_role_placement(monkeypatch) -> None:
         _order(cockpit_pane="leader-pane"),
         "claude --model some-model",
         split_direction="down",
+        herdr_session="llm-lab-test",
     )
 
     start = calls[1]
@@ -472,7 +484,8 @@ def test_place_started_agent_creates_role_tab_from_the_live_pane(monkeypatch) ->
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         assert kwargs == {
-            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS
+            "herdr_session": "llm-lab-test",
+            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS,
         }
         if args[:2] == ("tab", "list"):
             return {
@@ -504,7 +517,11 @@ def test_place_started_agent_creates_role_tab_from_the_live_pane(monkeypatch) ->
     monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
 
     pane = recruiter._place_started_agent_in_role_tab(
-        "worker-pane", "workspace-1", "workers", split_direction="right"
+        "worker-pane",
+        "workspace-1",
+        "workers",
+        split_direction="right",
+        herdr_session="llm-lab-test",
     )
 
     assert pane == "worker-pane"
@@ -527,7 +544,8 @@ def test_place_started_agent_joins_existing_role_tab(monkeypatch) -> None:
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         assert kwargs == {
-            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS
+            "herdr_session": "llm-lab-test",
+            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS,
         }
         if args[:2] == ("tab", "list"):
             return {
@@ -571,7 +589,11 @@ def test_place_started_agent_joins_existing_role_tab(monkeypatch) -> None:
     monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
 
     recruiter._place_started_agent_in_role_tab(
-        "watchdog-pane", "workspace-1", "oversight", split_direction="down"
+        "watchdog-pane",
+        "workspace-1",
+        "oversight",
+        split_direction="down",
+        herdr_session="llm-lab-test",
     )
 
     assert calls[-1] == (
@@ -592,7 +614,7 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(monkeypatch, capsys
     calls: list[tuple[str, ...]] = []
     closed: list[str] = []
 
-    def fake_json(*args: str) -> dict:
+    def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         if args == ("pane", "get", "leader-pane"):
             return {
@@ -630,6 +652,7 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(monkeypatch, capsys
         _order(cockpit_pane="leader-pane"),
         "claude",
         tab_role="workers",
+        herdr_session="llm-lab-test",
     )
 
     assert started == ("worker-pane", "workspace-1", "worker")
@@ -657,7 +680,8 @@ def test_resize_started_pane_shrinks_new_split(
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         assert kwargs == {
-            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS
+            "timeout_seconds": recruiter.LAYOUT_COMMAND_TIMEOUT_SECONDS,
+            "herdr_session": None,
         }
         if args[0:2] == ("pane", "neighbor"):
             return {"result": {"neighbor": {"neighbor_pane_id": neighbor_pane}}}
@@ -757,7 +781,6 @@ def test_worker_tab_role_separates_active_work_from_oversight() -> None:
 
 
 def test_herdr_json_converts_timeout_to_recruiter_error(monkeypatch) -> None:
-    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
     monkeypatch.setattr(
         recruiter.subprocess,
         "run",
@@ -767,7 +790,187 @@ def test_herdr_json_converts_timeout_to_recruiter_error(monkeypatch) -> None:
     )
 
     with pytest.raises(RecruiterError, match="timed out after 0.1 seconds"):
-        recruiter._herdr_json("pane", "layout", timeout_seconds=0.1)
+        recruiter._herdr_json(
+            "pane", "layout", timeout_seconds=0.1, herdr_session="llm-lab-test"
+        )
+
+
+def test_explicit_session_command_still_checks_herdr_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(recruiter.shutil, "which", lambda command: None)
+    monkeypatch.setattr(
+        recruiter.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("missing Herdr must fail before subprocess"),
+    )
+
+    with pytest.raises(RecruiterError, match="not found in PATH"):
+        recruiter._herdr("pane", "close", "pane-1", herdr_session="llm-lab-test")
+
+
+def test_current_herdr_session_resolves_by_socket_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_SOCKET_PATH", "/tmp/default.sock")
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+
+    def fake_run(args, **kwargs):
+        assert args == ["herdr", "session", "list", "--json"]
+        return recruiter.subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "default": True,
+                            "name": "default",
+                            "running": True,
+                            "socket_path": "/tmp/default.sock",
+                        }
+                    ]
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
+
+    assert recruiter._resolve_current_herdr_session_name() == "default"
+
+
+def test_current_herdr_session_uses_real_status_payload_shape_when_env_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HERDR_SOCKET_PATH", raising=False)
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args == ["herdr", "status", "--json"]:
+            return recruiter.subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(
+                    {
+                        "client": {"session": None},
+                        "server": {
+                            "running": True,
+                            "socket": "/tmp/default.sock",
+                            "status": "running",
+                        },
+                    }
+                ),
+                "",
+            )
+        if args == ["herdr", "session", "list", "--json"]:
+            return recruiter.subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(
+                    {
+                        "sessions": [
+                            {
+                                "default": True,
+                                "name": "default",
+                                "running": True,
+                                "socket_path": "/tmp/default.sock",
+                            }
+                        ]
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
+
+    assert recruiter._resolve_current_herdr_session_name() == "default"
+    assert calls == [
+        ["herdr", "status", "--json"],
+        ["herdr", "session", "list", "--json"],
+    ]
+
+
+def test_session_name_validation_matches_herdr_charset() -> None:
+    assert recruiter._validate_herdr_session_name("lab.one_2-three") == "lab.one_2-three"
+    with pytest.raises(RecruiterError, match="unsupported characters"):
+        recruiter._validate_herdr_session_name("lab:one")
+
+
+def test_current_herdr_session_refuses_ambiguous_socket_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERDR_SOCKET_PATH", "/tmp/same.sock")
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+
+    def fake_run(args, **kwargs):
+        return recruiter.subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "default": False,
+                            "name": "llm-lab-a",
+                            "running": True,
+                            "socket_path": "/tmp/same.sock",
+                        },
+                        {
+                            "default": False,
+                            "name": "llm-lab-b",
+                            "running": True,
+                            "socket_path": "/tmp/same.sock",
+                        },
+                    ]
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
+
+    with pytest.raises(RecruiterError, match="expected exactly one"):
+        recruiter._resolve_current_herdr_session_name()
+
+
+def test_close_worker_pane_requires_recorded_session() -> None:
+    with pytest.raises(RecruiterError, match="recorded Herdr session"):
+        recruiter._close_worker_pane("pane-1")
+
+
+def test_close_worker_pane_uses_global_session_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:4] == ["herdr", "--session", "llm-lab-test", "pane"]:
+            if args[4] == "close":
+                return recruiter.subprocess.CompletedProcess(args, 0, "", "")
+            if args[4] == "list":
+                return recruiter.subprocess.CompletedProcess(
+                    args, 0, '{"result":{"panes":[]}}\n', ""
+                )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
+
+    cleanup = recruiter._close_worker_pane(
+        "pane-1", herdr_session="llm-lab-test"
+    )
+
+    assert cleanup["verified_absent"] is True
+    assert calls[0] == ["herdr", "--session", "llm-lab-test", "pane", "close", "pane-1"]
+    assert calls[1] == ["herdr", "--session", "llm-lab-test", "pane", "list"]
 
 
 def test_checker_cleanup_guards_layout_adjustment(tmp_path: Path, monkeypatch) -> None:
@@ -780,12 +983,13 @@ def test_checker_cleanup_guards_layout_adjustment(tmp_path: Path, monkeypatch) -
         "address": "manager-address",
         "config": recruiter.llm_management.load_management_config(_roster()),
         "generation": 1,
+        "herdr_session": "llm-lab-test",
         "pane": "manager-pane",
     }
     monkeypatch.setattr(
         recruiter,
         "_herdr_json",
-        lambda *args: {
+        lambda *args, **kwargs: {
             "result": {"pane": {}}
             if args[0:2] == ("pane", "get")
             else {"result": {"process_info": {}}}
@@ -803,7 +1007,9 @@ def test_checker_cleanup_guards_layout_adjustment(tmp_path: Path, monkeypatch) -
         lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
     closed: list[str] = []
-    monkeypatch.setattr(recruiter, "_close_worker_pane", closed.append)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: closed.append(pane)
+    )
 
     with pytest.raises(KeyboardInterrupt):
         recruiter._run_one_shot_checker(
@@ -841,16 +1047,18 @@ def _patch_approved_manager(monkeypatch) -> None:
         "load_management_config",
         lambda roster: dataclasses.replace(real_load(roster), mode="dedicated"),
     )
-    monkeypatch.setattr(
-        recruiter,
-        "_start_account_manager",
-        lambda *args: {
+    def fake_account_manager(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
             "address": "manager-address",
+            "config": real_load(args[4]),
             "decision": SimpleNamespace(decision="approved", message="approved"),
             "generation": 1,
+            "herdr_session": kwargs.get("herdr_session"),
             "pane": "manager-pane",
-        },
-    )
+            "workspace_id": "manager-workspace",
+        }
+
+    monkeypatch.setattr(recruiter, "_start_account_manager", fake_account_manager)
     monkeypatch.setattr(
         recruiter,
         "_ask_manager_about_startup",
@@ -1223,12 +1431,14 @@ def test_run_order_honors_authorized_extension_after_timeout(
         ),
     )
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
-    def wait(_pane: str, timeout_ms: int, _finalized: object) -> bool:
+    def wait(_pane: str, timeout_ms: int, _finalized: object, **_: object) -> bool:
         waits.append(timeout_ms)
         if len(waits) == 1:
             raise recruiter.AgentWaitTimeout("cap reached")
@@ -1243,6 +1453,7 @@ def test_run_order_honors_authorized_extension_after_timeout(
         str(roster_path),
         private_result,
         on_timeout=lambda number, finalized: timeouts.append(number) or 50,
+        herdr_session="llm-lab-test",
     )
 
     assert code == 0
@@ -1275,10 +1486,12 @@ def test_run_order_blocks_result_when_startup_assessment_rejects_it(
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     code, result, _ = recruiter._run_order(
         str(order_path),
@@ -1287,6 +1500,7 @@ def test_run_order_blocks_result_when_startup_assessment_rejects_it(
         on_worker_healthy=lambda evidence: (_ for _ in ()).throw(
             RecruiterError("startup rejected")
         ),
+        herdr_session="llm-lab-test",
     )
 
     assert code == 1
@@ -1298,11 +1512,11 @@ def test_submit_agent_prompt_waits_for_idle_and_submits_enter_atomically(
     monkeypatch,
 ) -> None:
     calls = []
-    monkeypatch.setattr(recruiter, "_herdr", lambda *args: calls.append(args))
+    monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
     monkeypatch.setattr(
         recruiter,
         "_herdr_json",
-        lambda *args: {"result": {"agent": {"pane_id": "manager-pane"}}},
+        lambda *args, **kwargs: {"result": {"agent": {"pane_id": "manager-pane"}}},
     )
 
     recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000)
@@ -1427,11 +1641,15 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_wait_for_agent_status", lambda *args: True)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(
+        recruiter, "_wait_for_agent_status", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
     lifecycle_events: list[str] = []
 
     def record_worker(*args: object) -> threading.Event:
@@ -1449,6 +1667,7 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
         str(roster_path),
         private_result,
         on_worker_launched=record_worker,
+        herdr_session="llm-lab-test",
     )
 
     assert code == 0
@@ -1594,7 +1813,7 @@ def test_run_order_keeps_watchdog_alive_after_premature_self_verdict(
         finalized.set()
         return "watchdog-pane", "cockpit", "watchdog-address"
 
-    def fake_wait(*args: object) -> bool:
+    def fake_wait(*args: object, **kwargs: object) -> bool:
         nonlocal waits
         waits += 1
         if waits == 2:
@@ -1616,22 +1835,25 @@ def test_run_order_keeps_watchdog_alive_after_premature_self_verdict(
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", fake_wait)
     monkeypatch.setattr(
         recruiter,
         "_submit_agent_prompt",
-        lambda target, message, idle_timeout_ms: prompts.append(message),
+        lambda target, message, idle_timeout_ms, **kwargs: prompts.append(message),
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     code, result, cleanup = recruiter._run_order(
         str(order_path),
         str(roster_path),
         private_result,
         on_worker_launched=lambda *args: finalized,
+        herdr_session="llm-lab-test",
     )
 
     assert code == 0
@@ -1941,7 +2163,12 @@ def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
     ledger = recruiter.JobLedger()
     order = _order(result_path=str(tmp_path / "result.json"))
     key, _ = ledger.submit(order)
-    token = ledger.claim(key, order["order_id"], 1_000, owner={"runner_pid": 999})
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        1_000,
+        owner={"herdr_session": "llm-lab-owned", "runner_pid": 999},
+    )
     assert token
     assert ledger.record_worker(key, token, "owned-worker", "cockpit")
     staging = ledger.result_staging_path(key, token)
@@ -1952,7 +2179,7 @@ def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane: (
+        lambda pane, **kwargs: (
             closed.append(pane)
             or {"status": "closed", "worker_pane": pane, "verified_absent": True}
         ),
@@ -1965,6 +2192,34 @@ def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
     assert (
         ledger.completed_receipt(key, order)["cleanup"]["worker_pane"] == "owned-worker"
     )
+
+
+def test_reconciler_refuses_recorded_pane_without_recorded_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"runner_pid": 999})
+    assert token
+    assert ledger.record_worker(key, token, "owned-worker", "cockpit")
+    staging = ledger.result_staging_path(key, token)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text(json.dumps(_result(order["order_id"])))
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda pid, candidate_key: False)
+    monkeypatch.setattr(
+        recruiter,
+        "_close_worker_pane",
+        lambda pane, **kwargs: pytest.fail("ambiguous lease must not close a pane"),
+    )
+
+    assert recruiter.cmd_reconcile(force=True) == 0
+    lease = json.loads(
+        (ledger.active / "requests" / key / "lease.json").read_text()
+    )
+    assert lease["worker_pane"] == "owned-worker"
 
 
 def test_cleanup_failure_keeps_owned_lease_until_reconciler_verifies_absence(
@@ -2027,18 +2282,26 @@ def test_worker_ownership_is_recorded_before_startup_health_is_reported(
         recorded.set()
         return threading.Event()
 
-    def healthy(*args: object) -> dict:
+    def healthy(*args: object, **kwargs: object) -> dict:
         assert recorded.is_set()
         private_result.write_text(json.dumps(_result(order["order_id"])))
         return {"healthy": True}
 
     monkeypatch.setattr(recruiter, "_wait_for_worker_health", healthy)
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_wait_for_agent_status", lambda *args: True)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(
+        recruiter, "_wait_for_agent_status", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     code, result, cleanup = recruiter._run_order(
-        str(order_path), str(roster_path), private_result, on_worker
+        str(order_path),
+        str(roster_path),
+        private_result,
+        on_worker,
+        herdr_session="llm-lab-test",
     )
 
     assert (
@@ -2080,6 +2343,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         *,
         split_direction: str = "right",
         tab_role: str | None = None,
+        herdr_session: str | None = None,
     ) -> tuple[str, str, str]:
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)
@@ -2088,8 +2352,14 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", start_manager)
     def resize_manager(
-        pane: str, *, split_direction: str, target_fraction: float, role: str
+        pane: str,
+        *,
+        split_direction: str,
+        target_fraction: float,
+        role: str,
+        herdr_session: str | None = None,
     ) -> None:
+        assert herdr_session == "llm-lab-test"
         lease = json.loads(
             (ledger.active / "requests" / key / "lease.json").read_text()
         )
@@ -2103,7 +2373,9 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     monkeypatch.setattr(recruiter, "_wait_typed_file", lambda *args, **kwargs: decision)
     monkeypatch.setattr(recruiter, "_notify_requester", lambda *args, **kwargs: None)
 
-    manager = recruiter._start_account_manager(ledger, key, token, order, _roster())
+    manager = recruiter._start_account_manager(
+        ledger, key, token, order, _roster(), herdr_session="llm-lab-test"
+    )
 
     lease = json.loads((ledger.active / "requests" / key / "lease.json").read_text())
     assert manager["decision"].decision == "approved"
@@ -2182,7 +2454,7 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
         worker_launched.set()
         return "worker-pane", "cockpit", name
 
-    def fake_close(pane: str) -> dict:
+    def fake_close(pane: str, **kwargs: object) -> dict:
         closed_panes.append(pane)
         worker_closed.set()
         return _cleanup(pane)
@@ -2203,19 +2475,20 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
             return "", ""
 
     def fake_popen(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[1:3] == ["wait", "agent-status"]
+        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
+        assert command[4:6] == ["agent-status", "worker-pane"]
         status_wait_timeouts.append(command[-1])
         status_wait_started.set()
         return NeverDoneProcess()
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
     monkeypatch.setattr(recruiter, "_close_worker_pane", fake_close)
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
     monkeypatch.setattr(recruiter.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     runner = threading.Thread(
         target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path)))
@@ -2301,7 +2574,7 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
         worker_launched.set()
         return "codex-worker-pane", "cockpit", name
 
-    def fake_close(pane: str) -> dict:
+    def fake_close(pane: str, **kwargs: object) -> dict:
         closed_panes.append(pane)
         return _cleanup(pane)
 
@@ -2321,18 +2594,19 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
             return "", ""
 
     def never_done(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[1:3] == ["wait", "agent-status"]
+        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
+        assert command[4] == "agent-status"
         status_wait_started.set()
         return NeverDoneProcess()
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
     monkeypatch.setattr(recruiter, "_close_worker_pane", fake_close)
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
     monkeypatch.setattr(recruiter.subprocess, "Popen", never_done)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     runner = threading.Thread(
         target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path)))
@@ -2394,7 +2668,7 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
-    def fail_wait(*args: object) -> bool:
+    def fail_wait(*args: object, **kwargs: object) -> bool:
         worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
         worker_result_paths[0].write_text(
             json.dumps(_result(order["order_id"], verdict="passed"))
@@ -2403,11 +2677,13 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", fail_wait)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
@@ -2512,10 +2788,10 @@ def test_run_order_rejects_cosmetic_result_before_done(
     monkeypatch.setattr(
         recruiter,
         "_herdr_json",
-        lambda *args: {"result": {"pane": {"pane_id": "worker-pane"}}},
+        lambda *args, **kwargs: {"result": {"pane": {"pane_id": "worker-pane"}}},
     )
 
-    def fake_wait(*args: object) -> bool:
+    def fake_wait(*args: object, **kwargs: object) -> bool:
         staging_path.write_text(
             json.dumps(
                 {
@@ -2528,10 +2804,10 @@ def test_run_order_rejects_cosmetic_result_before_done(
         return True
 
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", fake_wait)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     code, result, cleanup = recruiter._run_order(
-        str(order_path), str(roster_path), staging_path
+        str(order_path), str(roster_path), staging_path, herdr_session="llm-lab-test"
     )
     assert code == 1
     assert result["verdict"] == "blocked"
@@ -2562,6 +2838,32 @@ def test_duplicate_popen_failure_cannot_finalize_live_owner(
     latest = json.loads((ledger.request_dir(key) / "state/latest.json").read_text())
     assert latest["state"] == "claimed"
     assert "DONE" not in capsys.readouterr().out
+
+
+def test_session_resolution_failure_publishes_blocked_recruit_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_owner_record",
+        lambda: (_ for _ in ()).throw(RecruiterError("session unavailable")),
+    )
+    monkeypatch.setattr(
+        recruiter.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("unowned session must not launch a runner"),
+    )
+
+    assert recruiter.cmd_recruit(str(order_path), "roster.yaml") == 1
+
+    result = json.loads(Path(order["result_path"]).read_text())
+    assert result["verdict"] == "blocked"
+    assert "session unavailable" in result["reason"]
+    assert f"ORDER {order['order_id']} DONE" in capsys.readouterr().out
 
 
 def test_recovered_lease_fences_stale_runner_result_and_terminal_state(
@@ -2669,7 +2971,7 @@ def test_direct_lifecycle_runs_job_without_an_account_manager(
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
-    def wait(*args: object) -> bool:
+    def wait(*args: object, **kwargs: object) -> bool:
         worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
         worker_result_paths[0].write_text(
             json.dumps(_result(order["order_id"], verdict="passed"))
@@ -2678,11 +2980,13 @@ def test_direct_lifecycle_runs_job_without_an_account_manager(
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
@@ -2728,7 +3032,7 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
-    def wait(*args: object) -> bool:
+    def wait(*args: object, **kwargs: object) -> bool:
         worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
         worker_result_paths[0].write_text(
             json.dumps(_result(order["order_id"], verdict="passed"))
@@ -2744,11 +3048,13 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
     monkeypatch.setattr(recruiter, "_startup_rescue_advice", advise)
     monkeypatch.setattr(recruiter, "_start_herdr_agent", flaky_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
@@ -2789,8 +3095,10 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
 
     monkeypatch.setattr(recruiter, "_startup_rescue_advice", lambda *a: "ask-requester")
     monkeypatch.setattr(recruiter, "_start_herdr_agent", dead_start)
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 1
 
@@ -2833,7 +3141,9 @@ def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
         roster_arg: dict,
         generation_arg: int,
         validation_arg: dict,
+        **kwargs: object,
     ) -> dict[str, object]:
+        assert kwargs == {"herdr_session": "llm-lab-test"}
         manager_calls.append(order_arg["order_id"])
         config = recruiter.llm_management.load_management_config(roster_arg)
         return {
@@ -2846,6 +3156,7 @@ def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
                 message="ok",
             ),
             "generation": generation_arg,
+            "herdr_session": "llm-lab-test",
             "health": None,
             "pane": None,
             "workspace_id": None,
@@ -2859,7 +3170,7 @@ def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
-    def wait(*args: object) -> bool:
+    def wait(*args: object, **kwargs: object) -> bool:
         worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
         worker_result_paths[0].write_text(
             json.dumps(_result(order["order_id"], verdict="passed"))
@@ -2869,11 +3180,13 @@ def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
     monkeypatch.setattr(recruiter, "_start_account_manager", fake_manager)
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
@@ -2987,6 +3300,7 @@ def test_rescue_advice_survives_a_broken_filesystem(
     manager = {
         "generation": 1,
         "config": recruiter.llm_management.load_management_config({}),
+        "herdr_session": "llm-lab-test",
         "pane": None,
     }
 
@@ -3013,6 +3327,7 @@ def test_rescue_advice_returns_the_brokers_recommendation(
     manager = {
         "generation": 1,
         "config": recruiter.llm_management.load_management_config({}),
+        "herdr_session": "llm-lab-test",
         "pane": None,
     }
     closed: list[str] = []
@@ -3029,7 +3344,9 @@ def test_rescue_advice_returns_the_brokers_recommendation(
             assessment="startup-failed", recommended_action="ask-requester"
         ),
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: closed.append(pane))
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: closed.append(pane)
+    )
 
     advice = recruiter._startup_rescue_advice(
         ledger, key, order, manager, "harness rejected the model flag"
@@ -3059,7 +3376,8 @@ def test_manager_startup_rejection_is_not_rescued(
     ledger = recruiter.JobLedger()
     key, _ = ledger.submit(order)
 
-    def fake_manager(*args: object) -> dict[str, object]:
+    def fake_manager(*args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs == {"herdr_session": "llm-lab-test"}
         roster_arg = args[4]
         return {
             "address": "manager-address",
@@ -3071,6 +3389,7 @@ def test_manager_startup_rejection_is_not_rescued(
                 message="ok",
             ),
             "generation": 1,
+            "herdr_session": "llm-lab-test",
             "health": None,
             "pane": "manager-pane",
             "workspace_id": "ws",
@@ -3087,7 +3406,7 @@ def test_manager_startup_rejection_is_not_rescued(
         lambda name, o, command, **kwargs: ("worker-pane", "cockpit", name),
     )
     monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args: {"healthy": True}
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
     monkeypatch.setattr(
         recruiter,
@@ -3096,8 +3415,10 @@ def test_manager_startup_rejection_is_not_rescued(
             assessment="startup-failed", message="wrong model requested"
         ),
     )
-    monkeypatch.setattr(recruiter, "_close_worker_pane", lambda pane: _cleanup(pane))
-    monkeypatch.setattr(recruiter, "_report_state", lambda *args: None)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 1
 
@@ -3211,13 +3532,20 @@ def test_ensure_role_pane_defaults_to_the_unified_workspace(
 
     renames: list[tuple[str, ...]] = []
     monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
-    monkeypatch.setattr(recruiter, "_herdr", lambda *a: renames.append(a))
+    monkeypatch.setattr(recruiter, "_herdr", lambda *a, **_: renames.append(a))
 
-    workspace, pane, reused = recruiter._ensure_role_pane(
-        recruiter.RECRUITER_PANE_LABEL, recruiter.UNIFIED_WORKSPACE_LABEL
+    workspace, pane, workspace_created, pane_created = recruiter._ensure_role_pane(
+        recruiter.RECRUITER_PANE_LABEL,
+        recruiter.UNIFIED_WORKSPACE_LABEL,
+        "llm-lab-test",
     )
 
-    assert (workspace, pane, reused) == ("ws-herdr", "pane-1", False)
+    assert (workspace, pane, workspace_created, pane_created) == (
+        "ws-herdr",
+        "pane-1",
+        True,
+        True,
+    )
     assert ("pane", "rename", "pane-1", "recruiter") in renames
 
 
@@ -3243,7 +3571,9 @@ def test_ensure_role_pane_rejects_switching_workspace_modes(
 
     with pytest.raises(RecruiterError, match="herdr-down"):
         recruiter._ensure_role_pane(
-            recruiter.RECRUITER_PANE_LABEL, recruiter.UNIFIED_WORKSPACE_LABEL
+            recruiter.RECRUITER_PANE_LABEL,
+            recruiter.UNIFIED_WORKSPACE_LABEL,
+            "llm-lab-test",
         )
 
 
@@ -3267,11 +3597,195 @@ def test_ensure_role_pane_separate_mode_reuses_shared_services(
 
     monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
 
-    workspace, pane, reused = recruiter._ensure_role_pane(
-        recruiter.RECRUITER_PANE_LABEL, recruiter.SHARED_SERVICES_WORKSPACE
+    workspace, pane, workspace_created, pane_created = recruiter._ensure_role_pane(
+        recruiter.RECRUITER_PANE_LABEL,
+        recruiter.SHARED_SERVICES_WORKSPACE,
+        "llm-lab-test",
     )
 
-    assert (workspace, pane, reused) == ("ws-old", "p1", True)
+    assert (workspace, pane, workspace_created, pane_created) == (
+        "ws-old",
+        "p1",
+        False,
+        False,
+    )
+
+
+def test_cmd_up_records_only_pane_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    state_path = tmp_path / "state" / "recruiter.json"
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+    monkeypatch.setattr(recruiter, "load_roster", lambda path: {})
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_ensure_role_pane",
+        lambda role, workspace, session: ("ws-herdr", "recruiter-pane", True, True),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_place_started_agent_in_role_tab",
+        lambda pane, workspace, tab, split_direction, herdr_session: pane,
+    )
+    monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: None)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
+
+    class FakePopen:
+        pid = 1234
+
+    monkeypatch.setattr(recruiter.subprocess, "Popen", lambda *args, **kwargs: FakePopen())
+
+    assert recruiter.cmd_up("roster.yaml") == 0
+
+    state = json.loads(state_path.read_text())
+    assert state["herdr_session"] == "llm-lab-test"
+    assert state["ownership"] == {
+        "pane": {"pane_id": "recruiter-pane", "state": "created"}
+    }
+    assert "workspace" not in state["ownership"]
+    assert json.loads(capsys.readouterr().out)["reused"] is False
+
+
+def test_cmd_down_closes_only_created_recruiter_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    state_path = tmp_path / "state" / "recruiter.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                "herdr_session": "llm-lab-test",
+                "ownership": {
+                    "pane": {"pane_id": "recruiter-pane", "state": "created"}
+                },
+                "recruiter_pane": "recruiter-pane",
+            }
+        )
+    )
+    closed: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+    monkeypatch.setattr(recruiter, "cmd_reconcile", lambda force: 0)
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr",
+        lambda *args, **kwargs: closed.append((args, kwargs)),
+    )
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **kwargs: set())
+
+    assert recruiter.cmd_down() == 0
+
+    assert closed == [
+        (
+            ("pane", "close", "recruiter-pane"),
+            {"herdr_session": "llm-lab-test"},
+        )
+    ]
+    assert not state_path.exists()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cleanup"]["status"] == "closed"
+    assert payload["cleanup"]["herdr_session"] == "llm-lab-test"
+
+
+def test_cmd_down_skips_adopted_recruiter_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    state_path = tmp_path / "state" / "recruiter.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                "herdr_session": "llm-lab-test",
+                "ownership": {
+                    "pane": {"pane_id": "recruiter-pane", "state": "adopted"}
+                },
+                "recruiter_pane": "recruiter-pane",
+            }
+        )
+    )
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+    monkeypatch.setattr(recruiter, "cmd_reconcile", lambda force: 0)
+    monkeypatch.setattr(
+        recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("adopted pane closed")
+    )
+
+    assert recruiter.cmd_down() == 0
+
+    assert not state_path.exists()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cleanup"]["status"] == "skipped-adopted"
+    assert payload["cleanup"]["worker_pane"] == "recruiter-pane"
+
+
+def test_cmd_down_malformed_legacy_state_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state" / "recruiter.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                "herdr_session": "llm-lab-test",
+                "recruiter_pane": "recruiter-pane",
+            }
+        )
+    )
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+    monkeypatch.setattr(recruiter, "cmd_reconcile", lambda force: 0)
+    monkeypatch.setattr(
+        recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("malformed state closed")
+    )
+
+    with pytest.raises(RecruiterError, match="structural pane ownership"):
+        recruiter.cmd_down()
+
+    assert state_path.exists()
+
+
+def test_cmd_status_uses_recorded_state_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    state_path = tmp_path / "state" / "recruiter.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps({"herdr_session": "llm-lab-test", "recruiter_pane": "pane"})
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+
+    def herdr_json(*args: str, **kwargs: object) -> dict:
+        calls.append(kwargs)
+        return {
+            "result": {
+                "workspaces": [
+                    {"label": recruiter.UNIFIED_WORKSPACE_LABEL, "workspace_id": "ws"}
+                ]
+            }
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr_json)
+
+    assert recruiter.cmd_status() == 0
+
+    assert calls == [{"herdr_session": "llm-lab-test"}]
+    assert "services: up (herdr)" in capsys.readouterr().out
+
+
+def test_cmd_status_missing_state_session_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state" / "recruiter.json"
+    state_path.parent.mkdir()
+    state_path.write_text(json.dumps({"recruiter_pane": "pane"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", lambda *args, **kwargs: pytest.fail("ambient status")
+    )
+
+    with pytest.raises(RecruiterError, match="explicit recorded Herdr session"):
+        recruiter.cmd_status()
 
 
 @pytest.mark.parametrize(
@@ -3292,7 +3806,7 @@ def test_every_submission_door_uses_the_same_forgiving_ladder(
         raise RecruiterError("intake sentinel")
 
     monkeypatch.setattr(recruiter, "_intake_order", intake)
-    monkeypatch.setattr(recruiter, "_reject_legacy_order", lambda *args: None)
+    monkeypatch.setattr(recruiter, "_reject_legacy_order", lambda *args, **kwargs: None)
     if catches:
         assert door("order.json", "roster.yaml") == 1
     else:
@@ -4424,6 +4938,7 @@ def test_uncertain_launch_stays_open_until_delayed_named_agent_appears(
         "expected_agent": "claude",
         "expected_process": "claude",
         "expected_cwd": str(attempt),
+        "herdr_session": "llm-lab-test",
         "expires_at": int(time.time()) + 300,
         "pane": None,
         "state": "launching",
@@ -4467,7 +4982,7 @@ def test_uncertain_launch_stays_open_until_delayed_named_agent_appears(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane: closed.append(pane)
+        lambda pane, **kwargs: closed.append(pane)
         or {"status": "closed", "worker_pane": pane, "verified_absent": True},
     )
 
@@ -4576,6 +5091,7 @@ def test_stale_pane_id_is_never_closed_when_unique_agent_is_absent(
         "intake_key": key,
         "lease_token": token,
         "agent_name": recruiter._intake_clerk_agent_name(key, token),
+        "herdr_session": "llm-lab-test",
         "pane": "reused-pane",
     }
     monkeypatch.setattr(
@@ -4586,7 +5102,7 @@ def test_stale_pane_id_is_never_closed_when_unique_agent_is_absent(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane: pytest.fail(f"foreign pane {pane} must not be closed"),
+        lambda pane, **kwargs: pytest.fail(f"foreign pane {pane} must not be closed"),
     )
 
     cleanup = recruiter._cleanup_intake_clerk(ownership)
@@ -4604,6 +5120,7 @@ def test_pane_id_mismatch_blocks_cleanup_instead_of_closing_foreign_pane(
         "intake_key": key,
         "lease_token": token,
         "agent_name": name,
+        "herdr_session": "llm-lab-test",
         "pane": "recorded-old-pane",
     }
     monkeypatch.setattr(
@@ -4616,7 +5133,7 @@ def test_pane_id_mismatch_blocks_cleanup_instead_of_closing_foreign_pane(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane: pytest.fail(f"mismatched pane {pane} must not be closed"),
+        lambda pane, **kwargs: pytest.fail(f"mismatched pane {pane} must not be closed"),
     )
 
     cleanup = recruiter._cleanup_intake_clerk(ownership)
@@ -4649,6 +5166,7 @@ def test_intake_cleanup_requires_expected_agent_process_and_cwd(
         "expected_agent": "claude",
         "expected_process": "claude",
         "expected_cwd": "/trusted",
+        "herdr_session": "llm-lab-test",
     }
 
     def herdr_json(*args, **kwargs):
@@ -4672,7 +5190,7 @@ def test_intake_cleanup_requires_expected_agent_process_and_cwd(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane: pytest.fail(f"unverified pane {pane} must not be closed"),
+        lambda pane, **kwargs: pytest.fail(f"unverified pane {pane} must not be closed"),
     )
 
     cleanup = recruiter._cleanup_intake_clerk(ownership)

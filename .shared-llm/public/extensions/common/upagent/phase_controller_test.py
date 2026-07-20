@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 _spec = importlib.util.spec_from_file_location(
     "upagent_phase_controller_tested", Path(__file__).with_name("phase_controller.py")
 )
@@ -17,6 +16,15 @@ assert _spec and _spec.loader
 phase_controller = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(phase_controller)
 PhaseStartError = phase_controller.PhaseStartError
+
+
+@pytest.fixture(autouse=True)
+def _resolved_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        phase_controller.recruiter,
+        "_resolve_current_herdr_session_name",
+        lambda: "llm-lab-test",
+    )
 
 
 def _route(path: Path, *, watchdog_profile: bool = True) -> None:
@@ -80,13 +88,15 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
     monkeypatch.setattr(
         phase_controller,
         "_start_gated_leader",
-        lambda name, tui, cwd, script: (
+        lambda name, tui, cwd, script, herdr_session: (
             started.append(name) or "leader-pane",
             "workspace-1",
         ),
     )
     monkeypatch.setattr(
-        phase_controller, "_verify_gated_leader", lambda pane, script: None
+        phase_controller,
+        "_verify_gated_leader",
+        lambda pane, script, herdr_session: None,
     )
     monkeypatch.setattr(
         phase_controller,
@@ -96,12 +106,15 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
     monkeypatch.setattr(
         phase_controller,
         "_leader_health",
-        lambda pane, cwd, profile, roster: {"healthy": True, "pane_id": pane},
+        lambda pane, cwd, profile, roster, herdr_session: {
+            "healthy": True,
+            "pane_id": pane,
+        },
     )
     monkeypatch.setattr(
         phase_controller.recruiter,
         "_close_worker_pane",
-        lambda pane: closed.append(pane) or {"verified_absent": True},
+        lambda pane, **kwargs: closed.append(pane) or {"verified_absent": True},
     )
     return started, closed
 
@@ -130,7 +143,7 @@ def test_phase_start_releases_verified_leader_without_a_watchdog(
     assert receipt["watchdog"]["state"] == "not-configured"
     assert not (control.parent / "watchdog").exists()
     assert json.loads((run_root / "active-leader-panes.json").read_text()) == {
-        "phase-0": "leader-pane"
+        "phase-0": {"pane_id": "leader-pane", "herdr_session": "llm-lab-test"}
     }
 
 
@@ -223,10 +236,14 @@ def test_live_prior_leader_is_never_destroyed_by_a_new_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_root, route, roster = _inputs(tmp_path)
-    (run_root / "active-leader-panes.json").write_text('{"phase-0": "owned-pane"}\n')
+    (run_root / "active-leader-panes.json").write_text(
+        '{"phase-0": {"pane_id": "owned-pane", "herdr_session": "llm-lab-test"}}\n'
+    )
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
-    monkeypatch.setattr(phase_controller, "_live_panes", lambda: {"owned-pane"})
+    monkeypatch.setattr(
+        phase_controller, "_live_panes", lambda herdr_session=None: {"owned-pane"}
+    )
     monkeypatch.setattr(
         phase_controller.shutil, "which", lambda binary: f"/bin/{binary}"
     )
@@ -241,6 +258,101 @@ def test_live_prior_leader_is_never_destroyed_by_a_new_start(
             cwd=tmp_path,
             roster_path=str(roster),
         )
+
+
+def test_ready_phase_receipt_session_mismatch_fails_before_liveness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root, route, roster = _inputs(tmp_path)
+    control = run_root / "phases/phase-0/pass-1/control"
+    control.mkdir(parents=True)
+    (control / "phase-start.json").write_text(
+        json.dumps(
+            {
+                "herdr_session": "other-session",
+                "leader_pane": "leader-pane",
+                "pass": 1,
+                "phase_id": "phase-0",
+                "state": "ready",
+            }
+        )
+    )
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
+    monkeypatch.setattr(
+        phase_controller,
+        "_live_panes",
+        lambda herdr_session=None: pytest.fail("mismatch must fail before liveness"),
+    )
+
+    with pytest.raises(PhaseStartError, match="different Herdr session"):
+        phase_controller.start_phase(
+            route_path=route,
+            run_root=run_root,
+            phase_id="phase-0",
+            pass_number=1,
+            tui_pane="tui-pane",
+            cwd=tmp_path,
+            roster_path=str(roster),
+        )
+
+
+def test_active_leader_session_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root, route, roster = _inputs(tmp_path)
+    active = run_root / "active-leader-panes.json"
+    active.write_text(
+        '{"phase-0": {"pane_id": "owned-pane", "herdr_session": "other-session"}}\n'
+    )
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
+    monkeypatch.setattr(
+        phase_controller, "_live_panes", lambda herdr_session=None: {"owned-pane"}
+    )
+
+    with pytest.raises(PhaseStartError, match="different Herdr session"):
+        phase_controller.start_phase(
+            route_path=route,
+            run_root=run_root,
+            phase_id="phase-0",
+            pass_number=1,
+            tui_pane="tui-pane",
+            cwd=tmp_path,
+            roster_path=str(roster),
+        )
+
+    assert json.loads(active.read_text()) == {
+        "phase-0": {"pane_id": "owned-pane", "herdr_session": "other-session"}
+    }
+
+
+def test_legacy_active_leader_entry_fails_closed_and_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root, route, roster = _inputs(tmp_path)
+    active = run_root / "active-leader-panes.json"
+    active.write_text('{"phase-0": "legacy-pane"}\n')
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
+    monkeypatch.setattr(
+        phase_controller.recruiter,
+        "_close_worker_pane",
+        lambda *args, **kwargs: pytest.fail("legacy entry must not be closed"),
+    )
+
+    with pytest.raises(PhaseStartError, match="legacy or malformed"):
+        phase_controller.start_phase(
+            route_path=route,
+            run_root=run_root,
+            phase_id="phase-0",
+            pass_number=1,
+            tui_pane="tui-pane",
+            cwd=tmp_path,
+            roster_path=str(roster),
+        )
+
+    assert json.loads(active.read_text()) == {"phase-0": "legacy-pane"}
 
 
 def test_watchdog_profile_falls_back_to_leader_profile(tmp_path: Path) -> None:
@@ -315,7 +427,7 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
 ) -> None:
     calls: list[tuple[str, ...]] = []
 
-    def fake_herdr(*args: str) -> dict:
+    def fake_herdr(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         if args == ("pane", "get", "tui-pane"):
             return {
@@ -342,7 +454,7 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
     script.write_text("#!/bin/sh\n")
 
     assert phase_controller._start_gated_leader(
-        "phase-leader", "tui-pane", tmp_path, script
+        "phase-leader", "tui-pane", tmp_path, script, "llm-lab-test"
     ) == ("leader-pane", "ws-1")
     assert calls[1] == (
         "agent",
@@ -379,7 +491,7 @@ def test_leader_start_failure_closes_the_gated_leader_and_reports_the_real_cause
     monkeypatch.setattr(
         phase_controller,
         "_leader_health",
-        lambda pane, cwd, profile, roster: (_ for _ in ()).throw(
+        lambda pane, cwd, profile, roster, herdr_session: (_ for _ in ()).throw(
             PhaseStartError("leader never became healthy")
         ),
     )
@@ -412,14 +524,14 @@ def test_leader_close_failure_during_cleanup_does_not_mask_the_startup_error(
     monkeypatch.setattr(
         phase_controller,
         "_leader_health",
-        lambda pane, cwd, profile, roster: (_ for _ in ()).throw(
+        lambda pane, cwd, profile, roster, herdr_session: (_ for _ in ()).throw(
             PhaseStartError("leader never became healthy")
         ),
     )
     monkeypatch.setattr(
         phase_controller.recruiter,
         "_close_worker_pane",
-        lambda pane: (_ for _ in ()).throw(
+        lambda pane, **kwargs: (_ for _ in ()).throw(
             phase_controller.recruiter.RecruiterError("close transport down")
         ),
     )
