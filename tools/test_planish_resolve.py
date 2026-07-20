@@ -10,9 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".shared-llm/public/llm/common/common/planish_resolve.py"
-PI_EXTENSION = (
-    ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts"
-)
+PI_EXTENSION = ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts"
 SPEC = importlib.util.spec_from_file_location("planish_resolve_tested", SCRIPT)
 assert SPEC and SPEC.loader
 resolver = importlib.util.module_from_spec(SPEC)

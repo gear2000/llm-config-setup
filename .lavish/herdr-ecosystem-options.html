@@ -1,0 +1,2478 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Herdr + Firstmate + no-mistakes — architecture decision</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+      :where(
+          [style*="display: grid"],
+          [style*="display:grid"],
+          [style*="display: flex"],
+          [style*="display:flex"]
+        )
+        > * {
+        min-width: 0;
+      }
+      :where(
+        p,
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
+        li,
+        dd,
+        blockquote,
+        figcaption,
+        td,
+        th,
+        .badge,
+        .label
+      ) {
+        overflow-wrap: anywhere;
+      }
+      :where(img, svg, video, canvas, iframe) {
+        max-width: 100%;
+        height: auto;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        background-image: radial-gradient(
+          circle at 18% 4%,
+          color-mix(in oklab, var(--color-primary) 12%, transparent),
+          transparent 30rem
+        );
+      }
+      .mono {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      .eyebrow {
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        font-size: 0.72rem;
+        font-weight: 800;
+        opacity: 0.68;
+      }
+      .section-anchor {
+        scroll-margin-top: 1.5rem;
+      }
+      .score {
+        display: inline-flex;
+        gap: 0.2rem;
+        white-space: nowrap;
+      }
+      .score i {
+        display: inline-block;
+        width: 0.56rem;
+        height: 0.56rem;
+        border-radius: 999px;
+        background: color-mix(in oklab, currentColor 20%, transparent);
+      }
+      .score i.on {
+        background: currentColor;
+      }
+      .evidence code {
+        font-size: 0.75rem;
+        white-space: normal;
+      }
+      .mermaid {
+        overflow-x: auto;
+        padding: 0.75rem;
+      }
+      .alert {
+        overflow: visible !important;
+        min-height: fit-content;
+      }
+      .alert > * {
+        min-width: 0;
+      }
+      .lane {
+        border-left: 0.3rem solid var(--lane);
+      }
+      .recommended {
+        box-shadow:
+          0 0 0 1px color-mix(in oklab, var(--color-success) 45%, transparent),
+          0 1rem 3rem color-mix(in oklab, var(--color-success) 10%, transparent);
+      }
+      .sticky-nav {
+        position: sticky;
+        top: 0.75rem;
+        z-index: 20;
+        backdrop-filter: blur(12px);
+      }
+      @media print {
+        .sticky-nav {
+          position: static;
+        }
+        body {
+          background: white;
+        }
+      }
+    </style>
+  </head>
+  <body class="min-h-screen text-base-content">
+    <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
+      <nav
+        class="sticky-nav mb-6 rounded-box border border-base-content/10 bg-base-100/85 p-2 shadow-lg"
+      >
+        <ul class="menu menu-horizontal w-full gap-1 overflow-x-auto text-sm">
+          <li><a href="#verdict">Verdict</a></li>
+          <li><a href="#fit">Fit map</a></li>
+          <li><a href="#target">Target stack</a></li>
+          <li><a href="#roadmap">Adoption</a></li>
+          <li><a href="#risks">Guardrails</a></li>
+          <li><a href="#evidence">Evidence</a></li>
+        </ul>
+      </nav>
+
+      <header
+        id="verdict"
+        class="section-anchor hero min-h-[25rem] rounded-box border border-base-content/10 bg-base-200 shadow-2xl"
+      >
+        <div class="hero-content max-w-5xl py-14 text-center">
+          <div>
+            <div class="eyebrow text-primary">
+              Architecture decision · local source review · 19 July 2026
+            </div>
+            <h1 class="mt-4 text-4xl font-black leading-tight sm:text-6xl">
+              Do not replace Herdr.<br /><span class="text-primary"
+                >Complete the stack around it.</span
+              >
+            </h1>
+            <p class="mx-auto mt-6 max-w-3xl text-lg opacity-80 sm:text-xl">
+              Herdr remains the plan-and-phase control plane. Firstmate
+              contributes proven supervision and lifecycle patterns. no-mistakes
+              can become the final delivery and CI gate once the candidate
+              branch is ready and shared infrastructure is locked.
+            </p>
+            <div class="mt-8 flex flex-wrap justify-center gap-3">
+              <span class="badge badge-lg badge-success"
+                >Recommended: evolve Herdr in layers</span
+              >
+              <span class="badge badge-lg badge-outline"
+                >No wholesale replacement</span
+              >
+              <span class="badge badge-lg badge-warning"
+                >Shared AWS needs one exclusive lane</span
+              >
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="mt-6 grid gap-4 md:grid-cols-3">
+        <article
+          class="card card-border bg-base-100 lane"
+          style="--lane: var(--color-primary)"
+        >
+          <div class="card-body">
+            <div class="eyebrow">Keep</div>
+            <h2 class="card-title text-2xl">Herdr</h2>
+            <p>
+              Owns checked plans, phase order, stage gates, routing, durable
+              receipts, backtracking, human decisions, and terminal authority.
+            </p>
+          </div>
+        </article>
+        <article
+          class="card card-border bg-base-100 lane"
+          style="--lane: var(--color-accent)"
+        >
+          <div class="card-body">
+            <div class="eyebrow">Borrow patterns</div>
+            <h2 class="card-title text-2xl">Firstmate</h2>
+            <p>
+              Its strongest value is operational safety: wake queues, locks and
+              beacons, restart reconciliation, backend ownership, and
+              fail-closed teardown.
+            </p>
+          </div>
+        </article>
+        <article
+          class="card card-border bg-base-100 lane"
+          style="--lane: var(--color-success)"
+        >
+          <div class="card-body">
+            <div class="eyebrow">Final candidate gate</div>
+            <h2 class="card-title text-2xl">no-mistakes</h2>
+            <p>
+              Starts at a candidate-ready checkpoint while Herdr pauses and
+              yields branch custody. It rebases, reviews, tests, documents,
+              lints, pushes, opens the PR, and watches CI.
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <section id="fit" class="section-anchor mt-12">
+        <div class="mb-5 max-w-4xl">
+          <div class="eyebrow text-primary">The central finding</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Herdr, supervision, and delivery are different layers
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            A replacement comparison is misleading until the work is split into
+            control, execution, supervision, and delivery.
+          </p>
+        </div>
+
+        <div
+          class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100 shadow-xl"
+        >
+          <table class="table table-zebra">
+            <thead>
+              <tr>
+                <th>System</th>
+                <th>Plan → phases</th>
+                <th>Phase → stages</th>
+                <th>Inner coding loop</th>
+                <th>Crash / lifecycle supervision</th>
+                <th>PR delivery gate</th>
+                <th>Best role here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th><span class="badge badge-primary">Herdr</span></th>
+                <td class="text-primary">
+                  <span class="score" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td class="text-primary">
+                  <span class="score" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="2 of 5"
+                    ><i class="on"></i><i class="on"></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="4 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="1 of 5"
+                    ><i class="on"></i><i></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td><strong>Control plane</strong></td>
+              </tr>
+              <tr>
+                <th><span class="badge badge-accent">Firstmate</span></th>
+                <td>
+                  <span class="score" aria-label="2 of 5"
+                    ><i class="on"></i><i class="on"></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="2 of 5"
+                    ><i class="on"></i><i class="on"></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="3 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i></i><i></i
+                  ></span>
+                </td>
+                <td class="text-accent">
+                  <span class="score" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="3 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i></i><i></i
+                  ></span>
+                </td>
+                <td><strong>Pattern source; optional fleet distro</strong></td>
+              </tr>
+              <tr>
+                <th><span class="badge badge-success">no-mistakes</span></th>
+                <td>
+                  <span class="score" aria-label="0 of 5"
+                    ><i></i><i></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="0 of 5"
+                    ><i></i><i></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="1 of 5"
+                    ><i class="on"></i><i></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score" aria-label="4 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i></i
+                  ></span>
+                </td>
+                <td class="text-success">
+                  <span class="score" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td><strong>Plan-level candidate and delivery gate</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-sm opacity-60">
+          Scores indicate architectural fit for this workflow, not general
+          product quality.
+        </p>
+      </section>
+
+      <section class="mt-12 grid gap-5 lg:grid-cols-2">
+        <article class="card card-border bg-base-100">
+          <div class="card-body">
+            <div class="flex items-center justify-between gap-3">
+              <h3 class="card-title text-2xl">Firstmate</h3>
+              <span class="badge badge-accent">Enhancement source</span>
+            </div>
+            <p class="font-semibold">
+              Do not import the distro wholesale. Port the mechanisms that close
+              known operational gaps.
+            </p>
+            <ol class="list-decimal space-y-2 pl-5 opacity-80">
+              <li>
+                Explicit named-session lab and a default-session tripwire for
+                destructive Herdr tests.
+              </li>
+              <li>Queue an actionable wake before advancing detector state.</li>
+              <li>
+                Session lock plus freshness beacon. Extra sessions become
+                read-only rather than competing owners.
+              </li>
+              <li>
+                Created-versus-adopted ownership records before any pane
+                cleanup.
+              </li>
+              <li>
+                Fail-closed teardown that preserves dirty or unlanded work.
+              </li>
+              <li>
+                One structured current-state snapshot for humans and tools.
+              </li>
+            </ol>
+            <div class="alert alert-error alert-soft mt-3">
+              <span
+                ><strong>Why this matters:</strong> Firstmate records a real
+                cleanup bug where a label heuristic adopted and killed the
+                captain's live Herdr pane. Structural ownership fixed it.</span
+              >
+            </div>
+          </div>
+        </article>
+
+        <article class="card card-border bg-base-100">
+          <div class="card-body">
+            <div class="flex items-center justify-between gap-3">
+              <h3 class="card-title text-2xl">no-mistakes</h3>
+              <span class="badge badge-success">Complement</span>
+            </div>
+            <p class="font-semibold">
+              Replace the ad-hoc final review, push, PR, and CI tail. Never
+              start it during an active phase.
+            </p>
+            <ul class="list-disc space-y-2 pl-5 opacity-80">
+              <li>
+                Fixed pipeline: intent → rebase → review → test → document →
+                lint → push → PR → CI.
+              </li>
+              <li>
+                Daemon, SQLite state, disposable worktrees, approval gates,
+                crash recovery, and AXI control.
+              </li>
+              <li>
+                The branch must be fully committed and Herdr must explicitly
+                release custody first.
+              </li>
+            </ul>
+            <div
+              class="mt-3 rounded-box border border-warning/30 bg-warning/10 p-4 text-sm"
+            >
+              <span
+                ><strong>Two caveats:</strong> direct pushes to
+                <span class="mono">origin</span> bypass the local named remote;
+                and this public kit still needs a demonstrably independent
+                final-diff reviewer before any push.</span
+              >
+            </div>
+            <h4
+              class="mt-5 border-t border-base-content/10 pt-4 text-sm font-black uppercase tracking-wider opacity-70"
+            >
+              Required topology
+            </h4>
+            <p>
+              Merge every phase worktree into one candidate branch. At the
+              candidate-ready checkpoint, pause Herdr edits and hand that branch
+              to the gate. Write <span class="mono">run-terminal.json</span>
+              only after the gate and exact-SHA shared integration check pass.
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <section id="target" class="section-anchor mt-12">
+        <div class="mb-5 max-w-4xl">
+          <div class="eyebrow text-primary">Recommended target</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Herdr stays the spine
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            Firstmate patterns harden Herdr itself. no-mistakes attaches at a
+            candidate-ready custody boundary near the end of the run.
+          </p>
+        </div>
+        <div class="grid gap-5 xl:grid-cols-2">
+          <article class="card card-border bg-base-100 shadow-xl">
+            <div class="card-body">
+              <span class="badge badge-outline">Current Herdr shape</span>
+              <h3 class="card-title">
+                One repeated lifecycle inside every phase
+              </h3>
+              <pre
+                class="mono mt-3 overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+PLAN
+├── Phase 0  (fresh phase leader)
+│   ├── accuracy: medium
+│   │   └── Stage 1 → 2 → 3 → 4 → 5
+│   ├── accuracy: high
+│   │   └── Stage 0 alignment → 1 → 2 → 3 → 4 → 5
+│   └── accuracy: max
+│       └── Stage 0 alignment → 1 → Stage 2A + 2B → 3 → 4 → 5
+│
+│   Stage 1  implement in temporary worktree
+│   Stage 2  independent adversarial audit
+│   Stage 3  “integration / acceptance seams” + optional merge
+│   Stage 4  upstream DAG / CI-CD verification + optional merge
+│   Stage 5  final merge, green checks, logs, cleanup
+│
+├── Phase 1  (same lifecycle, new leader)
+├── Phase 2  (same lifecycle, new leader)
+└── … → run-terminal.json</pre>
+              <div class="alert alert-warning alert-soft mt-3">
+                <span
+                  ><strong>Current pressure point:</strong> Stages 3 and 4 can
+                  absorb work that is large enough to be a phase, especially
+                  when verification touches a shared AWS environment.</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100 shadow-xl">
+            <div class="card-body">
+              <span class="badge badge-primary">Proposed Herdr shape</span>
+              <h3 class="card-title">
+                Build phases become lean; shared acceptance runs once per
+                candidate
+              </h3>
+              <pre
+                class="mono mt-3 overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+PLAN  (one candidate branch / exact commit history)
+├── Build Phase A  (lean default)
+│   ├── Stage 0  only for high / max accuracy
+│   ├── Stage 1  implementation worker + unit/component tests
+│   ├── Stage 2  independent audit worker (two only for max)
+│   ├── Stage 3  controller runs changed-scope local seam checks
+│   │            no generic lint rerun; hire LLM only on anomaly
+│   ├── Stage 4  moved out of ordinary build phases
+│   └── Stage 5  deterministic merge + checks + cleanup receipt
+│
+├── Build Phase B
+│   └── same lean lifecycle
+│
+├── Integration Construction Phase  [OPTIONAL]
+│   └── only when real cross-slice production code remains;
+│       use the same lean lifecycle, not an extra audit stack
+│
+└── CANDIDATE READY  (Herdr is paused, not terminal)
+    └── no-mistakes attempt N owns the branch
+        ├── rebase → review → test → docs → lint → push / PR
+        └── PR CI acquires the shared-environment lease
+            ├── deploy exact candidate SHA
+            ├── run global AWS / end-to-end acceptance
+            ├── PASS → checks-passed receipt → Herdr terminal success
+            └── FAIL → failure receipt + custody returns to Herdr
+                ├── triage to responsible phase(s)
+                ├── replay forward from earliest affected phase
+                └── new candidate → no-mistakes attempt N+1</pre>
+              <div class="alert alert-success alert-soft mt-3">
+                <span
+                  ><strong>Boundary:</strong> worktrees build code.
+                  Deterministic controllers run known checks and cleanup. The
+                  candidate branch accumulates the plan. Only PR CI holding the
+                  central environment lease may deploy to shared AWS.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-primary/25 bg-primary/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-primary">Phase design correction</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Verification is a stage. Construction is a phase.
+        </h3>
+        <p class="mt-3 max-w-4xl text-lg opacity-80">
+          <strong>No: Stage 3 is not a second adversarial review.</strong> Stage
+          2 judges the implementation. Stage 3 proves a narrow technical
+          boundary with evidence. It may run hermetic contract, component, or
+          local acceptance tests, but it must not deploy or mutate shared
+          infrastructure. If it discovers missing production work, it fails back
+          to Stage 1.
+        </p>
+        <div class="mt-5 grid gap-4 md:grid-cols-3">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary">Keep in Stage 3</span>
+              <h4 class="card-title">Mechanical-first seam verification</h4>
+              <p>
+                The route declares focused contract, component, or hermetic
+                checks. A deterministic controller runs them. No shared AWS
+                mutation. A fresh verifier is hired only when output is
+                ambiguous or a failure needs attribution; missing production
+                work revisits Stage 1.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-warning">Optional phase</span>
+              <h4 class="card-title">Integration construction</h4>
+              <p>
+                Only add this phase when real cross-slice production code
+                remains. Because it writes code, it still gets one
+                implementation worker and one independent audit. It reuses the
+                same mechanical seam and finalization path; it does not add a
+                second stack of reviewers.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success">Shared acceptance</span>
+              <h4 class="card-title">Keep it at candidate level</h4>
+              <p>
+                Onboarding the one test user, deploying to the one AWS
+                environment, and global end-to-end acceptance happen once the
+                candidate branch is ready. They require a central lease and can
+                send the plan back to a responsible phase.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="alert alert-info alert-soft mt-5">
+          <span
+            ><strong>Recommended rename:</strong> Stage 3 —
+            <em>local seam verification</em>. Reserve “integration construction
+            phase” for writing cross-slice code, and “shared acceptance gate”
+            for the one serialized AWS test lane.</span
+          >
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-warning/25 bg-warning/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-warning">Time and assurance budget</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Do not pay an LLM for deterministic stages
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          Your concern is valid. The current five-stage phase can hire five
+          workers even when three of those jobs are mostly commands, merge
+          bookkeeping, and cleanup. Adding a mandatory final
+          integration-construction phase would make the problem worse. The
+          target should reduce LLM seats, not only add guardrails.
+        </p>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-error badge-soft">Too slow</span>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+EVERY PHASE
+├── LLM Stage 1  implementation
+├── LLM Stage 2  audit
+├── LLM Stage 3  integration / acceptance
+├── LLM Stage 4  upstream verification
+└── LLM Stage 5  finalization
+    × many phases
+    + final global gate</pre>
+              <p>
+                This repeats judgment where commands and receipts would be
+                enough. It also encourages larger plans merely to amortize
+                orchestration cost.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success badge-soft">Lean target</span>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+ORDINARY MEDIUM PHASE
+├── LLM 1  implement + local tests
+├── LLM 2  independent adversarial audit
+├── CODE   run declared seam checks
+│          └── hire verifier only on anomaly
+└── CODE   merge + green checks + cleanup receipt
+
+HIGH adds Stage 0 alignment only when risk earns it.
+MAX adds Stage 0 + a second independent audit.
+GLOBAL AWS acceptance runs once per candidate attempt.</pre>
+              <p>
+                The expensive final loop remains, but early failures are still
+                localized by phase evidence. Small plans stay small; phases
+                remain meaningful vertical slices rather than tiny file edits.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="alert alert-info alert-soft mt-5">
+          <span
+            ><strong>Why Stage 2 is not duplicated:</strong> it independently
+            judges code. Stage 3 becomes executable seam evidence, not another
+            general reviewer. An optional integration-construction phase gets
+            one audit only because it writes new production code; if no
+            integration code remains, that phase does not exist.</span
+          >
+        </div>
+        <div class="mt-4 rounded-box border border-success/25 bg-base-100 p-5">
+          <h4 class="text-lg font-black">
+            Checked against the actual quality gates: remove the duplicate
+            generic lint pass
+          </h4>
+          <p class="mt-2 opacity-80">
+            The current CI definitions already run language lint broadly (Ruff
+            for Python, lint plus TypeScript checks for the frontend, and Go
+            lint/test gates); several Python pipelines also run MyPy. The
+            candidate-level no-mistakes pipeline separately owns
+            <span class="mono">test → document → lint/static analysis</span>
+            before push, then watches CI. I found no explicit AST job in the
+            current CI definitions. AST-aware inspection is an instruction
+            inside Herdr's adversarial evaluator—not a separate deterministic
+            pipeline stage.
+          </p>
+          <pre
+            class="mono mt-3 overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+          >
+Stage 1   focused tests needed while implementing
+Stage 2   independent semantic/adversarial audit; AST-aware when useful
+Stage 3   only declared seam/contract checks not already proven above
+Stage 5   merge + cleanup; do not rerun generic lint when candidate gate follows
+CANDIDATE no-mistakes runs configured tests + lint/static analysis once
+REMOTE    CI reruns its authoritative lint/type/test jobs on the pushed SHA</pre>
+          <p class="mt-3">
+            <strong>Fallback:</strong> if a run does not use no-mistakes, Stage
+            5 must keep the repository's normal green-check command so lint is
+            not dropped. Local-versus-remote repetition inside no-mistakes is
+            intentional: local catches failures before push; CI proves the exact
+            shared candidate.
+          </p>
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-secondary/25 bg-secondary/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-secondary">Conversion contract</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          The plan converter should recommend whether an
+          integration-construction phase exists
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          Agreed: leave the original planning workflow alone. It produces one
+          coherent big plan. The <strong>conversion</strong> step analyzes that
+          plan, breaks it into Herdr phases and stage routes, evaluates
+          verticality and parallelism, and recommends whether residual
+          integration construction needs its own phase. The executor must never
+          invent that phase after work starts.
+        </p>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-secondary">Converter decision tree</span>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+BIG SOURCE PLAN  (unchanged planning output)
+└── cc/do-convert --herdr analyzes the plan
+    ├── map user-visible outcomes and system seams
+    └── propose vertical Herdr phases
+        ├── each phase owns one meaningful outcome
+        ├── each phase names contracts it produces / consumes
+        ├── each phase has local hermetic seam checks
+        └── parallel phases avoid the same files / mutable resources
+            │
+            └── Is production work still left between slices?
+                ├── NO
+                │   └── integration_construction: not_required
+                │       candidate-level shared acceptance still applies
+                │
+                └── YES
+                    ├── Can one existing phase own it cleanly?
+                    │   └── YES → move that work into the owning phase
+                    └── NO
+                        └── integration_construction: required
+                            add a named phase after its dependencies</pre>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary"
+                >Vertical-slice conversion output</span
+              >
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+optional Contract/Foundation Phase
+├── defines stable shared schema / interface first
+│
+├── Parallel Vertical Phase A
+│   └── endpoint → logic → persistence → local seam check
+├── Parallel Vertical Phase B
+│   └── event → worker → result → local seam check
+└── Parallel Vertical Phase C
+    └── UI → API → state → local seam check
+        │
+        ├── no residual construction → candidate gate
+        └── residual A↔B↔C production wiring
+            └── explicit Integration Construction Phase
+                └── candidate gate</pre>
+              <p class="mt-3 opacity-80">
+                A shared AWS test user or environment does
+                <strong>not</strong> by itself require an
+                integration-construction phase. It requires a serialized
+                candidate-level acceptance gate. The phase is required only when
+                production code still has to be written across the slices.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="mt-5 grid gap-4 md:grid-cols-3">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-info">Converter must provide</span>
+              <p>
+                <strong>Recommendation:</strong> required or not required.
+                <strong>Evidence:</strong> the exact residual wiring, shared
+                contracts, dependencies, file/resource collisions, and why no
+                existing phase can own it.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-warning">Conversion review</span>
+              <p>
+                The converter may use a Planish-style static grill to show the
+                phase tree and recommendation, but this review belongs to
+                conversion. The human accepts, removes, or reshapes it. A
+                missing note accepts the recommendation; uncertainty remains
+                visible rather than silently guessed.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success">Checker enforces</span>
+              <p>
+                The checked plan records an
+                <span class="mono">integration assessment</span>. “Required”
+                must name the phase and dependencies. “Not required” must state
+                where every cross-slice contract is owned.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="alert alert-info alert-soft mt-5">
+          <span
+            ><strong>Verified current gap:</strong> today's
+            <span class="mono">meta-plan-convert</span> asks only whether each
+            generated phase merges at Stage 3, 4, or 5, then emits the same five
+            stage routes. It does not assess verticality or residual integration
+            construction. Centralize the new analysis there: outcomes, seams,
+            shared contracts, parallel file/resource ownership, phase accuracy,
+            mechanical versus LLM stages, and residual production wiring. Record
+            the recommendation as an H3 integration assessment before Phase 0,
+            and extend <span class="mono">meta-plan-check</span> / the schema so
+            “required” names a phase while “not required” proves ownership. The
+            upstream big-plan prompt does not need this decision logic.</span
+          >
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-base-content/10 bg-base-200 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-primary">Command-surface cleanup</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Today, planning, conversion, checking, and launching are mixed across
+          four prefixes
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          The naming confusion is real. Some front doors already convert and
+          check. Their “full” wrappers then convert and check again. The
+          <span class="mono">meta-</span> prefix mixes portable helpers with a
+          Claude-specific wrapper, while
+          <span class="mono">just herdr-plan</span> does not plan anything—it
+          launches a live TUI run.
+        </p>
+        <div
+          class="mt-5 overflow-x-auto rounded-box border border-base-content/10 bg-base-100"
+        >
+          <table class="table table-zebra table-sm">
+            <thead>
+              <tr>
+                <th>Current surface</th>
+                <th>What it actually does now</th>
+                <th>Problem</th>
+                <th>Recommended action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>
+                  <span class="mono">cc-research</span><br /><span class="mono"
+                    >do-research</span
+                  >
+                </th>
+                <td>
+                  Harness-specific research only. Writes research and stops.
+                </td>
+                <td>
+                  Clear behavior; duplicate prose is mostly harness adaptation.
+                </td>
+                <td>
+                  <span class="badge badge-success badge-soft">Keep</span> as
+                  optional research-only front doors.
+                </td>
+              </tr>
+              <tr>
+                <th>
+                  <span class="mono">cc-planish</span><br /><span class="mono"
+                    >do-planish</span
+                  >
+                </th>
+                <td>
+                  Lightweight visual planner. The Claude version also builds
+                  route/check output; Pi uses the Planish extension.
+                </td>
+                <td>
+                  The Planish UX is useful, but the command name and Herdr
+                  coupling add another planning path.
+                </td>
+                <td>
+                  <span class="badge badge-primary badge-soft">Fold into</span>
+                  <span class="mono">cc-plan</span> /
+                  <span class="mono">do-plan</span>. Planish remains an
+                  interchangeable grill renderer.
+                </td>
+              </tr>
+              <tr>
+                <th>
+                  <span class="mono">cc-plan-and-grill</span><br /><span
+                    class="mono"
+                    >do-plan-and-grill</span
+                  >
+                </th>
+                <td>
+                  Research + plan + grill + canonical phases + route + check.
+                </td>
+                <td>
+                  It combines research, big-plan creation, Herdr decomposition,
+                  and validation.
+                </td>
+                <td>
+                  <span class="badge badge-primary badge-soft"
+                    >Replace with</span
+                  >
+                  <span class="mono">cc-plan</span> /
+                  <span class="mono">do-plan</span>, which always grill and
+                  produce only the big plan.
+                </td>
+              </tr>
+              <tr>
+                <th>
+                  <span class="mono">cc-full</span><br /><span class="mono"
+                    >do-full</span
+                  >
+                </th>
+                <td>
+                  Today it calls plan-and-grill, then repeats conversion and
+                  checking.
+                </td>
+                <td>
+                  The one-command experience is valuable—especially on a
+                  phone—but the implementation duplicates work.
+                </td>
+                <td>
+                  <span class="badge badge-success badge-soft"
+                    >Keep and rebuild</span
+                  >
+                  as a thin composer that invokes each primitive exactly once.
+                </td>
+              </tr>
+              <tr>
+                <th><span class="mono">meta-cc-plan-and-grill</span></th>
+                <td>
+                  Calls the Claude plan-and-grill flow, normalizes, then checks.
+                </td>
+                <td>
+                  Another wrapper over the same path; “meta” no longer names a
+                  coherent layer.
+                </td>
+                <td>
+                  <span class="badge badge-error badge-soft">Retire</span>.
+                </td>
+              </tr>
+              <tr>
+                <th><span class="mono">meta-plan-convert</span></th>
+                <td>
+                  Turns loose Markdown into phased plan + route; currently asks
+                  only merge timing.
+                </td>
+                <td>
+                  This is the important seam, but it is incomplete and not
+                  available symmetrically.
+                </td>
+                <td>
+                  <span class="badge badge-primary badge-soft"
+                    >Replace with</span
+                  >
+                  <span class="mono">cc-convert --herdr</span> /
+                  <span class="mono">do-convert --herdr</span>.
+                </td>
+              </tr>
+              <tr>
+                <th><span class="mono">meta-plan-check</span></th>
+                <td>Validates canonical plan + route.</td>
+                <td>
+                  A separate user command creates another thing to remember and
+                  permits convert-without-check drift.
+                </td>
+                <td>
+                  <span class="badge badge-error badge-soft"
+                    >Remove as user surface</span
+                  >. Conversion checks idempotently; Herdr rechecks at startup.
+                </td>
+              </tr>
+              <tr>
+                <th><span class="mono">just herdr-plan</span></th>
+                <td>
+                  Creates and health-checks the live TUI, then assigns the
+                  plan-level run controller.
+                </td>
+                <td>
+                  The name says “plan” but the behavior is “start execution.”
+                </td>
+                <td>
+                  <span class="badge badge-primary badge-soft">Rename</span> to
+                  <span class="mono">just herdr-start</span>.
+                </td>
+              </tr>
+              <tr>
+                <th>
+                  <span class="mono">/herdr-run</span><br /><span class="mono"
+                    >/herdr-phase</span
+                  >
+                </th>
+                <td>
+                  Internal runtime protocols for the plan-level TUI and a phase
+                  leader.
+                </td>
+                <td>
+                  <span class="mono">/herdr-run</span> looks human-facing even
+                  though the launcher assigns it internally.
+                </td>
+                <td>
+                  Rename to <span class="mono">/herdr-control</span> + keep
+                  <span class="mono">/herdr-phase</span>, or mark both internal
+                  and hide them from normal discovery.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-error badge-soft"
+                >Current call graph</span
+              >
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+cc-full
+└── cc-plan-and-grill
+    ├── research + grill + big plan
+    ├── meta-plan-convert
+    └── meta-plan-check
+└── meta-plan-convert  ← repeated
+└── meta-plan-check    ← repeated
+
+meta-cc-plan-and-grill
+└── cc-plan-and-grill  ← same child
+    └── convert + check again
+
+do-full has the same duplication through do-plan-and-grill.</pre>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success badge-soft"
+                >Proposed user journey</span
+              >
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+ONE-COMMAND / PHONE PATH
+/cc-full | /do-full "&lt;ask&gt;" --execute-with-herdr
+├── research → plan/grill → plan adversary → final human approval
+├── convert/check exactly once
+└── just herdr-start; report the new remote TUI name
+
+PREFERRED COMPOSABLE PATH
+/cc-research | /do-research  → research.md  (optional)
+/cc-plan     | /do-plan      → plan.md      (always grills)
+
+OTHER REPLACEABLE PLAN PRODUCERS
+native /plan                 → plan.md
+Lavish or future visual tool → plan.md
+
+================== plan.md seam ==================
+
+DIRECT HUMAN-IN-THE-LOOP IMPLEMENTATION
+/cc-implement | /do-implement &lt;plan.md&gt;
+└── one fresh TUI owns the work; no Herdr decomposition
+
+HERDR IMPLEMENTATION
+/cc-convert --herdr &lt;plan.md&gt;
+/do-convert --herdr &lt;plan.md&gt;
+├── idempotently analyze + split into vertical phases
+├── recommend optional integration-construction phase
+├── select accuracy and mechanical/LLM stage shapes
+├── conversion-time visual review
+├── write canonical plan.md + route.yaml
+└── validate internally; no separate check command
+    └── just herdr-start &lt;converted-run-dir&gt;
+        └── internal /herdr-control → /herdr-phase</pre>
+            </div>
+          </article>
+        </div>
+        <div class="alert alert-warning alert-soft mt-5">
+          <span
+            ><strong>Migration:</strong> introduce
+            <span class="mono">cc/do-plan</span>,
+            <span class="mono">cc/do-implement</span>, and
+            <span class="mono">cc/do-convert --herdr</span>. Rebuild
+            <span class="mono">cc/do-full</span> as the one-command composer; it
+            must call each primitive once rather than repeat conversion. Keep
+            old planish, plan-and-grill, convert, check, and
+            <span class="mono">just herdr-plan</span> names as warning aliases
+            for one release. Retire only the redundant meta wrapper.</span
+          >
+        </div>
+        <div class="alert alert-error alert-soft mt-3">
+          <span
+            ><strong>Current routing mismatch:</strong> the conversion/check
+            prose calls these helpers portable, and Claude planning commands
+            invoke them, but the compose recipes currently route them under Pi
+            and the generated Claude inventory does not contain them. The new
+            <span class="mono">cc-convert</span> and
+            <span class="mono">do-convert</span> front doors should compose one
+            shared conversion/checking core and differ only in harness UI
+            mechanics.</span
+          >
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-base-content/10 bg-base-100 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-primary">How you would actually run it</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Fresh interactive TUI is the documented default; in-session commands
+          are the convenience path
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          Both installed CLIs accept an initial prompt while remaining
+          interactive when <span class="mono">--print</span> is omitted. That
+          gives every research, plan, conversion, or direct implementation run a
+          clean context window without requiring a separate launcher program.
+        </p>
+        <div class="alert alert-warning alert-soft mt-4">
+          <span
+            ><strong>Target interface:</strong> the simplified
+            <span class="mono">cc/do-plan</span>,
+            <span class="mono">cc/do-implement</span>,
+            <span class="mono">cc/do-convert</span>, rebuilt
+            <span class="mono">cc/do-full</span>, and
+            <span class="mono">just herdr-start</span> names below are the
+            proposed cleanup; they do not exist yet. The current command table
+            above shows what is runnable today.</span
+          >
+        </div>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary"
+                >Claude Code · fresh sessions</span
+              >
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+cd /path/to/repo
+
+# One command; Remote Control makes it phone-friendly
+claude --name feature-full --remote-control=feature-full \
+  "/cc-full 'describe the outcome' --execute-with-herdr"
+
+# Or use the composable commands
+# Optional research
+claude --name feature-research "/cc-research feature-name"
+
+# Preferred reviewed big plan (2 adversarial rounds by default)
+claude --name feature-plan "/cc-plan feature-name @path/to/research.md"
+
+# Path A: direct implementation, full human-in-loop TUI
+claude --name feature-implement "/cc-implement @path/to/plan.md"
+
+# Path B: convert for Herdr, with conversion grill + internal check
+claude --name feature-convert "/cc-convert --herdr @path/to/plan.md"
+just herdr-start path/to/converted-run</pre>
+              <p class="opacity-75">
+                These start new interactive Claude sessions because there is no
+                <span class="mono">-p</span>.
+                <span class="mono">--name</span> makes the fresh windows easy to
+                identify.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-secondary">Pi · fresh sessions</span>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+cd /path/to/repo
+
+# One command; remain in one interactive planning TUI until Herdr handoff
+pi --name feature-full \
+  "/do-full 'describe the outcome' --execute-with-herdr"
+
+# Or use the composable commands
+# Optional research
+pi --name feature-research "/do-research feature-name"
+
+# Preferred reviewed big plan (2 adversarial rounds by default)
+pi --name feature-plan "/do-plan feature-name @path/to/research.md"
+
+# Path A: direct implementation, full human-in-loop TUI
+pi --name feature-implement "/do-implement @path/to/plan.md"
+
+# Path B: convert for Herdr, with conversion grill + internal check
+pi --name feature-convert "/do-convert --herdr @path/to/plan.md"
+just herdr-start path/to/converted-run</pre>
+              <p class="opacity-75">
+                Pi likewise stays interactive without
+                <span class="mono">--print</span>. Herdr execution still starts
+                its own fresh controller and phase-leader TUIs.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="mt-5 card card-border bg-base-200">
+          <div class="card-body">
+            <span class="badge badge-ghost"
+              >Inside an existing session · supported, not preferred</span
+            >
+            <pre
+              class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+            >
+# Claude Code composer
+/cc-full "describe the outcome" --execute-with-herdr
+/cc-plan feature-name @path/to/research.md
+/cc-implement @path/to/plan.md
+/cc-convert --herdr @path/to/plan.md
+
+# Pi composer
+/do-full "describe the outcome" --execute-with-herdr
+/do-plan feature-name @path/to/research.md
+/do-implement @path/to/plan.md
+/do-convert --herdr @path/to/plan.md</pre>
+            <p>
+              This is useful when the session already contains valuable context.
+              It should not be the documented default because a fresh TUI gives
+              the operation a clean context and a clear lifecycle. Conversion
+              output is file-based, so either route produces the same idempotent
+              result.
+            </p>
+          </div>
+        </div>
+        <div class="mt-5 card card-border bg-base-200">
+          <div class="card-body">
+            <span class="badge badge-accent"
+              >Phone review · no live server required</span
+            >
+            <pre
+              class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+            >
+do-full writes review/plan.html
+├── send or download the single self-contained HTML file
+├── annotate it offline on the phone
+├── tap Copy Feedback
+├── paste the feedback block into the Remote Control TUI
+└── command regenerates the HTML until final approval
+    └── --execute-with-herdr converts, checks, and starts the run</pre>
+            <p>
+              The existing static annotated-HTML loop remains first-class.
+              Lavish or a live server can enhance it when reachable, but neither
+              is required. The full command checkpoints every durable artifact
+              so reconnecting does not restart research or planning.
+            </p>
+          </div>
+        </div>
+        <div class="alert alert-info alert-soft mt-5">
+          <span
+            ><strong>Plan seam:</strong> native <span class="mono">/plan</span>,
+            Lavish, Planish, or any future planner is acceptable if it writes
+            <span class="mono">plan.md</span>. Only
+            <span class="mono">cc/do-convert --herdr</span> knows Herdr phase
+            and route semantics.</span
+          >
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-info/25 bg-info/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-info">Web research · design phase</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Design is compelling when architecture is unresolved—not as another
+          mandatory command
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          The current agentic-development trend is not “always add one more
+          approval phase.” Mature workflows preserve a design artifact, but
+          scale the ceremony to complexity. That matches this repo: existing
+          design docs and architecture-aware agents already carry most changes,
+          so mandatory design would often duplicate trusted context.
+        </p>
+        <div
+          class="mt-5 overflow-x-auto rounded-box border border-base-content/10 bg-base-100"
+        >
+          <table class="table table-zebra table-sm">
+            <thead>
+              <tr>
+                <th>Current framework</th>
+                <th>Published workflow</th>
+                <th>What it says about design</th>
+                <th>Lesson here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>
+                  <a
+                    class="link link-primary"
+                    href="https://github.github.com/spec-kit/"
+                    >GitHub Spec Kit</a
+                  >
+                </th>
+                <td>Spec → Plan → Tasks → Implement</td>
+                <td>
+                  Its core workflow does not require a separately named design
+                  phase; technical shaping lives in the plan/artifacts.
+                </td>
+                <td>A separate user command is not inherently necessary.</td>
+              </tr>
+              <tr>
+                <th>
+                  <a
+                    class="link link-primary"
+                    href="https://kiro.dev/blog/faster-smarter-specs/"
+                    >Kiro Specs</a
+                  >
+                </th>
+                <td>Requirements → Design → Tasks</td>
+                <td>
+                  For clear work, quick-plan generates all three in one pass
+                  with only clarify/review gates. It also parallelizes tasks
+                  from dependency and same-file analysis.
+                </td>
+                <td>
+                  Keep the design artifact when useful, but collapse ceremony
+                  for well-understood work.
+                </td>
+              </tr>
+              <tr>
+                <th>
+                  <a
+                    class="link link-primary"
+                    href="https://docs.bmad-method.org/explanation/why-solutioning-matters/"
+                    >BMAD Solutioning</a
+                  >
+                </th>
+                <td>Analysis → Planning → Solutioning → Implementation</td>
+                <td>
+                  Architecture/solutioning is required for complex and
+                  enterprise work, optional for simple work, and skipped in
+                  quick flow.
+                </td>
+                <td>Make design complexity-triggered, not universal.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success badge-soft"
+                >Recommended command shape</span
+              >
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+optional cc/do-research → research.md
+                │
+                ▼
+cc/do-plan  (always grills)
+├── read existing design docs + ADRs
+├── architecture gap?
+│   ├── NO  → cite existing decisions; continue
+│   └── YES → create / update design.md or ADRs
+│             grill the architectural forks
+└── write one big candidate plan
+    └── default 2-round independent plan adversary
+        └── final human approval → plan.md
+
+No separate design command to remember.</pre>
+              <p>
+                The design artifact is conditional work inside
+                <span class="mono">cc/do-plan</span>. Existing design docs
+                remain the default authority; new docs are produced only when
+                the feature changes architecture.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-warning badge-soft"
+                >Design triggers</span
+              >
+              <ul class="list-disc space-y-2 pl-5">
+                <li>
+                  New service, package, trust, persistence, or deployment
+                  boundary.
+                </li>
+                <li>
+                  New shared API, event, schema, IAM/security, state, or
+                  concurrency model.
+                </li>
+                <li>
+                  Performance, availability, compliance, migration, or rollback
+                  requirements that drive structure.
+                </li>
+                <li>
+                  Several parallel phases could make incompatible technical
+                  choices.
+                </li>
+                <li>
+                  Existing design docs conflict, are missing, or cannot answer a
+                  material implementation fork.
+                </li>
+              </ul>
+              <div class="alert alert-info alert-soft mt-3">
+                <span
+                  ><strong>Converter backstop:</strong>
+                  <span class="mono">cc/do-convert --herdr</span> does not
+                  invent architecture. If decomposition exposes an unresolved
+                  design fork, it returns
+                  <span class="mono">DESIGN_REQUIRED</span> with evidence and
+                  sends the work back to
+                  <span class="mono">cc/do-plan</span>.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-secondary/25 bg-secondary/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-secondary">Plan quality loop</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Make independent adversarial plan review the default final step of
+          cc/do-plan
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          The human-approved draft should become a <em>candidate</em> plan, not
+          immediately the final file. By default, the planning command sends it
+          through two independent challenge-and-revision rounds via the UpAgent
+          Hub, then returns the changed plan to the human for final approval.
+          This strengthens the plan before either direct implementation or Herdr
+          decomposition.
+        </p>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-secondary">Default protocol</span>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+cc/do-plan "&lt;topic&gt;"
+└── research + conditional design + human HTML grill
+    └── human accepts candidate plan
+        ├── ask: adversary model/profile? (recommend opposite family)
+        └── --adversarial-iterations 2  [default]
+            ├── round 1: fresh plan-adversary review order
+            │   └── planner revises + records finding disposition
+            ├── round 2: fresh full-plan review of revised artifact
+            │   └── planner revises + records finding disposition
+            └── regenerate annotated HTML with adversarial diff
+                └── final human approval → immutable plan.md</pre>
+              <p>
+                The correct flag spelling is
+                <span class="mono">--adversarial-iterations</span>. Accept
+                <span class="mono">0</span> as an explicit opt-out; cap
+                unattended rounds so a reviewer cannot create an endless
+                planning loop.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary">Model independence</span>
+              <ul class="list-disc space-y-2 pl-5">
+                <li>
+                  At candidate-plan finalization, show the planning model and
+                  ask which UpAgent review profile to use.
+                </li>
+                <li>
+                  Recommend an independently configured model family, but do not
+                  hard-code a provider, model, or effort into the future
+                  planning workflow—the human chooses it for that run.
+                </li>
+                <li>
+                  If the selected reviewer matches the planning model family,
+                  warn and ask for an explicit confirmation or a different
+                  profile.
+                </li>
+                <li>
+                  A supplied <span class="mono">--adversary-profile</span> skips
+                  the question but must still resolve through the Hub roster.
+                </li>
+              </ul>
+              <div class="alert alert-warning alert-soft mt-3">
+                <span
+                  ><strong>Separate persona:</strong> add a plan-adversary
+                  agent. Do not reuse the current adversarial-evaluator
+                  unchanged—it audits finished code against a plan, whereas this
+                  role challenges feasibility, missing decisions, phase
+                  boundaries, testability, rollback, parallel safety, and
+                  acceptance criteria inside the plan itself.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+        <div
+          class="mt-5 rounded-box border border-base-content/10 bg-base-100 p-5"
+        >
+          <h4 class="text-lg font-black">
+            Human authority and durable evidence
+          </h4>
+          <p class="mt-2">
+            Each reviewer is read-only and writes a typed review result through
+            the Hub. The planner owns revisions, but must disposition every
+            finding as accepted, rejected-with-reason, or
+            human-decision-required. Material product or architecture forks
+            pause immediately for the human; they are never “resolved” by
+            reviewer consensus. Preserve
+            <span class="mono">plan-candidate-vN.md</span>, each review receipt,
+            and a revision diff. Only the post-review human approval promotes
+            the final <span class="mono">plan.md</span>.
+          </p>
+        </div>
+        <div class="alert alert-success alert-soft mt-4">
+          <span
+            ><strong>Full-command behavior:</strong>
+            <span class="mono">cc/do-full</span> inherits the same default of
+            two adversarial rounds. It does not implement a second review loop;
+            it calls <span class="mono">cc/do-plan</span> once, waits for final
+            human approval, then follows
+            <span class="mono">--execute-direct</span> or
+            <span class="mono">--execute-with-herdr</span>. With neither flag,
+            the final review asks which path to take or whether to stop.
+            Execution flags preselect the path; they never bypass final human
+            plan approval.</span
+          >
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-info/25 bg-info/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-info">Internal Herdr roles</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          herdr-control owns the plan; herdr-phase owns one phase
+        </h3>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary"
+                >/herdr-control · proposed rename</span
+              >
+              <h4 class="card-title">The plan-level TUI—the one you talk to</h4>
+              <p>
+                This is the proposed clearer internal name for today's
+                <span class="mono">/herdr-run</span>. It validates the frozen
+                plan and route, starts one fresh phase leader at a time, waits
+                on typed phase events, applies phase-level replay/backtracking,
+                handles human decisions, and writes the terminal run authority.
+                It does not implement stages itself.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-secondary"
+                >/herdr-phase · existing internal role</span
+              >
+              <h4 class="card-title">A fresh leader for exactly one phase</h4>
+              <p>
+                It translates one phase into Stage 1 implementation, Stage 2
+                independent audit, deterministic seam checks, merge, and cleanup
+                orders through the UpAgent Recruiter. It owns stage retries and
+                <span class="mono">phase-result.json</span>, then exits. A
+                replay gets a new leader and fresh context.
+              </p>
+            </div>
+          </article>
+        </div>
+        <pre
+          class="mono mt-5 overflow-x-auto rounded-box bg-base-100 p-5 text-xs leading-relaxed sm:text-sm"
+        >
+human → just herdr-start
+          └── /herdr-control  (one per plan; current name /herdr-run)
+              ├── /herdr-phase  Phase A  (fresh; exits)
+              ├── /herdr-phase  Phase B  (fresh; exits)
+              └── /herdr-phase  replay    (fresh if evidence says revisit)</pre>
+        <div class="alert alert-info alert-soft mt-3">
+          <span
+            >Neither slash command should be part of the normal user surface.
+            The memorable user action is
+            <span class="mono">just herdr-start &lt;converted-run-dir&gt;</span
+            >; the launcher assigns the internal controller and leaders.</span
+          >
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-warning/25 bg-warning/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-warning">
+          One-time execution choice · this implementation only
+        </div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Use your GPT credit: GPT-5.5 high writes; Claude independently audits
+        </h3>
+        <div class="alert alert-info alert-soft mt-4">
+          <span
+            ><strong
+              >No—I am not saying GPT-5.5 high/xhigh is worse than
+              Sonnet.</strong
+            >
+            Sonnet's advantage here is speed and economy, not a blanket
+            capability win. With abundant GPT credit, GPT-5.5 high is a strong
+            primary implementer for this already-detailed plan. I also should
+            not treat the local Codex quota snapshot as your entire ChatGPT/API
+            credit pool; they may be different entitlements.</span
+          >
+        </div>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary">Selected primary</span>
+              <h4 class="card-title">GPT-5.5 · high, preferably fast mode</h4>
+              <p>
+                Use high for ordinary Stage 1 work. The plan is specific enough
+                that xhigh on every phase is mostly extra latency and
+                second-guessing. If fast mode spends credits faster but lowers
+                wall-clock time, that is a sensible trade when unused credit—not
+                scarcity—is the constraint.
+              </p>
+              <div class="alert alert-warning alert-soft mt-3">
+                <span
+                  >Use xhigh only for the ownership/reconciliation or
+                  candidate-custody phase, or after one failed implementation
+                  pass. Keep the scope leash even at high.</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-secondary"
+                >Independent per-phase audit</span
+              >
+              <h4 class="card-title">
+                Claude Sonnet high; Opus on the riskiest phase
+              </h4>
+              <p>
+                Because GPT writes the code, the adversary must come from
+                Claude—not Sol. Sonnet high should audit ordinary phases
+                quickly. Use Opus high for the phase that changes destructive
+                ownership/cleanup rules and for any disagreement Sonnet cannot
+                resolve.
+              </p>
+              <div class="alert alert-error alert-soft mt-3">
+                <span
+                  >GPT-5.6 Sol is not the adversary when GPT-5.5 is the
+                  implementer; it is too close to the same model/provider family
+                  for the independence we want.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+        <div
+          class="mt-5 rounded-box border border-base-content/10 bg-base-100 p-5"
+        >
+          <span class="badge badge-accent">Final candidate review</span>
+          <h4 class="mt-2 text-lg font-black">
+            Fresh Claude Opus high, authoring disabled
+          </h4>
+          <p class="mt-2">
+            After all phases merge and tests are green, use one fresh Opus
+            reviewer that authored none of the changes. It reviews the whole
+            diff, migration compatibility, and public-repository
+            proprietary-content risk. That preserves model-family independence
+            and can satisfy the mandatory independent review only if it
+            explicitly returns a pass.
+          </p>
+        </div>
+        <pre
+          class="mono mt-5 overflow-x-auto rounded-box bg-base-100 p-5 text-xs leading-relaxed sm:text-sm"
+        >
+THIS RUN ONLY — CREDIT-HEAVY, TIME-BOUNDED
+Stage 1 ordinary phases  GPT-5.5 high + fast mode if available
+Stage 1 riskiest phase   GPT-5.5 xhigh (one phase only)
+Stage 2 ordinary phases  Claude Sonnet high, read-only
+Stage 2 riskiest phase   Claude Opus high, read-only
+GPT implementation fails  retry once at xhigh; then stop/diagnose
+final merged candidate  fresh Claude Opus high, no authoring
+then                     deterministic tests + explicit public-repo PASS</pre>
+        <p class="mt-3 opacity-80">
+          If you instead optimize purely for minimum wall-clock time, the
+          earlier Sonnet-writes / Sol-low-audits route is still valid. Given
+          your actual constraint—unused ChatGPT credit—I would choose the
+          GPT-5.5-high route above. These choices apply only to implementing
+          this proposal now; future kit runs remain human-selected.
+        </p>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-accent/25 bg-accent/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-accent">Firstmate adoption tree</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          Three integrations, each independently useful
+        </h3>
+        <p class="mt-3 max-w-4xl opacity-80">
+          Port the invariants into Herdr. Do not install Firstmate as a second
+          controller and do not copy its whole shell distro.
+        </p>
+        <pre
+          class="mono mt-5 overflow-x-auto rounded-box bg-base-100 p-5 text-xs leading-relaxed shadow sm:text-sm"
+        >
+HERDR TODAY
+└── Integration 1 — destructive-operation safety
+    ├── every test uses a generated non-default Herdr session
+    ├── every destructive command carries explicit --session
+    ├── before/after tripwire proves the default fleet is unchanged
+    ├── created-vs-adopted ownership is recorded structurally
+    └── teardown preserves dirty, unlanded, or ambiguously-owned work
+        │
+        └── Integration 2 — controller continuity
+            ├── one plan owner lock + freshness beacon
+            ├── extra Remote Control sessions become read-only observers
+            ├── SessionStart reconciles files, leases, and live panes
+            ├── Stop / PreToolUse guard prevents ending blind
+            └── existing Herdr phase journal remains the event authority
+                │
+                └── Integration 3 — recovery and operator view
+                    ├── one current-state JSON snapshot for the whole run
+                    ├── durable result beats pane state; live state beats old prose
+                    ├── restart resumes from receipts, not conversation memory
+                    ├── fail-closed cleanup reports what it preserved and why
+                    └── shared-environment lease appears in status / alerts</pre>
+        <div class="mt-4 grid gap-3 md:grid-cols-3">
+          <div class="alert alert-success alert-soft">
+            <span
+              ><strong>First:</strong> safety with almost no orchestration
+              behavior change.</span
+            >
+          </div>
+          <div class="alert alert-warning alert-soft">
+            <span
+              ><strong>Second:</strong> continuity changes who may control a
+              run, so pilot it.</span
+            >
+          </div>
+          <div class="alert alert-info alert-soft">
+            <span
+              ><strong>Third:</strong> better recovery and visibility after
+              ownership is trustworthy.</span
+            >
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-8">
+        <h3 class="text-2xl font-black">Custody contract</h3>
+        <div class="mt-4 grid gap-4 md:grid-cols-3">
+          <div class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary">During phase work</span>
+              <h4 class="card-title">Herdr owns the candidate branch</h4>
+              <p>
+                Phase leaders and stage workers may change it only through
+                route-approved work. Temporary worktrees never own the shared
+                infrastructure lane.
+              </p>
+            </div>
+          </div>
+          <div class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-warning">Candidate ready</span>
+              <h4 class="card-title">Herdr pauses and yields custody</h4>
+              <p>
+                Record branch, exact head SHA, intent, phase evidence,
+                dirty-state proof, gate attempt number, and the next owner. This
+                is a checkpoint, not the terminal marker.
+              </p>
+            </div>
+          </div>
+          <div class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success">Gate outcome</span>
+              <h4 class="card-title">Success ends; failure returns custody</h4>
+              <p>
+                no-mistakes exclusively owns rebase, fixes, PR, and CI. Checks
+                passed allows Herdr terminal success. A failed shared test emits
+                evidence and returns custody for a targeted Herdr repair pass.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="mt-8 rounded-box border border-success/25 bg-success/5 p-5 sm:p-7"
+      >
+        <div class="eyebrow text-success">no-mistakes + shared AWS reality</div>
+        <h3 class="mt-2 text-2xl font-black sm:text-3xl">
+          It fits only if CI/CD can validate an exact non-main SHA
+        </h3>
+        <p class="mt-3 max-w-5xl opacity-80">
+          no-mistakes is not another Herdr phase. It owns a
+          <strong>candidate gate attempt</strong> after all planned phase work
+          is merged but before Herdr declares terminal success. That only works
+          if the shared environment can deploy the exact candidate or PR SHA
+          under a remote, single-writer lease visible to every CI worker and
+          concurrent run.
+        </p>
+        <div class="mt-5 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-error badge-soft"
+                >Current main-only deployment</span
+              >
+              <h4 class="card-title">Poor fit for an end-of-plan gate</h4>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+phase worktree
+└── audit
+    └── merge / push main
+        └── main deploys to the one AWS environment
+            └── integration test
+                └── next phase</pre>
+              <p>
+                If main must receive every phase before AWS can be tested, the
+                work is already published before no-mistakes sees it. Running
+                the gate at the very end is then post-facto review, not a gate.
+              </p>
+              <div class="alert alert-error alert-soft mt-2">
+                <span
+                  ><strong>Recommendation:</strong> do not add no-mistakes to
+                  this mode. Keep Herdr's current phase checks and mandatory
+                  independent review.</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success badge-soft"
+                >Target branch-SHA deployment</span
+              >
+              <h4 class="card-title">
+                Good fit at the candidate-ready checkpoint
+              </h4>
+              <pre
+                class="mono overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+              >
+Herdr candidate branch
+└── candidate-ready receipt; Herdr pauses edits
+    └── no-mistakes attempt N
+        ├── rebase → review → test → docs → lint
+        ├── push / update one candidate PR
+        └── PR CI acquires the shared AWS lease
+            ├── reconcile the one test user / baseline
+            ├── deploy exact PR SHA
+            ├── run global integration + acceptance
+            ├── finally: cleanup + release lease
+            ├── PASS → checks-passed → Herdr terminal success
+            └── FAIL → evidence receipt → custody back to Herdr</pre>
+              <p>
+                All temporary phase worktrees merge into one candidate branch
+                and one PR. The worktrees may build independently; only the
+                branch SHA holding the central lease may touch the shared test
+                user and AWS environment.
+              </p>
+              <div class="alert alert-warning alert-soft mt-2">
+                <span
+                  ><strong>SHA rule:</strong> a no-mistakes rebase or fix
+                  creates a new candidate. Only the exact SHA deployed and
+                  tested under the lease may receive checks-passed.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+        <div class="mt-5 rounded-box border border-warning/25 bg-base-100 p-5">
+          <h4 class="text-lg font-black">
+            When the one big integration loop fails
+          </h4>
+          <pre
+            class="mono mt-3 overflow-x-auto whitespace-pre text-xs leading-relaxed sm:text-sm"
+          >
+shared acceptance FAILS on exact SHA
+├── freeze integration-failure.json
+│   ├── SHA + gate attempt + lease owner
+│   ├── failed check / resource / test user
+│   ├── commands + logs + cleanup state
+│   └── changed components since last passing baseline
+├── disable broad CI auto-fix for this failure class
+├── no-mistakes returns branch custody
+└── fresh independent triage worker
+    ├── reads phase manifests, commits, handoffs, and failure evidence
+    ├── phase-owned failure → revisit earliest responsible phase
+    ├── cross-cutting failure → create / replay integration-repair phase
+    └── ambiguous ownership → stop for human, never guess
+        └── Herdr replays forward → candidate attempt N+1</pre>
+          <p class="mt-3 opacity-80">
+            This is a larger loop, but it is not “redo the whole plan.” It
+            reuses Herdr's existing forward-only
+            <span class="mono">revisit</span> mechanism. The hard new
+            requirement is trustworthy failure-to-phase attribution backed by
+            manifests and evidence. The language model recommends the revisit;
+            typed files and an independent audit make that recommendation
+            reviewable.
+          </p>
+        </div>
+        <div class="alert alert-info alert-soft mt-5">
+          <span
+            ><strong>Practical conclusion:</strong> first prove exact-SHA branch
+            deployment, a remote environment lease with heartbeat/TTL/final
+            cleanup, and failure-to-phase receipts. Then pilot no-mistakes as
+            the candidate gate loop. While deployment is main-only, skip this
+            integration.</span
+          >
+        </div>
+      </section>
+
+      <section id="roadmap" class="section-anchor mt-12">
+        <div class="mb-5 max-w-4xl">
+          <div class="eyebrow text-primary">Adoption sequence</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Take the low-risk wins first
+          </h2>
+        </div>
+        <ul
+          class="timeline timeline-vertical timeline-snap-icon max-md:timeline-compact"
+        >
+          <li>
+            <div class="timeline-middle">
+              <span class="badge badge-accent">1</span>
+            </div>
+            <div class="timeline-start mb-10 md:text-end">
+              <time class="font-mono text-sm opacity-60"
+                >Firstmate integration 1</time
+              >
+              <div class="text-xl font-black">
+                Port destructive-operation safety
+              </div>
+              <p class="mt-2 opacity-75">
+                Explicit session on every destructive command. Never test
+                against default. Add before/after fleet-state tripwire. Track
+                created versus adopted panes structurally.
+              </p>
+              <span class="badge badge-success badge-soft mt-2"
+                >Low behavior risk</span
+              >
+            </div>
+            <hr />
+          </li>
+          <li>
+            <hr />
+            <div class="timeline-middle">
+              <span class="badge badge-success">2</span>
+            </div>
+            <div class="timeline-end mb-10">
+              <time class="font-mono text-sm opacity-60"
+                >Firstmate integration 2</time
+              >
+              <div class="text-xl font-black">
+                Add single-owner continuity and restart reconciliation
+              </div>
+              <p class="mt-2 opacity-75">
+                Add the owner lock, freshness beacon, read-only observer mode,
+                SessionStart reconciliation, and Stop/PreToolUse blind-turn
+                guard. Keep the existing typed phase journal authoritative.
+              </p>
+              <span class="badge badge-warning badge-soft mt-2"
+                >Pilot on real interrupted runs</span
+              >
+            </div>
+            <hr />
+          </li>
+          <li>
+            <hr />
+            <div class="timeline-middle">
+              <span class="badge badge-secondary">3</span>
+            </div>
+            <div class="timeline-start mb-10 md:text-end">
+              <time class="font-mono text-sm opacity-60"
+                >Firstmate integration 3</time
+              >
+              <div class="text-xl font-black">
+                Add the reconciled operator snapshot and fail-closed cleanup
+              </div>
+              <p class="mt-2 opacity-75">
+                Publish one current-state JSON view of runs, leaders, workers,
+                leases, and shared-environment ownership. Recovery and teardown
+                explain what they preserved rather than guessing or deleting.
+              </p>
+              <span class="badge badge-info badge-soft mt-2"
+                >Visibility after ownership</span
+              >
+            </div>
+            <hr />
+          </li>
+          <li>
+            <hr />
+            <div class="timeline-middle">
+              <span class="badge badge-primary">4</span>
+            </div>
+            <div class="timeline-end mb-10">
+              <time class="font-mono text-sm opacity-60"
+                >Conversion + naming cleanup</time
+              >
+              <div class="text-xl font-black">
+                Centralize decomposition in cc/do-convert --herdr
+              </div>
+              <p class="mt-2 opacity-75">
+                Keep the upstream big plan unchanged. Replace planish and
+                plan-and-grill with cc/do-plan, add the default two-round plan
+                adversary, add cc/do-implement for the direct TUI path, and make
+                conversion validate idempotently. Rebuild cc/do-full as the
+                phone-friendly one-command composer; retire only the redundant
+                meta wrapper and keep short warning aliases for migration.
+              </p>
+              <span class="badge badge-primary badge-soft mt-2"
+                >Fewer LLM loops per phase</span
+              >
+            </div>
+            <hr />
+          </li>
+          <li>
+            <hr />
+            <div class="timeline-middle">
+              <span class="badge badge-outline">5</span>
+            </div>
+            <div class="timeline-start md:text-end">
+              <time class="font-mono text-sm opacity-60"
+                >Conditional delivery integration</time
+              >
+              <div class="text-xl font-black">
+                Pilot no-mistakes only after branch-SHA AWS deployment works
+              </div>
+              <p class="mt-2 opacity-75">
+                First add one remote shared-environment concurrency key and
+                prove CI/CD can deploy an exact non-main SHA. At
+                candidate-ready, pause Herdr and yield custody to no-mistakes.
+                Success publishes terminal state; failure returns custody with
+                evidence for a targeted phase revisit and another gate attempt.
+              </p>
+              <span class="badge badge-ghost mt-2"
+                >Skip while deployment is main-only</span
+              >
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <section id="risks" class="section-anchor mt-12">
+        <div class="mb-5 max-w-4xl">
+          <div class="eyebrow text-error">Guardrails</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            What must not happen
+          </h2>
+        </div>
+        <div class="grid gap-4 md:grid-cols-2">
+          <div class="alert alert-error alert-vertical items-start">
+            <div>
+              <h3 class="font-black">
+                Do not replace typed files with terminal prose
+              </h3>
+              <p class="mt-1">
+                Herdr's strongest property is reconstructable truth. Pane state,
+                scrollback, and status prose remain observations, not completion
+                authority.
+              </p>
+            </div>
+          </div>
+          <div class="alert alert-error alert-vertical items-start">
+            <div>
+              <h3 class="font-black">
+                Do not let Herdr and no-mistakes edit at the same time
+              </h3>
+              <p class="mt-1">
+                At candidate-ready, Herdr must yield branch custody while the
+                gate rebases, fixes, pushes, and runs CI. A failed gate must
+                explicitly return custody before Herdr starts a repair pass.
+              </p>
+            </div>
+          </div>
+          <div class="alert alert-error alert-vertical items-start">
+            <div>
+              <h3 class="font-black">
+                Do not copy Firstmate's hooks without its predicate
+              </h3>
+              <p class="mt-1">
+                The hooks depend on home identity, lock, beacon, task metadata,
+                and watcher state. Port the invariant as a Herdr-native
+                mechanism.
+              </p>
+            </div>
+          </div>
+          <div class="alert alert-warning alert-vertical items-start">
+            <div>
+              <h3 class="font-black">
+                Do not call a named local remote “mandatory”
+              </h3>
+              <p class="mt-1">
+                A user can still push directly to origin. Protected branches and
+                required remote checks remain the enforcement boundary.
+              </p>
+            </div>
+          </div>
+          <div class="alert alert-warning alert-vertical items-start">
+            <div>
+              <h3 class="font-black">Do not weaken independent audit</h3>
+              <p class="mt-1">
+                Stage 2 must independently inspect the branch and evidence
+                before advancing. A later global integration failure does not
+                erase that evidence; it adds a new failure to triage and
+                backtrack.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-12">
+        <div class="eyebrow text-primary">Decision options</div>
+        <h2 class="mt-2 text-3xl font-black sm:text-4xl">Three paths</h2>
+        <div class="mt-5 grid gap-5 lg:grid-cols-3">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-ghost">A · Minimal</span>
+              <h3 class="card-title text-2xl">Keep Herdr unchanged</h3>
+              <p>
+                Lowest change risk, but leaves delivery outside the run and
+                misses mature lifecycle lessons from Firstmate.
+              </p>
+              <div class="card-actions mt-auto pt-4">
+                <span class="badge badge-outline">Safe, limited gain</span>
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100 recommended">
+            <div class="card-body">
+              <span class="badge badge-success">B · Recommended</span>
+              <h3 class="card-title text-2xl">Layer by role, not by force</h3>
+              <p>
+                Herdr controls phases and repair passes. Firstmate patterns
+                harden ownership and recovery. no-mistakes owns the final
+                candidate gate and shared-environment CI attempt.
+              </p>
+              <div class="card-actions mt-auto pt-4">
+                <span class="badge badge-success badge-soft"
+                  >Best capability / risk balance</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-error">C · Rewrite</span>
+              <h3 class="card-title text-2xl">Replace Herdr with Firstmate</h3>
+              <p>
+                Imports a large shell-heavy distro and still needs a runtime
+                backend. Loses the canonical phase/stage route, typed stage
+                gates, and phase backtracking unless rebuilt.
+              </p>
+              <div class="card-actions mt-auto pt-4">
+                <span class="badge badge-error badge-soft"
+                  >Not recommended</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="evidence" class="section-anchor mt-12">
+        <div class="eyebrow text-primary">Evidence appendix</div>
+        <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+          What this conclusion is based on
+        </h2>
+        <div class="mt-5 grid gap-4 lg:grid-cols-2 evidence">
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-semibold">Herdr baseline</div>
+            <div class="collapse-content">
+              <ul class="list-disc space-y-2 pl-5">
+                <li>
+                  <code
+                    >.shared-llm/public/layers/slash-commands/common/common/herdr-run/command.md</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/layers/slash-commands/common/common/herdr-phase/command.md</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/extensions/common/herdr/plan_controller.py</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/extensions/common/upagent/phase_controller.py</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/extensions/common/upagent/phase_await.py</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/layers/slash-commands/common/common/meta-plan-convert/command.md</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/llm/pi/common/meta-plan/meta-plan-format.md</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/llm/pi/common/meta-plan/meta-plan-schema.ts</code
+                  >
+                </li>
+              </ul>
+            </div>
+          </div>
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-semibold">
+              Firstmate · local commit <span class="mono">c12bdea</span>
+            </div>
+            <div class="collapse-content">
+              <ul class="list-disc space-y-2 pl-5">
+                <li><code>../firstmate/README.md</code></li>
+                <li><code>../firstmate/docs/architecture.md</code></li>
+                <li><code>../firstmate/docs/herdr-backend.md</code></li>
+                <li><code>../firstmate/docs/turnend-guard.md</code></li>
+                <li><code>../firstmate/bin/fm-herdr-lab.sh</code></li>
+                <li><code>../firstmate/bin/fm-teardown.sh</code></li>
+              </ul>
+            </div>
+          </div>
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-semibold">
+              no-mistakes · local commit <span class="mono">2d10688</span>
+            </div>
+            <div class="collapse-content">
+              <ul class="list-disc space-y-2 pl-5">
+                <li><code>../no-mistakes/README.md</code></li>
+                <li>
+                  <code
+                    >../no-mistakes/docs/src/content/docs/concepts/gate-model.md</code
+                  >
+                </li>
+                <li>
+                  <code
+                    >../no-mistakes/docs/src/content/docs/concepts/pipeline.md</code
+                  >
+                </li>
+                <li><code>../no-mistakes/internal/gate/gate.go</code></li>
+                <li><code>../no-mistakes/internal/agent/claude.go</code></li>
+              </ul>
+            </div>
+          </div>
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-semibold">
+              Current CI / lint duplication audit
+            </div>
+            <div class="collapse-content">
+              <ul class="list-disc space-y-2 pl-5">
+                <li>
+                  Destination repository root
+                  <code>Taskfile.yml</code> safe-check and test targets.
+                </li>
+                <li>
+                  Local operations repository
+                  <code>ci/pipelines/**/.woodpecker.yml</code> definitions
+                  (reviewed locally; details not copied here).
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/layers/agents/common/adversarial-evaluator.md</code
+                  >
+                  for the AST-aware audit instruction.
+                </li>
+                <li>
+                  <code
+                    >../no-mistakes/docs/src/content/docs/concepts/pipeline.md</code
+                  >
+                  for candidate test/lint/static-analysis ownership.
+                </li>
+              </ul>
+            </div>
+          </div>
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-semibold">
+              External design-workflow research
+            </div>
+            <div class="collapse-content">
+              <ul class="list-disc space-y-2 pl-5">
+                <li>
+                  <a
+                    class="link link-primary"
+                    href="https://github.github.com/spec-kit/"
+                    >GitHub Spec Kit documentation</a
+                  >
+                </li>
+                <li>
+                  <a
+                    class="link link-primary"
+                    href="https://kiro.dev/blog/faster-smarter-specs/"
+                    >Kiro: Faster, smarter specs</a
+                  >
+                </li>
+                <li>
+                  <a
+                    class="link link-primary"
+                    href="https://docs.bmad-method.org/explanation/why-solutioning-matters/"
+                    >BMAD: Why solutioning matters</a
+                  >
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div class="alert alert-info alert-soft mt-5">
+          <span
+            ><strong>Confidence:</strong> architecture and source-level review,
+            supported by independent repository scouts and prior Herdr design
+            history. No live end-to-end run of the proposed custody and shared-
+            environment loop was performed. The adoption sequence is
+            deliberately a set of pilots, not a claim that the integrations
+            already work.</span
+          >
+        </div>
+      </section>
+
+      <footer
+        class="mt-12 border-t border-base-content/10 py-8 text-sm opacity-65"
+      >
+        <p>
+          <strong>Recommended review focus:</strong> annotate the custody
+          boundaries, the local-seam versus integration-phase rule, and the
+          order of the adoption steps.
+        </p>
+        <p class="mt-2">
+          Design source: Lavish's DaisyUI v5 + Tailwind browser fallback, using
+          the <span class="mono">luxury</span> theme. The subject repos are
+          terminal-oriented and expose no shared web design system to match.
+        </p>
+      </footer>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+      const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const paint = document.createElement("canvas").getContext("2d");
+      function toRgba(color) {
+        paint.clearRect(0, 0, 1, 1);
+        paint.fillStyle = "#000";
+        paint.fillStyle = color;
+        paint.fillRect(0, 0, 1, 1);
+        return paint.getImageData(0, 0, 1, 1).data;
+      }
+      function compositeRgba(foreground, background) {
+        const fa = foreground[3] / 255,
+          ba = background[3] / 255,
+          a = fa + ba * (1 - fa);
+        if (a === 0) return [0, 0, 0, 0];
+        return [
+          (foreground[0] * fa + background[0] * ba * (1 - fa)) / a,
+          (foreground[1] * fa + background[1] * ba * (1 - fa)) / a,
+          (foreground[2] * fa + background[2] * ba * (1 - fa)) / a,
+          a * 255,
+        ];
+      }
+      function pageIsDark() {
+        const root = document.documentElement;
+        const rb = toRgba(getComputedStyle(root).backgroundColor);
+        const bb = document.body
+          ? toRgba(getComputedStyle(document.body).backgroundColor)
+          : [0, 0, 0, 0];
+        const [r, g, b, a] = compositeRgba(bb, rb);
+        if (a > 0) return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+        const cs = getComputedStyle(root).colorScheme;
+        if (cs.includes("dark") && !cs.includes("light")) return true;
+        if (cs.includes("light") && !cs.includes("dark")) return false;
+        return darkQuery.matches;
+      }
+      const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({
+        el,
+        src: el.textContent,
+      }));
+      let applied;
+      let rendering = false;
+      let queued = false;
+      function queueRender() {
+        queued = true;
+        if (rendering) return;
+        void render();
+      }
+      async function render() {
+        rendering = true;
+        try {
+          while (queued) {
+            queued = false;
+            const theme = pageIsDark() ? "dark" : "default";
+            if (theme === applied) continue;
+            mermaid.initialize({
+              startOnLoad: false,
+              theme,
+              securityLevel: "strict",
+            });
+            for (const { el, src } of diagrams) {
+              el.removeAttribute("data-processed");
+              el.textContent = src;
+            }
+            try {
+              await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+            } catch (error) {
+              console.error("Mermaid diagram render failed:", error);
+              return;
+            }
+            applied = theme;
+          }
+        } finally {
+          rendering = false;
+          if (queued) queueRender();
+        }
+      }
+      if (document.readyState === "complete") queueRender();
+      else window.addEventListener("load", queueRender, { once: true });
+      const themeObserver = new MutationObserver(queueRender);
+      for (const el of [document.documentElement, document.body])
+        if (el)
+          themeObserver.observe(el, {
+            attributes: true,
+            attributeFilter: ["data-theme", "class", "style"],
+          });
+      document.addEventListener("change", queueRender, true);
+      darkQuery.addEventListener("change", queueRender);
+    </script>
+  </body>
+</html>

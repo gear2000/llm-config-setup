@@ -1,0 +1,944 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pi automatic compaction — assessment</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+      :where(
+          [style*="display: grid"],
+          [style*="display:grid"],
+          [style*="display: flex"],
+          [style*="display:flex"]
+        )
+        > * {
+        min-width: 0;
+      }
+      :where(
+        p,
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
+        li,
+        dd,
+        blockquote,
+        figcaption,
+        td,
+        th,
+        .badge,
+        .label
+      ) {
+        overflow-wrap: anywhere;
+      }
+      :where(img, svg, video, canvas, iframe) {
+        max-width: 100%;
+        height: auto;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 15% 0%,
+            color-mix(in oklab, var(--color-primary) 16%, transparent),
+            transparent 28rem
+          ),
+          radial-gradient(
+            circle at 92% 8%,
+            color-mix(in oklab, var(--color-secondary) 11%, transparent),
+            transparent 24rem
+          ),
+          var(--color-base-300);
+      }
+      .shell {
+        width: min(1180px, calc(100% - 2rem));
+        margin-inline: auto;
+      }
+      .eyebrow {
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        font:
+          700 0.72rem/1.2 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      .mono {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      .hairline {
+        border-color: color-mix(
+          in oklab,
+          var(--color-base-content) 13%,
+          transparent
+        );
+      }
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.65fr);
+        gap: 1rem;
+      }
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.75rem;
+      }
+      .option-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+      }
+      .recommendation-card {
+        border: 1px solid
+          color-mix(in oklab, var(--color-success) 35%, transparent);
+        box-shadow:
+          0 0 0 1px color-mix(in oklab, var(--color-success) 9%, transparent),
+          0 18px 80px rgba(0, 0, 0, 0.22);
+      }
+      .risk-card {
+        border: 1px solid
+          color-mix(in oklab, var(--color-warning) 30%, transparent);
+      }
+      .evidence {
+        font:
+          500 0.72rem/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        color: color-mix(in oklab, var(--color-base-content) 62%, transparent);
+      }
+      .bar-track {
+        height: 0.7rem;
+        border-radius: 999px;
+        background: color-mix(
+          in oklab,
+          var(--color-base-content) 10%,
+          transparent
+        );
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        border-radius: inherit;
+      }
+      .table :where(th, td) {
+        vertical-align: top;
+        white-space: normal;
+      }
+      .table code {
+        white-space: normal;
+        word-break: break-word;
+      }
+      .mermaid-wrap {
+        overflow: auto;
+      }
+      #proposed-code {
+        min-height: 32rem;
+        overflow: hidden;
+        border-radius: 0.9rem;
+      }
+      .callout-number {
+        width: 2rem;
+        height: 2rem;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+      }
+      @media (max-width: 880px) {
+        .hero-grid,
+        .option-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .metric-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 520px) {
+        .shell {
+          width: min(100% - 1rem, 1180px);
+        }
+        .metric-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    </style>
+  </head>
+  <body class="text-base-content">
+    <header class="shell pt-6 lg:pt-10">
+      <nav
+        class="navbar rounded-box border hairline bg-base-200/70 backdrop-blur"
+      >
+        <div class="navbar-start min-w-0">
+          <div>
+            <div class="eyebrow text-primary">Technical assessment</div>
+            <div class="mono text-sm opacity-70">
+              pi-ultra-compact · Pi 0.80.6
+            </div>
+          </div>
+        </div>
+        <div class="navbar-end gap-2">
+          <a class="btn btn-ghost btn-sm" href="#evidence">Evidence</a>
+          <a class="btn btn-primary btn-sm" href="#recommendation"
+            >Recommendation</a
+          >
+        </div>
+      </nav>
+    </header>
+
+    <main class="shell py-6 lg:py-10 space-y-8">
+      <section class="hero-grid">
+        <article class="card bg-base-100/85 border hairline shadow-2xl">
+          <div class="card-body gap-5">
+            <div class="flex flex-wrap gap-2">
+              <span class="badge badge-success">Implemented</span>
+              <span class="badge badge-error badge-soft"
+                >Did not install third-party package</span
+              >
+              <span class="badge badge-info badge-soft"
+                >Distributed through shared-llm</span
+              >
+            </div>
+            <div>
+              <p class="eyebrow text-primary mb-3">Bottom line</p>
+              <h1
+                class="text-3xl sm:text-5xl font-black tracking-tight leading-[1.1] pb-1"
+              >
+                Yes—Pi can compact automatically at
+                <span class="text-primary">50%</span> of the actual active
+                context window.
+              </h1>
+            </div>
+            <p class="text-lg opacity-80 max-w-3xl">
+              The audit still stands:
+              <strong
+                >pi-ultra-compact does not currently initiate that
+                compaction</strong
+              >. Instead of installing it, the recommended thin extension is now
+              implemented. It watches Pi’s authoritative
+              <span class="mono">getContextUsage().percent</span>, triggers
+              native compaction after a long-lived TUI or RPC run settles, and
+              lets Pi’s built-in summarizer do the lossy part.
+            </p>
+            <div class="alert alert-success alert-soft">
+              <span
+                ><strong>Deployed:</strong> automatic native compaction at
+                <strong>50%</strong>, with Pi’s native near-overflow compaction
+                retained as a second safety net. The source is symlinked into
+                <span class="mono">~/.pi/agent/extensions/auto-compact.ts</span
+                >; restart Pi or run <span class="mono">/reload</span> to
+                activate it.</span
+              >
+            </div>
+          </div>
+        </article>
+
+        <aside class="card bg-base-200/85 border hairline">
+          <div class="card-body">
+            <p class="eyebrow text-secondary">Current machine</p>
+            <h2 class="card-title text-2xl">GPT-5.6 Sol</h2>
+            <div
+              class="stats stats-vertical bg-base-100/60 border hairline mt-2"
+            >
+              <div class="stat">
+                <div class="stat-title">Context window</div>
+                <div class="stat-value text-primary">372K</div>
+                <div class="stat-desc">Pi model metadata</div>
+              </div>
+              <div class="stat">
+                <div class="stat-title">50% trigger</div>
+                <div class="stat-value text-success">186K</div>
+                <div class="stat-desc">Recommended starting point</div>
+              </div>
+              <div class="stat">
+                <div class="stat-title">Native default trigger</div>
+                <div class="stat-value text-warning">355.6K</div>
+                <div class="stat-desc">95.6% with 16,384 reserved</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section aria-labelledby="threshold-heading" class="space-y-4">
+        <div>
+          <p class="eyebrow text-primary">Threshold reality</p>
+          <h2 id="threshold-heading" class="text-3xl font-bold">
+            What each number actually means
+          </h2>
+        </div>
+        <div class="metric-grid">
+          <article class="card bg-base-100 border hairline">
+            <div class="card-body p-5">
+              <div class="flex justify-between gap-2">
+                <strong>50%</strong
+                ><span class="mono text-success">186,000</span>
+              </div>
+              <div class="bar-track mt-3">
+                <div class="bar-fill bg-success" style="width: 50%"></div>
+              </div>
+              <p class="text-sm opacity-70 mt-3">
+                Fresh-context bias; more frequent lossy summaries.
+              </p>
+            </div>
+          </article>
+          <article class="card bg-base-100 border hairline">
+            <div class="card-body p-5">
+              <div class="flex justify-between gap-2">
+                <strong>60%</strong><span class="mono text-info">223,200</span>
+              </div>
+              <div class="bar-track mt-3">
+                <div class="bar-fill bg-info" style="width: 60%"></div>
+              </div>
+              <p class="text-sm opacity-70 mt-3">
+                Reasonable alternative if 50% proves too chatty.
+              </p>
+            </div>
+          </article>
+          <article class="card bg-base-100 border hairline">
+            <div class="card-body p-5">
+              <div class="flex justify-between gap-2">
+                <strong>Cost tier</strong
+                ><span class="mono text-secondary">272,000</span>
+              </div>
+              <div class="bar-track mt-3">
+                <div class="bar-fill bg-secondary" style="width: 73.1%"></div>
+              </div>
+              <p class="text-sm opacity-70 mt-3">
+                Both 50% and 60% compact before the model’s higher input-price
+                tier.
+              </p>
+            </div>
+          </article>
+          <article class="card bg-base-100 border hairline">
+            <div class="card-body p-5">
+              <div class="flex justify-between gap-2">
+                <strong>Pi default</strong
+                ><span class="mono text-warning">355,616</span>
+              </div>
+              <div class="bar-track mt-3">
+                <div class="bar-fill bg-warning" style="width: 95.6%"></div>
+              </div>
+              <p class="text-sm opacity-70 mt-3">
+                Designed as an exhaustion guard, not a “stay mentally fresh”
+                policy.
+              </p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="card bg-base-100 border hairline"
+        aria-labelledby="flow-heading"
+      >
+        <div class="card-body">
+          <p class="eyebrow text-primary">Mechanism</p>
+          <h2 id="flow-heading" class="text-3xl font-bold">
+            Why the package’s 50% gate does not fire at 50%
+          </h2>
+          <p class="opacity-75 max-w-4xl">
+            The package put its threshold check downstream of Pi’s trigger. At
+            50%, no event reaches it. Around 95.6%, Pi finally starts
+            compaction, emits the hook, and only then does the package evaluate
+            its 50%/60% gate.
+          </p>
+          <div
+            class="mermaid-wrap rounded-box bg-base-200/70 border hairline p-3 mt-3"
+          >
+            <div class="mermaid">
+              flowchart TD subgraph CURRENT["Current package"] A["Context
+              crosses 50%"] -. "no listener" .-> B["Nothing happens"] C["Pi
+              native check<br />contextWindow − reserveTokens"] --> D["Around
+              95.6% on current model"] M["Manual /ultracompact"] -->
+              E["session_before_compact"] D --> E E --> F{"Package gate<br />50%
+              / fixed 60%"} F -->|yes| G["Package heuristic summary"] F -->|no|
+              H["Pi native summary"] end subgraph TARGET["Recommended
+              extension"] I["agent_settled"] --> J["ctx.getContextUsage()"] J
+              --> K{"percent ≥ 50?"} K -->|no| L["Wait"] K -->|yes|
+              N["ctx.compact(custom instructions)"] N --> O["Pi native
+              structured summarizer"] O --> P["Compaction entry + recent turns
+              kept"] end
+            </div>
+          </div>
+          <p class="evidence mt-2">
+            Evidence: <span>extensions/index.ts:63–99, 142–165, 304–356</span> ·
+            Pi <span>compaction.js:137–140</span> · official
+            <span>trigger-compact.ts:27–40</span>
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="options-heading" class="space-y-4">
+        <div>
+          <p class="eyebrow text-primary">Decision</p>
+          <h2 id="options-heading" class="text-3xl font-bold">
+            Four ways forward
+          </h2>
+        </div>
+        <div class="option-grid">
+          <article class="card bg-base-100 risk-card">
+            <div class="card-body">
+              <div class="flex justify-between gap-3">
+                <h3 class="card-title">1. Install unchanged</h3>
+                <span class="badge badge-error badge-soft">No</span>
+              </div>
+              <p>
+                Useful only for the manual command or replacing Pi’s summary
+                once Pi is already compacting.
+              </p>
+              <ul class="list-disc pl-5 opacity-75 space-y-1">
+                <li>Does not independently trigger at 50% or 60%.</li>
+                <li>Current test run has 10 failures.</li>
+                <li>Documentation, defaults, types, and behavior disagree.</li>
+              </ul>
+            </div>
+          </article>
+          <article class="card bg-base-100 risk-card">
+            <div class="card-body">
+              <div class="flex justify-between gap-3">
+                <h3 class="card-title">2. Fork and repair it</h3>
+                <span class="badge badge-warning badge-soft">Possible</span>
+              </div>
+              <p>
+                Add the missing lifecycle trigger and repair the engine, tests,
+                public types, and docs.
+              </p>
+              <ul class="list-disc pl-5 opacity-75 space-y-1">
+                <li>Retains ~1,500 lines of custom heuristic compression.</li>
+                <li>Large maintenance surface for a narrow need.</li>
+                <li>Harder to prove semantic preservation.</li>
+              </ul>
+            </div>
+          </article>
+          <article
+            id="recommendation"
+            class="card bg-base-100 recommendation-card"
+          >
+            <div class="card-body">
+              <div class="flex justify-between gap-3">
+                <h3 class="card-title">3. Small native trigger extension</h3>
+                <span class="badge badge-success">Recommended</span>
+              </div>
+              <p>
+                Use the package’s best idea—the model-relative threshold—without
+                taking its summary engine.
+              </p>
+              <ul class="list-disc pl-5 opacity-75 space-y-1">
+                <li>
+                  Authoritative ratio from Pi, automatically follows model
+                  switches.
+                </li>
+                <li>
+                  Native turn boundaries, previous-summary handling, and file
+                  tracking.
+                </li>
+                <li>
+                  Small enough to test end-to-end and understand completely.
+                </li>
+              </ul>
+            </div>
+          </article>
+          <article class="card bg-base-100 border hairline">
+            <div class="card-body">
+              <div class="flex justify-between gap-3">
+                <h3 class="card-title">4. Wait for Pi upstream</h3>
+                <span class="badge badge-info badge-soft">Eventually</span>
+              </div>
+              <p>
+                Upstream issue #4129 proposes a native
+                <span class="mono">contextRatio</span> trigger.
+              </p>
+              <ul class="list-disc pl-5 opacity-75 space-y-1">
+                <li>Best long-term ownership boundary.</li>
+                <li>
+                  Not available in the installed Pi 0.80.6 settings surface.
+                </li>
+                <li>Our extension can be deleted when upstream lands.</li>
+              </ul>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="evidence" class="space-y-4" aria-labelledby="audit-heading">
+        <div>
+          <p class="eyebrow text-primary">Audit</p>
+          <h2 id="audit-heading" class="text-3xl font-bold">
+            What I found in pi-ultra-compact v1.3.0
+          </h2>
+          <p class="opacity-70">
+            The rows below are the reasons I would not make it load-bearing in
+            your Pi setup.
+          </p>
+        </div>
+        <div class="overflow-x-auto rounded-box border hairline bg-base-100">
+          <table class="table table-zebra table-sm">
+            <thead>
+              <tr>
+                <th>Finding</th>
+                <th>Observed behavior</th>
+                <th>Risk</th>
+                <th>Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>No automatic initiator</strong></td>
+                <td>
+                  Registers <span class="mono">session_before_compact</span>,
+                  but no usage-watching event that calls
+                  <span class="mono">ctx.compact()</span>.
+                </td>
+                <td>
+                  <span class="badge badge-error badge-soft">Critical</span>
+                  Advertised feature does not happen.
+                </td>
+                <td class="evidence">extensions/index.ts:304–356</td>
+              </tr>
+              <tr>
+                <td><strong>Dead threshold knobs</strong></td>
+                <td>
+                  <span class="mono">thresholdTokens</span> is maintained, but
+                  active <span class="mono">shouldCompact()</span> uses fixed
+                  60% and <span class="mono">hardWatermark</span>. Default hard
+                  watermark is 50%.
+                </td>
+                <td>
+                  <span class="badge badge-error badge-soft">High</span>
+                  Configuration is misleading.
+                </td>
+                <td class="evidence">engine.ts:144–172, 292–303, 440–454</td>
+              </tr>
+              <tr>
+                <td>
+                  <strong>Micro path is more lossy than advertised</strong>
+                </td>
+                <td>
+                  After pruning, every string message is cut to 200 characters;
+                  structured array content becomes an empty string in the
+                  emitted summary.
+                </td>
+                <td>
+                  <span class="badge badge-error badge-soft">High</span> Tool
+                  calls, reasoning, and rich content can disappear.
+                </td>
+                <td class="evidence">extensions/index.ts:189–211</td>
+              </tr>
+              <tr>
+                <td><strong>Heuristic dedup collision</strong></td>
+                <td>
+                  Messages with the same role and first 100 characters are
+                  treated as duplicates, despite the changelog claiming full
+                  normalized content.
+                </td>
+                <td>
+                  <span class="badge badge-warning badge-soft">High</span>
+                  Distinct messages can be silently dropped.
+                </td>
+                <td class="evidence">engine.ts:585–612 · CHANGELOG 1.3.0</td>
+              </tr>
+              <tr>
+                <td><strong>Behavior suite is red</strong></td>
+                <td>
+                  <strong>333 passed, 10 failed</strong>. Failures include
+                  structured summary expectations and image-content accounting.
+                </td>
+                <td>
+                  <span class="badge badge-warning badge-soft">High</span>
+                  Release claims “all tests pass” are stale.
+                </td>
+                <td class="evidence">npm test · 2026-07-20</td>
+              </tr>
+              <tr>
+                <td><strong>Build hygiene drift</strong></td>
+                <td>
+                  Typecheck passes; lint has 27 warnings. Package is 1.3.0 while
+                  the lockfile root remains 1.2.1.
+                </td>
+                <td>
+                  <span class="badge badge-info badge-soft">Medium</span> Not
+                  fatal, but signals release drift.
+                </td>
+                <td class="evidence">
+                  npm run typecheck · npm run lint · package-lock.json
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section
+        class="card bg-base-100 border hairline"
+        aria-labelledby="design-heading"
+      >
+        <div class="card-body gap-6">
+          <div>
+            <p class="eyebrow text-primary">Proposed design</p>
+            <h2 id="design-heading" class="text-3xl font-bold">
+              Keep the trigger custom; keep compaction native
+            </h2>
+          </div>
+          <div class="grid lg:grid-cols-2 gap-4">
+            <div class="space-y-3">
+              <div class="flex gap-3 rounded-box bg-base-200 p-4">
+                <div class="callout-number bg-primary text-primary-content">
+                  1
+                </div>
+                <div>
+                  <strong>Observe only when settled</strong>
+                  <p class="opacity-70 text-sm">
+                    Use <span class="mono">agent_settled</span> so automatic
+                    compaction never aborts a tool-heavy run halfway through.
+                  </p>
+                </div>
+              </div>
+              <div class="flex gap-3 rounded-box bg-base-200 p-4">
+                <div class="callout-number bg-primary text-primary-content">
+                  2
+                </div>
+                <div>
+                  <strong>Use Pi’s actual ratio</strong>
+                  <p class="opacity-70 text-sm">
+                    Read <span class="mono">usage.percent</span>; do not
+                    estimate tokens or maintain a model table.
+                  </p>
+                </div>
+              </div>
+              <div class="flex gap-3 rounded-box bg-base-200 p-4">
+                <div class="callout-number bg-primary text-primary-content">
+                  3
+                </div>
+                <div>
+                  <strong>Trigger at 50%, with hysteresis</strong>
+                  <p class="opacity-70 text-sm">
+                    Re-arm below 35% after a valid post-compaction response.
+                    This prevents repeated compaction loops.
+                  </p>
+                </div>
+              </div>
+              <div class="flex gap-3 rounded-box bg-base-200 p-4">
+                <div class="callout-number bg-primary text-primary-content">
+                  4
+                </div>
+                <div>
+                  <strong>Ask Pi to preserve durable meaning</strong>
+                  <p class="opacity-70 text-sm">
+                    Goals, constraints, decisions + rationale, evidence
+                    pointers, dead ends, errors, and next steps—not raw
+                    transcripts.
+                  </p>
+                </div>
+              </div>
+              <div class="flex gap-3 rounded-box bg-base-200 p-4">
+                <div class="callout-number bg-primary text-primary-content">
+                  5
+                </div>
+                <div>
+                  <strong>Leave the native safety net enabled</strong>
+                  <p class="opacity-70 text-sm">
+                    The built-in near-overflow trigger still protects unusually
+                    long single runs and provider overflow recovery.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="rounded-box bg-base-200/70 border hairline p-4">
+              <h3 class="font-bold text-lg mb-2">Suggested policy</h3>
+              <dl
+                class="grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-4 gap-y-3 text-sm"
+              >
+                <dt class="opacity-60">Ratio</dt>
+                <dd><strong>0.50</strong> default; configurable</dd>
+                <dt class="opacity-60">Timing</dt>
+                <dd>After <span class="mono">agent_settled</span></dd>
+                <dt class="opacity-60">Re-arm</dt>
+                <dd>Below 35% after fresh usage</dd>
+                <dt class="opacity-60">Summary</dt>
+                <dd>Pi native + custom preservation instructions</dd>
+                <dt class="opacity-60">Hard cap</dt>
+                <dd>Optional later for 1M+ models; ratio first</dd>
+                <dt class="opacity-60">Failure</dt>
+                <dd>
+                  Notify + exponential retry backoff; never truncate silently
+                </dd>
+                <dt class="opacity-60">Telemetry</dt>
+                <dd>
+                  Model, before %, tokens before/after estimate, result/error
+                </dd>
+              </dl>
+              <div class="alert alert-warning alert-soft mt-4 text-sm">
+                <span
+                  ><strong>Important:</strong> full history remains in Pi’s
+                  JSONL session tree. Compaction changes active context, not the
+                  recoverable source record.</span
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="card bg-base-100 border hairline"
+        aria-labelledby="code-heading"
+      >
+        <div class="card-body">
+          <p class="eyebrow text-primary">Implementation</p>
+          <h2 id="code-heading" class="text-3xl font-bold">
+            Built, tested, and distributed
+          </h2>
+          <p class="opacity-70 mb-4">
+            The design sketch below became
+            <span class="mono"
+              >.shared-llm/public/llm/pi/common/extensions/auto-compact.ts</span
+            >. The shipped version adds TUI/RPC lifecycle guards, stale-callback
+            generations, loud non-UI errors, bounded exponential backoff, and
+            <strong>25 passing behavioral checks</strong>. Two consecutive
+            <span class="mono">just update</span> runs confirmed idempotent
+            distribution.
+          </p>
+          <div
+            id="proposed-code"
+            aria-label="Proposed TypeScript extension"
+          ></div>
+        </div>
+      </section>
+
+      <section class="grid lg:grid-cols-3 gap-4" aria-label="Conclusion">
+        <article class="card bg-success text-success-content lg:col-span-2">
+          <div class="card-body">
+            <p class="eyebrow">Verdict</p>
+            <h2 class="card-title text-3xl">
+              Thin native trigger extension shipped.
+            </h2>
+            <p class="text-lg">
+              The third-party heuristic engine was not adopted. The new shared
+              runtime uses Pi’s official usage and compaction APIs, keeps the
+              50% policy explicit, and is already wired into the global Pi
+              extension directory.
+            </p>
+          </div>
+        </article>
+        <article class="card bg-base-100 border hairline">
+          <div class="card-body">
+            <p class="eyebrow text-secondary">Confidence</p>
+            <div
+              class="radial-progress text-success"
+              style="--value: 97; --size: 7rem; --thickness: 0.7rem"
+              role="progressbar"
+              aria-valuenow="97"
+            >
+              97%
+            </div>
+            <p class="text-sm opacity-70">
+              Verified by Pi loader smoke test, 25 policy checks, 543 repository
+              tests, lifecycle-focused independent review, and idempotent
+              distribution.
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <footer class="border-t hairline pt-6 pb-10 text-sm opacity-65">
+        <p>
+          <strong>Design source:</strong> Lavish’s DaisyUI/Tailwind fallback
+          with a Pi-terminal-inspired dark treatment. The inspected project is a
+          TypeScript CLI package and contains no product UI design system or
+          visual assets to match.
+        </p>
+        <p class="mt-2">
+          Primary sources: local
+          <span class="mono">../pi-ultra-compact</span> checkout, installed Pi
+          0.80.6 docs and runtime source, official
+          <span class="mono">trigger-compact.ts</span> example, and upstream
+          ratio-trigger issue #4129.
+        </p>
+      </footer>
+    </main>
+
+    <script type="module">
+      import { File } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+
+      const proposedCode = String.raw`import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+const TRIGGER_PERCENT = 50;
+const REARM_PERCENT = 35;
+const SUMMARY_FOCUS = [
+  "Preserve the user's goal and constraints.",
+  "Preserve decisions with rationale.",
+  "Preserve evidence pointers, file paths, and URLs.",
+  "Preserve failed approaches and why they were rejected.",
+  "Preserve current errors, state, and concrete next steps.",
+].join(" ");
+
+export default function autoCompact(pi: ExtensionAPI) {
+  let armed = true;
+  let compacting = false;
+
+  function maybeCompact(ctx: ExtensionContext) {
+    const usage = ctx.getContextUsage();
+    if (usage?.percent == null || compacting) return;
+
+    if (usage.percent < REARM_PERCENT) armed = true;
+    if (!armed || usage.percent < TRIGGER_PERCENT) return;
+
+    armed = false;
+    compacting = true;
+    ctx.compact({
+      customInstructions: SUMMARY_FOCUS,
+      onComplete: () => {
+        compacting = false;
+        if (ctx.hasUI) ctx.ui.notify("Context compacted at 50% policy", "info");
+      },
+      onError: (error) => {
+        compacting = false;
+        armed = true; // production: add bounded exponential backoff
+        if (ctx.hasUI) ctx.ui.notify(
+          "Automatic compaction failed: " + error.message,
+          "error",
+        );
+      },
+    });
+  }
+
+  pi.on("agent_settled", (_event, ctx) => maybeCompact(ctx));
+  pi.on("model_select", () => { armed = true; });
+
+  pi.registerCommand("compact-status", {
+    description: "Show current context usage and automatic threshold",
+    handler: async (_args, ctx) => {
+      const usage = ctx.getContextUsage();
+      ctx.ui.notify(
+        usage?.percent == null
+          ? "Context usage unavailable until the next response"
+          : usage.percent.toFixed(1) + "% used; auto-compacts at 50%",
+        "info",
+      );
+    },
+  });
+}`;
+
+      const options = {
+        theme: { light: "github-light", dark: "github-dark" },
+        themeType: "dark",
+        overflow: "wrap",
+      };
+      new File(options).render({
+        containerWrapper: document.querySelector("#proposed-code"),
+        file: {
+          name: "extensions/auto-compact.ts (design sketch; shipped version hardened)",
+          contents: proposedCode,
+        },
+      });
+    </script>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+      const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const paint = document.createElement("canvas").getContext("2d");
+      function toRgba(color) {
+        paint.clearRect(0, 0, 1, 1);
+        paint.fillStyle = "#000";
+        paint.fillStyle = color;
+        paint.fillRect(0, 0, 1, 1);
+        return paint.getImageData(0, 0, 1, 1).data;
+      }
+      function compositeRgba(foreground, background) {
+        const fa = foreground[3] / 255,
+          ba = background[3] / 255,
+          alpha = fa + ba * (1 - fa);
+        if (alpha === 0) return [0, 0, 0, 0];
+        return [
+          (foreground[0] * fa + background[0] * ba * (1 - fa)) / alpha,
+          (foreground[1] * fa + background[1] * ba * (1 - fa)) / alpha,
+          (foreground[2] * fa + background[2] * ba * (1 - fa)) / alpha,
+          alpha * 255,
+        ];
+      }
+      function pageIsDark() {
+        const root = document.documentElement;
+        const rb = toRgba(getComputedStyle(root).backgroundColor);
+        const bb = document.body
+          ? toRgba(getComputedStyle(document.body).backgroundColor)
+          : [0, 0, 0, 0];
+        const [r, g, b, a] = compositeRgba(bb, rb);
+        if (a > 0) return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+        return darkQuery.matches;
+      }
+      const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({
+        el,
+        src: el.textContent,
+      }));
+      let applied,
+        rendering = false,
+        queued = false;
+      function queueRender() {
+        queued = true;
+        if (!rendering) void render();
+      }
+      async function render() {
+        rendering = true;
+        try {
+          while (queued) {
+            queued = false;
+            const theme = pageIsDark() ? "dark" : "default";
+            if (theme === applied) continue;
+            mermaid.initialize({
+              startOnLoad: false,
+              theme,
+              securityLevel: "strict",
+            });
+            for (const { el, src } of diagrams) {
+              el.removeAttribute("data-processed");
+              el.textContent = src;
+            }
+            try {
+              await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+            } catch (error) {
+              console.error("Mermaid diagram render failed:", error);
+              return;
+            }
+            applied = theme;
+          }
+        } finally {
+          rendering = false;
+          if (queued) queueRender();
+        }
+      }
+      if (document.readyState === "complete") queueRender();
+      else window.addEventListener("load", queueRender, { once: true });
+      const observer = new MutationObserver(queueRender);
+      for (const el of [document.documentElement, document.body])
+        if (el)
+          observer.observe(el, {
+            attributes: true,
+            attributeFilter: ["data-theme", "class", "style"],
+          });
+      darkQuery.addEventListener("change", queueRender);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+{
+  "signature": "tools/test_herdr_phase_protocol.py::Unresolved from this turn — tools/test_herdr_phase_protocol.py:\n🔴 STOP — 1 issue(s) must be fixed:\n  L3: Import block is un-sorted or un-formatted",
+  "sessionId": "lens-mrsmtxm4-21706d07"
+}

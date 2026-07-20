@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "files": {
+    ".shared-llm/public/llm/pi/common/extensions/auto-compact.ts": {
+      "latest": {
+        "commit": "96a7990",
+        "timestamp": "2026-07-20T13:51:26.711Z",
+        "mi": 29.4,
+        "cognitive": 42,
+        "nesting": 5,
+        "lines": 175,
+        "maxCyclomatic": 55,
+        "entropy": 6.77
+      },
+      "history": [
+        {
+          "commit": "96a7990",
+          "timestamp": "2026-07-20T13:51:26.711Z",
+          "mi": 29.4,
+          "cognitive": 42,
+          "nesting": 5,
+          "lines": 175,
+          "maxCyclomatic": 55,
+          "entropy": 6.77
+        }
+      ],
+      "trend": "stable"
+    }
+  },
+  "capturedAt": "2026-07-20T13:51:31.712Z"
+}

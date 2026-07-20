@@ -22,7 +22,11 @@ interface ExtensionContext {
 
 interface ExtensionAPI {
 	on(
-		event: "session_start" | "session_shutdown" | "model_select" | "agent_settled",
+		event:
+			| "session_start"
+			| "session_shutdown"
+			| "model_select"
+			| "agent_settled",
 		handler: (event: unknown, ctx: ExtensionContext) => void,
 	): void;
 	registerCommand(
@@ -66,7 +70,11 @@ function freshState(): AutoCompactState {
 	};
 }
 
-function formatUsage(tokens: number, contextWindow: number, percent: number): string {
+function formatUsage(
+	tokens: number,
+	contextWindow: number,
+	percent: number,
+): string {
 	return `${tokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${percent.toFixed(1)}%)`;
 }
 
@@ -99,7 +107,12 @@ export default function autoCompact(pi: ExtensionAPI): void {
 		if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
 
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.percent === null || usage.tokens === null || state.compacting) {
+		if (
+			!usage ||
+			usage.percent === null ||
+			usage.tokens === null ||
+			state.compacting
+		) {
 			return;
 		}
 

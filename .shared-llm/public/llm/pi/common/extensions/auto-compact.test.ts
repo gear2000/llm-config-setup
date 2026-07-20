@@ -12,7 +12,11 @@ const {
 	RETRY_MAX_MS,
 } = autoCompactModule;
 
-type EventName = "session_start" | "session_shutdown" | "model_select" | "agent_settled";
+type EventName =
+	| "session_start"
+	| "session_shutdown"
+	| "model_select"
+	| "agent_settled";
 type EventHandler = (event: unknown, ctx: FakeContext) => void;
 type Mode = "tui" | "rpc" | "json" | "print";
 
@@ -103,7 +107,11 @@ Date.now = () => now;
 settled?.({}, ctx);
 check(compactCalls.length === 0, "does not compact below 50%");
 
-usage = { tokens: 50_000, contextWindow: 100_000, percent: AUTO_COMPACT_PERCENT };
+usage = {
+	tokens: 50_000,
+	contextWindow: 100_000,
+	percent: AUTO_COMPACT_PERCENT,
+};
 settled?.({}, ctx);
 check(compactCalls.length === 1, "compacts exactly at 50%");
 check(
@@ -116,7 +124,10 @@ check(
 	"preserves rationale and rejected approaches",
 );
 settled?.({}, ctx);
-check(compactCalls.length === 1, "blocks duplicate settled events while compaction is active");
+check(
+	compactCalls.length === 1,
+	"blocks duplicate settled events while compaction is active",
+);
 
 const notificationCountBeforeStaleCallback = notifications.length;
 modelSelect?.({}, ctx);
@@ -126,20 +137,30 @@ check(
 	"ignores stale callbacks after a model switch",
 );
 settled?.({}, ctx);
-check(compactCalls.length === 2, "re-evaluates the ratio for the newly selected model");
+check(
+	compactCalls.length === 2,
+	"re-evaluates the ratio for the newly selected model",
+);
 
 compactCalls[1]?.onComplete?.();
 settled?.({}, ctx);
-check(compactCalls.length === 2, "does not compact repeatedly while still above threshold");
+check(
+	compactCalls.length === 2,
+	"does not compact repeatedly while still above threshold",
+);
 usage = { tokens: 40_000, contextWindow: 100_000, percent: 40 };
 settled?.({}, ctx);
 usage = { tokens: 51_000, contextWindow: 100_000, percent: 51 };
 settled?.({}, ctx);
-check(compactCalls.length === 3, "re-arms after fresh post-compaction usage falls below 50%");
+check(
+	compactCalls.length === 3,
+	"re-arms after fresh post-compaction usage falls below 50%",
+);
 
 const realConsoleError = console.error;
 const stderr: string[] = [];
-console.error = (...parts: unknown[]) => stderr.push(parts.map(String).join(" "));
+console.error = (...parts: unknown[]) =>
+	stderr.push(parts.map(String).join(" "));
 ctx.hasUI = false;
 compactCalls[2]?.onError?.(new Error("provider unavailable"));
 ctx.hasUI = true;
@@ -150,15 +171,24 @@ check(
 );
 
 settled?.({}, ctx);
-check(compactCalls.length === 3, "does not retry before the first backoff expires");
+check(
+	compactCalls.length === 3,
+	"does not retry before the first backoff expires",
+);
 now += RETRY_BASE_MS;
 settled?.({}, ctx);
-check(compactCalls.length === 4, "retries on a later settled run after the first backoff");
+check(
+	compactCalls.length === 4,
+	"retries on a later settled run after the first backoff",
+);
 
 compactCalls[3]?.onError?.(new Error("second failure"));
 now += RETRY_BASE_MS * 2 - 1;
 settled?.({}, ctx);
-check(compactCalls.length === 4, "doubles the retry delay after a second failure");
+check(
+	compactCalls.length === 4,
+	"doubles the retry delay after a second failure",
+);
 now += 1;
 settled?.({}, ctx);
 check(compactCalls.length === 5, "retries when the doubled backoff expires");
