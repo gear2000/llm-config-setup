@@ -58,7 +58,13 @@ def _fake_intake_clerk(raw_text, raw_path, roster_path, intake_key, **kwargs):
     }
 
     def answer(**fields) -> tuple[SimpleNamespace, dict]:
-        base = {"order": None, "refusal": None, "understood": (), "missing": (), "notes": ()}
+        base = {
+            "order": None,
+            "refusal": None,
+            "understood": (),
+            "missing": (),
+            "notes": (),
+        }
         return SimpleNamespace(**{**base, **fields}), record
 
     try:
@@ -183,9 +189,7 @@ def test_invalid_phase_release_receipt_becomes_a_degraded_warning(
     )
     monkeypatch.setenv(recruiter.PHASE_START_RECEIPT_ENV, str(receipt_path))
 
-    assert "belongs to leader some-other-pane" in recruiter.phase_receipt_warning(
-        order
-    )
+    assert "belongs to leader some-other-pane" in recruiter.phase_receipt_warning(order)
 
 
 def test_phase_watchdog_bootstrap_order_is_exempt_from_release_receipt(
@@ -232,12 +236,12 @@ def test_missing_receipt_announcement_prints_once_per_phase_pass(
     """Every degraded order records its ledger event, but the pane sees one warning per pass."""
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     monkeypatch.delenv(recruiter.PHASE_START_RECEIPT_ENV, raising=False)
-    monkeypatch.setattr(
-        recruiter.subprocess, "Popen", lambda command, **kwargs: None
-    )
+    monkeypatch.setattr(recruiter.subprocess, "Popen", lambda command, **kwargs: None)
 
     def submit(stage_id: str, pass_name: str, try_name: str) -> tuple[dict, str]:
-        stage = tmp_path / f"run/phases/phase-0/{pass_name}/stages/{stage_id}/{try_name}"
+        stage = (
+            tmp_path / f"run/phases/phase-0/{pass_name}/stages/{stage_id}/{try_name}"
+        )
         stage.mkdir(parents=True, exist_ok=True)
         instructions = stage / "instructions.md"
         instructions.write_text("# Worker\n")
@@ -334,7 +338,9 @@ def test_worker_health_requires_expected_process_agent_and_cwd(monkeypatch) -> N
             }
         },
     }
-    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args, **kwargs: responses[args])
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", lambda *args, **kwargs: responses[args]
+    )
     evidence = recruiter._wait_for_worker_health("worker-pane", _order(), 100)
     assert evidence["healthy"] is True
     assert evidence["process_pid"] == 42
@@ -359,7 +365,9 @@ def test_worker_health_detector_can_be_overridden_by_roster(monkeypatch) -> None
             }
         },
     }
-    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args, **kwargs: responses[args])
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", lambda *args, **kwargs: responses[args]
+    )
     roster = {
         "health": {
             "claude": {"expected_agent": "wrapped-agent", "expected_process": "wrapper"}
@@ -389,7 +397,9 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
             "result": {"process_info": {"foreground_processes": []}}
         },
     }
-    monkeypatch.setattr(recruiter, "_herdr_json", lambda *args, **kwargs: responses[args])
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", lambda *args, **kwargs: responses[args]
+    )
     monkeypatch.setattr(recruiter, "STARTUP_FAILURE_SETTLE_SECONDS", 0)
     monkeypatch.setattr(
         recruiter,
@@ -610,7 +620,9 @@ def test_place_started_agent_joins_existing_role_tab(monkeypatch) -> None:
     )
 
 
-def test_tab_placement_failure_keeps_the_started_agent_alive(monkeypatch, capsys) -> None:
+def test_tab_placement_failure_keeps_the_started_agent_alive(
+    monkeypatch, capsys
+) -> None:
     calls: list[tuple[str, ...]] = []
     closed: list[str] = []
 
@@ -661,7 +673,13 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(monkeypatch, capsys
 
 
 @pytest.mark.parametrize(
-    ("split_direction", "target_fraction", "neighbor_direction", "neighbor_pane", "amount"),
+    (
+        "split_direction",
+        "target_fraction",
+        "neighbor_direction",
+        "neighbor_pane",
+        "amount",
+    ),
     [
         ("down", 0.20, "up", "upper-pane", "0.3"),
         ("right", 0.28, "left", "left-pane", "0.22"),
@@ -736,7 +754,10 @@ def test_resize_started_pane_warns_without_failing_lifecycle(
         role="watchdog",
     )
 
-    assert "watchdog pane watchdog-pane layout adjustment failed" in capsys.readouterr().err
+    assert (
+        "watchdog pane watchdog-pane layout adjustment failed"
+        in capsys.readouterr().err
+    )
 
 
 def test_resize_started_pane_is_a_quiet_noop_for_first_pane_in_role_tab(
@@ -774,8 +795,7 @@ def test_watchdog_worker_fraction_is_role_specific() -> None:
 def test_worker_tab_role_separates_active_work_from_oversight() -> None:
     assert recruiter._worker_tab_role({"agent": "docs-writer"}) == "workers"
     assert (
-        recruiter._worker_tab_role({"agent": "plan-lifecycle-watchdog"})
-        == "oversight"
+        recruiter._worker_tab_role({"agent": "plan-lifecycle-watchdog"}) == "oversight"
     )
     assert recruiter._worker_tab_role({"agent": "phase-watchdog"}) == "oversight"
 
@@ -802,7 +822,9 @@ def test_explicit_session_command_still_checks_herdr_availability(
     monkeypatch.setattr(
         recruiter.subprocess,
         "run",
-        lambda *args, **kwargs: pytest.fail("missing Herdr must fail before subprocess"),
+        lambda *args, **kwargs: pytest.fail(
+            "missing Herdr must fail before subprocess"
+        ),
     )
 
     with pytest.raises(RecruiterError, match="not found in PATH"):
@@ -898,7 +920,9 @@ def test_current_herdr_session_uses_real_status_payload_shape_when_env_is_absent
 
 
 def test_session_name_validation_matches_herdr_charset() -> None:
-    assert recruiter._validate_herdr_session_name("lab.one_2-three") == "lab.one_2-three"
+    assert (
+        recruiter._validate_herdr_session_name("lab.one_2-three") == "lab.one_2-three"
+    )
     with pytest.raises(RecruiterError, match="unsupported characters"):
         recruiter._validate_herdr_session_name("lab:one")
 
@@ -964,9 +988,7 @@ def test_close_worker_pane_uses_global_session_option(
 
     monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
 
-    cleanup = recruiter._close_worker_pane(
-        "pane-1", herdr_session="llm-lab-test"
-    )
+    cleanup = recruiter._close_worker_pane("pane-1", herdr_session="llm-lab-test")
 
     assert cleanup["verified_absent"] is True
     assert calls[0] == ["herdr", "--session", "llm-lab-test", "pane", "close", "pane-1"]
@@ -1047,6 +1069,7 @@ def _patch_approved_manager(monkeypatch) -> None:
         "load_management_config",
         lambda roster: dataclasses.replace(real_load(roster), mode="dedicated"),
     )
+
     def fake_account_manager(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "address": "manager-address",
@@ -1698,9 +1721,7 @@ def test_completion_monitor_can_resume_after_a_premature_result(
 ) -> None:
     result_path = tmp_path / "private-result.json"
     order = _order()
-    stop, ready, thread = recruiter._start_completion_monitor(
-        order, result_path, 1_000
-    )
+    stop, ready, thread = recruiter._start_completion_monitor(order, result_path, 1_000)
 
     result_path.write_text(json.dumps(_result(order["order_id"])))
     assert ready.wait(timeout=0.5)
@@ -1865,7 +1886,9 @@ def test_run_order_keeps_watchdog_alive_after_premature_self_verdict(
     assert len(list((private_result.parent / "premature-results").glob("*.json"))) == 1
 
 
-def test_spawn_job_detaches_all_standard_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spawn_job_detaches_all_standard_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
     monkeypatch.setattr(
         recruiter.subprocess,
@@ -2085,7 +2108,9 @@ def test_completed_result_returns_durable_when_the_public_read_always_oserrors(
     result = ledger.completed_result(key, order)
 
     assert result == _result(order["order_id"])
-    assert public_reads["n"] == 1  # the initial read only; reconcile returns durable, never re-reads
+    assert (
+        public_reads["n"] == 1
+    )  # the initial read only; reconcile returns durable, never re-reads
 
 
 def test_reconcile_returns_durable_when_republishing_the_public_result_oserrors(
@@ -2108,7 +2133,9 @@ def test_reconcile_returns_durable_when_republishing_the_public_result_oserrors(
     result = ledger.completed_result(key, order)
 
     assert result == _result(order["order_id"])
-    assert not Path(order["result_path"]).exists()  # republish failed; the result was still returned
+    assert not Path(
+        order["result_path"]
+    ).exists()  # republish failed; the result was still returned
 
 
 def test_a_terminal_record_refuses_with_evidence_when_the_hub_copy_is_unreadable(
@@ -2118,7 +2145,9 @@ def test_a_terminal_record_refuses_with_evidence_when_the_hub_copy_is_unreadable
     terminal record must refuse with evidence — a structured RecruiterError naming the receipt —
     not a bare loader crash out of `_durable_terminal_result`."""
     order, order_path, ledger, key = _finished_order(tmp_path, monkeypatch)
-    Path(order["result_path"]).unlink()  # public copy gone -> ContractError enters reconcile
+    Path(
+        order["result_path"]
+    ).unlink()  # public copy gone -> ContractError enters reconcile
     durable = str(ledger.published_result_path(key))
     real_load = recruiter.load_result
 
@@ -2216,9 +2245,7 @@ def test_reconciler_refuses_recorded_pane_without_recorded_session(
     )
 
     assert recruiter.cmd_reconcile(force=True) == 0
-    lease = json.loads(
-        (ledger.active / "requests" / key / "lease.json").read_text()
-    )
+    lease = json.loads((ledger.active / "requests" / key / "lease.json").read_text())
     assert lease["worker_pane"] == "owned-worker"
 
 
@@ -2351,6 +2378,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         return "manager-pane", "cockpit-workspace", name
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", start_manager)
+
     def resize_manager(
         pane: str,
         *,
@@ -2557,8 +2585,8 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     monkeypatch.setattr(
         recruiter,
         "_notify_requester",
-        lambda ledger, key, order, generation, message_type, *args, **kwargs: notifications.append(
-            message_type
+        lambda ledger, key, order, generation, message_type, *args, **kwargs: (
+            notifications.append(message_type)
         ),
     )
 
@@ -3227,7 +3255,9 @@ def test_await_threads_the_ping_threshold_through(
 
     seen: list[tuple[int, str, str]] = []
 
-    def spy(waited_ms: float, threshold_ms: int, order_id: str, verdict: str, **_: object) -> bool:
+    def spy(
+        waited_ms: float, threshold_ms: int, order_id: str, verdict: str, **_: object
+    ) -> bool:
         seen.append((threshold_ms, order_id, verdict))
         return False
 
@@ -3636,7 +3666,9 @@ def test_cmd_up_records_only_pane_ownership(
     class FakePopen:
         pid = 1234
 
-    monkeypatch.setattr(recruiter.subprocess, "Popen", lambda *args, **kwargs: FakePopen())
+    monkeypatch.setattr(
+        recruiter.subprocess, "Popen", lambda *args, **kwargs: FakePopen()
+    )
 
     assert recruiter.cmd_up("roster.yaml") == 0
 
@@ -3735,7 +3767,9 @@ def test_cmd_down_malformed_legacy_state_fails_closed(
     monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
     monkeypatch.setattr(recruiter, "cmd_reconcile", lambda force: 0)
     monkeypatch.setattr(
-        recruiter, "_herdr", lambda *args, **kwargs: pytest.fail("malformed state closed")
+        recruiter,
+        "_herdr",
+        lambda *args, **kwargs: pytest.fail("malformed state closed"),
     )
 
     with pytest.raises(RecruiterError, match="structural pane ownership"):
@@ -3820,7 +3854,7 @@ def test_recruit_pane_door_safely_forwards_one_path() -> None:
 
     assert door.startswith("recruit() {")
     assert 'if [ "$#" -ne 1 ]' in door
-    assert "request -- \"$1\"" in door
+    assert 'request -- "$1"' in door
     assert "normal verified request door" in door
     assert "just upagent-consult" in door
     assert "eval" not in door
@@ -3873,10 +3907,15 @@ def test_alias_form_is_interpreted_by_the_clerk_not_by_python(
     assert repaired["result_path"].endswith("-result.json")
     assert json.loads(order_path.read_text()) == repaired
     assert (tmp_path / "order.json.raw-submitted").read_bytes() == raw_text.encode()
-    assert json.loads((tmp_path / "order.json.interpreted.json").read_text()) == repaired
+    assert (
+        json.loads((tmp_path / "order.json.interpreted.json").read_text()) == repaired
+    )
     stamp = json.loads((tmp_path / "order.json.intake.json").read_text())
     assert stamp["mode"] == "intake-clerk" and stamp["attempts"] == 1
-    assert json.loads((tmp_path / "order.json.validation.json").read_text())["valid"] is True
+    assert (
+        json.loads((tmp_path / "order.json.validation.json").read_text())["valid"]
+        is True
+    )
 
 
 def test_order_intake_escalates_nested_envelope_to_one_clerk(
@@ -3923,7 +3962,10 @@ def test_order_intake_escalates_nested_envelope_to_one_clerk(
 
     assert len(calls) == 1
     assert repaired["agent"] == "backend"
-    assert json.loads((tmp_path / "nested.json.intake.json").read_text())["mode"] == "intake-clerk"
+    assert (
+        json.loads((tmp_path / "nested.json.intake.json").read_text())["mode"]
+        == "intake-clerk"
+    )
 
 
 def test_clerk_interpretation_still_faces_the_unchanged_strict_contract(
@@ -3944,14 +3986,21 @@ def test_clerk_interpretation_still_faces_the_unchanged_strict_contract(
         recruiter,
         "_run_order_intake_clerk",
         lambda *args, **kwargs: (
-            SimpleNamespace(order=values, refusal=None, understood=(), missing=(), notes=()),
+            SimpleNamespace(
+                order=values, refusal=None, understood=(), missing=(), notes=()
+            ),
             {"attempt": 1},
         ),
     )
 
-    with pytest.raises(RecruiterError, match="failed strict validation.*unknown harness"):
+    with pytest.raises(
+        RecruiterError, match="failed strict validation.*unknown harness"
+    ):
         recruiter._intake_order(str(path), "roster.yaml")
-    assert json.loads((tmp_path / "order.json.validation.json").read_text())["valid"] is False
+    assert (
+        json.loads((tmp_path / "order.json.validation.json").read_text())["valid"]
+        is False
+    )
     assert json.loads(path.read_text()) == {"payload": values}
 
 
@@ -3969,7 +4018,13 @@ def test_order_intake_refusal_is_actionable_and_audited(
                 order=None,
                 refusal="The target agent and execution context are missing.",
                 understood=("task request",),
-                missing=("agent", "harness", "cwd", "instructions_path", "cockpit_pane"),
+                missing=(
+                    "agent",
+                    "harness",
+                    "cwd",
+                    "instructions_path",
+                    "cockpit_pane",
+                ),
                 notes=(),
             ),
             {"attempt": 1, "cleanup": {"verified_absent": True}},
@@ -3982,8 +4037,13 @@ def test_order_intake_refusal_is_actionable_and_audited(
     assert (tmp_path / "order.json.raw-submitted").read_text() == raw
     refusal = json.loads((tmp_path / "order.json.refusal.json").read_text())
     assert "agent" in refusal["missing"]
-    assert json.loads((tmp_path / "order.json.validation.json").read_text())["valid"] is False
-    assert json.loads((tmp_path / "order.json.interpreted.json").read_text()) == {"order": None}
+    assert (
+        json.loads((tmp_path / "order.json.validation.json").read_text())["valid"]
+        is False
+    )
+    assert json.loads((tmp_path / "order.json.interpreted.json").read_text()) == {
+        "order": None
+    }
     assert order_path.read_text() == raw
 
 
@@ -3996,7 +4056,7 @@ cwd: {tmp_path}
 approval: approved by the user
 harness: claude
 agent: terraform
-instructions_path: {tmp_path / 'brief.md'}
+instructions_path: {tmp_path / "brief.md"}
 cockpit_pane: w1:p1
 """
     path = tmp_path / "order.json"
@@ -4026,14 +4086,18 @@ cockpit_pane: w1:p1
         recruiter,
         "_run_order_intake_clerk",
         lambda *args, **kwargs: (
-            SimpleNamespace(order=candidate, refusal=None, understood=(), missing=(), notes=()),
+            SimpleNamespace(
+                order=candidate, refusal=None, understood=(), missing=(), notes=()
+            ),
             {"attempt": 1},
         ),
     )
     monkeypatch.setattr(
         recruiter.JobLedger,
         "submit",
-        lambda *args, **kwargs: pytest.fail("prose authority must never reach target submission"),
+        lambda *args, **kwargs: pytest.fail(
+            "prose authority must never reach target submission"
+        ),
     )
 
     with pytest.raises(RecruiterError, match="invented or changed execution intent"):
@@ -4169,7 +4233,9 @@ def test_every_submission_shape_records_one_intake_clerk_launch(
     except recruiter.IntakeOutcomeError as error:
         assert error.outcome != "infrastructure-failure", shape
 
-    assert rounds and rounds[0]["attempt"] == 1, f"{shape} never reached the intake clerk"
+    assert rounds and rounds[0]["attempt"] == 1, (
+        f"{shape} never reached the intake clerk"
+    )
     assert (tmp_path / "order.json.raw-submitted").read_text() == raw
     stamp = json.loads((tmp_path / "order.json.intake.json").read_text())
     assert stamp["clerk"]["attempt_name"] == "attempt-test-double"
@@ -4228,7 +4294,9 @@ def test_non_executable_requests_are_blocked_by_the_clerk_not_by_python(
     monkeypatch.setattr(
         recruiter.JobLedger,
         "submit",
-        lambda *args, **kwargs: pytest.fail("a blocked request must never reach the ledger"),
+        lambda *args, **kwargs: pytest.fail(
+            "a blocked request must never reach the ledger"
+        ),
     )
 
     assert recruiter.main(["--roster", "roster.yaml", "dispatch", str(order_path)]) == 3
@@ -4236,9 +4304,18 @@ def test_non_executable_requests_are_blocked_by_the_clerk_not_by_python(
     blocked = json.loads(capsys.readouterr().out.split("REQUEST_BLOCKED ", 1)[1])
     assert blocked["outcome"] == "blocked"
     assert blocked["authored_by"] == "intake-clerk"
-    assert blocked["reason"] == "the submission is not one JSON object naming a target agent"
+    assert (
+        blocked["reason"]
+        == "the submission is not one JSON object naming a target agent"
+    )
     assert "agent" in blocked["missing"]
-    assert set(blocked["evidence"]) >= {"raw", "interpreted", "intake", "validation", "refusal"}
+    assert set(blocked["evidence"]) >= {
+        "raw",
+        "interpreted",
+        "intake",
+        "validation",
+        "refusal",
+    }
     recorded = json.loads(Path(blocked["evidence"]["refusal"]).read_text())
     assert recorded["authored_by"] == "intake-clerk"
     assert recorded["error"] == blocked["reason"]
@@ -4266,7 +4343,9 @@ def test_invalid_clerk_output_is_corrected_by_the_same_clerk(
 
     def drop_stage_once(attempt: int, response) -> None:
         if attempt == 1:
-            response.order = {k: v for k, v in response.order.items() if k != "stage_id"}
+            response.order = {
+                k: v for k, v in response.order.items() if k != "stage_id"
+            }
 
     monkeypatch.setattr(
         recruiter, "_run_order_intake_clerk", _counting_clerk(rounds, drop_stage_once)
@@ -4281,7 +4360,9 @@ def test_invalid_clerk_output_is_corrected_by_the_same_clerk(
     # A correction round must never be answered by the response it was sent to correct.
     assert rounds[0]["intake_key"] != rounds[1]["intake_key"]
     assert order["stage_id"] == "stage-5-finalization"
-    assert json.loads((tmp_path / "order.json.intake.json").read_text())["attempts"] == 2
+    assert (
+        json.loads((tmp_path / "order.json.intake.json").read_text())["attempts"] == 2
+    )
 
 
 def test_correction_is_bounded_and_ends_as_an_intake_clerk_failure(
@@ -4339,7 +4420,9 @@ def test_an_unavailable_clerk_is_a_durable_refusal_with_its_own_exit_code(
     monkeypatch.setattr(
         recruiter.JobLedger,
         "submit",
-        lambda *args, **kwargs: pytest.fail("an unanswered intake must never launch a worker"),
+        lambda *args, **kwargs: pytest.fail(
+            "an unanswered intake must never launch a worker"
+        ),
     )
 
     assert recruiter.main(["--roster", "roster.yaml", "dispatch", str(order_path)]) == 4
@@ -4349,7 +4432,9 @@ def test_an_unavailable_clerk_is_a_durable_refusal_with_its_own_exit_code(
     assert failed["authored_by"] == "recruiter"
     assert "no live Recruiter state" in failed["reason"]
     assert Path(failed["evidence"]["raw"]).read_text() == order_path.read_text()
-    assert json.loads(Path(failed["evidence"]["validation"]).read_text())["valid"] is False
+    assert (
+        json.loads(Path(failed["evidence"]["validation"]).read_text())["valid"] is False
+    )
 
 
 def test_an_unreadable_submission_is_an_infrastructure_failure(
@@ -4362,7 +4447,9 @@ def test_an_unreadable_submission_is_an_infrastructure_failure(
 
     assert recruiter.main(["--roster", "roster.yaml", "dispatch", str(missing)]) == 5
 
-    failure = json.loads(capsys.readouterr().out.split("REQUEST_INFRASTRUCTURE_FAILED ", 1)[1])
+    failure = json.loads(
+        capsys.readouterr().out.split("REQUEST_INFRASTRUCTURE_FAILED ", 1)[1]
+    )
     assert failure["outcome"] == "infrastructure-failure"
     assert failure["authored_by"] == "recruiter"
     assert "could not preserve the submitted bytes" in failure["reason"]
@@ -4407,7 +4494,11 @@ def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -
         "approval": approval,
         "plan_artifact": artifact,
         "manager_placement": {"mode": "requester"},
-        "requester": {"id": "leader", "kind": "file-mailbox", "address": str(tmp_path / "inbox")},
+        "requester": {
+            "id": "leader",
+            "kind": "file-mailbox",
+            "address": str(tmp_path / "inbox"),
+        },
         "env": {"SAFE": "yes"},
         "timeout": "120000",
         "harness": "claude",
@@ -4425,8 +4516,16 @@ def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -
     repaired = recruiter._intake_order(str(order_path), "unused.yaml")
 
     for field in (
-        "mode", "operation", "requires_apply", "approval", "plan_artifact",
-        "manager_placement", "requester", "env", "plan_id", "step_id",
+        "mode",
+        "operation",
+        "requires_apply",
+        "approval",
+        "plan_artifact",
+        "manager_placement",
+        "requester",
+        "env",
+        "plan_id",
+        "step_id",
     ):
         assert repaired[field] == sloppy[field]
     assert repaired["timeout_ms"] == 120000
@@ -4452,7 +4551,13 @@ def test_explicit_invalid_stage_and_timeout_are_not_silently_rewritten(
     def refuse(*args, **kwargs):
         called.append(True)
         return (
-            SimpleNamespace(order=None, refusal="Explicit stage and timeout are invalid.", understood=(), missing=(), notes=()),
+            SimpleNamespace(
+                order=None,
+                refusal="Explicit stage and timeout are invalid.",
+                understood=(),
+                missing=(),
+                notes=(),
+            ),
             {"attempt": 1},
         )
 
@@ -4505,9 +4610,13 @@ def test_unknown_fields_escalate_instead_of_being_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     raw = {
-        "harness": "claude", "model": "some-model", "agent": "backend",
-        "cwd": str(tmp_path), "instructions_path": str(tmp_path / "b.md"),
-        "cockpit_pane": "w1:p1", "stage_id": "stage-5-finalization",
+        "harness": "claude",
+        "model": "some-model",
+        "agent": "backend",
+        "cwd": str(tmp_path),
+        "instructions_path": str(tmp_path / "b.md"),
+        "cockpit_pane": "w1:p1",
+        "stage_id": "stage-5-finalization",
         "op": "apply-now",
     }
     order_path = tmp_path / "order.json"
@@ -4517,7 +4626,14 @@ def test_unknown_fields_escalate_instead_of_being_dropped(
         recruiter,
         "_run_order_intake_clerk",
         lambda *args, **kwargs: (
-            called.append(True) or SimpleNamespace(order=None, refusal="Unknown operation is ambiguous.", understood=(), missing=("operation",), notes=()),
+            called.append(True)
+            or SimpleNamespace(
+                order=None,
+                refusal="Unknown operation is ambiguous.",
+                understood=(),
+                missing=("operation",),
+                notes=(),
+            ),
             {"attempt": 1},
         ),
     )
@@ -4525,7 +4641,12 @@ def test_unknown_fields_escalate_instead_of_being_dropped(
     with pytest.raises(RecruiterError, match="ambiguous"):
         recruiter._intake_order(str(order_path), "roster.yaml")
     assert called == [True]
-    assert "op" in json.loads((tmp_path / "order.json.intake.json").read_text())["unknown_fields"]
+    assert (
+        "op"
+        in json.loads((tmp_path / "order.json.intake.json").read_text())[
+            "unknown_fields"
+        ]
+    )
 
 
 def test_intake_persistence_failure_never_rewrites_original(
@@ -4533,9 +4654,13 @@ def test_intake_persistence_failure_never_rewrites_original(
 ) -> None:
     raw = json.dumps(
         {
-            "harness": "claude", "model": "some-model", "agent": "backend",
-            "workdir": str(tmp_path), "brief": str(tmp_path / "b.md"),
-            "pane": "w1:p1", "stage": "stage-5-finalization",
+            "harness": "claude",
+            "model": "some-model",
+            "agent": "backend",
+            "workdir": str(tmp_path),
+            "brief": str(tmp_path / "b.md"),
+            "pane": "w1:p1",
+            "stage": "stage-5-finalization",
         }
     )
     path = tmp_path / "order.json"
@@ -4594,8 +4719,14 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     monkeypatch.setattr(
         recruiter,
         "_cleanup_intake_clerk",
-        lambda ownership: cleaned.append(dict(ownership))
-        or {"status": "closed", "worker_pane": ownership["pane"], "verified_absent": True},
+        lambda ownership: (
+            cleaned.append(dict(ownership))
+            or {
+                "status": "closed",
+                "worker_pane": ownership["pane"],
+                "verified_absent": True,
+            }
+        ),
     )
 
     response, record = _live_intake_clerk(
@@ -4676,7 +4807,9 @@ def _repairable_order(tmp_path: Path, order_id: str) -> dict:
     }
 
 
-def test_an_unsafe_consult_identity_is_refused_rather_than_regenerated(tmp_path: Path) -> None:
+def test_an_unsafe_consult_identity_is_refused_rather_than_regenerated(
+    tmp_path: Path,
+) -> None:
     """A LAUNDERING GUARD, not specialist vocabulary — and the reason a keyword sweep of the
     word `consult` must not take it out.
 
@@ -4688,7 +4821,9 @@ def test_an_unsafe_consult_identity_is_refused_rather_than_regenerated(tmp_path:
     """
     with pytest.raises(ContractError, match="cannot be regenerated"):
         recruiter._complete_order_form(
-            _repairable_order(tmp_path, "consult-../../etc/passwd"), "raw", tmp_path / "order.json"
+            _repairable_order(tmp_path, "consult-../../etc/passwd"),
+            "raw",
+            tmp_path / "order.json",
         )
 
 
@@ -4723,7 +4858,13 @@ def test_unsafe_consult_prefixed_order_ids_are_refused_not_laundered(
         recruiter,
         "_run_order_intake_clerk",
         lambda *args, **kwargs: (
-            SimpleNamespace(order=None, refusal="Unsafe consult identity cannot be repaired.", understood=(), missing=(), notes=()),
+            SimpleNamespace(
+                order=None,
+                refusal="Unsafe consult identity cannot be repaired.",
+                understood=(),
+                missing=(),
+                notes=(),
+            ),
             {"attempt": 1},
         ),
     )
@@ -4748,7 +4889,9 @@ def test_identical_bytes_reuse_one_clerk_but_different_bytes_launch_a_fresh_one(
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
     monkeypatch.setattr(recruiter, "STATE_FILE", state)
     monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
-    monkeypatch.setattr(recruiter, "_run_order_intake_clerk", _live_intake_clerk)  # the real seam
+    monkeypatch.setattr(
+        recruiter, "_run_order_intake_clerk", _live_intake_clerk
+    )  # the real seam
 
     order_a = _order(result_path=str(tmp_path / "result-a.json"))
     order_b = _order(agent="reviewer", result_path=str(tmp_path / "result-b.json"))
@@ -4797,7 +4940,9 @@ def test_identical_bytes_reuse_one_clerk_but_different_bytes_launch_a_fresh_one(
     # Byte-identical resubmission of order A: reused, no second launch.
     order_path.write_text(json.dumps(order_a))
     assert recruiter._intake_order(str(order_path), "roster.yaml") == order_a
-    assert len(launches) == 1  # the resubmission reused the first attempt's validated response
+    assert (
+        len(launches) == 1
+    )  # the resubmission reused the first attempt's validated response
 
     # A DIFFERENT submission (order B): different bytes, so a fresh clerk launches.
     current["order"] = order_b
@@ -4851,7 +4996,9 @@ def test_identical_intake_reuses_only_a_validated_indexed_attempt(
     monkeypatch.setattr(
         recruiter,
         "_start_herdr_agent",
-        lambda *args, **kwargs: pytest.fail("a verified identical intake must not hire twice"),
+        lambda *args, **kwargs: pytest.fail(
+            "a verified identical intake must not hire twice"
+        ),
     )
 
     parsed, record = _live_intake_clerk(
@@ -4897,8 +5044,14 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
     monkeypatch.setattr(
         recruiter,
         "_cleanup_intake_clerk",
-        lambda ownership: cleaned.append(dict(ownership))
-        or {"status": "closed", "worker_pane": ownership["pane"], "verified_absent": True},
+        lambda ownership: (
+            cleaned.append(dict(ownership))
+            or {
+                "status": "closed",
+                "worker_pane": ownership["pane"],
+                "verified_absent": True,
+            }
+        ),
     )
 
     with pytest.raises(RecruiterError, match="journal disk failure"):
@@ -4951,11 +5104,7 @@ def test_uncertain_launch_stays_open_until_delayed_named_agent_appears(
         if args[:2] == ("agent", "get"):
             if not visibility["shown"] or closed:
                 raise RecruiterError("agent_not_found")
-            return {
-                "result": {
-                    "agent": {"name": name, "pane_id": "resolved-pane"}
-                }
-            }
+            return {"result": {"agent": {"name": name, "pane_id": "resolved-pane"}}}
         if args[:2] == ("pane", "get"):
             return {
                 "result": {
@@ -4982,8 +5131,10 @@ def test_uncertain_launch_stays_open_until_delayed_named_agent_appears(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane, **kwargs: closed.append(pane)
-        or {"status": "closed", "worker_pane": pane, "verified_absent": True},
+        lambda pane, **kwargs: (
+            closed.append(pane)
+            or {"status": "closed", "worker_pane": pane, "verified_absent": True}
+        ),
     )
 
     assert recruiter._reconcile_intake_clerks(force=False) == 0
@@ -5042,13 +5193,13 @@ def test_reuse_rejects_attempt_directory_swapped_to_symlink(
     monkeypatch.setattr(
         recruiter,
         "_start_herdr_agent",
-        lambda *args, **kwargs: pytest.fail("unsafe reuse metadata must not start a clerk"),
+        lambda *args, **kwargs: pytest.fail(
+            "unsafe reuse metadata must not start a clerk"
+        ),
     )
 
     with pytest.raises(RecruiterError, match="real broker-owned directory"):
-        _live_intake_clerk(
-            "bad", tmp_path / "raw", "roster.yaml", key
-        )
+        _live_intake_clerk("bad", tmp_path / "raw", "roster.yaml", key)
     assert not list(outside.iterdir())
 
 
@@ -5133,7 +5284,9 @@ def test_pane_id_mismatch_blocks_cleanup_instead_of_closing_foreign_pane(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane, **kwargs: pytest.fail(f"mismatched pane {pane} must not be closed"),
+        lambda pane, **kwargs: pytest.fail(
+            f"mismatched pane {pane} must not be closed"
+        ),
     )
 
     cleanup = recruiter._cleanup_intake_clerk(ownership)
@@ -5190,7 +5343,9 @@ def test_intake_cleanup_requires_expected_agent_process_and_cwd(
     monkeypatch.setattr(
         recruiter,
         "_close_worker_pane",
-        lambda pane, **kwargs: pytest.fail(f"unverified pane {pane} must not be closed"),
+        lambda pane, **kwargs: pytest.fail(
+            f"unverified pane {pane} must not be closed"
+        ),
     )
 
     cleanup = recruiter._cleanup_intake_clerk(ownership)
@@ -5228,8 +5383,10 @@ def test_pid_reuse_does_not_count_as_the_original_intake_owner(
     monkeypatch.setattr(
         recruiter,
         "_cleanup_intake_clerk",
-        lambda ownership: cleaned.append(ownership)
-        or {"status": "already-absent", "verified_absent": True},
+        lambda ownership: (
+            cleaned.append(ownership)
+            or {"status": "already-absent", "verified_absent": True}
+        ),
     )
 
     assert recruiter._reconcile_intake_clerks(force=False) == 1
@@ -5257,7 +5414,9 @@ def _kit_base_specialists() -> list[dict]:
     )["specialists"]
 
 
-def test_the_shipped_kit_base_roster_lists_every_persona_the_kit_agents_compose() -> None:
+def test_the_shipped_kit_base_roster_lists_every_persona_the_kit_agents_compose() -> (
+    None
+):
     """The kit base is loaded in EVERY destination, so it is the whole phone book wherever a
     repo has not written an overlay. Each entry must name a persona the kit can actually
     launch: `agent:` is what the launch template substitutes, and a name with no compose
@@ -5265,10 +5424,16 @@ def test_the_shipped_kit_base_roster_lists_every_persona_the_kit_agents_compose(
     specialists = _kit_base_specialists()
     # .../<tree>/extensions/common/upagent/recruiter.py -> .../<tree>/compose/agents. Identical
     # in the kit and in every destination, both of which carry the composed agent recipes.
-    recipes = {path.stem for path in (_ENGINE.parents[3] / "compose/agents").glob("*.yaml")}
+    recipes = {
+        path.stem for path in (_ENGINE.parents[3] / "compose/agents").glob("*.yaml")
+    }
 
-    assert specialists, "the kit ships no specialists — every destination's phone book is empty"
-    assert recipes, "no agent compose recipes found; the path this test resolves has moved"
+    assert specialists, (
+        "the kit ships no specialists — every destination's phone book is empty"
+    )
+    assert recipes, (
+        "no agent compose recipes found; the path this test resolves has moved"
+    )
     missing = sorted(
         entry["agent"] for entry in specialists if entry["agent"] not in recipes
     )
@@ -5307,7 +5472,9 @@ def test_the_phone_book_caps_the_whole_line_not_just_the_description(
 
     recruiter.cmd_specialists()
 
-    rendered = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("- **")]
+    rendered = [
+        ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("- **")
+    ]
     assert len(rendered) == 1
     assert len(rendered[0]) < recruiter.PHONE_BOOK_LINE_CAP
     assert rendered[0].endswith("...")
@@ -5339,7 +5506,9 @@ def test_a_specialist_with_no_description_falls_back_to_its_persona_frontmatter(
     )
     persona = repo / ".claude/agents/reviewer.md"
     persona.parent.mkdir(parents=True)
-    persona.write_text("---\ndescription: Reads the diff and cites it.\nmodel: opus\n---\n\nBody.\n")
+    persona.write_text(
+        "---\ndescription: Reads the diff and cites it.\nmodel: opus\n---\n\nBody.\n"
+    )
 
     index = recruiter._specialist_index(recruiter.load_specialist_roster())
 
@@ -5353,7 +5522,9 @@ def test_the_shipped_kit_base_roster_satisfies_the_loader_it_ships_for() -> None
 
     for entry in specialists:
         recruiter._validate_specialist({**entry, "origin": "kit-base"})
-        assert entry.get("description"), f"{entry['name']} has no description to choose it by"
+        assert entry.get("description"), (
+            f"{entry['name']} has no description to choose it by"
+        )
 
 
 # --- the consult door ---------------------------------------------------------
@@ -5369,10 +5540,20 @@ def _two_reviewers_roster() -> str:
     return recruiter.yaml.safe_dump(
         {
             "specialists": [
-                {"name": "reviewer", "description": "first", "harness": "claude",
-                 "model": "opus", "agent": "reviewer"},
-                {"name": "reviewer", "description": "second", "harness": "claude",
-                 "model": "haiku", "agent": "other"},
+                {
+                    "name": "reviewer",
+                    "description": "first",
+                    "harness": "claude",
+                    "model": "opus",
+                    "agent": "reviewer",
+                },
+                {
+                    "name": "reviewer",
+                    "description": "second",
+                    "harness": "claude",
+                    "model": "haiku",
+                    "agent": "other",
+                },
             ]
         }
     )
@@ -5414,8 +5595,13 @@ def test_a_duplicate_specialist_name_in_the_kit_base_fails_loud(
         recruiter.yaml.safe_dump(
             {
                 "specialists": [
-                    {"name": "payments", "description": "clean", "harness": "claude",
-                     "model": "sonnet", "agent": "payments"},
+                    {
+                        "name": "payments",
+                        "description": "clean",
+                        "harness": "claude",
+                        "model": "sonnet",
+                        "agent": "payments",
+                    },
                 ]
             }
         )
@@ -5496,7 +5682,9 @@ def _answering_dispatch(answer: dict | None, seen: list[dict]):
 
 
 def _receipt(consult_path: Path) -> dict:
-    return json.loads(consult_path.with_name(consult_path.name + ".receipt.json").read_text())
+    return json.loads(
+        consult_path.with_name(consult_path.name + ".receipt.json").read_text()
+    )
 
 
 def _cited_answer(consult_id: str = "phase-2.stage-1.pass-1.consult-1") -> dict:
@@ -5517,13 +5705,17 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path)
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     assert recruiter.cmd_consult(str(consult), "roster.yaml") == 0
 
     order = seen[0]
     assert set(order) <= set(recruiter.ORDER_INTAKE_ALIASES)
-    recruiter.contracts.parse_order(json.dumps(order))  # must satisfy the ordinary contract
+    recruiter.contracts.parse_order(
+        json.dumps(order)
+    )  # must satisfy the ordinary contract
     assert order["agent"] == "reviewer"
     assert order["timeout_ms"] == recruiter.CONSULT_TIMEOUT_MS
     assert order["cockpit_pane"] == "ws1:%7"
@@ -5539,7 +5731,9 @@ def test_a_consult_order_is_not_filed_under_the_callers_phase(
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path)
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
@@ -5574,7 +5768,10 @@ def test_a_specialist_signalled_failure_is_recorded_as_failed_not_rejected(
     reporting a failure and the door refusing its evidence."""
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path)
-    signalled = {"consult_id": "phase-2.stage-1.pass-1.consult-1", "error": "repo unreadable"}
+    signalled = {
+        "consult_id": "phase-2.stage-1.pass-1.consult-1",
+        "error": "repo unreadable",
+    }
     monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(signalled, []))
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
@@ -5646,7 +5843,9 @@ def test_a_near_miss_specialist_name_is_resolved_deterministically_and_recorded(
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path, specialist="Reviewer")
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
@@ -5667,7 +5866,9 @@ def test_a_near_miss_specialist_name_is_resolved_deterministically_and_recorded(
         ("", None),
     ],
 )
-def test_specialist_name_resolution_is_deterministic(value: str, expected: str | None) -> None:
+def test_specialist_name_resolution_is_deterministic(
+    value: str, expected: str | None
+) -> None:
     assert recruiter._resolve_specialist_name(value, ["reviewer", "qa"])[0] == expected
 
 
@@ -5685,7 +5886,9 @@ def test_a_consult_runs_in_the_directory_the_caller_named(
     elsewhere.mkdir()
     consult = _consult_file(tmp_path, cwd=str(elsewhere))
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
@@ -5702,7 +5905,9 @@ def test_a_consult_naming_a_vanished_directory_falls_back_to_the_rosters_repo(
     repo = _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path, cwd=str(tmp_path / "deleted-worktree"))
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
@@ -5739,7 +5944,9 @@ def test_the_brief_states_the_citation_requirement_the_answer_is_judged_by(
     _specialist_world(tmp_path, monkeypatch, location=".claude/agents/reviewer.md")
     consult = _consult_file(tmp_path)
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
@@ -5797,7 +6004,11 @@ def test_a_malformed_consult_that_names_an_answer_path_is_answered_there(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
-            {"consult_id": "c-9", "answer_path": str(tmp_path / "a.json"), "specialist": "reviewer"}
+            {
+                "consult_id": "c-9",
+                "answer_path": str(tmp_path / "a.json"),
+                "specialist": "reviewer",
+            }
         )
     )
 
@@ -5816,9 +6027,13 @@ def test_the_receipt_names_the_ordinary_request_identity_the_ledger_knows(
     id or result path. That is what makes a worker's `consults` claim resolvable rather than
     self-reported prose."""
     _specialist_world(tmp_path, monkeypatch)
-    consult = _consult_file(tmp_path, requested_by="phase-2.stage-1-implementation.pass-1.try-1")
+    consult = _consult_file(
+        tmp_path, requested_by="phase-2.stage-1-implementation.pass-1.try-1"
+    )
     seen: list[dict] = []
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
@@ -5837,13 +6052,22 @@ def test_the_consult_prints_one_machine_readable_receipt_line(
     sentinel to wait for. One line, parseable, emitted on every path."""
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path)
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), []))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), [])
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("CONSULT_RECEIPT ")]
+    lines = [
+        ln
+        for ln in capsys.readouterr().out.splitlines()
+        if ln.startswith("CONSULT_RECEIPT ")
+    ]
     assert len(lines) == 1
-    assert json.loads(lines[0].removeprefix("CONSULT_RECEIPT "))["answer_verdict"] == "cited"
+    assert (
+        json.loads(lines[0].removeprefix("CONSULT_RECEIPT "))["answer_verdict"]
+        == "cited"
+    )
 
 
 # --- consult receipts a worker cannot forge (Tier 2) --------------------------
@@ -5918,7 +6142,10 @@ def test_a_worker_cannot_bank_a_receipt_for_a_consult_that_never_happened(
 
     assert stamp["consults_verified"] == []
     assert stamp["consults_unverified"] == [
-        {"consult_id": "phase-2.stage-1.pass-1.consult-1", "request_id": _claim()["request_id"]}
+        {
+            "consult_id": "phase-2.stage-1.pass-1.consult-1",
+            "request_id": _claim()["request_id"],
+        }
     ]
 
 
@@ -5954,9 +6181,12 @@ def test_a_consult_another_worker_made_cannot_be_claimed_as_your_own(
     theirs = _order(order_id="phase-2.stage-1-implementation.pass-1.try-2")
     _broker_a_real_consult(tmp_path, monkeypatch, theirs)
 
-    assert recruiter.resolve_consult_claims(mine, _worker_result([_claim()], mine))[
-        "consults_verified"
-    ] == []
+    assert (
+        recruiter.resolve_consult_claims(mine, _worker_result([_claim()], mine))[
+            "consults_verified"
+        ]
+        == []
+    )
     assert recruiter.resolve_consult_claims(theirs, _worker_result([_claim()], theirs))[
         "consults_verified"
     ]
@@ -6004,14 +6234,19 @@ def test_a_consult_with_no_requester_is_unverifiable_but_never_false(
     order = _worker_order(tmp_path)
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path)  # no requested_by
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), []))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), [])
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
     assert "index_path" not in _receipt(consult)
-    assert recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))[
-        "consults_verified"
-    ] == []
+    assert (
+        recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))[
+            "consults_verified"
+        ]
+        == []
+    )
 
 
 def test_a_consult_that_failed_before_any_specialist_ran_is_not_verifiable(
@@ -6027,23 +6262,32 @@ def test_a_consult_that_failed_before_any_specialist_ran_is_not_verifiable(
     """
     order = _worker_order(tmp_path)
     _specialist_world(tmp_path, monkeypatch)
-    consult = _consult_file(tmp_path, requested_by=order["order_id"], specialist="ghostwriter")
+    consult = _consult_file(
+        tmp_path, requested_by=order["order_id"], specialist="ghostwriter"
+    )
     monkeypatch.setattr(
         recruiter,
         "cmd_dispatch",
-        lambda *a, **k: pytest.fail("an unknown specialist must fail before any worker runs"),
+        lambda *a, **k: pytest.fail(
+            "an unknown specialist must fail before any worker runs"
+        ),
     )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
     receipt = _receipt(consult)
     assert receipt["answer_verdict"] == "rejected"
-    assert "order_receipt_state" not in receipt  # the order never finished — no worker ran
+    assert (
+        "order_receipt_state" not in receipt
+    )  # the order never finished — no worker ran
     assert "index_path" not in receipt  # so nothing was recorded to verify against
     stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
     assert stamp["consults_verified"] == []
     assert stamp["consults_unverified"] == [
-        {"consult_id": "phase-2.stage-1.pass-1.consult-1", "request_id": _claim()["request_id"]}
+        {
+            "consult_id": "phase-2.stage-1.pass-1.consult-1",
+            "request_id": _claim()["request_id"],
+        }
     ]
 
 
@@ -6056,11 +6300,15 @@ def test_a_consult_that_never_reached_the_recruiter_is_not_verifiable(
     order = _worker_order(tmp_path)
     _specialist_world(tmp_path, monkeypatch)
     monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "recruiter-is-down.json")
-    consult = _consult_file(tmp_path, requested_by=order["order_id"])  # names the known reviewer
+    consult = _consult_file(
+        tmp_path, requested_by=order["order_id"]
+    )  # names the known reviewer
     monkeypatch.setattr(
         recruiter,
         "cmd_dispatch",
-        lambda *a, **k: pytest.fail("a down Recruiter must fail before any worker runs"),
+        lambda *a, **k: pytest.fail(
+            "a down Recruiter must fail before any worker runs"
+        ),
     )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
@@ -6069,9 +6317,12 @@ def test_a_consult_that_never_reached_the_recruiter_is_not_verifiable(
     assert receipt["answer_verdict"] == "rejected"
     assert "order_receipt_state" not in receipt
     assert "index_path" not in receipt
-    assert recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))[
-        "consults_verified"
-    ] == []
+    assert (
+        recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))[
+            "consults_verified"
+        ]
+        == []
+    )
 
 
 def test_a_planted_index_entry_with_no_finished_order_is_not_verified(
@@ -6083,7 +6334,9 @@ def test_a_planted_index_entry_with_no_finished_order_is_not_verified(
     monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
     order = _worker_order(tmp_path)
     claim = _claim()
-    entry_path = recruiter.consult_index_entry_path(order["order_id"], claim["consult_id"])
+    entry_path = recruiter.consult_index_entry_path(
+        order["order_id"], claim["consult_id"]
+    )
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry_path.write_text(
         json.dumps(
@@ -6125,13 +6378,17 @@ def test_a_consult_whose_answer_failed_the_citation_gate_is_verifiable_as_reject
         "answer": "In the leader loop, before each try.",
         "citations": ["foo.py"],  # no `:line` — fails CITATION_RE
     }
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(uncited_success, []))
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(uncited_success, [])
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
     receipt = _receipt(consult)
     assert receipt["order_receipt_state"] == "finished"  # the worker ran
-    assert receipt["answer_verdict"] == "rejected"  # the citation gate rejected the uncited answer
+    assert (
+        receipt["answer_verdict"] == "rejected"
+    )  # the citation gate rejected the uncited answer
     assert "index_path" in receipt  # still indexed, because it ran
     stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
     assert stamp["consults_verified"] == [
@@ -6155,14 +6412,20 @@ def test_a_consult_whose_specialist_signaled_failure_is_verifiable_as_failed(
     _specialist_world(tmp_path, monkeypatch)
     consult = _consult_file(tmp_path, requested_by=order["order_id"])
     consult_id = json.loads(consult.read_text())["consult_id"]
-    signaled_failure = recruiter.contracts_consult.failure_answer(consult_id, "could not determine")
-    monkeypatch.setattr(recruiter, "cmd_dispatch", _answering_dispatch(signaled_failure, []))
+    signaled_failure = recruiter.contracts_consult.failure_answer(
+        consult_id, "could not determine"
+    )
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(signaled_failure, [])
+    )
 
     recruiter.cmd_consult(str(consult), "roster.yaml")
 
     receipt = _receipt(consult)
     assert receipt["order_receipt_state"] == "finished"  # the worker ran
-    assert receipt["answer_verdict"] == "failed"  # specialist-signaled failure, NOT the citation gate
+    assert (
+        receipt["answer_verdict"] == "failed"
+    )  # specialist-signaled failure, NOT the citation gate
     assert "index_path" in receipt  # still indexed, because it ran
     stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
     assert stamp["consults_verified"] == [
@@ -6199,7 +6462,9 @@ def test_a_publication_stamps_the_receipt_the_stage_2_auditor_reads(
     _broker_a_real_consult(tmp_path, monkeypatch, order)
     ledger = recruiter.JobLedger(tmp_path / "hub")
     key, _ = ledger.submit(order)
-    token = ledger.claim(key, order["order_id"], 60_000, owner={"runner_pid": os.getpid()})
+    token = ledger.claim(
+        key, order["order_id"], 60_000, owner={"runner_pid": os.getpid()}
+    )
     assert token is not None
     result = _worker_result([_claim(), _claim(consult_id="never-happened")], order)
 
@@ -6215,10 +6480,14 @@ def test_a_publication_stamps_the_receipt_the_stage_2_auditor_reads(
     assert [c["consult_id"] for c in receipt["consults_verified"]] == [
         "phase-2.stage-1.pass-1.consult-1"
     ]
-    assert [c["consult_id"] for c in receipt["consults_unverified"]] == ["never-happened"]
+    assert [c["consult_id"] for c in receipt["consults_unverified"]] == [
+        "never-happened"
+    ]
 
 
-def test_a_malformed_consults_claim_is_refused_by_the_result_contract(tmp_path: Path) -> None:
+def test_a_malformed_consults_claim_is_refused_by_the_result_contract(
+    tmp_path: Path,
+) -> None:
     """Tier 1: shape. `parse_result` is pure and has no ledger, so it can say a claim is WELL
     FORMED but never that it is TRUE — that is the resolver's job above. What it can do is
     refuse bookkeeping that could not be resolved by anyone, which is what an entry missing its
@@ -6235,10 +6504,14 @@ def test_a_malformed_consults_claim_is_refused_by_the_result_contract(tmp_path: 
         )
 
 
-def test_a_wellformed_consults_list_still_passes_the_result_contract(tmp_path: Path) -> None:
+def test_a_wellformed_consults_list_still_passes_the_result_contract(
+    tmp_path: Path,
+) -> None:
     """The shape check must not become a reason a real result is thrown away."""
     order = _worker_order(tmp_path)
 
-    parsed = recruiter.contracts.parse_result(json.dumps(_worker_result([_claim()], order)))
+    parsed = recruiter.contracts.parse_result(
+        json.dumps(_worker_result([_claim()], order))
+    )
 
     assert parsed["consults"] == [_claim()]

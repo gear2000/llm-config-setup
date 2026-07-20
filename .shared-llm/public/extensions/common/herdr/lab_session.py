@@ -113,7 +113,9 @@ def _ensure_state_dir() -> None:
         STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = STATE_DIR.lstat()
     except OSError as error:
-        raise LabError(f"lab state directory {STATE_DIR} is unavailable: {error}") from error
+        raise LabError(
+            f"lab state directory {STATE_DIR} is unavailable: {error}"
+        ) from error
     if not stat.S_ISDIR(info.st_mode) or STATE_DIR.is_symlink():
         raise LabError(f"lab state directory {STATE_DIR} must be a real directory")
     if info.st_uid != os.getuid():
@@ -121,7 +123,9 @@ def _ensure_state_dir() -> None:
     try:
         STATE_DIR.chmod(0o700)
     except OSError as error:
-        raise LabError(f"lab state directory {STATE_DIR} cannot be secured: {error}") from error
+        raise LabError(
+            f"lab state directory {STATE_DIR} cannot be secured: {error}"
+        ) from error
 
 
 def _ownership_path(name: str) -> Path:
@@ -136,7 +140,9 @@ def _read_ownership(name: str) -> dict:
     except FileNotFoundError as error:
         raise LabError(f"missing lab ownership record for {name!r}") from error
     except (OSError, json.JSONDecodeError) as error:
-        raise LabError(f"lab ownership record for {name!r} is invalid: {error}") from error
+        raise LabError(
+            f"lab ownership record for {name!r} is invalid: {error}"
+        ) from error
     if not isinstance(value, dict) or value.get("session") != name:
         raise LabError(f"lab ownership record for {name!r} has the wrong identity")
     if value.get("created") is not True:
@@ -202,7 +208,9 @@ def provision(name: str) -> dict[str, object]:
     if owner.get("created") is True:
         raise LabError(f"session {name!r} is already owned by this lab helper")
     if _find_session(_session_list(), name) is not None:
-        raise LabError(f"session {name!r} appeared before provision; refusing to adopt it")
+        raise LabError(
+            f"session {name!r} appeared before provision; refusing to adopt it"
+        )
     process = subprocess.Popen(
         ["herdr", "--session", name, "server"],
         stdout=subprocess.DEVNULL,

@@ -338,9 +338,7 @@ def _start_gated_leader(
     return pane_id, returned_workspace if isinstance(returned_workspace, str) else ""
 
 
-def _verify_gated_leader(
-    pane_id: str, script_path: Path, herdr_session: str
-) -> None:
+def _verify_gated_leader(pane_id: str, script_path: Path, herdr_session: str) -> None:
     process_info = (
         recruiter._herdr_json(
             "pane", "process-info", "--pane", pane_id, herdr_session=herdr_session
@@ -417,7 +415,9 @@ def start_phase(
     if pass_number <= 0:
         raise PhaseStartError("pass must be a positive integer")
     if not run_root.is_absolute() or not run_root.is_dir():
-        raise PhaseStartError(f"run_root must be an existing absolute directory: {run_root}")
+        raise PhaseStartError(
+            f"run_root must be an existing absolute directory: {run_root}"
+        )
     if not cwd.is_absolute() or not cwd.is_dir():
         raise PhaseStartError(f"cwd must be an existing absolute directory: {cwd}")
     plan_path = run_root / "plan.md"
@@ -451,10 +451,9 @@ def start_phase(
                         "phase-start receipt belongs to a different Herdr session"
                     )
                 existing_leader_pane = existing.get("leader_pane")
-                if (
-                    isinstance(existing_leader_pane, str)
-                    and existing_leader_pane in _live_panes(herdr_session)
-                ):
+                if isinstance(
+                    existing_leader_pane, str
+                ) and existing_leader_pane in _live_panes(herdr_session):
                     return cast(dict[str, object], existing)
                 raise PhaseStartError(
                     "phase-start receipt says ready but its leader is no longer live"
@@ -500,7 +499,9 @@ def start_phase(
             f"```text\n{leader_command}\n```\n",
         )
         lead_profile = cast(dict[str, str], lead["profile"])
-        launch = _resolve_leader_launch(roster, phase_id, lead, cwd, leader_instructions)
+        launch = _resolve_leader_launch(
+            roster, phase_id, lead, cwd, leader_instructions
+        )
         _write_text_atomic(
             script_path,
             "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -565,9 +566,7 @@ def start_phase(
                 "leader_health": leader_health,
                 "leader_pane": leader_pane,
                 "herdr_session": herdr_session,
-                "ownership": {
-                    "leader": {"pane_id": leader_pane, "state": "created"}
-                },
+                "ownership": {"leader": {"pane_id": leader_pane, "state": "created"}},
                 "pass": pass_number,
                 "phase_id": phase_id,
                 "state": "ready",
@@ -607,7 +606,11 @@ def start_phase(
                         recruiter._close_worker_pane(
                             leader_pane, herdr_session=herdr_session
                         )
-                    except (recruiter.RecruiterError, OSError, subprocess.SubprocessError) as close_error:
+                    except (
+                        recruiter.RecruiterError,
+                        OSError,
+                        subprocess.SubprocessError,
+                    ) as close_error:
                         # Never let cleanup mask the startup error that got us here.
                         sys.stderr.write(
                             f"phase-start cleanup: could not close gated leader {leader_pane}: {close_error}\n"
@@ -619,6 +622,7 @@ def start_phase(
                         and active.get("herdr_session") == herdr_session
                     ):
                         _set_active_leader(active_path, phase_id, None, None)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="upagent-phase-start")

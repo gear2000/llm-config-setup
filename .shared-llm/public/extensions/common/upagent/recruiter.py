@@ -496,7 +496,10 @@ class JobLedger:
                 candidate = load_result(path, expected_order_id=order["order_id"])
             except (ContractError, OSError):
                 continue
-            if candidate["verdict"] == receipt["verdict"] and candidate not in surviving:
+            if (
+                candidate["verdict"] == receipt["verdict"]
+                and candidate not in surviving
+            ):
                 surviving.append(candidate)
         return surviving[0] if len(surviving) == 1 else None
 
@@ -1003,7 +1006,9 @@ def load_roster(path: str | Path) -> dict:
 # specialist owns this area" rather than as an error.
 
 SPECIALIST_ROSTER_FILE = "specialists.yaml"
-SPECIALIST_OVERLAY_REL = ".shared-llm/this_repo/extensions/common/upagent/specialists.yaml"
+SPECIALIST_OVERLAY_REL = (
+    ".shared-llm/this_repo/extensions/common/upagent/specialists.yaml"
+)
 
 
 def specialist_roster_paths() -> tuple[Path | None, Path, str]:
@@ -1043,7 +1048,9 @@ def _repo_root_from_roster(path: Path) -> Path:
     for candidate in (path.parent, *path.parent.parents):
         if (candidate / ".git").exists():
             return candidate
-    raise RecruiterError(f"could not find a repository root above roster {path}: no .git marker")
+    raise RecruiterError(
+        f"could not find a repository root above roster {path}: no .git marker"
+    )
 
 
 def _read_specialist_file(path: Path) -> dict:
@@ -1071,10 +1078,14 @@ def _named_specialists(entries: list, origin: str, path: Path) -> dict[str, dict
     named: dict[str, dict] = {}
     for entry in entries:
         if not isinstance(entry, dict):
-            raise RecruiterError(f"every specialist entry must be an object: {entry!r} (in {path})")
+            raise RecruiterError(
+                f"every specialist entry must be an object: {entry!r} (in {path})"
+            )
         name = entry.get("name")
         if not isinstance(name, str) or not name:
-            raise RecruiterError(f"every specialist needs a non-empty `name`: {entry} (in {path})")
+            raise RecruiterError(
+                f"every specialist needs a non-empty `name`: {entry} (in {path})"
+            )
         if name in named:
             raise RecruiterError(
                 f"specialist {name!r} is defined more than once in {path}; base-under-overlay "
@@ -1090,13 +1101,19 @@ def _validate_specialist(entry: dict) -> None:
         if not isinstance(entry.get(key), str) or not entry[key]:
             raise RecruiterError(f"every specialist needs a non-empty `{key}`: {entry}")
     if not isinstance(entry.get("model"), str):
-        raise RecruiterError(f"every specialist needs a string `model` (may be empty): {entry}")
+        raise RecruiterError(
+            f"every specialist needs a string `model` (may be empty): {entry}"
+        )
     if entry["harness"] not in KNOWN_HARNESSES:
         raise RecruiterError(
             f"specialist {entry['name']!r} has unsupported harness {entry['harness']!r}"
         )
-    if "effort" in entry and (not isinstance(entry["effort"], str) or not entry["effort"]):
-        raise RecruiterError(f"specialist {entry['name']!r} effort must be a non-empty string")
+    if "effort" in entry and (
+        not isinstance(entry["effort"], str) or not entry["effort"]
+    ):
+        raise RecruiterError(
+            f"specialist {entry['name']!r} effort must be a non-empty string"
+        )
 
 
 def load_specialist_roster() -> dict:
@@ -1150,7 +1167,9 @@ def _specialist_description(roster: dict, entry: dict) -> str:
     location = entry.get("location")
     if not location:
         return ""
-    path = _resolve_specialist_path(location, roster["repo_root"], "specialist location")
+    path = _resolve_specialist_path(
+        location, roster["repo_root"], "specialist location"
+    )
     if not path.is_file():
         return ""
     matched = re.match(r"\A---\n(.*?)\n---\n", path.read_text(), re.DOTALL)
@@ -1160,7 +1179,11 @@ def _specialist_description(roster: dict, entry: dict) -> str:
         frontmatter = yaml.safe_load(matched.group(1))
     except yaml.YAMLError:
         return ""
-    description = (frontmatter or {}).get("description", "") if isinstance(frontmatter, dict) else ""
+    description = (
+        (frontmatter or {}).get("description", "")
+        if isinstance(frontmatter, dict)
+        else ""
+    )
     return str(description).strip().split("\n")[0]
 
 
@@ -1424,9 +1447,7 @@ def _validate_herdr_session_name(value: object, field: str = "herdr session") ->
     if not isinstance(value, str) or not value.strip():
         raise RecruiterError(f"{field} must be a non-empty string")
     if value.strip() != value or HERDR_SESSION_NAME_RE.fullmatch(value) is None:
-        raise RecruiterError(
-            f"{field} contains unsupported characters: {value!r}"
-        )
+        raise RecruiterError(f"{field} contains unsupported characters: {value!r}")
     return value
 
 
@@ -1450,7 +1471,9 @@ def _run_raw_herdr(
             f"herdr {' '.join(args)} timed out after {timeout_seconds} seconds"
         ) from error
     except OSError as error:
-        raise RecruiterError(f"herdr {' '.join(args)} could not run: {error}") from error
+        raise RecruiterError(
+            f"herdr {' '.join(args)} could not run: {error}"
+        ) from error
 
 
 def _herdr_session_list() -> dict:
@@ -1491,7 +1514,9 @@ def _active_herdr_socket_from_status(session_hint: str | None) -> str:
         raise RecruiterError("could not resolve Herdr session: server is not running")
     socket = server.get("socket") or server.get("socket_path")
     if not isinstance(socket, str) or not socket:
-        raise RecruiterError("could not resolve Herdr session: status returned no socket")
+        raise RecruiterError(
+            "could not resolve Herdr session: status returned no socket"
+        )
     return socket
 
 
@@ -2290,7 +2315,9 @@ def _watchdog_terminal_reason(order: dict, result: dict) -> str | None:
     terminal = order["watchdog_terminal"]
     path = Path(terminal["path"])
     if not path.is_file():
-        return f"authoritative {terminal['kind']} terminal record does not exist: {path}"
+        return (
+            f"authoritative {terminal['kind']} terminal record does not exist: {path}"
+        )
     try:
         value = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
@@ -2418,9 +2445,7 @@ def _start_completion_monitor(
                 stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
                 continue
             finalized.set()
-            while finalized.is_set() and not stop.wait(
-                COMPLETION_MONITOR_POLL_SECONDS
-            ):
+            while finalized.is_set() and not stop.wait(COMPLETION_MONITOR_POLL_SECONDS):
                 pass
             invalid_signature = None
 
@@ -2441,9 +2466,7 @@ def _write_text_atomic(path: Path, text_value: str) -> None:
     os.replace(temporary, path)
 
 
-def _wait_typed_file(
-    path: Path, timeout_ms: int, parser: Callable[[str], Any]
-) -> Any:
+def _wait_typed_file(path: Path, timeout_ms: int, parser: Callable[[str], Any]) -> Any:
     """Wait for one atomically replaceable LLM response and reject stable malformed output."""
     deadline = time.monotonic() + timeout_ms / 1000
     invalid_signature: tuple[int, int] | None = None
@@ -3342,7 +3365,9 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "watchdog_terminal": ("watchdog_terminal",),
 }
 _SAFE_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_ORDER_ENVELOPE_KEYS = frozenset(("payload", "order", "request", "work_order", "data", "body"))
+_ORDER_ENVELOPE_KEYS = frozenset(
+    ("payload", "order", "request", "work_order", "data", "body")
+)
 ORDER_INTAKE_NEVER_INVENTED = (
     "harness",
     "agent",
@@ -3502,7 +3527,9 @@ def _open_private_directory(
         except FileExistsError:
             pass
         except OSError as error:
-            raise RecruiterError(f"could not create private intake directory {path}: {error}") from error
+            raise RecruiterError(
+                f"could not create private intake directory {path}: {error}"
+            ) from error
     try:
         descriptor = os.open(
             path,
@@ -3559,7 +3586,9 @@ def _secure_file_bytes(path: Path) -> bytes:
                 dir_fd=parent_descriptor,
             )
         except OSError as error:
-            raise RecruiterError(f"secure intake file {path} is unreadable: {error}") from error
+            raise RecruiterError(
+                f"secure intake file {path} is unreadable: {error}"
+            ) from error
         try:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
@@ -3582,7 +3611,9 @@ def _secure_json(path: Path) -> dict:
     try:
         value = json.loads(_secure_file_bytes(path))
     except json.JSONDecodeError as error:
-        raise RecruiterError(f"secure intake JSON {path} is invalid: {error}") from error
+        raise RecruiterError(
+            f"secure intake JSON {path} is invalid: {error}"
+        ) from error
     if not isinstance(value, dict):
         raise RecruiterError(f"secure intake JSON {path} must be an object")
     return value
@@ -3596,7 +3627,9 @@ def _secure_file_exists(path: Path) -> bool:
         except FileNotFoundError:
             return False
         except OSError as error:
-            raise RecruiterError(f"could not inspect secure intake file {path}: {error}") from error
+            raise RecruiterError(
+                f"could not inspect secure intake file {path}: {error}"
+            ) from error
         return True
     finally:
         os.close(parent_descriptor)
@@ -3609,10 +3642,7 @@ def _secure_write_bytes(path: Path, value: bytes) -> None:
     try:
         descriptor = os.open(
             temporary_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             _INTAKE_FILE_MODE,
             dir_fd=parent_descriptor,
         )
@@ -3630,7 +3660,9 @@ def _secure_write_bytes(path: Path, value: bytes) -> None:
         )
         os.fsync(parent_descriptor)
     except OSError as error:
-        raise RecruiterError(f"could not write secure intake file {path}: {error}") from error
+        raise RecruiterError(
+            f"could not write secure intake file {path}: {error}"
+        ) from error
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -3658,14 +3690,14 @@ def _intake_attempt_lock(key: str) -> Iterator[None]:
         try:
             descriptor = os.open(
                 f"{key}.lock",
-                os.O_RDWR
-                | os.O_CREAT
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
                 _INTAKE_FILE_MODE,
                 dir_fd=lock_directory,
             )
         except OSError as error:
-            raise RecruiterError(f"could not open secure intake lock for {key}: {error}") from error
+            raise RecruiterError(
+                f"could not open secure intake lock for {key}: {error}"
+            ) from error
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
             raise RecruiterError(f"intake lock for {key} is not a regular owned file")
@@ -3717,24 +3749,33 @@ def _complete_order_form(
     unknown = set(candidate) - set(ORDER_INTAKE_ALIASES)
     if unknown:
         raise ContractError(
-            "order.json: interpreted order has unknown fields: " + ", ".join(sorted(unknown))
+            "order.json: interpreted order has unknown fields: "
+            + ", ".join(sorted(unknown))
         )
     order = dict(candidate)
     changes: list[str] = []
     order_dir = order_path.resolve().parent
 
     order_id = order.get("order_id")
-    if isinstance(order_id, str) and order_id and not _SAFE_ORDER_ID_RE.fullmatch(order_id):
+    if (
+        isinstance(order_id, str)
+        and order_id
+        and not _SAFE_ORDER_ID_RE.fullmatch(order_id)
+    ):
         if order_id.startswith("consult-"):
             # NOT specialist vocabulary — a laundering guard. An unsafe order id claiming the
             # consult door's minted identity is REFUSED, never silently renamed into a valid
             # one. `_SAFE_ORDER_ID_RE` already excludes `/`; this guard's contribution is
             # refusing rather than repairing. Pinned by recruiter_test.py.
-            raise ContractError("order.json: unsafe consult-shaped order_id cannot be regenerated")
+            raise ContractError(
+                "order.json: unsafe consult-shaped order_id cannot be regenerated"
+            )
         order.pop("order_id")
         changes.append(f"regenerated unsafe order_id {order_id!r}")
     if not isinstance(order.get("order_id"), str) or not order["order_id"]:
-        order["order_id"] = f"intake-{hashlib.sha256(raw_text.encode()).hexdigest()[:12]}"
+        order["order_id"] = (
+            f"intake-{hashlib.sha256(raw_text.encode()).hexdigest()[:12]}"
+        )
         changes.append(f"generated order_id {order['order_id']}")
     if not isinstance(order.get("phase_id"), str) or not order["phase_id"]:
         order["phase_id"] = "intake-adhoc"
@@ -3744,7 +3785,9 @@ def _complete_order_form(
         changes.append("defaulted missing stage_id to stage-5-finalization")
     if "model" not in order:
         order["model"] = ""
-        changes.append("defaulted unspecified model to the harness-resolved empty value")
+        changes.append(
+            "defaulted unspecified model to the harness-resolved empty value"
+        )
 
     for field in ("cwd", "instructions_path"):
         value = order.get(field)
@@ -3816,10 +3859,14 @@ def _clerk_provenance_errors(raw_text: str, candidate: dict) -> list[str]:
     errors: list[str] = []
     unknown_candidate = sorted(set(candidate) - set(ORDER_INTAKE_ALIASES))
     if unknown_candidate:
-        errors.append("interpreted order contains unknown fields: " + ", ".join(unknown_candidate))
+        errors.append(
+            "interpreted order contains unknown fields: " + ", ".join(unknown_candidate)
+        )
     raw_unknown = _raw_unknown_fields(raw_text)
     if raw_unknown:
-        errors.append("submission contains unclassified fields: " + ", ".join(raw_unknown))
+        errors.append(
+            "submission contains unclassified fields: " + ", ".join(raw_unknown)
+        )
 
     for field in ORDER_INTAKE_PROTECTED:
         supplied = _raw_field_values(raw_text, field)
@@ -3855,8 +3902,14 @@ def _clerk_provenance_errors(raw_text: str, candidate: dict) -> list[str]:
 
 
 def _intake_record(
-    *, mode: str, raw_path: Path, interpreted_path: Path, changes: list[str],
-    unknown_fields: list[str], attempts: int, clerk: dict | None = None
+    *,
+    mode: str,
+    raw_path: Path,
+    interpreted_path: Path,
+    changes: list[str],
+    unknown_fields: list[str],
+    attempts: int,
+    clerk: dict | None = None,
 ) -> dict:
     return {
         "at_ns": time.time_ns(),
@@ -3865,16 +3918,16 @@ def _intake_record(
         "raw_path": str(raw_path),
         "raw_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
         "interpreted_path": str(interpreted_path),
-        "interpreted_sha256": hashlib.sha256(
-            interpreted_path.read_bytes()
-        ).hexdigest(),
+        "interpreted_sha256": hashlib.sha256(interpreted_path.read_bytes()).hexdigest(),
         "changes": changes,
         "unknown_fields": unknown_fields,
         **({"clerk": clerk} if clerk is not None else {}),
     }
 
 
-def _intake_evidence(paths: dict[str, Path], clerk: dict | None = None) -> dict[str, str]:
+def _intake_evidence(
+    paths: dict[str, Path], clerk: dict | None = None
+) -> dict[str, str]:
     """Every durable path a human or agent can open after a non-accepted outcome."""
     evidence = {name: str(path) for name, path in paths.items()}
     for field in ("brief_path", "output_path", "ownership_path"):
@@ -3936,11 +3989,15 @@ def _persist_intake_refusal(
     errors: list[str] | None = None,
 ) -> None:
     authored_by = _intake_author(outcome)
-    JobLedger._write_json(paths["interpreted"], candidate if candidate is not None else {"order": None})
+    JobLedger._write_json(
+        paths["interpreted"], candidate if candidate is not None else {"order": None}
+    )
     JobLedger._write_json(
         paths["intake"],
         _intake_record(
-            mode="intake-clerk-refusal" if outcome == "blocked" else "intake-clerk-failure",
+            mode="intake-clerk-refusal"
+            if outcome == "blocked"
+            else "intake-clerk-failure",
             raw_path=paths["raw"],
             interpreted_path=paths["interpreted"],
             changes=[],
@@ -4036,8 +4093,12 @@ def _load_reusable_intake_clerk_response(
         return None
     index = _secure_json(index_path)
     if index.get("schema_version") != 1 or index.get("intake_key") != intake_key:
-        raise RecruiterError("intake reuse index has the wrong schema or request identity")
-    attempt = _validated_attempt_directory(layout["attempts"], index.get("attempt_name"))
+        raise RecruiterError(
+            "intake reuse index has the wrong schema or request identity"
+        )
+    attempt = _validated_attempt_directory(
+        layout["attempts"], index.get("attempt_name")
+    )
     ownership_path = attempt / "ownership.json"
     ownership = _secure_json(ownership_path)
     lease_token = index.get("lease_token")
@@ -4083,7 +4144,9 @@ def _load_reusable_intake_clerk_response(
     }
 
 
-def _matching_intake_process(process_info: object, expected_process: str) -> dict | None:
+def _matching_intake_process(
+    process_info: object, expected_process: str
+) -> dict | None:
     processes = (
         process_info.get("foreground_processes", [])
         if isinstance(process_info, dict)
@@ -4136,7 +4199,10 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
     if not isinstance(agent, dict) or not agent:
         return {"status": "absent", "agent_name": agent_name}
     if agent.get("name") != agent_name:
-        return {"status": "blocked", "reason": "Herdr agent name does not match the lease"}
+        return {
+            "status": "blocked",
+            "reason": "Herdr agent name does not match the lease",
+        }
     pane_id = agent.get("pane_id")
     if not isinstance(pane_id, str) or not pane_id:
         return {"status": "absent", "agent_name": agent_name}
@@ -4163,7 +4229,10 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
     except RecruiterError as error:
         return {"status": "blocked", "reason": f"pane identity lookup failed: {error}"}
     if not isinstance(pane, dict) or pane.get("pane_id", pane_id) != pane_id:
-        return {"status": "blocked", "reason": "Herdr pane identity changed during cleanup"}
+        return {
+            "status": "blocked",
+            "reason": "Herdr pane identity changed during cleanup",
+        }
     expected_agent = ownership.get("expected_agent")
     expected_process = ownership.get("expected_process")
     expected_cwd = ownership.get("expected_cwd")
@@ -4232,9 +4301,8 @@ def _cleanup_intake_clerk(ownership: dict) -> dict[str, object]:
     identity = _resolve_intake_clerk_identity(ownership)
     if identity.get("status") == "absent":
         recorded_pane = ownership.get("pane")
-        if (
-            ownership.get("state") != "closed"
-            and not (isinstance(recorded_pane, str) and recorded_pane)
+        if ownership.get("state") != "closed" and not (
+            isinstance(recorded_pane, str) and recorded_pane
         ):
             # `herdr agent start` is a separate socket transaction. The caller can die after
             # sending it but before Herdr publishes the named agent. One not-found lookup cannot
@@ -4263,7 +4331,9 @@ def _cleanup_intake_clerk(ownership: dict) -> dict[str, object]:
         }
     # Resolve twice immediately before close. A stale pane id from the journal is never used.
     confirmed = _resolve_intake_clerk_identity(ownership)
-    if confirmed.get("status") != "owned" or confirmed.get("pane") != identity.get("pane"):
+    if confirmed.get("status") != "owned" or confirmed.get("pane") != identity.get(
+        "pane"
+    ):
         return {
             "status": "cleanup-blocked",
             "worker_pane": identity.get("pane"),
@@ -4364,7 +4434,9 @@ def _run_order_intake_clerk(
     herdr_session = _resolve_current_herdr_session_name()
     owner_start_time = _process_start_time(os.getpid())
     if owner_start_time is None:
-        raise RecruiterError("could not record the intake owner's process start identity")
+        raise RecruiterError(
+            "could not record the intake owner's process start identity"
+        )
     ownership: dict[str, object] = {
         "schema_version": 1,
         "intake_key": intake_key,
@@ -4380,8 +4452,7 @@ def _run_order_intake_clerk(
         "expires_at": int(time.time())
         + max(
             1,
-            (config.startup_timeout_ms + config.intake_clerk.timeout_ms) // 1000
-            + 30,
+            (config.startup_timeout_ms + config.intake_clerk.timeout_ms) // 1000 + 30,
         ),
         "pane": None,
         "state": "launching",
@@ -4411,7 +4482,9 @@ def _run_order_intake_clerk(
             tab_role="oversight",
             herdr_session=herdr_session,
         )
-        ownership["pane"] = pane  # local cleanup remains possible if journal update fails
+        ownership["pane"] = (
+            pane  # local cleanup remains possible if journal update fails
+        )
         _record_started_intake_clerk(
             ownership_path, ownership, pane, workspace_id, address
         )
@@ -4469,7 +4542,9 @@ def _run_order_intake_clerk(
                     ownership["health"] = cleanup_health
             cleanup = _cleanup_intake_clerk(ownership)
             if cleanup.get("verified_absent") is not True and failure is None:
-                failure = RecruiterError(str(cleanup.get("reason", "clerk cleanup failed")))
+                failure = RecruiterError(
+                    str(cleanup.get("reason", "clerk cleanup failed"))
+                )
         elif launch_attempted:
             # Herdr may have created the named agent before a transport/parsing error prevented
             # _start_herdr_agent from returning its pane. Resolve the pre-journaled name now;
@@ -4542,7 +4617,9 @@ def _intake_refusal_message(
     order_path: str, reason: str, missing: list[str] | None = None
 ) -> str:
     suffix = f" Missing: {', '.join(missing)}." if missing else ""
-    detail = reason.rstrip().removesuffix(".")  # the clerk writes sentences; keep one full stop
+    detail = reason.rstrip().removesuffix(
+        "."
+    )  # the clerk writes sentences; keep one full stop
     return (
         f"invalid order {order_path}: {detail}.{suffix} One fresh intake clerk read the exact "
         "submitted bytes and could not produce an executable order. It will not invent or change "
@@ -4552,7 +4629,9 @@ def _intake_refusal_message(
     )
 
 
-def _intake_attempt_key(submission_key: str, attempt: int, correction: dict | None) -> str:
+def _intake_attempt_key(
+    submission_key: str, attempt: int, correction: dict | None
+) -> str:
     """Give every bounded attempt its own reuse identity so a correction round can never be
     answered by the very response it was sent to correct."""
     if attempt == 1:
@@ -4692,7 +4771,12 @@ def _interpret_submission(
                 unknown_fields=unknown_fields,
                 correction=correction,
             )
-        except (RecruiterError, LifecycleError, ManagementConfigError, OSError) as error:
+        except (
+            RecruiterError,
+            LifecycleError,
+            ManagementConfigError,
+            OSError,
+        ) as error:
             raise _refuse_intake(
                 paths,
                 order_path,
@@ -4731,7 +4815,9 @@ def _interpret_submission(
                 order, form_changes = _complete_order_form(candidate, raw_text, path)
             except ContractError as error:
                 errors = [str(error)]
-                reason = f"intake clerk interpretation failed strict validation: {error}"
+                reason = (
+                    f"intake clerk interpretation failed strict validation: {error}"
+                )
             else:
                 try:
                     _persist_intake_success(
@@ -4784,7 +4870,9 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         order = _intake_order(order_path, roster_path)
     except IntakeOutcomeError as e:
         _print_intake_outcome(e)
-        _reject_legacy_order(order_path, str(e))  # wake old waiters after the outcome is visible
+        _reject_legacy_order(
+            order_path, str(e)
+        )  # wake old waiters after the outcome is visible
         return e.exit_code
     except RecruiterError as e:
         _reject_legacy_order(order_path, str(e))
@@ -5412,7 +5500,11 @@ Use `passed` when the original claims hold, `failed` when they do not (include
     return cmd_dispatch(str(verify_order_path), roster_path)
 
 
-_AWAIT_ANY_VERDICT_KINDS = {"passed": "completed", "failed": "failed", "blocked": "blocked"}
+_AWAIT_ANY_VERDICT_KINDS = {
+    "passed": "completed",
+    "failed": "failed",
+    "blocked": "blocked",
+}
 
 
 def _mailbox_messages(ledger: JobLedger, key: str) -> list[tuple[int, dict]]:
@@ -5424,13 +5516,17 @@ def _mailbox_messages(ledger: JobLedger, key: str) -> list[tuple[int, dict]]:
             sequence = int(path.name.split("-", 1)[0])
             payload = json.loads(path.read_text())
         except (ValueError, OSError, json.JSONDecodeError) as error:
-            raise RecruiterError(f"mailbox message {path} is unreadable: {error}") from error
+            raise RecruiterError(
+                f"mailbox message {path} is unreadable: {error}"
+            ) from error
         if isinstance(payload, dict):
             messages.append((sequence, payload))
     return messages
 
 
-def _emit_await_event(kind: str, request_id: str | None, summary: str, cursor: dict, **detail: object) -> int:
+def _emit_await_event(
+    kind: str, request_id: str | None, summary: str, cursor: dict, **detail: object
+) -> int:
     event: dict[str, object] = {
         "at_ns": time.time_ns(),
         "cursor": cursor,
@@ -5443,15 +5539,25 @@ def _emit_await_event(kind: str, request_id: str | None, summary: str, cursor: d
     return 0
 
 
-def cmd_await_any(order_paths: list[str], timeout_ms: int, cursor_json: str = "{}", poll_seconds: float = HEALTH_PROBE_SECONDS) -> int:
+def cmd_await_any(
+    order_paths: list[str],
+    timeout_ms: int,
+    cursor_json: str = "{}",
+    poll_seconds: float = HEALTH_PROBE_SECONDS,
+) -> int:
     if not order_paths:
         raise RecruiterError("await-any requires at least one order path")
     try:
         cursor_value = json.loads(cursor_json) if cursor_json else {}
     except json.JSONDecodeError as error:
         raise RecruiterError(f"await-any cursor is not valid JSON: {error}") from error
-    if not isinstance(cursor_value, dict) or not all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) for k, v in cursor_value.items()):
-        raise RecruiterError("await-any cursor must be a JSON object of request_id -> integer")
+    if not isinstance(cursor_value, dict) or not all(
+        isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+        for k, v in cursor_value.items()
+    ):
+        raise RecruiterError(
+            "await-any cursor must be a JSON object of request_id -> integer"
+        )
     cursor: dict[str, int] = dict(cursor_value)
     ledger = JobLedger()
     watched: list[tuple[str, dict, str, str]] = []
@@ -5463,7 +5569,9 @@ def cmd_await_any(order_paths: list[str], timeout_ms: int, cursor_json: str = "{
             raise RecruiterError(f"invalid order {path}: {error}") from error
         key = ledger.key_for_order(order)
         if not ledger.request_dir(key).is_dir():
-            raise RecruiterError(f"request {lifecycle.request_identity(order)} has not been submitted")
+            raise RecruiterError(
+                f"request {lifecycle.request_identity(order)} has not been submitted"
+            )
         request_id = lifecycle.request_identity(order)
         if request_id in seen:
             raise RecruiterError(f"await-any lists request {request_id} more than once")
@@ -5476,22 +5584,61 @@ def cmd_await_any(order_paths: list[str], timeout_ms: int, cursor_json: str = "{
             state = ledger.state(key)
             states[request_id] = str(state.get("state"))
             if state.get("state") == "awaiting-requester":
-                return _emit_await_event("decision-required", request_id, f"Request {request_id} reached a work cap; the owner must extend or cancel.", cursor, decision_nonce=state.get("decision_nonce"), order_path=path, terminal=False, timeout_number=state.get("timeout_number"))
+                return _emit_await_event(
+                    "decision-required",
+                    request_id,
+                    f"Request {request_id} reached a work cap; the owner must extend or cancel.",
+                    cursor,
+                    decision_nonce=state.get("decision_nonce"),
+                    order_path=path,
+                    terminal=False,
+                    timeout_number=state.get("timeout_number"),
+                )
             if state.get("state") in ("finished", "cleanup-failed"):
                 receipt = ledger.completed_receipt(key, order)
                 verdict = str(receipt.get("verdict"))
                 kind = _AWAIT_ANY_VERDICT_KINDS.get(verdict, "failed")
-                return _emit_await_event(kind, request_id, f"Request {request_id} is terminal: verdict={verdict}.", cursor, order_path=path, receipt=receipt, terminal=True)
+                return _emit_await_event(
+                    kind,
+                    request_id,
+                    f"Request {request_id} is terminal: verdict={verdict}.",
+                    cursor,
+                    order_path=path,
+                    receipt=receipt,
+                    terminal=True,
+                )
             for sequence, payload in _mailbox_messages(ledger, key):
                 if sequence <= cursor.get(request_id, 0):
                     continue
                 cursor[request_id] = sequence
                 message_type = str(payload.get("type", ""))
-                kind = "worker-warning" if ("warning" in message_type or "failed" in message_type) else "advisory"
-                return _emit_await_event(kind, request_id, str(payload.get("message", message_type)), cursor, detail=payload.get("detail", {}), message_type=message_type, order_path=path, sequence=sequence, terminal=False)
+                kind = (
+                    "worker-warning"
+                    if ("warning" in message_type or "failed" in message_type)
+                    else "advisory"
+                )
+                return _emit_await_event(
+                    kind,
+                    request_id,
+                    str(payload.get("message", message_type)),
+                    cursor,
+                    detail=payload.get("detail", {}),
+                    message_type=message_type,
+                    order_path=path,
+                    sequence=sequence,
+                    terminal=False,
+                )
         if time.monotonic() >= deadline:
-            return _emit_await_event("await-heartbeat", None, "Quiet and healthy: no watched request moved within the bounded wait; re-await.", cursor, states=states, terminal=False)
+            return _emit_await_event(
+                "await-heartbeat",
+                None,
+                "Quiet and healthy: no watched request moved within the bounded wait; re-await.",
+                cursor,
+                states=states,
+                terminal=False,
+            )
         time.sleep(poll_seconds)
+
 
 def cmd_respond(
     order_path: str,
@@ -5585,7 +5732,9 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     # An order may pin its own lifecycle ownership; the roster sets the default. Consults do
     # not pin one: they follow the roster like any other order.
     requested_management = order.get("management") or {}
-    effective_management_mode = requested_management.get("mode") or management_config.mode
+    effective_management_mode = (
+        requested_management.get("mode") or management_config.mode
+    )
     try:
         if effective_management_mode == "dedicated":
             manager = _start_account_manager(
@@ -5938,6 +6087,7 @@ def _find_services_workspace(workspaces_resp: dict) -> dict | None:
 
 RECRUITER_PANE_LABEL = "recruiter"
 
+
 def _recruit_door_command(roster_path: str) -> str:
     """A narrow compatibility door for the common ``recruit <path>`` pane command.
 
@@ -5953,7 +6103,7 @@ def _recruit_door_command(roster_path: str) -> str:
         "echo 'recruit expects exactly one order.json path. Use `recruit <order.json>`; "
         "specialist questions use `just upagent-consult <consult.json>`.' >&2; "
         "return 2; fi; "
-        f"{python} {script} --roster {roster} request -- \"$1\"; "
+        f'{python} {script} --roster {roster} request -- "$1"; '
         "} # normal verified request door"
     )
 
@@ -6140,7 +6290,9 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     return 0
 
 
-def _recruiter_pane_cleanup_decision(state: dict, recruiter_pane: object) -> dict[str, object]:
+def _recruiter_pane_cleanup_decision(
+    state: dict, recruiter_pane: object
+) -> dict[str, object]:
     if not isinstance(recruiter_pane, str) or not recruiter_pane:
         return {
             "status": "not-created",
@@ -6184,9 +6336,7 @@ def cmd_down() -> int:
         raise RecruiterError(f"Recruiter state is invalid: {error}") from error
     if not isinstance(state, dict):
         raise RecruiterError("Recruiter state must be an object")
-    recruiter_pane = (
-        state.get("recruiter_pane") if isinstance(state, dict) else None
-    )
+    recruiter_pane = state.get("recruiter_pane") if isinstance(state, dict) else None
     cleanup = _recruiter_pane_cleanup_decision(state, recruiter_pane)
     if cleanup["status"] == "close-created":
         herdr_session = _recorded_herdr_session(
@@ -6284,7 +6434,9 @@ def cmd_specialists(as_json: bool = False) -> int:
         # lets the rendered line run well past the budget on a real roster.
         prefix = f"- **{name}**{origin} — "
         budget = min(PHONE_BOOK_DESCRIPTION_CAP, PHONE_BOOK_LINE_CAP - 1 - len(prefix))
-        description = str(entry.get("description") or "(no description)").strip().split("\n")[0]
+        description = (
+            str(entry.get("description") or "(no description)").strip().split("\n")[0]
+        )
         if len(description) > budget:
             description = description[: max(0, budget - 3)].rstrip() + "..."
         lines.append(prefix + description)
@@ -6334,9 +6486,13 @@ def _resolve_specialist_name(
     lowered = value.lower()
     case_matches = [n for n in roster_names if n.lower() == lowered]
     if len(case_matches) == 1:
-        return case_matches[0], f"specialist {value!r} matched {case_matches[0]!r} (case)"
+        return case_matches[
+            0
+        ], f"specialist {value!r} matched {case_matches[0]!r} (case)"
     stripped = lowered.removesuffix("-agent")
-    suffix_matches = [n for n in roster_names if n.lower() in (stripped, f"{stripped}-agent")]
+    suffix_matches = [
+        n for n in roster_names if n.lower() in (stripped, f"{stripped}-agent")
+    ]
     if len(set(suffix_matches)) == 1:
         resolved = suffix_matches[0]
         return resolved, f"specialist {value!r} matched {resolved!r} (-agent suffix)"
@@ -6461,7 +6617,12 @@ def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
     if not isinstance(raw, dict):
         return None
     consult_id, answer_path = raw.get("consult_id"), raw.get("answer_path")
-    if isinstance(consult_id, str) and consult_id and isinstance(answer_path, str) and answer_path:
+    if (
+        isinstance(consult_id, str)
+        and consult_id
+        and isinstance(answer_path, str)
+        and answer_path
+    ):
         return consult_id, answer_path
     return None
 
@@ -6474,7 +6635,12 @@ def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> Non
         path = Path(answer_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(contracts_consult.failure_answer(consult_id, f"upagent-consult: {reason}"), indent=2)
+            json.dumps(
+                contracts_consult.failure_answer(
+                    consult_id, f"upagent-consult: {reason}"
+                ),
+                indent=2,
+            )
         )
     except (OSError, ConsultError) as e:
         sys.stderr.write(
@@ -6497,7 +6663,9 @@ def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
     Hub's state directory, and the request-id digest is the identity being verified anyway.
     """
     requester_key = hashlib.sha256(requested_by.encode()).hexdigest()[:16]
-    return consult_index_dir() / requester_key / f"{consult_request_id(consult_id)}.json"
+    return (
+        consult_index_dir() / requester_key / f"{consult_request_id(consult_id)}.json"
+    )
 
 
 def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
@@ -6508,7 +6676,9 @@ def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
     if not isinstance(consult_id, str) or not consult_id:
         return None
     try:
-        recorded = json.loads(consult_index_entry_path(requested_by, consult_id).read_text())
+        recorded = json.loads(
+            consult_index_entry_path(requested_by, consult_id).read_text()
+        )
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(recorded, dict):
@@ -6574,7 +6744,8 @@ def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
                 "answer_verdict": recorded.get("answer_verdict"),
                 "consult_id": recorded.get("consult_id"),
                 "request_id": recorded.get("request_id"),
-                "specialist": recorded.get("resolved_specialist") or recorded.get("specialist"),
+                "specialist": recorded.get("resolved_specialist")
+                or recorded.get("specialist"),
             }
         )
     return {"consults_verified": verified, "consults_unverified": unverified}
@@ -6604,7 +6775,9 @@ def _record_consult_in_index(receipt: dict) -> Path | None:
     path = consult_index_entry_path(requested_by, str(receipt["consult_id"]))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_bytes_atomic(path, (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode())
+        _write_bytes_atomic(
+            path, (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+        )
     except OSError as e:
         # Loud, because the consequence lands on someone else: an unrecorded consult makes an
         # honest worker's claim read as unverified.
@@ -6722,14 +6895,19 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
             )
 
         artifacts["brief"].parent.mkdir(parents=True, exist_ok=True)
-        artifacts["brief"].write_text(build_consult_brief({**consult, "specialist": resolved}, location, cwd))
+        artifacts["brief"].write_text(
+            build_consult_brief({**consult, "specialist": resolved}, location, cwd)
+        )
         # Any answer.json left at this path by a PRIOR consult goes before launch, so the only
         # answer readable afterwards is the one this specialist wrote.
         Path(answer_path).unlink(missing_ok=True)
-        order = build_consult_order(consult, entry, artifacts, cwd=cwd, cockpit_pane=cockpit_pane)
+        order = build_consult_order(
+            consult, entry, artifacts, cwd=cwd, cockpit_pane=cockpit_pane
+        )
         artifacts["result"].unlink(missing_ok=True)
         _write_bytes_atomic(
-            artifacts["order"], (json.dumps(order, indent=2, sort_keys=True) + "\n").encode()
+            artifacts["order"],
+            (json.dumps(order, indent=2, sort_keys=True) + "\n").encode(),
         )
 
         # In-process, no subprocess hop: the door is a caller of the ordinary lifecycle, not a
@@ -6739,7 +6917,9 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
 
         # THE CITATION GATE. `parse_result` already said the worker ran and delivered; this says
         # the answer is backed by evidence. Two questions, two artifacts, both required.
-        answer = contracts_consult.load_answer(answer_path, expected_consult_id=consult_id)
+        answer = contracts_consult.load_answer(
+            answer_path, expected_consult_id=consult_id
+        )
         receipt["answer_verdict"] = "failed" if answer.get("error") else "cited"
     except (
         RecruiterError,
@@ -6803,7 +6983,8 @@ def main(argv: list[str] | None = None) -> int:
     p_verify.add_argument("--agent", default="reviewer")
     p_verify.add_argument("--effort", default="low")
     p_await_any = sub.add_parser(
-        "await-any", help="block until any watched request moves; print one tagged AWAIT_EVENT"
+        "await-any",
+        help="block until any watched request moves; print one tagged AWAIT_EVENT",
     )
     p_await_any.add_argument("orders", nargs="+", help="paths to order.json files")
     p_await_any.add_argument("--timeout-ms", type=int, default=600_000)
@@ -6837,7 +7018,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("status", help="report shared-services state")
     p_specialists = sub.add_parser(
-        "specialists", help="print the merged specialist roster as a paste-ready brief block"
+        "specialists",
+        help="print the merged specialist roster as a paste-ready brief block",
     )
     p_specialists.add_argument(
         "--json", action="store_true", help="print the raw merged index as JSON"
