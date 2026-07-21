@@ -18,6 +18,7 @@ running Herdr instance (see contracts_test.py).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 # Verdicts a worker may report. `passed` advances; `failed` loops back per `revisit`;
@@ -91,7 +92,9 @@ class ContractError(ValueError):
 def _require_str(obj: dict, key: str, where: str) -> str:
     val = obj.get(key)
     if not isinstance(val, str) or val == "":
-        raise ContractError(f"{where}: `{key}` must be a non-empty string (got {val!r})")
+        raise ContractError(
+            f"{where}: `{key}` must be a non-empty string (got {val!r})"
+        )
     return val
 
 
@@ -128,44 +131,74 @@ def parse_order(text: str) -> dict:
     # must be an actual, positive integer before the Recruiter starts any runner work.
     if "timeout_ms" in order:
         timeout_ms = order["timeout_ms"]
-        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
-            raise ContractError("order.json: `timeout_ms` must be a positive integer when present")
+        if (
+            isinstance(timeout_ms, bool)
+            or not isinstance(timeout_ms, int)
+            or timeout_ms <= 0
+        ):
+            raise ContractError(
+                "order.json: `timeout_ms` must be a positive integer when present"
+            )
     # Optional `env` must be a flat str->str map when present (injected via `pane split --env`).
     env = order.get("env")
     if env is not None and (
-        not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+        not isinstance(env, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
     ):
         raise ContractError("order.json: `env` must be a map of string->string")
     request_id = order.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not request_id):
-        raise ContractError("order.json: `request_id` must be a non-empty string when present")
+        raise ContractError(
+            "order.json: `request_id` must be a non-empty string when present"
+        )
     requester = order.get("requester")
     if requester is not None:
         if not isinstance(requester, dict):
-            raise ContractError("order.json: `requester` must be an object when present")
+            raise ContractError(
+                "order.json: `requester` must be an object when present"
+            )
         for field in ("id", "kind", "address"):
             value = requester.get(field)
             if not isinstance(value, str) or not value:
-                raise ContractError(f"order.json: `requester.{field}` must be a non-empty string")
+                raise ContractError(
+                    f"order.json: `requester.{field}` must be a non-empty string"
+                )
     placement = order.get("manager_placement")
     if placement is not None:
         if not isinstance(placement, dict):
-            raise ContractError("order.json: `manager_placement` must be an object when present")
+            raise ContractError(
+                "order.json: `manager_placement` must be an object when present"
+            )
         mode = placement.get("mode")
         if mode not in MANAGER_PLACEMENT_MODES:
-            raise ContractError("order.json: `manager_placement.mode` must be one of " + ", ".join(MANAGER_PLACEMENT_MODES))
+            raise ContractError(
+                "order.json: `manager_placement.mode` must be one of "
+                + ", ".join(MANAGER_PLACEMENT_MODES)
+            )
         for field in ("workspace_id", "workspace_label", "anchor_pane"):
             value = placement.get(field)
             if value is not None and (not isinstance(value, str) or not value):
-                raise ContractError(f"order.json: `manager_placement.{field}` must be a non-empty string when present")
-        if mode == "workspace" and not placement.get("workspace_id") and not placement.get("workspace_label"):
-            raise ContractError("order.json: workspace manager placement needs `workspace_id` or `workspace_label`")
+                raise ContractError(
+                    f"order.json: `manager_placement.{field}` must be a non-empty string when present"
+                )
+        if (
+            mode == "workspace"
+            and not placement.get("workspace_id")
+            and not placement.get("workspace_label")
+        ):
+            raise ContractError(
+                "order.json: workspace manager placement needs `workspace_id` or `workspace_label`"
+            )
         if placement.get("workspace_id") and placement.get("workspace_label"):
-            raise ContractError("order.json: manager placement may specify `workspace_id` or `workspace_label`, not both")
+            raise ContractError(
+                "order.json: manager placement may specify `workspace_id` or `workspace_label`, not both"
+            )
     management = order.get("management")
     if management is not None:
         if not isinstance(management, dict):
-            raise ContractError("order.json: `management` must be an object when present")
+            raise ContractError(
+                "order.json: `management` must be an object when present"
+            )
         unknown_management = set(management) - {"mode"}
         if unknown_management:
             raise ContractError(
@@ -174,20 +207,108 @@ def parse_order(text: str) -> dict:
             )
         if management.get("mode") not in MANAGEMENT_MODES:
             raise ContractError(
-                "order.json: `management.mode` must be one of " + ", ".join(MANAGEMENT_MODES)
+                "order.json: `management.mode` must be one of "
+                + ", ".join(MANAGEMENT_MODES)
             )
+    artifact_publication = order.get("artifact_publication")
+    if artifact_publication is not None:
+        if not isinstance(artifact_publication, dict):
+            raise ContractError("order.json: `artifact_publication` must be an object")
+        allowed_artifacts = {
+            "schema_version",
+            "compacted_path",
+            "handoff_path",
+            "answer_path",
+            "consult_id",
+            "consult_payload_sha256",
+            "mandatory_consults",
+        }
+        unknown_artifacts = set(artifact_publication) - allowed_artifacts
+        if unknown_artifacts:
+            raise ContractError(
+                "order.json: `artifact_publication` has unknown keys: "
+                + ", ".join(sorted(unknown_artifacts))
+            )
+        if artifact_publication.get("schema_version") != 1:
+            raise ContractError(
+                "order.json: `artifact_publication.schema_version` must be 1"
+            )
+        for field in ("compacted_path", "handoff_path"):
+            value = artifact_publication.get(field)
+            if not isinstance(value, str) or not value or not Path(value).is_absolute():
+                raise ContractError(
+                    f"order.json: `artifact_publication.{field}` must be an absolute path"
+                )
+        answer_path = artifact_publication.get("answer_path")
+        consult_id = artifact_publication.get("consult_id")
+        if (answer_path is None) != (consult_id is None):
+            raise ContractError(
+                "order.json: artifact_publication answer_path and consult_id must appear together"
+            )
+        if answer_path is not None and (
+            not isinstance(answer_path, str)
+            or not answer_path
+            or not Path(answer_path).is_absolute()
+        ):
+            raise ContractError(
+                "order.json: `artifact_publication.answer_path` must be an absolute path"
+            )
+        if consult_id is not None and (
+            not isinstance(consult_id, str) or not consult_id
+        ):
+            raise ContractError(
+                "order.json: `artifact_publication.consult_id` must be a non-empty string"
+            )
+        consult_payload_sha256 = artifact_publication.get("consult_payload_sha256")
+        if consult_payload_sha256 is not None and (
+            not isinstance(consult_payload_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", consult_payload_sha256) is None
+            or consult_id is None
+        ):
+            raise ContractError(
+                "order.json: `artifact_publication.consult_payload_sha256` must be a lowercase SHA-256 for a consult"
+            )
+        mandatory = artifact_publication.get("mandatory_consults", [])
+        if not isinstance(mandatory, list):
+            raise ContractError(
+                "order.json: `artifact_publication.mandatory_consults` must be a list"
+            )
+        seen_consults: set[str] = set()
+        for index, requirement in enumerate(mandatory):
+            if not isinstance(requirement, dict) or set(requirement) != {
+                "consult_id",
+                "specialist",
+            }:
+                raise ContractError(
+                    "order.json: each mandatory consult must contain only consult_id and specialist"
+                )
+            for field in ("consult_id", "specialist"):
+                value = requirement.get(field)
+                if not isinstance(value, str) or not value:
+                    raise ContractError(
+                        f"order.json: mandatory_consults[{index}].{field} must be non-empty"
+                    )
+            if requirement["consult_id"] in seen_consults:
+                raise ContractError("order.json: mandatory consult ids must be unique")
+            seen_consults.add(requirement["consult_id"])
     operation = order.get("operation", "plan")
     if operation not in OPERATIONS:
-        raise ContractError("order.json: `operation` must be one of " + ", ".join(OPERATIONS))
+        raise ContractError(
+            "order.json: `operation` must be one of " + ", ".join(OPERATIONS)
+        )
     if "requires_apply" in order and not isinstance(order["requires_apply"], bool):
-        raise ContractError("order.json: `requires_apply` must be a boolean when present")
+        raise ContractError(
+            "order.json: `requires_apply` must be a boolean when present"
+        )
     mode = order.get("mode", "phase")
     if mode not in ("phase", "direct"):
         raise ContractError("order.json: `mode` must be `phase` or `direct`")
     if mode == "direct":
         for field in ("plan_id", "step_id"):
             if not isinstance(order.get(field), str) or not order[field]:
-                raise ContractError(f"order.json: direct orders require a non-empty `{field}`")
+                raise ContractError(
+                    f"order.json: direct orders require a non-empty `{field}`"
+                )
     expected_watchdog_kind = WATCHDOG_KINDS.get(order["agent"])
     if expected_watchdog_kind is not None:
         terminal = order.get("watchdog_terminal")
@@ -222,17 +343,27 @@ def parse_order(text: str) -> dict:
     if operation == "apply":
         approval, artifact = order.get("approval"), order.get("plan_artifact")
         if not isinstance(approval, dict):
-            raise ContractError("order.json: apply operation requires an `approval` object")
+            raise ContractError(
+                "order.json: apply operation requires an `approval` object"
+            )
         if not isinstance(artifact, dict):
-            raise ContractError("order.json: apply operation requires a `plan_artifact` object")
+            raise ContractError(
+                "order.json: apply operation requires a `plan_artifact` object"
+            )
         for field in ("approved_by", "approved_at", "nonce", "plan_sha256"):
             if not isinstance(approval.get(field), str) or not approval[field]:
-                raise ContractError(f"order.json: `approval.{field}` must be a non-empty string")
+                raise ContractError(
+                    f"order.json: `approval.{field}` must be a non-empty string"
+                )
         for field in ("path", "sha256"):
             if not isinstance(artifact.get(field), str) or not artifact[field]:
-                raise ContractError(f"order.json: `plan_artifact.{field}` must be a non-empty string")
+                raise ContractError(
+                    f"order.json: `plan_artifact.{field}` must be a non-empty string"
+                )
         if approval["plan_sha256"] != artifact["sha256"]:
-            raise ContractError("order.json: approval.plan_sha256 must match plan_artifact.sha256")
+            raise ContractError(
+                "order.json: approval.plan_sha256 must match plan_artifact.sha256"
+            )
     return order
 
 
@@ -253,7 +384,9 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
         _require_str(result, key, "result.json")
 
     if result["verdict"] not in VERDICTS:
-        raise ContractError(f"result.json: verdict {result['verdict']!r} must be one of {', '.join(VERDICTS)}")
+        raise ContractError(
+            f"result.json: verdict {result['verdict']!r} must be one of {', '.join(VERDICTS)}"
+        )
     if expected_order_id is not None and result["order_id"] != expected_order_id:
         raise ContractError(
             f"result.json: order_id {result['order_id']!r} does not match the order "
@@ -267,9 +400,13 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
         raise ContractError("result.json: `revisit` must be a list of stage-id strings")
     for stage in revisit:
         if stage not in RECOGNIZED_STAGE_IDS:
-            raise ContractError(f"result.json: revisit stage {stage!r} is not a recognized stage id")
+            raise ContractError(
+                f"result.json: revisit stage {stage!r} is not a recognized stage id"
+            )
     if result["verdict"] == "failed" and not revisit:
-        raise ContractError("result.json: a `failed` verdict must name at least one stage to `revisit`")
+        raise ContractError(
+            "result.json: a `failed` verdict must name at least one stage to `revisit`"
+        )
 
     # `consults` (optional) is the worker's own record of the specialists it asked. Shape only:
     # this module is pure and has no ledger access, so it can say a claim is WELL FORMED but
@@ -281,7 +418,9 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
             raise ContractError("result.json: `consults` must be a list when present")
         for claim in consults:
             if not isinstance(claim, dict):
-                raise ContractError(f"result.json: every `consults` entry must be an object: {claim!r}")
+                raise ContractError(
+                    f"result.json: every `consults` entry must be an object: {claim!r}"
+                )
             for field in CONSULT_CLAIM_REQUIRED:
                 if not isinstance(claim.get(field), str) or not claim[field]:
                     raise ContractError(
@@ -292,7 +431,9 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
     # Optional advisor ruling. Present only on an advisor order's result; must be recognized.
     decision = result.get("decision")
     if decision is not None and decision not in ADVISOR_DECISIONS:
-        raise ContractError(f"result.json: decision {decision!r} must be one of {', '.join(ADVISOR_DECISIONS)}")
+        raise ContractError(
+            f"result.json: decision {decision!r} must be one of {', '.join(ADVISOR_DECISIONS)}"
+        )
     return result
 
 
@@ -405,21 +546,31 @@ def parse_event(
         )
     request_id = event.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not request_id):
-        raise ContractError("event: `request_id` must be a non-empty string when present")
+        raise ContractError(
+            "event: `request_id` must be a non-empty string when present"
+        )
     generation = event.get("generation")
     if generation is not None and (
-        isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation <= 0
     ):
-        raise ContractError("event: `generation` must be a positive integer when present")
+        raise ContractError(
+            "event: `generation` must be a positive integer when present"
+        )
     ack_required = event.get("ack_required", False)
     if not isinstance(ack_required, bool):
         raise ContractError("event: `ack_required` must be a boolean")
     evidence = event.get("evidence", [])
-    if not isinstance(evidence, list) or not all(isinstance(item, dict) for item in evidence):
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, dict) for item in evidence
+    ):
         raise ContractError("event: `evidence` must be a list of objects")
     dedupe_key = event.get("dedupe_key")
     if dedupe_key is not None and (not isinstance(dedupe_key, str) or not dedupe_key):
-        raise ContractError("event: `dedupe_key` must be a non-empty string when present")
+        raise ContractError(
+            "event: `dedupe_key` must be a non-empty string when present"
+        )
     return event
 
 
@@ -465,17 +616,24 @@ def parse_phase_command(text: str, *, expected_run_id: str | None = None) -> dic
             f"command: run_id {command['run_id']!r} does not match expected {expected_run_id!r}"
         )
     in_response_to = command.get("in_response_to")
-    if in_response_to is not None and (not isinstance(in_response_to, str) or not in_response_to):
-        raise ContractError("command: `in_response_to` must be a non-empty string when present")
+    if in_response_to is not None and (
+        not isinstance(in_response_to, str) or not in_response_to
+    ):
+        raise ContractError(
+            "command: `in_response_to` must be a non-empty string when present"
+        )
     detail = command.get("detail")
     if detail is not None and not isinstance(detail, dict):
         raise ContractError("command: `detail` must be an object when present")
     extension_ms = command.get("extension_ms")
-    if command["action"] == "extend-soft-timeout":
-        if isinstance(extension_ms, bool) or not isinstance(extension_ms, int) or extension_ms <= 0:
-            raise ContractError(
-                "command: extend-soft-timeout requires a positive integer `extension_ms`"
-            )
+    if command["action"] == "extend-soft-timeout" and (
+        isinstance(extension_ms, bool)
+        or not isinstance(extension_ms, int)
+        or extension_ms <= 0
+    ):
+        raise ContractError(
+            "command: extend-soft-timeout requires a positive integer `extension_ms`"
+        )
     return command
 
 
@@ -501,7 +659,9 @@ def parse_ack(text: str, *, expected_event_id: str | None = None) -> dict:
 
 def validate_ack_transition(previous_state: str | None, new_state: str) -> str:
     if new_state not in ACK_STATES:
-        raise ContractError(f"ack: state {new_state!r} must be one of {', '.join(ACK_STATES)}")
+        raise ContractError(
+            f"ack: state {new_state!r} must be one of {', '.join(ACK_STATES)}"
+        )
     if previous_state is None:
         return new_state
     if previous_state not in ACK_STATES:

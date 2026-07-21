@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,14 @@ _spec = importlib.util.spec_from_file_location(
 assert _spec and _spec.loader
 phase_controller = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(phase_controller)
+_recruiter_spec = importlib.util.spec_from_file_location(
+    "phase_controller_test_recruiter", Path(__file__).with_name("recruiter.py")
+)
+assert _recruiter_spec and _recruiter_spec.loader
+recruiter = importlib.util.module_from_spec(_recruiter_spec)
+sys.modules[_recruiter_spec.name] = recruiter
+_recruiter_spec.loader.exec_module(recruiter)
+phase_controller._bind_recruiter_runtime(recruiter)
 PhaseStartError = phase_controller.PhaseStartError
 
 
@@ -188,7 +197,9 @@ def test_phase_start_publishes_receipt_before_releasing_leader(
 
     assert observed["state"] == "leader-gated"
     assert observed["leader_pane"] == "leader-pane"
-    assert observed["watchdog"]["state"] == "not-configured"
+    watchdog = observed["watchdog"]
+    assert isinstance(watchdog, dict)
+    assert watchdog["state"] == "not-configured"
 
 
 def test_not_configured_watchdog_receipt_is_not_degraded(tmp_path: Path) -> None:

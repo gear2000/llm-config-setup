@@ -1,0 +1,1657 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>
+      UpAgent amended final plan — one canonical hub, nine offerings
+    </title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      :where(.grid, .flex) > * {
+        min-width: 0;
+      }
+      :where(p, h1, h2, h3, h4, li, td, th, code, span, label) {
+        overflow-wrap: anywhere;
+      }
+      :where(img, svg, video, canvas, iframe) {
+        max-width: 100%;
+        height: auto;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 12% 0%,
+            color-mix(in oklab, var(--color-primary) 17%, transparent),
+            transparent 34rem
+          ),
+          radial-gradient(
+            circle at 95% 25%,
+            color-mix(in oklab, var(--color-secondary) 12%, transparent),
+            transparent 28rem
+          ),
+          var(--color-base-100);
+      }
+      .shell {
+        width: min(1200px, calc(100% - 2rem));
+        margin-inline: auto;
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 0.72rem;
+        font-weight: 800;
+        opacity: 0.72;
+      }
+      .tiny {
+        font-size: 0.78rem;
+      }
+      .phase {
+        border-left: 4px solid var(--accent, var(--color-primary));
+      }
+      .code-line {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .source {
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        text-decoration-color: color-mix(
+          in oklab,
+          var(--color-primary) 50%,
+          transparent
+        );
+      }
+    </style>
+  </head>
+  <body>
+    <header
+      class="sticky top-0 z-20 border-b border-base-content/10 bg-base-100/80 backdrop-blur"
+    >
+      <div class="shell navbar px-0">
+        <div class="navbar-start min-w-0">
+          <div>
+            <div class="eyebrow text-primary">
+              Amended final plan · 21 Jul 2026
+            </div>
+            <div class="font-bold truncate">
+              One front door · one canonical writer · nine offerings
+            </div>
+          </div>
+        </div>
+        <nav class="navbar-end hidden md:flex gap-1">
+          <a class="btn btn-ghost btn-sm" href="#locked">Locked</a
+          ><a class="btn btn-ghost btn-sm" href="#hub-amendment">Hub fix</a
+          ><a class="btn btn-ghost btn-sm" href="#commands">Commands</a
+          ><a class="btn btn-ghost btn-sm" href="#offerings">Offerings</a
+          ><a class="btn btn-ghost btn-sm" href="#launch">Launch</a
+          ><a class="btn btn-ghost btn-sm" href="#plan">Plan</a
+          ><a class="btn btn-primary btn-sm" href="#approval">Ready</a>
+        </nav>
+      </div>
+    </header>
+    <main class="shell py-9 lg:py-12 space-y-11">
+      <section
+        class="hero rounded-box border border-primary/25 bg-base-200/70 overflow-hidden"
+      >
+        <div class="hero-content w-full items-start py-10 lg:py-14">
+          <div class="max-w-5xl">
+            <div class="badge badge-success badge-soft mb-4">
+              Critical worktree amendment applied
+            </div>
+            <h1
+              class="text-4xl lg:text-6xl font-black tracking-tight leading-[1.14] pb-1"
+            >
+              One UpAgent Hub.<br /><span class="text-primary"
+                >Nine approved offerings.</span
+              >
+            </h1>
+            <p class="mt-6 text-lg lg:text-xl opacity-80 max-w-4xl">
+              The final design now enforces one process-level lifecycle
+              authority behind one imported Just entry point. Main checkouts,
+              worktrees, agents, and local users all call the same open
+              machine-local Hub; no caller executes a nearby Recruiter copy.
+              Callers select a stable offering id plus an allowed effort, and
+              Python always publishes a terminal bundle.
+            </p>
+            <div
+              class="stats stats-vertical sm:stats-horizontal bg-base-100 shadow mt-8 w-full"
+            >
+              <div class="stat">
+                <div class="stat-title">Public entry</div>
+                <div class="stat-value text-primary text-3xl">just upagent</div>
+                <div class="stat-desc">Lists · request · await · status</div>
+              </div>
+              <div class="stat">
+                <div class="stat-title">Ledger writers</div>
+                <div class="stat-value text-secondary">1</div>
+                <div class="stat-desc">Canonical Hub process only</div>
+              </div>
+              <div class="stat">
+                <div class="stat-title">Offerings</div>
+                <div class="stat-value text-success">9</div>
+                <div class="stat-desc">3 Claude · 1 Codex · 5 Pi</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="locked" class="space-y-6 scroll-mt-24">
+        <div>
+          <div class="eyebrow text-success">Locked decisions</div>
+          <h2 class="text-3xl font-bold mt-1">The boundaries are settled</h2>
+        </div>
+        <div class="grid lg:grid-cols-3 gap-4">
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-success badge-soft">Architecture</div>
+              <h3 class="card-title">One Hub + adapters</h3>
+              <p>
+                Worker and specialist intake remain typed modules. Both submit
+                ordinary orders to one ledger, lease, cleanup, completion, and
+                receipt authority. Specialist answers retain their citation
+                gate.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-primary badge-soft">Caller surface</div>
+              <h3 class="card-title">One variadic recipe</h3>
+              <p>
+                An imported <code>upagent +args</code> recipe invokes a thin
+                machine-local client. It never imports or executes the nearest
+                worktree’s Recruiter lifecycle code. No LLM-facing
+                <code>upagent-request</code> versus
+                <code>upagent-consult</code> split.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-secondary badge-soft">
+                Offering selection
+              </div>
+              <h3 class="card-title">Stable id + effort</h3>
+              <p>
+                Requests use <code>--offering ID --effort LEVEL</code>. YAML
+                derives the harness, exact model, renderer, and allowed effort
+                set before any ledger or Herdr action.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="card card-border bg-base-200">
+          <div class="card-body">
+            <h3 class="card-title">Single-door routing</h3>
+            <pre
+              class="overflow-x-auto rounded-box bg-base-300 p-4 text-sm leading-relaxed"
+              aria-label="Single-door routing tree"
+            ><code>Any agent or local user
+└── just upagent …
+    └── thin client (any checkout or worktree)
+        └── machine-local Unix socket
+            └── ONE canonical UpAgent Hub process
+                ├── strict request + offering validation
+                │   ├── worker adapter
+                │   └── specialist adapter + citation policy
+                ├── single ledger / lease writer
+                ├── bounded Account Manager
+                └── worker or specialist pane
+                    └── typed completion reactor
+                        └── bundle + answer + receipt + requester event</code></pre>
+            <p class="text-sm opacity-70">
+              The caller’s worktree remains the worker <code>cwd</code>;
+              lifecycle execution, lease mutation, reconciliation, and
+              child-runner code always come from the canonical Hub. Future
+              capacity isolation is a queue lane, never another ledger writer.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section id="hub-amendment" class="space-y-6 scroll-mt-24">
+        <div>
+          <div class="eyebrow text-error">Mandatory split-brain amendment</div>
+          <h2 class="text-3xl font-bold mt-1">
+            One Hub now means one process-level writer
+          </h2>
+          <p class="opacity-75 mt-2 max-w-5xl">
+            The reproduced failure is positional: a worktree’s imported Just
+            recipe executes that worktree’s <code>recruiter.py</code>;
+            <code>cmd_consult()</code> dispatches in-process;
+            <code>_spawn_job()</code> launches via that copy’s
+            <code>__file__</code>; meanwhile all copies share
+            <code>/tmp/.upagent</code>. A worktree runner and the main
+            supervisor can therefore mutate the same lease with different code
+            versions. The worker pane is created, its token loses ownership
+            before <code>record_worker</code>, and the pane is orphaned before
+            it can write the specialist answer.
+          </p>
+        </div>
+        <div class="grid lg:grid-cols-2 gap-5">
+          <article class="card card-border bg-base-200 border-error/40">
+            <div class="card-body">
+              <div class="badge badge-error badge-soft">Current failure</div>
+              <h3 class="card-title">Nearest code copy + shared ledger</h3>
+              <pre
+                class="overflow-x-auto rounded-box bg-base-300 p-4 text-sm leading-relaxed"
+                aria-label="Current split-brain failure tree"
+              ><code>Shared state: /tmp/.upagent
+├── main-checkout Recruiter
+│   └── reconciles and changes lease ownership
+└── worktree Recruiter copy
+    └── creates Herdr pane
+        └── record_worker(old token)  ✗ rejected
+            └── pane becomes orphaned
+                └── specialist answer not found</code></pre>
+              <p class="text-sm opacity-70 mt-2">
+                <strong>Failure chain:</strong> two Recruiter copies share one
+                state directory; ownership changes after pane creation but
+                before worker recording, leaving no accepted answer.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200 border-success/40">
+            <div class="card-body">
+              <div class="badge badge-success badge-soft">Required target</div>
+              <h3 class="card-title">Open clients + one canonical authority</h3>
+              <pre
+                class="overflow-x-auto rounded-box bg-base-300 p-4 text-sm leading-relaxed"
+                aria-label="Canonical Hub target tree"
+              ><code>Any local caller
+├── local user or agent
+└── any main checkout or worktree
+    └── thin client
+        └── open machine-local socket
+            └── ONE canonical Hub
+                ├── single ledger writer
+                └── Herdr pane
+                    └── answer + artifacts</code></pre>
+            </div>
+          </article>
+        </div>
+        <div class="grid lg:grid-cols-3 gap-4">
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-primary badge-soft">Transport</div>
+              <h3 class="card-title">Stable local socket</h3>
+              <p>
+                Publish one discoverable socket such as
+                <code>/tmp/.upagent/hubs/&lt;repo-id&gt;/hub.sock</code>.
+                <code>UPAGENT_SOCKET</code> may override it. Every Just
+                invocation connects; none directly calls
+                <code>cmd_dispatch</code>, <code>JobLedger</code>,
+                <code>run-job</code>, or reconciliation.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-secondary badge-soft">Single writer</div>
+              <h3 class="card-title">Canonical engine identity</h3>
+              <p>
+                The Hub records <code>hub_instance_id</code>, canonical engine
+                path, protocol version, PID, and Herdr session. An exclusive
+                startup lock prevents a second Hub. All child runners use the
+                Hub’s code path/version, never the caller’s
+                <code>__file__</code>.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-warning badge-soft">
+                Launch transaction
+              </div>
+              <h3 class="card-title">No orphan window</h3>
+              <p>
+                Persist fenced <code>launching</code> intent before pane
+                creation; tag the pane with request + generation;
+                compare-and-swap to <code>started</code>. A failed transition
+                closes that exact pane. Reconciliation can recover or close an
+                interrupted launch deterministically.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="card card-border bg-base-200 border-success/40">
+          <div class="card-body">
+            <div class="flex flex-wrap gap-2 items-center">
+              <div class="badge badge-success">Usability first</div>
+              <h3 class="card-title">
+                Callable and requestable by every local agent and user
+              </h3>
+            </div>
+            <div class="grid md:grid-cols-2 gap-4">
+              <div>
+                <h4 class="font-bold">Deliberately included</h4>
+                <ul class="list-disc pl-5 space-y-1 mt-2">
+                  <li>
+                    Machine-local socket readable/writable by local callers by
+                    default.
+                  </li>
+                  <li>
+                    No caller registration, user allowlist, role enrollment, API
+                    key, JWT, TLS, or per-worktree approval.
+                  </li>
+                  <li>
+                    <code>lists</code>, <code>status</code>,
+                    <code>request</code>, <code>await</code>, and specialist
+                    requests work from any cwd/worktree.
+                  </li>
+                  <li>
+                    The Hub executes under its existing service account; callers
+                    supply the target worktree <code>cwd</code>.
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <h4 class="font-bold">Retained only for correctness</h4>
+                <ul class="list-disc pl-5 space-y-1 mt-2">
+                  <li>Closed request schema and offering validation.</li>
+                  <li>Lease generation/token compare-and-swap.</li>
+                  <li>Timeout-response nonce to prevent stale decisions.</li>
+                  <li>
+                    Protocol-version handshake that fails clearly instead of
+                    corrupting shared state.
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <p class="text-sm opacity-70 mt-3">
+              These fences prevent duplicate work, stale writes, and version
+              corruption; they are not caller authorization. Any local caller
+              may submit work. A caller holding the current request event may
+              perform its fenced lifecycle response.
+            </p>
+          </div>
+        </div>
+        <div class="card card-border bg-base-200">
+          <div class="card-body">
+            <h3 class="card-title">Consult-specific terminal contract</h3>
+            <ol class="list-decimal pl-5 space-y-2">
+              <li>
+                Specialist workers write <code>answer.json</code> to a
+                lease-private staging path, never directly to the public caller
+                path.
+              </li>
+              <li>
+                Python validates consult id, error/success shape, and required
+                citations, then atomically projects the exact public
+                <code>answer_path</code>.
+              </li>
+              <li>
+                Omission or malformed output receives one bounded repair;
+                failure then produces a schema-valid Python-authored failure
+                answer.
+              </li>
+              <li>
+                The consult receipt and requester event publish only after the
+                public answer is readable and valid.
+              </li>
+              <li>
+                A mandated specialist consult without a cited answer blocks
+                stage acceptance. Reading the source directly is useful
+                diagnosis but does not satisfy the consult requirement.
+              </li>
+              <li>
+                Same consult/request id + same canonical payload attaches to the
+                existing request; changed payload conflicts. Nine retries create
+                one worker, not nine contenders.
+              </li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <section id="commands" class="space-y-6 scroll-mt-24">
+        <div>
+          <div class="eyebrow text-primary">Complete Just command catalog</div>
+          <h2 class="text-3xl font-bold mt-1">
+            Everything available for agents and one-off human jobs
+          </h2>
+          <p class="opacity-75 mt-2 max-w-4xl">
+            Every general-purpose operation lives under one variadic recipe:
+            <code>just upagent …</code>. From any main checkout, worktree,
+            agent, or local user, the recipe discovers the canonical local
+            socket and invokes only the thin client. Run without arguments or
+            with <code>--help</code> to print this grammar. Add
+            <code>--json</code>
+            where shown for scripts; human-readable output is the default.
+          </p>
+        </div>
+
+        <div class="card card-border bg-base-200">
+          <div class="card-body">
+            <h3 class="card-title">Discovery and Hub operations</h3>
+            <div class="overflow-x-auto">
+              <table class="table table-zebra table-sm">
+                <thead>
+                  <tr>
+                    <th>Command</th>
+                    <th>Purpose</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>just upagent --help</code></td>
+                    <td>
+                      Print the complete public grammar and examples; launches
+                      nothing.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>just upagent up [--separate-workspaces]</code>
+                    </td>
+                    <td>
+                      Discover or start the one locked canonical Hub and Herdr
+                      services workspace; an existing Hub is reused from any
+                      worktree.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>just upagent status [--json]</code></td>
+                    <td>
+                      Show <code>hub_instance_id</code>, canonical engine path,
+                      protocol version, socket, PID, Herdr session, ledger, and
+                      service health.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>just upagent status --request ID [--json]</code>
+                    </td>
+                    <td>
+                      Inspect one request, artifact manifest, manager/worker
+                      addresses, and terminal receipt.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>just upagent lists --type offerings [--json]</code>
+                    </td>
+                    <td>
+                      List all nine offering ids, harness/model identities, and
+                      allowed efforts.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent lists --type specialists [--json]</code
+                      >
+                    </td>
+                    <td>
+                      List the merged kit + repository specialist phone book and
+                      pinned offering.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent lists --type workers --status active
+                        [--json]</code
+                      >
+                    </td>
+                    <td>List live manager/worker panes and lease ownership.</td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent lists --type workers --status terminal|all
+                        [--json]</code
+                      >
+                    </td>
+                    <td>List completed workers or the full ledger view.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card card-border bg-base-200">
+          <div class="card-body">
+            <h3 class="card-title">Request a worker or specialist</h3>
+            <div class="grid lg:grid-cols-2 gap-4">
+              <div class="mockup-code bg-neutral text-neutral-content min-w-0">
+                <pre
+                  data-prefix="$"
+                ><code class="code-line">just upagent request --type worker \
+  --offering pi-gpt-5-6-sol --effort high \
+  --agent backend --prompt-file /abs/brief.md \
+  [--cwd /abs/workdir] [--json]</code></pre>
+                <pre
+                  data-prefix="$"
+                ><code class="code-line">just upagent request --type worker \
+  --offering claude-opus-4-8 --effort max \
+  --agent reviewer --prompt-file /abs/brief.md \
+  --wait</code></pre>
+              </div>
+              <div class="mockup-code bg-neutral text-neutral-content min-w-0">
+                <pre
+                  data-prefix="$"
+                ><code class="code-line">just upagent request --type specialist \
+  --specialist backend \
+  --prompt-file /abs/question.md \
+  [--cwd /abs/workdir] [--json]</code></pre>
+                <pre
+                  data-prefix="$"
+                ><code class="code-line">just upagent request --type specialist \
+  --specialist architecture \
+  --prompt-file /abs/question.md \
+  --wait</code></pre>
+              </div>
+            </div>
+            <div class="grid md:grid-cols-2 gap-3 mt-3">
+              <div role="alert" class="alert alert-info alert-soft">
+                <span
+                  ><strong>Without <code>--wait</code>:</strong> return after
+                  Python verifies worker startup, with <code>request_id</code>,
+                  worker address, and control token. A manager address is
+                  included when healthy; manager failure is reported as degraded
+                  supervision while the worker lifecycle continues.</span
+                >
+              </div>
+              <div role="alert" class="alert alert-success alert-soft">
+                <span
+                  ><strong>With <code>--wait</code>:</strong> block for the
+                  terminal valid/blocked bundle—best for your own one-off shell
+                  jobs.</span
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card card-border bg-base-200 border-primary/35">
+          <div class="card-body">
+            <div class="flex flex-wrap gap-2 items-center">
+              <div class="badge badge-primary badge-soft">Recommended</div>
+              <h3 class="card-title">
+                Strict request-file intake + optional caller id
+              </h3>
+            </div>
+            <p>
+              Yes—support both. They are robust if the file enters the exact
+              same strict parser as named flags and a caller-supplied id is
+              treated as an idempotency/correlation key, never as a filesystem
+              path or lease id.
+            </p>
+            <div class="grid lg:grid-cols-2 gap-4">
+              <div class="mockup-code bg-neutral text-neutral-content min-w-0">
+                <pre
+                  data-prefix="$"
+                ><code class="code-line">just upagent request \
+  --file /abs/request.json \
+  [--wait] [--json]</code></pre>
+                <pre
+                  data-prefix="$"
+                ><code class="code-line">just upagent request --type worker \
+  --request-id "$(uuidgen | tr A-Z a-z)" \
+  --offering pi-gpt-5-6-sol --effort high \
+  --agent backend --prompt-file /abs/brief.md</code></pre>
+              </div>
+              <div class="mockup-code bg-neutral text-neutral-content min-w-0">
+                <pre><code class="code-line">{
+  "schema_version": 1,
+  "request_id": "01957f4e-7f7f-7f8b-9c42-6e7f52f9321a",
+  "type": "worker",
+  "offering": "pi-gpt-5-6-sol",
+  "effort": "high",
+  "agent": "backend",
+  "prompt_file": "/abs/brief.md",
+  "cwd": "/abs/workdir"
+}</code></pre>
+              </div>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="table table-sm table-zebra">
+                <thead>
+                  <tr>
+                    <th>Rule</th>
+                    <th>Fail-loud behavior</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>One request source</td>
+                    <td>
+                      <code>--file</code> is mutually exclusive with
+                      request-defining inline flags. Operational
+                      <code>--wait</code>/<code>--json</code> remain allowed.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Closed schema</td>
+                    <td>
+                      Absolute readable JSON file, one object,
+                      <code>schema_version: 1</code>, no unknown keys, and the
+                      same worker/specialist conditional fields as the CLI.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Optional caller id</td>
+                    <td>
+                      Accept one canonical UUID or ULID from either
+                      <code>--request-id</code> or the file—not both. If absent,
+                      Recruiter generates it.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Idempotent retry</td>
+                    <td>
+                      Existing id + identical canonical request hash returns the
+                      existing request/status and launches nothing new.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Collision</td>
+                    <td>
+                      Existing id + different request hash exits non-zero with
+                      <code>request_id_conflict</code> before manager, ledger
+                      mutation, or launch.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Identity separation</td>
+                    <td>
+                      External <code>request_id</code> is only a
+                      lookup/idempotency key; Python still mints the internal
+                      <code>order_id</code>, lease token, paths, and control
+                      token.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div role="alert" class="alert alert-info alert-soft">
+              <span
+                ><strong>Keep transport controls out of the file:</strong>
+                <code>--wait</code>, <code>--json</code>, and notification
+                timing affect this invocation, not the immutable identity of the
+                work. That keeps retries hash-stable and lets the same file be
+                submitted synchronously or asynchronously.</span
+              >
+            </div>
+          </div>
+        </div>
+
+        <div class="card card-border bg-base-200">
+          <div class="card-body">
+            <h3 class="card-title">Observe, decide, verify, and repair</h3>
+            <div class="overflow-x-auto">
+              <table class="table table-zebra table-sm">
+                <thead>
+                  <tr>
+                    <th>Command</th>
+                    <th>Purpose</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent await --request ID [--notify-after-ms
+                        600000] [--json]</code
+                      >
+                    </td>
+                    <td>
+                      Block without burning LLM turns; returns immediately if
+                      already terminal.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent await-any --request ID [--request ID…]
+                        [--cursor '{"ID": 12}'] [--timeout-ms MS] [--json]</code
+                      >
+                    </td>
+                    <td>
+                      Wait until any watched request changes and return its
+                      typed event.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent verify --request ID --offering ID --effort
+                        LEVEL --agent reviewer [--wait]</code
+                      >
+                    </td>
+                    <td>
+                      Launch an optional independent second opinion against a
+                      finished request.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent respond --request ID --control-token TOKEN
+                        --nonce NONCE --action extend --extension-ms MS</code
+                      >
+                    </td>
+                    <td>
+                      Answer the current typed timeout decision by granting a
+                      bounded extension.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code
+                        >just upagent respond --request ID --control-token TOKEN
+                        --nonce NONCE --action cancel --extension-ms 0</code
+                      >
+                    </td>
+                    <td>
+                      Cancel at the current fenced decision; stale tokens/nonces
+                      fail.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>just upagent reconcile [--json]</code></td>
+                    <td>
+                      Operator recovery: reconcile dead/expired runners from
+                      durable lease ownership.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid lg:grid-cols-2 gap-5">
+          <article class="mockup-code bg-neutral text-neutral-content min-w-0">
+            <pre
+              data-prefix="#"
+            ><code class="code-line">One-off: submit, keep the id, await later</code></pre>
+            <pre
+              data-prefix="$"
+            ><code class="code-line">request_id=$(just upagent request --type worker \
+  --offering codex-gpt-5-6-sol --effort high \
+  --agent backend --prompt-file "$PWD/brief.md" \
+  --json | jq -r .request_id)</code></pre>
+            <pre
+              data-prefix="$"
+            ><code class="code-line">just upagent await --request "$request_id"</code></pre>
+          </article>
+          <article class="mockup-code bg-neutral text-neutral-content min-w-0">
+            <pre
+              data-prefix="#"
+            ><code class="code-line">One-off: simple blocking form</code></pre>
+            <pre
+              data-prefix="$"
+            ><code class="code-line">just upagent request --type worker \
+  --offering pi-gpt-5-4-mini --effort low \
+  --agent docs-writer \
+  --prompt-file "$PWD/brief.md" --wait</code></pre>
+          </article>
+        </div>
+
+        <div role="alert" class="alert alert-error alert-soft">
+          <span
+            ><strong>Zero-launch rule:</strong> missing prompt, unknown request
+            type, unknown offering/persona/specialist, unsupported effort,
+            non-absolute or unreadable paths, malformed YAML/JSON, unknown
+            request keys, duplicate file/flag sources, invalid caller ids, id
+            conflicts, and mutually incompatible flags all exit non-zero before
+            intake repair, ledger mutation, Account Manager creation, or worker
+            launch.</span
+          >
+        </div>
+
+        <details
+          class="collapse collapse-arrow bg-base-200 border border-base-content/10"
+        >
+          <summary class="collapse-title font-semibold">
+            Controller-only and migration recipes retained behind the public
+            façade
+          </summary>
+          <div class="collapse-content space-y-4">
+            <p class="text-sm opacity-75">
+              These remain available to Herdr controllers during migration, but
+              are not the vocabulary taught to general LLM callers or used for
+              one-off jobs. Every retained recipe must delegate through the same
+              canonical socket; retaining a direct local Recruiter/ledger path
+              is a release-blocking defect.
+            </p>
+            <div class="overflow-x-auto">
+              <table class="table table-sm table-zebra">
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th>Recipes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Phase controller</td>
+                    <td>
+                      <code>upagent-phase-start</code>,
+                      <code>upagent-phase-await</code>,
+                      <code>upagent-phase-ack</code>,
+                      <code>upagent-phase-publish</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Direct controller</td>
+                    <td>
+                      <code>upagent-direct-steps</code>,
+                      <code>upagent-direct-order</code>,
+                      <code>upagent-direct-apply-order</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Temporary legacy wrappers</td>
+                    <td>
+                      <code>upagent-up</code>, <code>upagent-status</code>,
+                      <code>upagent-recruit</code>,
+                      <code>upagent-request</code>, <code>upagent-await</code>,
+                      <code>upagent-await-any</code>,
+                      <code>upagent-respond</code>,
+                      <code>upagent-specialists</code>,
+                      <code>upagent-consult</code>, <code>upagent-verify</code>,
+                      <code>upagent-reconcile</code>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="offerings" class="space-y-6 scroll-mt-24">
+        <div>
+          <div class="eyebrow text-warning">Final allowlist</div>
+          <h2 class="text-3xl font-bold mt-1">The nine selected offerings</h2>
+          <p class="opacity-75 mt-2">
+            These replace every raw harness/model choice on the public request
+            path. <code>medium</code> is the canonical token; Pi model ids are
+            provider-qualified.
+          </p>
+        </div>
+        <div
+          class="overflow-x-auto rounded-box border border-base-content/10 bg-base-200"
+        >
+          <table class="table table-zebra">
+            <thead>
+              <tr>
+                <th>Stable id</th>
+                <th>Rendered identity</th>
+                <th>Allowed efforts</th>
+                <th>Use</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>claude-fable-5</code></td>
+                <td><code>claude:::claude-fable-5</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>Explicit worker only; never a lifecycle-role default</td>
+              </tr>
+              <tr>
+                <td><code>claude-sonnet-5</code></td>
+                <td><code>claude:::claude-sonnet-5</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>
+                  Default kit specialists at medium; Account Manager at low
+                </td>
+              </tr>
+              <tr>
+                <td><code>claude-opus-4-8</code></td>
+                <td><code>claude:::claude-opus-4-8</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>Reviewer specialist at high</td>
+              </tr>
+              <tr>
+                <td><code>codex-gpt-5-6-sol</code></td>
+                <td><code>codex:::gpt-5.6-sol</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>Codex worker</td>
+              </tr>
+              <tr>
+                <td><code>pi-gpt-5-6-sol</code></td>
+                <td><code>pi:::openai-codex/gpt-5.6-sol</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>Pi worker</td>
+              </tr>
+              <tr>
+                <td><code>pi-gpt-5-6-terra</code></td>
+                <td><code>pi:::openai-codex/gpt-5.6-terra</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>Pi worker</td>
+              </tr>
+              <tr>
+                <td><code>pi-gpt-5-6-luna</code></td>
+                <td><code>pi:::openai-codex/gpt-5.6-luna</code></td>
+                <td>low · medium · high · xhigh · max</td>
+                <td>Pi worker</td>
+              </tr>
+              <tr>
+                <td><code>pi-gpt-5-5</code></td>
+                <td><code>pi:::openai-codex/gpt-5.5</code></td>
+                <td>low · medium · high · xhigh</td>
+                <td>Pi worker</td>
+              </tr>
+              <tr>
+                <td><code>pi-gpt-5-4-mini</code></td>
+                <td><code>pi:::openai-codex/gpt-5.4-mini</code></td>
+                <td>low · medium · high · xhigh</td>
+                <td>Pi worker</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div role="alert" class="alert alert-info alert-soft">
+          <span
+            ><strong>No implicit worker offering:</strong> the strict request
+            path always requires an offering and effort. If a legacy
+            compatibility shim absolutely needs a worker default, use
+            <code>claude-opus-4-8</code>/<code>max</code>—never limited Fable
+            credits. <strong>Specialist migration:</strong> existing Sonnet
+            specialists move to
+            <code>claude-sonnet-5</code>/<code>medium</code>; the reviewer moves
+            to <code>claude-opus-4-8</code>/<code>high</code>. Repo overrides
+            must resolve one of the nine ids.</span
+          >
+        </div>
+      </section>
+
+      <section class="space-y-6">
+        <div>
+          <div class="eyebrow text-success">YAML source of truth</div>
+          <h2 class="text-3xl font-bold mt-1">
+            One validated roster drives list and launch
+          </h2>
+        </div>
+        <div class="grid lg:grid-cols-2 gap-5">
+          <article class="mockup-code bg-neutral text-neutral-content min-w-0">
+            <pre><code class="code-line">offerings:
+  claude-fable-5:
+    harness: claude
+    model: claude-fable-5
+    efforts: [low, medium, high, xhigh, max]
+  claude-sonnet-5:
+    harness: claude
+    model: claude-sonnet-5
+    efforts: [low, medium, high, xhigh, max]
+  claude-opus-4-8:
+    harness: claude
+    model: claude-opus-4-8
+    efforts: [low, medium, high, xhigh, max]
+  codex-gpt-5-6-sol:
+    harness: codex
+    model: gpt-5.6-sol
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-6-sol:
+    harness: pi
+    model: openai-codex/gpt-5.6-sol
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-6-terra:
+    harness: pi
+    model: openai-codex/gpt-5.6-terra
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-6-luna:
+    harness: pi
+    model: openai-codex/gpt-5.6-luna
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-5:
+    harness: pi
+    model: openai-codex/gpt-5.5
+    efforts: [low, medium, high, xhigh]
+  pi-gpt-5-4-mini:
+    harness: pi
+    model: openai-codex/gpt-5.4-mini
+    efforts: [low, medium, high, xhigh]</code></pre>
+          </article>
+          <article class="space-y-4">
+            <div class="mockup-code bg-neutral text-neutral-content min-w-0">
+              <pre><code class="code-line">management:
+  mode: dedicated
+  account_manager:
+    offering: claude-sonnet-5
+    effort: low
+    agent: upagent-account-manager
+
+specialists:
+  - name: backend
+    offering: claude-sonnet-5
+    effort: medium
+    agent: backend
+  - name: reviewer
+    offering: claude-opus-4-8
+    effort: high
+    agent: reviewer</code></pre>
+            </div>
+            <div class="card card-border bg-base-200">
+              <div class="card-body">
+                <h3 class="card-title">Startup invariants</h3>
+                <ul class="list-disc pl-5 space-y-2">
+                  <li>Ids are unique and shell-safe.</li>
+                  <li>
+                    Harness exists and has a renderer plus health detector.
+                  </li>
+                  <li>
+                    Model is non-empty; effort list is non-empty, unique, and
+                    canonical.
+                  </li>
+                  <li>
+                    Every specialist and lifecycle role references an existing
+                    offering and permitted effort.
+                  </li>
+                  <li>
+                    <code>lists --type offerings</code> and request validation
+                    read the same parsed object.
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div role="alert" class="alert alert-success alert-soft">
+          <span
+            ><strong>Why Sonnet 5 / low for the Account Manager:</strong> it
+            only observes Herdr status and bounded lifecycle evidence, explains
+            anomalies, and suggests one repair. It does not design, code,
+            validate, lease, publish, or terminalize. A high-reasoning model
+            would waste credits without improving the deterministic authority,
+            which remains Python. Fable stays available only when a caller
+            explicitly spends its limited credits.</span
+          >
+        </div>
+      </section>
+
+      <section id="launch" class="space-y-6 scroll-mt-24">
+        <div>
+          <div class="eyebrow text-accent">Exact launch renderers</div>
+          <h2 class="text-3xl font-bold mt-1">
+            Herdr remains the atomic pane boundary
+          </h2>
+          <p class="opacity-75 mt-2">
+            The recruiter validates and records the immutable selected offering,
+            then launches through one Herdr socket operation. Child argv is
+            selected by the offering’s harness.
+          </p>
+        </div>
+        <div class="mockup-code bg-neutral text-neutral-content">
+          <pre
+            data-prefix="$"
+          ><code class="code-line">herdr agent start &lt;lease-name&gt; --cwd &lt;cwd&gt; --tab &lt;tab-id&gt; \
+  --split right --no-focus -- bash -lc '&lt;rendered child command&gt;'</code></pre>
+        </div>
+        <div class="grid gap-4">
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="flex flex-wrap gap-2 items-center">
+                <span class="badge badge-primary">Claude Code</span
+                ><code>harness: claude</code>
+              </div>
+              <div class="mockup-code bg-neutral text-neutral-content mt-2">
+                <pre><code class="code-line">claude --dangerously-skip-permissions --agent &lt;persona&gt; \
+  --model &lt;model&gt; --effort &lt;effort&gt; \
+  "Read &lt;lease instructions&gt; and do exactly that work."</code></pre>
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="flex flex-wrap gap-2 items-center">
+                <span class="badge badge-info">Codex CLI</span
+                ><code>harness: codex</code>
+              </div>
+              <div class="mockup-code bg-neutral text-neutral-content mt-2">
+                <pre><code class="code-line">codex exec --dangerously-bypass-approvals-and-sandbox \
+  --skip-git-repo-check --model &lt;model&gt; \
+  -c model_reasoning_effort=&lt;effort&gt; \
+  "Read &lt;lease instructions&gt; and do exactly that work."</code></pre>
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="flex flex-wrap gap-2 items-center">
+                <span class="badge badge-secondary">Pi</span
+                ><code>harness: pi</code>
+              </div>
+              <div class="mockup-code bg-neutral text-neutral-content mt-2">
+                <pre><code class="code-line">pi --approve --no-extensions \
+  -e "$HOME/.pi/agent/extensions/herdr-agent-state.ts" \
+  --model &lt;provider/model&gt; --thinking &lt;effort&gt; \
+  "Read &lt;lease instructions&gt; and do exactly that work."</code></pre>
+              </div>
+              <p class="text-sm opacity-70">
+                Pi’s current roster template must change from effort encoded in
+                the model pattern to explicit <code>--thinking</code>. Pi has no
+                <code>--agent</code>; persona content is written into the lease
+                instructions.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div class="flex flex-wrap gap-3 text-sm">
+          <a
+            class="source text-primary"
+            target="_blank"
+            rel="noreferrer"
+            href="https://code.claude.com/docs/en/model-config"
+            >Claude model/effort docs ↗</a
+          ><a
+            class="source text-primary"
+            target="_blank"
+            rel="noreferrer"
+            href="https://developers.openai.com/codex/models"
+            >Codex model docs ↗</a
+          ><a
+            class="source text-primary"
+            target="_blank"
+            rel="noreferrer"
+            href="https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/models.md"
+            >Pi model docs ↗</a
+          ><a
+            class="source text-primary"
+            target="_blank"
+            rel="noreferrer"
+            href="https://github.com/ogulcancelik/herdr/blob/HEAD/SKILL.md"
+            >Herdr agent docs ↗</a
+          >
+        </div>
+      </section>
+
+      <section class="space-y-6">
+        <div>
+          <div class="eyebrow text-secondary">Deterministic completion</div>
+          <h2 class="text-3xl font-bold mt-1">
+            A missing worker or specialist file becomes a terminal result, never
+            a hang
+          </h2>
+        </div>
+        <div class="card card-border bg-base-200">
+          <div class="card-body">
+            <pre
+              class="overflow-x-auto rounded-box bg-base-300 p-4 text-sm leading-relaxed"
+              aria-label="Deterministic completion tree"
+            ><code>Canonical Hub writes typed artifact manifest
+└── worker exits, emits done, or times out
+    └── Are all required lease-private artifacts valid?
+        ├── YES
+        │   └── atomically publish bundle and consult answer
+        └── NO
+            └── Account Manager explains bounded evidence
+                └── one exact repair attempt to the same worker
+                    └── Is the typed manifest valid now?
+                        ├── YES → atomically publish
+                        └── NO
+                            └── Python writes blocked bundle
+                                └── consultation also gets failure answer.json
+
+Published terminal output
+└── validate every public artifact
+    └── write receipt
+        └── emit durable requester event
+            └── wake await</code></pre>
+          </div>
+        </div>
+        <div class="grid lg:grid-cols-3 gap-4">
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-primary badge-soft">Manifest</div>
+              <h3 class="card-title">Typed required artifacts</h3>
+              <p>
+                Every worker requires <code>result.json</code>,
+                <code>compacted.md</code>, and <code>handoff.md</code> at
+                lease-private staging paths. Specialist requests additionally
+                require a staged <code>answer.json</code> that Python validates
+                and projects atomically to the caller’s exact
+                <code>answer_path</code>.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-warning badge-soft">Manager boundary</div>
+              <h3 class="card-title">Advisory only</h3>
+              <p>
+                The cheap per-request manager observes lifecycle evidence and
+                advises one repair. It cannot alter leases, invent passing
+                artifacts, publish results, or declare terminal state.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-200">
+            <div class="card-body">
+              <div class="badge badge-success badge-soft">Python authority</div>
+              <h3 class="card-title">Always terminal</h3>
+              <p>
+                The canonical Hub’s Python process validates, snapshots
+                evidence, writes fallback artifacts and consult answers,
+                publishes atomically, cleans the pane, writes the receipt, and
+                notifies the requester.
+              </p>
+            </div>
+          </article>
+        </div>
+        <div role="alert" class="alert alert-warning alert-soft">
+          <span
+            >Claude/Codex structured output and Pi JSON/RPC events may improve
+            capture, but they are adapters only. The canonical Hub’s
+            cross-harness Python manifest validation remains the acceptance
+            authority. A stage whose brief mandates specialist input cannot pass
+            without a Hub-verified cited consult receipt.</span
+          >
+        </div>
+      </section>
+
+      <section id="plan" class="space-y-6 scroll-mt-24">
+        <div>
+          <div class="eyebrow text-primary">Implementation plan</div>
+          <h2 class="text-3xl font-bold mt-1">
+            Six phases, beginning with a hard single-writer boundary
+          </h2>
+        </div>
+        <div class="grid gap-4">
+          <article
+            class="card card-border bg-base-200 phase"
+            style="--accent: var(--color-error)"
+          >
+            <div class="card-body">
+              <div class="flex gap-2 items-center">
+                <span class="badge badge-error">1</span>
+                <h3 class="card-title">Establish the open canonical Hub</h3>
+              </div>
+              <p>
+                Split lifecycle authority from caller code. Start one canonical
+                Hub behind a stable machine-local Unix socket and exclusive
+                startup lock; publish its <code>hub_instance_id</code>, engine
+                path, protocol version, PID, and Herdr session. Make the socket
+                usable by local agents and users without registration, API keys,
+                allowlists, TLS, or per-worktree approval. The thin client has
+                no ledger mutation, reconciliation, dispatch, or runner-spawn
+                path. All child runners use the Hub’s engine path/version. Add
+                the fenced <code>launching → started</code> transaction and
+                exact-pane compensation so a failed record transition cannot
+                orphan a pane.
+              </p>
+            </div>
+          </article>
+          <article
+            class="card card-border bg-base-200 phase"
+            style="--accent: var(--color-warning)"
+          >
+            <div class="card-body">
+              <div class="flex gap-2 items-center">
+                <span class="badge badge-warning">2</span>
+                <h3 class="card-title">
+                  Put the complete public façade on the socket
+                </h3>
+              </div>
+              <p>
+                Add imported <code>upagent +args</code> with <code>up</code>,
+                <code>status</code>, <code>lists</code>, <code>request</code>,
+                <code>await</code>, <code>await-any</code>, <code>verify</code>,
+                <code>respond</code>, and <code>reconcile</code>. Feed named
+                flags and <code>--file</code> through one closed schema; support
+                optional UUID/ULID <code>request_id</code> idempotency. Client
+                and Hub both validate protocol/schema, but only the Hub mutates
+                state. Every main-checkout, worktree, controller, and legacy
+                wrapper must use this transport; none may call
+                <code>cmd_dispatch()</code> locally.
+              </p>
+            </div>
+          </article>
+          <article
+            class="card card-border bg-base-200 phase"
+            style="--accent: var(--color-primary)"
+          >
+            <div class="card-body">
+              <div class="flex gap-2 items-center">
+                <span class="badge badge-primary">3</span>
+                <h3 class="card-title">Install the nine-offering roster</h3>
+              </div>
+              <p>
+                Add the validated <code>offerings</code> map, grouped/text/JSON
+                listing, stable-id request resolution, and immutable offering
+                snapshot in <code>order.json</code>. Convert kit specialists and
+                lifecycle roles from raw model tuples to offering references.
+                Keep controller and legacy recipes only as deliberate transport
+                shims that call the canonical socket; none retains a local
+                Recruiter or ledger path.
+              </p>
+            </div>
+          </article>
+          <article
+            class="card card-border bg-base-200 phase"
+            style="--accent: var(--color-info)"
+          >
+            <div class="card-body">
+              <div class="flex gap-2 items-center">
+                <span class="badge badge-info">4</span>
+                <h3 class="card-title">
+                  Render exact harness argv from canonical code
+                </h3>
+              </div>
+              <p>
+                Claude uses <code>--effort</code>; Codex uses
+                <code>-c model_reasoning_effort=…</code>; Pi uses
+                provider-qualified <code>--model</code> and
+                <code>--thinking</code>. Unit-test exact argv before Herdr
+                invocation, plus process/agent/cwd startup verification after
+                launch.
+              </p>
+            </div>
+          </article>
+          <article
+            class="card card-border bg-base-200 phase"
+            style="--accent: var(--color-secondary)"
+          >
+            <div class="card-body">
+              <div class="flex gap-2 items-center">
+                <span class="badge badge-secondary">5</span>
+                <h3 class="card-title">
+                  Finish manager + typed completion reactor
+                </h3>
+              </div>
+              <p>
+                Set dedicated per-request supervision, pinning the lightweight
+                Account Manager to
+                <code>claude-sonnet-5</code>/<code>low</code>. Keep Fable
+                credits opt-in and require explicit worker offerings; any
+                legacy-only worker default uses
+                <code>claude-opus-4-8</code>/<code>max</code>. Add the typed
+                artifact manifest, bounded one-repair transition,
+                Python-authored blocked bundle, atomic publication, receipt,
+                cleanup, and durable requester event. Specialist manifests add
+                lease-private <code>answer.json</code>; Python publishes a cited
+                answer or valid failure answer before the consult receipt. Stage
+                finalization blocks when mandated consult evidence is absent.
+              </p>
+            </div>
+          </article>
+          <article
+            class="card card-border bg-base-200 phase"
+            style="--accent: var(--color-success)"
+          >
+            <div class="card-body">
+              <div class="flex gap-2 items-center">
+                <span class="badge badge-success">6</span>
+                <h3 class="card-title">
+                  Verify, document, and vet the public diff
+                </h3>
+              </div>
+              <p>
+                Smoke every selected offering and run the worktree split-brain
+                matrix: main checkout plus multiple current/stale worktrees must
+                report one <code>hub_instance_id</code>, canonical engine path,
+                and exactly one worker for an idempotent consult. Kill the Hub
+                between pane create/record and prove recovery leaves no orphan.
+                Test open local caller access, protocol mismatch, omitted
+                artifacts, answer projection, timeout, crash, stale lease,
+                mandatory-consult blocking, manager failure, and process
+                mismatch. Run LSP diagnostics, <code>just test</code>,
+                <code>just update</code>, docs review, and mandatory independent
+                proprietary-content review before any push.
+              </p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="space-y-6">
+        <div>
+          <div class="eyebrow text-success">Acceptance matrix</div>
+          <h2 class="text-3xl font-bold mt-1">
+            Evidence required before calling it done
+          </h2>
+        </div>
+        <div
+          class="overflow-x-auto rounded-box border border-base-content/10 bg-base-200"
+        >
+          <table class="table table-zebra">
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Required proof</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Single writer</td>
+                <td>
+                  Main checkout plus multiple current and deliberately stale
+                  worktrees all report the same <code>hub_instance_id</code>,
+                  canonical engine path, protocol version, and socket. Only the
+                  Hub process can call ledger mutation/reconciliation APIs.
+                </td>
+              </tr>
+              <tr>
+                <td>Open local access</td>
+                <td>
+                  Unregistered local agents and users can list, status, request,
+                  and await through the machine-local socket from arbitrary cwd
+                  and worktrees. No API key, JWT, role, allowlist, TLS, or
+                  per-worktree approval is required.
+                </td>
+              </tr>
+              <tr>
+                <td>Worktree consult regression</td>
+                <td>
+                  The same specialist/question from main and worktree paths
+                  attaches to one request, starts at most one worker, returns
+                  the same cited or terminal failure answer, and never emits
+                  <code
+                    >lease ownership changed before worker … was recorded</code
+                  >.
+                </td>
+              </tr>
+              <tr>
+                <td>Launch transaction</td>
+                <td>
+                  Fault injection between Herdr pane creation and
+                  <code>record_worker</code> proves the exact pane is recovered
+                  or closed, the lease terminalizes, and no orphan remains.
+                </td>
+              </tr>
+              <tr>
+                <td>Strict boundary</td>
+                <td>
+                  Parameterized client/server tests show invalid CLI/YAML/JSON
+                  creates zero order, manager, pane, or worker and never
+                  bypasses the canonical Hub.
+                </td>
+              </tr>
+              <tr>
+                <td>Request files</td>
+                <td>
+                  File and equivalent flags canonicalize identically; unknown
+                  keys, duplicate sources, invalid ids, and changed-payload
+                  collisions launch nothing. Same-id/same-hash retries return
+                  the existing request.
+                </td>
+              </tr>
+              <tr>
+                <td>Offerings</td>
+                <td>
+                  Text and JSON lists match the nine parsed entries; every
+                  id/effort renders expected argv.
+                </td>
+              </tr>
+              <tr>
+                <td>Specialists</td>
+                <td>
+                  All base + overlay entries resolve an approved offering.
+                  Success atomically publishes a cited <code>answer.json</code>;
+                  launch/worker/citation failure publishes a schema-valid
+                  failure answer before its receipt. A mandated consult without
+                  cited Hub evidence blocks stage acceptance.
+                </td>
+              </tr>
+              <tr>
+                <td>Completion</td>
+                <td>
+                  Each missing/malformed artifact gets one bounded repair then a
+                  complete blocked three-file bundle; specialist requests also
+                  receive the validated public answer projection.
+                  Receipts/events never precede their required public artifacts.
+                </td>
+              </tr>
+              <tr>
+                <td>Lifecycle</td>
+                <td>
+                  Receipt, cleanup, requester event, await return, and
+                  active-worker list agree for pass/fail/blocked/timeout.
+                </td>
+              </tr>
+              <tr>
+                <td>Harness smoke</td>
+                <td>
+                  All nine offerings start with expected process, cwd, model,
+                  and effort; no hidden prompt or trust dialog.
+                </td>
+              </tr>
+              <tr>
+                <td>Public safety</td>
+                <td>
+                  Independent reviewer explicitly passes the full diff against
+                  the repository’s proprietary-content categories before push.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section
+        id="approval"
+        class="card card-border bg-base-200 border-success/40 scroll-mt-24"
+      >
+        <div class="card-body">
+          <div class="eyebrow text-success">
+            Amendment locked by user direction
+          </div>
+          <h2 class="card-title text-3xl mt-1">Ready for execution</h2>
+          <p class="opacity-75 mt-2 max-w-5xl">
+            The implementation target now includes the mandatory single-writer
+            socket boundary, open machine-local callers, canonical child-runner
+            code, fenced pane launch transaction, deterministic specialist
+            answer projection, idempotent consult retries, and mandatory-consult
+            stage gate. Functionality and usability take priority: local request
+            submission has no identity or authorization ceremony; only
+            correctness fencing remains.
+          </p>
+        </div>
+      </section>
+
+      <section class="card card-border bg-base-200">
+        <div class="card-body">
+          <h2 class="card-title text-2xl">Evidence notes</h2>
+          <div class="overflow-x-auto">
+            <table class="table table-sm">
+              <thead>
+                <tr>
+                  <th>Finding</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    Consultations already project into ordinary UpAgent orders
+                  </td>
+                  <td>
+                    <code>868976a</code>, <code>build_consult_order</code>,
+                    current consult tests
+                  </td>
+                </tr>
+                <tr>
+                  <td>Positional split-brain path is confirmed</td>
+                  <td>
+                    Imported Just recipe resolves a checkout-local
+                    <code>recruiter.py</code>; <code>cmd_consult()</code> calls
+                    <code>cmd_dispatch()</code>; <code>_spawn_job()</code> uses
+                    local <code>__file__</code>; all copies share
+                    <code>STATE_FILE</code>/<code>/tmp/.upagent</code>.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Pane-create / lease-record gap is real</td>
+                  <td>
+                    <code>start_monitor()</code> raises when
+                    <code>record_worker()</code> loses ownership after Herdr has
+                    already created the pane; observed event:
+                    <code
+                      >lease ownership changed before worker … was
+                      recorded</code
+                    >.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Reusable deterministic result seams exist</td>
+                  <td>
+                    <code>result_staging_path</code>,
+                    <code>published_result_path</code>,
+                    <code>completed_result</code>,
+                    <code>_write_blocked_result</code>
+                  </td>
+                </tr>
+                <tr>
+                  <td>Current Account Manager modes and history were traced</td>
+                  <td>
+                    <code>bec9487</code>, <code>187092f</code>,
+                    <code>c27ab6a</code>, <code>9911b26</code>
+                  </td>
+                </tr>
+                <tr>
+                  <td>Model and effort inventory</td>
+                  <td>
+                    Official Claude docs; local Codex model cache; local
+                    <code>pi --list-models</code> and generated model metadata
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="text-xs opacity-60">
+            Implementation is complete in the current working tree: the strict
+            public façade, code-owned offerings, single-writer Hub, and typed
+            completion lifecycle now implement the locked decisions above. This
+            evidence update records completion only; it does not alter those
+            decisions or their acceptance gates.
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer class="border-t border-base-content/10 mt-12">
+      <div
+        class="shell py-8 text-sm opacity-65 flex flex-wrap justify-between gap-3"
+      >
+        <span>UpAgent amended final technical plan</span
+        ><span
+          >One canonical writer · open local callers · deterministic
+          delivery</span
+        >
+      </div>
+    </footer>
+  </body>
+</html>

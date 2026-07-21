@@ -39,3 +39,4 @@ build/
 .idea/
 .vscode/
 .shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub/hub/hub
+.pi-lens

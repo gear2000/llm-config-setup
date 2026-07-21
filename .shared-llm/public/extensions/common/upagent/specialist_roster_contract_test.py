@@ -12,10 +12,10 @@ against behavior and should pass unchanged. Do not delete this file with the hub
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -30,21 +30,23 @@ REPO_ROOT = MODULES.parents[3]
 # moves under the Recruiter, change these values — here, only here. The arrow on each line is
 # what it becomes; confirm each against the implementation rather than pasting it blind.
 #
-IMPLEMENTATION = "upagent/recruiter.py"       # the Recruiter owns the roster since Phase 3
-ENGINE_DIR_ATTR = "HERE"                      # the module attribute holding the engine dir
-LOAD_ROSTER = "load_specialist_roster"        # the Recruiter's SPECIALIST loader (not load_roster:
+IMPLEMENTATION = "upagent/recruiter.py"  # the Recruiter owns the roster since Phase 3
+ENGINE_DIR_ATTR = "HERE"  # the module attribute holding the engine dir
+LOAD_ROSTER = (
+    "load_specialist_roster"  # the Recruiter's SPECIALIST loader (not load_roster:
+)
 #                                             # that one resolves launch templates first-match-wins)
-ENTRY_POINT = "main"                          # the module's argv entry point
-ROSTER_KEY = "specialists"                    # the merged-list key
-KIT_BASE_FILE = "specialists.yaml"            # beside the engine. NOT upagent.yaml: that file is
+ENTRY_POINT = "main"  # the module's argv entry point
+ROSTER_KEY = "specialists"  # the merged-list key
+KIT_BASE_FILE = "specialists.yaml"  # beside the engine. NOT upagent.yaml: that file is
 #                                             # destination-owned and deliberately unshipped, which
 #                                             # is what makes its "roster not found" fail loud, and
 #                                             # it is keyed by HARNESS and never decides the agent.
 OVERLAY_PATH = ".shared-llm/this_repo/extensions/common/upagent/specialists.yaml"
-SINGLE_FILE_ENV = "UPAGENT_CONFIG"            # cleared, not used: the specialist loader reads no
+SINGLE_FILE_ENV = "UPAGENT_CONFIG"  # cleared, not used: the specialist loader reads no
 #                                             # env var, so nothing can drop the kit base
-PHONE_BOOK_ARGV = ["specialists"]             # the subcommand that prints the phone book
-OVERLAY_EXTRA = ""                            # runtime_dir was Specialist Hub state; there is none
+PHONE_BOOK_ARGV = ["specialists"]  # the subcommand that prints the phone book
+OVERLAY_EXTRA = ""  # runtime_dir was Specialist Hub state; there is none
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 
@@ -102,8 +104,8 @@ def _write_kit_base_roster(engine_dir: Path) -> None:
         + "".join(
             f"  - name: {name}\n"
             f"    description: kit {name} specialist\n"
-            "    harness: claude\n"
-            "    model: sonnet\n"
+            "    offering: claude-sonnet-5\n"
+            "    effort: medium\n"
             f"    agent: {name}\n"
             for name in ("docs", "reviewer", "database", "security")
         )
@@ -116,17 +118,16 @@ def _write_repo_overlay_roster(repo_root: Path, runtime_dir: Path) -> None:
     overlay = repo_root / OVERLAY_PATH
     overlay.parent.mkdir(parents=True, exist_ok=True)
     overlay.write_text(
-        OVERLAY_EXTRA.format(runtime=runtime_dir)
-        + f"{ROSTER_KEY}:\n"
+        OVERLAY_EXTRA.format(runtime=runtime_dir) + f"{ROSTER_KEY}:\n"
         "  - name: reviewer\n"
         "    description: repo reviewer with private routing\n"
-        "    harness: claude\n"
-        "    model: haiku\n"
+        "    offering: claude-opus-4-8\n"
+        "    effort: high\n"
         "    agent: reviewer\n"
         "  - name: payments\n"
         "    description: repo-only payments specialist\n"
-        "    harness: claude\n"
-        "    model: sonnet\n"
+        "    offering: claude-sonnet-5\n"
+        "    effort: medium\n"
         "    agent: payments\n"
     )
 
@@ -141,9 +142,12 @@ def _roster_metadata() -> dict:
     return getattr(_owner, LOAD_ROSTER)()
 
 
-def _render_phone_book(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> str:
+def _render_phone_book(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> str:
     """Run the command a phase leader pastes into every stage brief, and return its output."""
     monkeypatch.setattr(sys, "argv", [IMPLEMENTATION, *PHONE_BOOK_ARGV])
+    monkeypatch.setattr(_owner, "_require_hub_authority", lambda: None)
     getattr(_owner, ENTRY_POINT)()
     return capsys.readouterr().out
 
@@ -189,7 +193,7 @@ def test_an_overlay_entry_clobbers_the_same_named_kit_entry(
     """Union, not concatenation: overriding a specialist replaces it rather than duplicating it."""
     merged = _merged_specialists()
 
-    assert merged["reviewer"]["model"] == "haiku"
+    assert merged["reviewer"]["offering"] == "claude-opus-4-8"
     assert merged["reviewer"]["description"] == "repo reviewer with private routing"
 
 
@@ -199,7 +203,7 @@ def test_a_repo_only_specialist_is_added_to_the_kit_roster(
     merged = _merged_specialists()
 
     assert merged["payments"]["agent"] == "payments"
-    assert merged["docs"]["model"] == "sonnet"
+    assert merged["docs"]["offering"] == "claude-sonnet-5"
 
 
 def test_every_specialist_records_which_roster_produced_it(
@@ -331,14 +335,13 @@ def test_the_phone_book_caps_an_essay_description_to_one_bounded_line(
     overlay = repo_root / OVERLAY_PATH
     overlay.parent.mkdir(parents=True, exist_ok=True)
     overlay.write_text(
-        OVERLAY_EXTRA.format(runtime=tmp_path / "runtime")
-        + f"{ROSTER_KEY}:\n"
+        OVERLAY_EXTRA.format(runtime=tmp_path / "runtime") + f"{ROSTER_KEY}:\n"
         "  - name: essayist\n"
         "    description: |\n"
         "      " + "long first line " * 30 + "\n"
         "      second line that must never appear\n"
-        "    harness: claude\n"
-        "    model: sonnet\n"
+        "    offering: claude-sonnet-5\n"
+        "    effort: medium\n"
         "    agent: essayist\n"
     )
     monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
@@ -377,4 +380,6 @@ def test_every_command_the_phone_book_names_resolves_to_a_real_recipe(
         text=True,
     )
 
-    assert named <= set(summary.stdout.split()), f"phone book names undefined: {sorted(named)}"
+    assert named <= set(summary.stdout.split()), (
+        f"phone book names undefined: {sorted(named)}"
+    )

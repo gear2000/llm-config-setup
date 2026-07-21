@@ -3,19 +3,41 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
+import importlib.util
 import json
-from pathlib import Path
-import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import yaml
 
 HERE = Path(__file__).resolve().parent
-RECRUITER = HERE / "recruiter.py"
+_runtime_name = "upagent_command_runtime"
+if _runtime_name in sys.modules:
+    command_runtime = sys.modules[_runtime_name]
+else:
+    _runtime_spec = importlib.util.spec_from_file_location(
+        _runtime_name, HERE / "command_runtime.py"
+    )
+    if _runtime_spec is None or _runtime_spec.loader is None:
+        raise RuntimeError("could not load UpAgent command runtime")
+    command_runtime = importlib.util.module_from_spec(_runtime_spec)
+    sys.modules[_runtime_name] = command_runtime
+    _runtime_spec.loader.exec_module(command_runtime)
+
+recruiter: Any = None
+
+
+def _bind_recruiter_runtime(runtime: Any) -> None:
+    """Accept the Hub's one canonical Recruiter module; never load a target-local copy."""
+    global recruiter
+    if recruiter is not None and recruiter is not runtime:
+        raise RuntimeError("direct controller Recruiter runtime is already bound")
+    recruiter = runtime
+
+
 DIRECT_STEP_KINDS = ("implement", "review")
 
 
@@ -182,15 +204,11 @@ def build_order(
             raise DirectRunError(
                 "manager placement cannot specify both workspace_id and workspace_label"
             )
-        placement = {
-            "mode": "workspace",
-            "anchor_pane": tui_pane,
-            **(
-                {"workspace_id": workspace_id}
-                if workspace_id
-                else {"workspace_label": workspace_label}
-            ),
-        }
+        placement = {"mode": "workspace", "anchor_pane": tui_pane}
+        if workspace_id:
+            placement["workspace_id"] = workspace_id
+        elif workspace_label:
+            placement["workspace_label"] = workspace_label
     order: dict[str, Any] = {
         "order_id": f"{plan_id}.{step_id}.{operation}.{time.time_ns()}",
         "mode": "direct",
@@ -206,6 +224,12 @@ def build_order(
         "result_path": str(result),
         "cockpit_pane": tui_pane,
         "manager_placement": placement,
+        "artifact_publication": {
+            "schema_version": 1,
+            "compacted_path": str(root / f"{operation}-compacted.md"),
+            "handoff_path": str(root / f"{operation}-handoff.md"),
+            "mandatory_consults": [],
+        },
         "operation": operation,
         "requires_apply": requires_apply,
         "step_kind": kind,
@@ -243,8 +267,8 @@ def build_order(
     return order
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
+def main(argv: list[str] | None = None) -> int:
+    p = command_runtime.ArgumentParser()
     p.add_argument("command", choices=("steps", "order", "apply-order"))
     p.add_argument("--route", type=Path, required=True)
     p.add_argument("--plan-id")
@@ -254,9 +278,9 @@ def main() -> int:
     p.add_argument("--tui-pane")
     p.add_argument("--approval", type=Path)
     p.add_argument("--plan-artifact", type=Path)
-    a = p.parse_args()
+    a = p.parse_args(argv)
     if a.command == "steps":
-        print(json.dumps(step_order(a.route)))
+        command_runtime.command_print(json.dumps(step_order(a.route)))
         return 0
     if not all((a.plan_id, a.step_id, a.cwd, a.run_root, a.tui_pane)):
         raise DirectRunError("missing direct order arguments")
@@ -280,9 +304,8 @@ def main() -> int:
         f"{order['operation']}-order.json"
     )
     path.write_text(json.dumps(order, indent=2) + "\n")
-    return subprocess.run(
-        [sys.executable, str(RECRUITER), "dispatch", str(path)], check=False
-    ).returncode
+    recruiter._require_hub_authority()
+    return recruiter.cmd_dispatch(str(path), recruiter.default_roster_path())
 
 
 if __name__ == "__main__":

@@ -20,9 +20,8 @@
 # route.yaml) and then delegate to `herdr-start` — the kickoff below stays the
 # single entry seam, so issue-driven runs are an additive fetcher, not a fork.
 
-_UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/recruiter.py"
-_PLAN_CONTROLLER := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/plan_controller.py"
-_RUN_LIFECYCLE := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/run_lifecycle.py"
+_UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/client.py"
+# plan_controller.py and run_lifecycle.py execute only as canonical Hub controller targets.
 _HERDR_LAB := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/lab_session.py"
 
 # Bring up the always-up shared service (the UpAgent Recruiter, in its own role-labeled pane,
@@ -35,52 +34,17 @@ herdr-up *FLAGS:
     ${PYTHON_BIN:-python3} {{_UPAGENT}} up {{FLAGS}}
     @{{just_executable()}} --justfile "{{justfile()}}" herdr-status
 
-# Status of the shared service as a table with ✓ up (green) / ✗ down (red).
+# Status comes from the canonical socket, so main checkouts and worktrees display the same Hub
+# identity instead of reading a checkout-local state path.
 herdr-status:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ${PYTHON_BIN:-python3} - <<'PY'
-    import json, os, subprocess
-    G, R, DIM, RST = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
-    def live_panes():
-        try:
-            out = subprocess.run(
-                ["herdr", "pane", "list"], check=True, capture_output=True, text=True
-            )
-            return {p["pane_id"] for p in json.loads(out.stdout)["result"]["panes"]}
-        except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
-            return set()
-    panes = live_panes()
-    def read(p):
-        try:
-            with open(p) as state:
-                return json.load(state)
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return None
-    rows = []
-    # recruiter
-    rec = read(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json"))
-    if rec and rec.get("recruiter_pane") in panes:
-        rows.append(("recruiter", True, f"pane {rec['recruiter_pane']} · roster {os.path.basename(rec.get('roster',''))}"))
-    else:
-        rows.append(("recruiter", False, "not up — run `just herdr-up`"))
-    W = max(len(d) for _,_,d in rows + [("","","Herdr shared services")])
-    bar = "─" * (W + 2)
-    print(f"┌──────────────┬────────┬{bar}┐")
-    print(f"│ hub          │ state  │ {'detail'.ljust(W)} │")
-    print(f"├──────────────┼────────┼{bar}┤")
-    for name, up, detail in rows:
-        mark = f"{G}✓ up  {RST}" if up else f"{R}✗ down{RST}"
-        print(f"│ {name.ljust(12)} │ {mark} │ {DIM}{detail.ljust(W)}{RST} │")
-    print(f"└──────────────┴────────┴{bar}┘")
-    PY
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" status
 
 # Tear down the shared services. The Recruiter engine first terminalizes every durably owned
 # active worker and verifies pane cleanup; it never closes a foreign/unrecorded pane.
 herdr-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    ${PYTHON_BIN:-python3} {{_UPAGENT}} down || true
+    ${PYTHON_BIN:-python3} {{_UPAGENT}} --target recruiter down || true
     {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
 
 # Kick off a checked plan through one deterministic Python transaction. It starts
@@ -105,7 +69,7 @@ herdr-down:
 #   just herdr-start ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
 #   just herdr-start ops/work-log/2026-07-12/my-feature "" pi
 herdr-start dir slug="" harness="claude" *FLAGS="":
-    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}" {{FLAGS}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target plan-controller "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}" {{FLAGS}}
 
 # One-release warning alias for the old launcher name.
 herdr-plan dir slug="" harness="claude" *FLAGS="":
@@ -115,28 +79,28 @@ herdr-plan dir slug="" harness="claude" *FLAGS="":
 # Publish the plan's durable terminal fact after run-status.md is complete. It is the run's
 # only terminal authority (and lets any in-flight legacy watchdog retire safely).
 herdr-run-session-finish dir state slug="" owner_token_file="":
-    ${PYTHON_BIN:-python3} "{{_PLAN_CONTROLLER}}" "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}" {{ if owner_token_file != "" { "--owner-token-file " + quote(owner_token_file) } else { "" } }}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target plan-controller "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}" {{ if owner_token_file != "" { "--owner-token-file " + quote(owner_token_file) } else { "" } }}
 
 # Durable run lifecycle operations. `session-start` acquires or observes, `heartbeat` refreshes
 # the owner token, `snapshot` is read-only, `reconcile` writes the typed recovery receipt,
 # `guard` refuses blind mutation, and `cleanup` preserves anything not structurally owned.
 herdr-run-session-start dir *FLAGS:
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" session-start "{{dir}}" --repo "{{invocation_directory()}}" {{FLAGS}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" session-start "{{dir}}" {{FLAGS}}
 
 herdr-run-session-heartbeat dir *FLAGS:
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" heartbeat "{{dir}}" --repo "{{invocation_directory()}}" {{FLAGS}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" heartbeat "{{dir}}" {{FLAGS}}
 
 herdr-run-session-snapshot dir:
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" snapshot "{{dir}}" --repo "{{invocation_directory()}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" snapshot "{{dir}}"
 
 herdr-run-session-reconcile dir:
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" reconcile "{{dir}}" --repo "{{invocation_directory()}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" reconcile "{{dir}}"
 
 herdr-run-session-guard dir action token_file="":
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" guard "{{dir}}" --repo "{{invocation_directory()}}" --action "{{action}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" guard "{{dir}}" --action "{{action}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
 
 herdr-run-session-cleanup dir token_file="":
-    ${PYTHON_BIN:-python3} "{{_RUN_LIFECYCLE}}" cleanup "{{dir}}" --repo "{{invocation_directory()}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" cleanup "{{dir}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
 
 # Guarded non-default Herdr lab/session helper for smoke tests.
 # Generate a name first, then provision/run/teardown through that exact name:

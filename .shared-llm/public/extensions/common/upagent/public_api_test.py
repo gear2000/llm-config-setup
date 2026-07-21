@@ -1,0 +1,441 @@
+# pyright: reportMissingImports=false
+"""Strict public request boundary, zero-launch, and idempotency tests."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location(
+    "public_api_test_module", HERE / "public_api.py"
+)
+assert spec and spec.loader
+public_api = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = public_api
+spec.loader.exec_module(public_api)
+recruiter_spec = importlib.util.spec_from_file_location(
+    "public_api_test_recruiter", HERE / "recruiter.py"
+)
+assert recruiter_spec and recruiter_spec.loader
+recruiter = importlib.util.module_from_spec(recruiter_spec)
+sys.modules[recruiter_spec.name] = recruiter
+recruiter_spec.loader.exec_module(recruiter)
+public_api._bind_recruiter_runtime(recruiter)
+
+REQUEST_ID = "01957f4e-7f7f-7f8b-9c42-6e7f52f9321a"
+
+
+def _prompt(tmp_path: Path, text: str = "Do the bounded task.\n") -> Path:
+    path = tmp_path / "prompt.md"
+    path.write_text(text)
+    return path
+
+
+def _worker_argv(tmp_path: Path, **overrides: str) -> list[str]:
+    values = {
+        "request_id": REQUEST_ID,
+        "offering": "pi-gpt-5-6-sol",
+        "effort": "high",
+        "agent": "backend",
+        "prompt_file": str(_prompt(tmp_path)),
+        "cwd": str(tmp_path),
+        **overrides,
+    }
+    return [
+        "request",
+        "--type",
+        "worker",
+        "--request-id",
+        values["request_id"],
+        "--offering",
+        values["offering"],
+        "--effort",
+        values["effort"],
+        "--agent",
+        values["agent"],
+        "--prompt-file",
+        values["prompt_file"],
+        "--cwd",
+        values["cwd"],
+    ]
+
+
+def _args(argv: list[str]) -> Any:
+    return public_api.contract.parse_argv(argv)
+
+
+def test_public_help_describes_manager_degradation_and_cursor_map() -> None:
+    help_text = public_api.contract.help_text()
+
+    assert "advisory manager failure degrades" in help_text
+    assert "--cursor '{\"ID\": 12}'" in help_text
+
+
+def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:
+    prompt = _prompt(tmp_path)
+    file_path = tmp_path / "request.json"
+    file_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "request_id": REQUEST_ID,
+                "type": "worker",
+                "offering": "pi-gpt-5-6-sol",
+                "effort": "high",
+                "agent": "backend",
+                "prompt_file": str(prompt),
+                "cwd": str(tmp_path),
+            }
+        )
+    )
+
+    inline = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+    from_file = public_api.validate_request(
+        _args(["request", "--file", str(file_path), "--wait", "--json"]),
+        tmp_path,
+    )
+
+    assert inline.payload == from_file.payload
+    assert inline.payload_sha256 == from_file.payload_sha256
+    assert inline.prompt_bytes == from_file.prompt_bytes
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value.update(extra=True), "unknown keys"),
+        (lambda value: value.update(schema_version="1"), "schema_version"),
+        (lambda value: value.update(offering="unknown"), "unknown offering"),
+        (lambda value: value.update(effort="ultra"), "does not allow effort"),
+        (lambda value: value.update(agent="not-a-persona"), "unknown worker persona"),
+        (lambda value: value.update(prompt_file="relative.md"), "must be absolute"),
+        (lambda value: value.update(request_id="BAD"), "canonical UUID or ULID"),
+        (lambda value: value.update(specialist="backend"), "incompatible specialist"),
+    ],
+)
+def test_invalid_file_requests_fail_before_store_or_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate: Any, message: str
+) -> None:
+    prompt = _prompt(tmp_path)
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "type": "worker",
+        "offering": "pi-gpt-5-6-sol",
+        "effort": "high",
+        "agent": "backend",
+        "prompt_file": str(prompt),
+        "cwd": str(tmp_path),
+    }
+    mutate(value)
+    request_file = tmp_path / "request.json"
+    request_file.write_text(json.dumps(value))
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    launched: list[object] = []
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda *args, **kwargs: launched.append(args) or 0,
+    )
+
+    with pytest.raises(public_api.PublicError, match=message):
+        public_api.validate_request(
+            _args(["request", "--file", str(request_file)]), tmp_path
+        )
+
+    assert launched == []
+    assert not (tmp_path / "ledger/public/requests").exists()
+
+
+def test_file_is_mutually_exclusive_with_defining_flags_but_not_transport_flags(
+    tmp_path: Path,
+) -> None:
+    request_file = tmp_path / "request.json"
+    request_file.write_text("{}")
+
+    with pytest.raises(
+        public_api.contract.PublicCommandError, match="mutually exclusive"
+    ):
+        _args(["request", "--file", str(request_file), "--agent", "backend"])
+    parsed = _args(["request", "--file", str(request_file), "--wait", "--json"])
+    assert parsed.wait is True and parsed.json is True
+
+
+def test_specialist_resolves_pinned_offering_and_rejects_public_override(
+    tmp_path: Path,
+) -> None:
+    prompt = _prompt(tmp_path, "What contract applies?\n")
+    parsed = _args(
+        [
+            "request",
+            "--type",
+            "specialist",
+            "--specialist",
+            "backend",
+            "--prompt-file",
+            str(prompt),
+            "--cwd",
+            str(tmp_path),
+        ]
+    )
+
+    request = public_api.validate_request(parsed, tmp_path)
+
+    assert request.payload["offering"] == "claude-sonnet-5"
+    assert request.payload["effort"] == "medium"
+    assert request.payload["agent"] == "backend"
+    with pytest.raises(public_api.contract.PublicCommandError, match="request"):
+        _args(
+            [
+                "request",
+                "--type",
+                "specialist",
+                "--specialist",
+                "backend",
+                "--offering",
+                "pi-gpt-5-6-sol",
+                "--prompt-file",
+                str(prompt),
+            ]
+        )
+
+
+def test_public_specialist_uses_private_staging_and_dedicated_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    prompt = _prompt(tmp_path, "What contract applies?\n")
+    validated = public_api.validate_request(
+        _args(
+            [
+                "request",
+                "--type",
+                "specialist",
+                "--request-id",
+                REQUEST_ID,
+                "--specialist",
+                "backend",
+                "--prompt-file",
+                str(prompt),
+                "--cwd",
+                str(tmp_path),
+            ]
+        ),
+        tmp_path,
+    )
+    registered = public_api.PublicRequestStore().register(validated, "recruiter-pane")
+    order = json.loads(registered.order_path.read_text())
+    instructions = (registered.request_dir / "instructions.md").read_text()
+
+    assert order["management"] == {"mode": "dedicated"}
+    assert order["artifact_publication"]["answer_path"].endswith("/answer.json")
+    assert order["artifact_publication"]["consult_id"] == REQUEST_ID
+    assert order["public_request"]["answer_path"] not in instructions
+    assert "lease-private answer path" in instructions
+
+
+def test_public_request_ignores_legacy_manager_command_and_uses_approved_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    legacy = tmp_path / "upagent.yaml"
+    legacy.write_text(
+        """harnesses:\n  claude: legacy-worker\nmanagement:\n  account_manager:\n    command: legacy-manager {brief_path} {output_path}\n"""
+    )
+    monkeypatch.setattr(
+        public_api.recruiter, "default_roster_path", lambda: str(legacy)
+    )
+    submitted_rosters: list[str] = []
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda _order, roster: submitted_rosters.append(roster) or 0,
+    )
+
+    assert public_api.execute(_args(_worker_argv(tmp_path)), tmp_path) == 0
+
+    assert submitted_rosters == [str(HERE / "offerings.yaml")]
+    public_roster = public_api.recruiter.load_roster(submitted_rosters[0])
+    manager_command = public_roster["management"]["account_manager"]["command"]
+    assert "legacy-manager" not in manager_command
+    assert "--agent upagent-account-manager" in manager_command
+    assert "--model claude-sonnet-5 --effort low" in manager_command
+
+
+def test_same_id_same_hash_attaches_without_second_launch_and_changed_prompt_conflicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    launches: list[str] = []
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda order, roster: launches.append(order) or 0,
+    )
+    argv = _worker_argv(tmp_path)
+    args = _args(argv)
+
+    assert public_api.execute(args, tmp_path) == 0
+    assert public_api.execute(args, tmp_path) == 0
+    assert len(launches) == 1
+    captured = capsys.readouterr().out
+    assert "attached" in captured
+    store = public_api.PublicRequestStore()
+    before_conflict = store.submission(store.load(REQUEST_ID))
+
+    _prompt(tmp_path, "The prompt changed after first submission.\n")
+    with pytest.raises(public_api.PublicError, match="request_id_conflict"):
+        public_api.execute(_args(argv), tmp_path)
+    assert len(launches) == 1
+    assert store.submission(store.load(REQUEST_ID)) == before_conflict
+
+
+def test_registered_request_resumes_after_crash_before_recruiter_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    args = _args(_worker_argv(tmp_path))
+    validated = public_api.validate_request(args, tmp_path)
+    store = public_api.PublicRequestStore()
+
+    # Fault seam: registration committed, then the caller process died before submission.
+    registered = store.register(validated, "recruiter-pane")
+    assert store.submission(registered)["state"] == "registered"
+    launches: list[str] = []
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda order, roster: launches.append(order) or 0,
+    )
+
+    assert public_api.execute(args, tmp_path) == 0
+
+    resumed = store.load(REQUEST_ID)
+    assert launches == [str(resumed.order_path)]
+    assert store.submission(resumed)["state"] == "submitted"
+    assert store.submission(resumed)["attempts"] == 1
+
+
+def test_retry_after_recruiter_acceptance_reattaches_idempotently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class InjectedCrash(RuntimeError):
+        pass
+
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    accepted: list[bool] = []
+
+    def accept_then_crash_once(order_path: str, _roster_path: str) -> int:
+        order = public_api.recruiter.load_order(order_path)
+        _key, created = public_api.recruiter.JobLedger().submit(order)
+        accepted.append(created)
+        if len(accepted) == 1:
+            raise InjectedCrash("crash after Recruiter acceptance")
+        return 0
+
+    monkeypatch.setattr(
+        public_api.recruiter, "cmd_request_strict", accept_then_crash_once
+    )
+    args = _args(_worker_argv(tmp_path))
+
+    with pytest.raises(InjectedCrash, match="after Recruiter acceptance"):
+        public_api.execute(args, tmp_path)
+    store = public_api.PublicRequestStore()
+    interrupted = store.load(REQUEST_ID)
+    assert store.submission(interrupted)["state"] == "submitting"
+
+    assert public_api.execute(args, tmp_path) == 0
+
+    recovered = store.load(REQUEST_ID)
+    assert accepted == [True, False]
+    assert store.submission(recovered)["state"] == "submitted"
+    assert store.submission(recovered)["attempts"] == 2
+    key = public_api.recruiter.JobLedger.key_for_order(
+        public_api.recruiter.load_order(recovered.order_path)
+    )
+    assert public_api.recruiter.JobLedger().request_dir(key).is_dir()
+
+
+def test_concurrent_identical_retries_submit_once_under_request_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    args = _args(_worker_argv(tmp_path))
+    validated = public_api.validate_request(args, tmp_path)
+    store = public_api.PublicRequestStore()
+    store.register(validated, "recruiter-pane")
+    entered = threading.Event()
+    release = threading.Event()
+    launches: list[str] = []
+
+    def blocking_submit(order_path: str, _roster_path: str) -> int:
+        launches.append(order_path)
+        entered.set()
+        assert release.wait(timeout=3)
+        return 0
+
+    monkeypatch.setattr(public_api.recruiter, "cmd_request_strict", blocking_submit)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(public_api.execute, args, tmp_path)
+        assert entered.wait(timeout=2)
+        second = pool.submit(public_api.execute, args, tmp_path)
+        assert not second.done()
+        assert launches == [str(store.load(REQUEST_ID).order_path)]
+        release.set()
+        assert first.result(timeout=3) == 0
+        assert second.result(timeout=3) == 0
+
+    submission = store.submission(store.load(REQUEST_ID))
+    assert launches == [str(store.load(REQUEST_ID).order_path)]
+    assert submission["state"] == "submitted"
+    assert submission["attempts"] == 1
+
+
+def test_prompt_bytes_and_offering_snapshot_are_immutable_request_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    validated = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+    registered = public_api.PublicRequestStore().register(validated, "recruiter-pane")
+    record = json.loads((registered.request_dir / "request.json").read_text())
+    order = json.loads(registered.order_path.read_text())
+
+    assert (registered.request_dir / "prompt.md").read_bytes() == validated.prompt_bytes
+    assert record["payload_sha256"] == validated.payload_sha256
+    assert record["offering_snapshot"] == order["offering_snapshot"]
+    assert (
+        order["public_request"]["prompt_sha256"] == validated.payload["prompt_sha256"]
+    )
+    assert order["instructions_path"] == str(registered.request_dir / "prompt.md")
+    status = public_api._public_status(public_api.PublicRequestStore(), registered)
+    assert status["payload_sha256"] == validated.payload_sha256
+    assert {artifact["kind"] for artifact in status["artifacts"]} == {
+        "prompt",
+        "order",
+        "result",
+        "compacted",
+        "handoff",
+        "receipt",
+    }
+
+
+def test_request_id_accepts_only_canonical_uuid_or_ulid() -> None:
+    assert public_api._canonical_request_id(REQUEST_ID) == REQUEST_ID
+    ulid = "01J00000000000000000000000"
+    assert public_api._canonical_request_id(ulid) == ulid
+    for invalid in (REQUEST_ID.upper(), ulid.lower(), "01I00000000000000000000000"):
+        with pytest.raises(public_api.PublicError):
+            public_api._canonical_request_id(invalid)

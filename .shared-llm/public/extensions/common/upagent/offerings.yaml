@@ -1,0 +1,64 @@
+# Canonical public UpAgent offering roster. The stable ids, harnesses, models, and effort
+# allowlists are validated against code-owned policy before they can be listed or launched.
+schema_version: 1
+offerings:
+  claude-fable-5:
+    harness: claude
+    model: claude-fable-5
+    efforts: [low, medium, high, xhigh, max]
+  claude-sonnet-5:
+    harness: claude
+    model: claude-sonnet-5
+    efforts: [low, medium, high, xhigh, max]
+  claude-opus-4-8:
+    harness: claude
+    model: claude-opus-4-8
+    efforts: [low, medium, high, xhigh, max]
+  codex-gpt-5-6-sol:
+    harness: codex
+    model: gpt-5.6-sol
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-6-sol:
+    harness: pi
+    model: openai-codex/gpt-5.6-sol
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-6-terra:
+    harness: pi
+    model: openai-codex/gpt-5.6-terra
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-6-luna:
+    harness: pi
+    model: openai-codex/gpt-5.6-luna
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-5-5:
+    harness: pi
+    model: openai-codex/gpt-5.5
+    efforts: [low, medium, high, xhigh]
+  pi-gpt-5-4-mini:
+    harness: pi
+    model: openai-codex/gpt-5.4-mini
+    efforts: [low, medium, high, xhigh]
+
+# Legacy route orders default direct; each public request pins dedicated management. References
+# are offering-based so the advisory Account Manager resolves exactly claude-sonnet-5/low with
+# upagent-account-manager and cannot escape the approved roster or inject a public-path command.
+management:
+  mode: direct
+  rescue_on_startup_failure: true
+  startup_timeout_ms: 45000
+  inactivity_check_ms: 900000
+  requester_grace_ms: 300000
+  account_manager:
+    offering: claude-sonnet-5
+    effort: low
+    agent: upagent-account-manager
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
+  checker:
+    offering: claude-sonnet-5
+    effort: low
+    agent: upagent-checker
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000

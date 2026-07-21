@@ -9,9 +9,10 @@ CLI lifecycle:
     just upagent-request <path/to/order.json>
     just upagent-await <path/to/order.json>
 
-These commands submit directly to the durable ledger instead of injecting command text into the
-Recruiter's shell pane. The compatibility ``dispatch`` command remains for non-interactive
-callers. Only the job runner atomically claims an order, then:
+These commands cross the canonical machine-local Hub socket instead of importing a nearby
+worktree copy or injecting command text into the Recruiter's shell pane. The compatibility
+``dispatch`` command remains behind that transport for non-interactive callers. Only a
+Hub-authorized canonical job runner atomically claims an order, then:
   1. resolves the per-harness launch template from the roster (upagent.yaml);
   2. creates and verifies a Dedicated Account Manager;
   3. atomically starts a worker beside the order's cockpit pane with its cwd and env;
@@ -50,7 +51,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -113,6 +113,39 @@ sys.modules[_management_spec.name] = llm_management
 _management_spec.loader.exec_module(llm_management)
 ManagementConfigError = llm_management.ManagementConfigError
 
+_offerings_spec = importlib.util.spec_from_file_location(
+    "upagent_offerings", HERE / "offerings.py"
+)
+if _offerings_spec is None or _offerings_spec.loader is None:
+    raise RuntimeError("could not load UpAgent offerings")
+offering_catalog = cast(Any, importlib.util.module_from_spec(_offerings_spec))
+sys.modules[_offerings_spec.name] = offering_catalog
+_offerings_spec.loader.exec_module(offering_catalog)
+OfferingError = offering_catalog.OfferingError
+
+_completion_spec = importlib.util.spec_from_file_location(
+    "upagent_completion", HERE / "completion.py"
+)
+if _completion_spec is None or _completion_spec.loader is None:
+    raise RuntimeError("could not load UpAgent completion contracts")
+completion = cast(Any, importlib.util.module_from_spec(_completion_spec))
+sys.modules[_completion_spec.name] = completion
+_completion_spec.loader.exec_module(completion)
+CompletionError = completion.CompletionError
+
+_runtime_name = "upagent_command_runtime"
+if _runtime_name in sys.modules:
+    command_runtime = sys.modules[_runtime_name]
+else:
+    _runtime_spec = importlib.util.spec_from_file_location(
+        _runtime_name, HERE / "command_runtime.py"
+    )
+    if _runtime_spec is None or _runtime_spec.loader is None:
+        raise RuntimeError("could not load UpAgent command runtime")
+    command_runtime = importlib.util.module_from_spec(_runtime_spec)
+    sys.modules[_runtime_name] = command_runtime
+    _runtime_spec.loader.exec_module(command_runtime)
+
 # Single-workspace default: services (and every run's tabs) share one `herdr` workspace.
 # `up --separate-workspaces` restores the dedicated `shared-services` workspace.
 UNIFIED_WORKSPACE_LABEL = "herdr"
@@ -162,6 +195,106 @@ COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
 HERDR_SESSION_ENV = "HERDR_SESSION"
 HERDR_SESSION_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+HUB_INSTANCE_ENV = "UPAGENT_HUB_INSTANCE_ID"
+HUB_ENGINE_ENV = "UPAGENT_HUB_ENGINE_PATH"
+HUB_LOCK_FD_ENV = "UPAGENT_HUB_LOCK_FD"
+HUB_PATH_ENV = "UPAGENT_HUB_PATH"
+HUB_PID_ENV = "UPAGENT_HUB_PID"
+HUB_SOCKET_ENV = "UPAGENT_SOCKET"
+_BOUND_HUB_LEDGER_ROOT: Path | None = None
+_BOUND_HUB_AUTHORITY: dict[str, object] | None = None
+_BOUND_HUB_LOCK_FD: int | None = None
+
+
+def _bind_hub_runtime(
+    ledger_root: str | Path,
+    state_file: str | Path | None = None,
+    identity: dict[str, object] | None = None,
+    lock_fd: int | None = None,
+) -> None:
+    """Bind the canonical Hub runtime without process-global cwd or environment mutation."""
+    global _BOUND_HUB_AUTHORITY, _BOUND_HUB_LEDGER_ROOT, _BOUND_HUB_LOCK_FD, STATE_FILE
+    _BOUND_HUB_LEDGER_ROOT = Path(ledger_root).expanduser().resolve()
+    if state_file is not None:
+        STATE_FILE = Path(state_file).expanduser().resolve()
+    _BOUND_HUB_AUTHORITY = dict(identity) if identity is not None else None
+    _BOUND_HUB_LOCK_FD = lock_fd
+
+
+def _canonical_engine_path() -> Path:
+    """Return the Hub-published engine, rejecting a mixed-version process tree."""
+    configured = os.environ.get(HUB_ENGINE_ENV)
+    engine = (
+        Path(configured).expanduser().resolve()
+        if configured
+        else (HERE / "recruiter.py").resolve()
+    )
+    if engine != (HERE / "recruiter.py").resolve():
+        raise RecruiterError(
+            f"canonical engine mismatch: Hub published {engine}, running copy is {HERE / 'recruiter.py'}"
+        )
+    return engine
+
+
+def _require_hub_authority() -> None:
+    """Prove this module is bound to the live Hub and its lifetime lock descriptor."""
+    authority = _BOUND_HUB_AUTHORITY
+    descriptor = _BOUND_HUB_LOCK_FD
+    if authority is None or descriptor is None:
+        raise RecruiterError(
+            "Hub authority is unbound; direct Recruiter execution is forbidden; use the UpAgent thin client / imported just recipes"
+        )
+    try:
+        hub_pid = int(cast(int, authority["pid"]))
+        instance_id = cast(str, authority["hub_instance_id"])
+        socket_value = cast(str, authority["socket_path"])
+        descriptor_stat = os.fstat(descriptor)
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        raise RecruiterError(
+            "Hub authority has an invalid process or lock descriptor"
+        ) from error
+    if hub_pid != os.getpid():
+        raise RecruiterError(
+            "Hub authority belongs to a different process; mutating subprocesses are forbidden"
+        )
+    socket_path = Path(socket_value).expanduser().resolve()
+    lock_path = socket_path.with_name(f"{socket_path.name}.lock")
+    identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
+    try:
+        lock_stat = lock_path.stat()
+        identity = json.loads(identity_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            "Hub authority has no live published lock identity"
+        ) from error
+    if not isinstance(identity, dict):
+        raise RecruiterError("Hub authority identity must be an object")
+    if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+        lock_stat.st_dev,
+        lock_stat.st_ino,
+    ):
+        raise RecruiterError(
+            "Hub authority lock descriptor does not name the published lock"
+        )
+    expected = {
+        "hub_instance_id": instance_id,
+        "pid": hub_pid,
+        "canonical_engine_path": str(_canonical_engine_path()),
+        "hub_path": authority.get("hub_path"),
+        "socket_path": str(socket_path),
+    }
+    if any(identity.get(key) != value for key, value in expected.items()):
+        raise RecruiterError(
+            "Hub authority does not match the live published Hub identity"
+        )
+    try:
+        # Re-locking the Hub's own open file description succeeds and leaves the lifetime lock
+        # held. A forged descriptor opened by another process cannot acquire while the Hub lives.
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as error:
+        raise RecruiterError(
+            "Hub authority does not hold the published lifetime lock"
+        ) from error
 
 
 def default_roster_path() -> str:
@@ -173,10 +306,11 @@ def default_roster_path() -> str:
     `load_roster` fails loud if the resolved path does not exist, so a destination that has done
     neither (1) nor (2) gets a clear error rather than silently reading a kit-owned public file.
     """
-    env = os.environ.get("UPAGENT_CONFIG")
+    env = command_runtime.getenv("UPAGENT_CONFIG")
     if env:
         return env
-    for parent in [Path.cwd(), *Path.cwd().parents]:
+    cwd = command_runtime.current_cwd()
+    for parent in [cwd, *cwd.parents]:
         this_repo = (
             parent / ".shared-llm/this_repo/extensions/common/upagent/upagent.yaml"
         )
@@ -204,6 +338,14 @@ class RecruiterError(RuntimeError):
     """A fail-loud Recruiter fault (bad roster, missing herdr, herdr call failed)."""
 
 
+class FencedLaunchError(RecruiterError):
+    """A failed launch carrying the exact journal's current cleanup evidence."""
+
+    def __init__(self, message: str, cleanup: dict[str, object]):
+        super().__init__(message)
+        self.cleanup = cleanup
+
+
 class AgentWaitTimeout(RecruiterError):
     """The worker reached its declared work cap without terminal evidence."""
 
@@ -223,6 +365,7 @@ class JobLedger:
     def __init__(self, root: str | Path | None = None):
         self.root = Path(
             root
+            or _BOUND_HUB_LEDGER_ROOT
             or os.environ.get("UPAGENT_HUB_DIR", "~/.local/state/herdr/upagent-hub")
         ).expanduser()
         self.requests = self.root / "requests"
@@ -313,6 +456,13 @@ class JobLedger:
 
     def submit(self, order: dict) -> tuple[str, bool]:
         """Atomically persist one request. Duplicate identical order ids are idempotent."""
+        try:
+            completion.ensure_publication_contract(order)
+            contracts.parse_order(json.dumps(order))
+        except (CompletionError, ContractError) as error:
+            raise RecruiterError(
+                f"request {order.get('order_id', '<unknown>')} has no valid typed artifact contract: {error}"
+            ) from error
         key = self.key_for_order(order)
         request = self.request_dir(key)
         self.requests.mkdir(parents=True, exist_ok=True)
@@ -449,7 +599,7 @@ class JobLedger:
         except OSError as republish_error:
             # Republication is best-effort: it must not lose an already-recovered result or crash.
             # The next dispatch reconciles again idempotently from the same durable copy.
-            sys.stderr.write(
+            command_runtime.write_stderr(
                 f"upagent: could not republish result for {order['order_id']} to "
                 f"{order['result_path']}: {republish_error}\n"
             )
@@ -491,7 +641,11 @@ class JobLedger:
         # sit under the request directory.  Accept one only when order identity and the
         # receipt's verdict leave exactly one candidate — a retried order has several.
         surviving: list[dict] = []
-        for path in sorted((self.request_dir(key) / "results").glob("*.json")):
+        legacy_paths = sorted((self.request_dir(key) / "results").glob("*.json"))
+        typed_paths = sorted(
+            (self.request_dir(key) / "artifacts").glob("*/result.json")
+        )
+        for path in [*legacy_paths, *typed_paths]:
             try:
                 candidate = load_result(path, expected_order_id=order["order_id"])
             except (ContractError, OSError):
@@ -639,6 +793,15 @@ class JobLedger:
                     raise
                 shutil.rmtree(temporary)
                 return None
+            manifest = completion.build_manifest(
+                self.order(key),
+                self.request_dir(key),
+                token,
+                lifecycle.request_identity(self.order(key)),
+            )
+            completion.write_manifest(
+                self.request_dir(key) / "artifact-manifest.json", manifest
+            )
             self._event(key, "claimed", **lease)
             self._snapshot(key, "claimed", **lease)
             return token
@@ -650,7 +813,11 @@ class JobLedger:
         this token-scoped file only while it still owns the lease, fencing a recovered runner
         from replacing a newer runner's result.
         """
-        return self.request_dir(key) / "results" / f"{token}.json"
+        order = self.order(key)
+        manifest = completion.build_manifest(
+            order, self.request_dir(key), token, lifecycle.request_identity(order)
+        )
+        return manifest.artifact("result").staging_path
 
     def worker_instructions_path(self, key: str, token: str) -> Path:
         return self.request_dir(key) / "workers" / f"{token}-instructions.md"
@@ -766,6 +933,229 @@ class JobLedger:
             )
             self._snapshot(key, "manager-starting", **lease)
             return True
+
+    def launch_journal_path(self, key: str, launch_id: str) -> Path:
+        return self.request_dir(key) / "launches" / f"{launch_id}.json"
+
+    def begin_launch(
+        self,
+        key: str,
+        token: str,
+        role: str,
+        agent_name: str,
+        herdr_session: str,
+        expected_cwd: str,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> str:
+        """Persist fenced launch intent before Herdr can create a pane."""
+        launch_id = f"{role}-{uuid.uuid4().hex}"
+        claim_dir = self.active / "requests" / key
+        with self._claim_lock(key):
+            if not claim_dir.is_dir():
+                raise RecruiterError("request lease disappeared before pane launch")
+            lease = self._lease(claim_dir / "lease.json")
+            if lease["token"] != token:
+                raise RecruiterError("request lease changed before pane launch")
+            journal = {
+                "agent_name": agent_name,
+                "expected_cwd": expected_cwd,
+                "expires_at": lease["expires_at"],
+                "herdr_session": herdr_session,
+                "key": key,
+                "launch_id": launch_id,
+                "lease_token": token,
+                "owner_pid": os.getpid(),
+                "owner_start_time": _process_start_time(os.getpid()),
+                "role": role,
+                "schema_version": 1,
+                "state": "launching",
+                **(metadata or {}),
+            }
+            self._write_json(self.launch_journal_path(key, launch_id), journal)
+            self._event(
+                key,
+                "pane-launching",
+                launch_id=launch_id,
+                role=role,
+                agent_name=agent_name,
+            )
+        return launch_id
+
+    def record_launch_created(
+        self,
+        key: str,
+        token: str,
+        launch_id: str,
+        pane: str,
+        workspace_id: str | None,
+        address: str,
+    ) -> None:
+        """Persist Herdr's exact returned identity before attempting the lease commit."""
+
+        path = self.launch_journal_path(key, launch_id)
+        with self._claim_lock(key):
+            try:
+                journal = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"launch journal {path} is unreadable: {error}"
+                ) from error
+            if (
+                not isinstance(journal, dict)
+                or journal.get("state") != "launching"
+                or journal.get("lease_token") != token
+            ):
+                raise RecruiterError(
+                    f"launch journal {launch_id} changed before create was recorded"
+                )
+            journal.update(
+                {
+                    "address": address,
+                    "created_at_ns": time.time_ns(),
+                    "pane": pane,
+                    "state": "created",
+                    "workspace_id": workspace_id,
+                }
+            )
+            self._write_json(path, journal)
+            self._event(
+                key,
+                "pane-created",
+                launch_id=launch_id,
+                pane=pane,
+                agent_name=journal.get("agent_name"),
+            )
+
+    def mark_launch_started(
+        self,
+        key: str,
+        token: str,
+        launch_id: str,
+        pane: str,
+        workspace_id: str | None,
+        address: str,
+    ) -> bool:
+        """CAS created -> started and publish the exact pane into the owning lease."""
+        claim_dir = self.active / "requests" / key
+        path = self.launch_journal_path(key, launch_id)
+        with self._claim_lock(key):
+            if not claim_dir.is_dir() or not path.is_file():
+                return False
+            lease = self._lease(claim_dir / "lease.json")
+            try:
+                journal = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"launch journal {path} is unreadable: {error}"
+                ) from error
+            if (
+                not isinstance(journal, dict)
+                or journal.get("state") not in ("launching", "created")
+                or journal.get("lease_token") != token
+                or lease["token"] != token
+            ):
+                return False
+            journal.update(
+                {
+                    "address": address,
+                    "pane": pane,
+                    "started_at_ns": time.time_ns(),
+                    "state": "started",
+                    "workspace_id": workspace_id,
+                }
+            )
+            role = journal.get("role")
+            if role == "worker":
+                lease.update(
+                    {
+                        "worker_address": address,
+                        "worker_pane": pane,
+                        **({"workspace_id": workspace_id} if workspace_id else {}),
+                    }
+                )
+            elif role == "manager":
+                lease.update(
+                    {
+                        "generation": journal.get("generation", 1),
+                        "manager_address": address,
+                        "manager_pane": pane,
+                        "manager_workspace_id": workspace_id,
+                    }
+                )
+            self._write_json(path, journal)
+            self._write_json(claim_dir / "lease.json", lease)
+            self._event(key, "pane-started", launch_id=launch_id, role=role, pane=pane)
+            self._snapshot(key, "startup-check", **lease)
+            return True
+
+    def mark_launch_closed(
+        self,
+        key: str,
+        launch_id: str,
+        pane: str | None,
+        cleanup: dict[str, object],
+    ) -> None:
+        """Close one journal only when its recorded exact pane still matches."""
+        path = self.launch_journal_path(key, launch_id)
+        with self._claim_lock(key):
+            try:
+                journal = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"launch journal {path} is unreadable: {error}"
+                ) from error
+            if not isinstance(journal, dict):
+                raise RecruiterError(f"launch journal {path} is not an object")
+            recorded = journal.get("pane")
+            if recorded is not None and pane is not None and recorded != pane:
+                raise RecruiterError(
+                    f"launch journal {launch_id} records pane {recorded}, not {pane}"
+                )
+            journal.update(
+                {
+                    "cleanup": cleanup,
+                    **({"pane": pane} if pane is not None else {}),
+                    "cleanup_checked_at_ns": time.time_ns(),
+                    "state": "closed"
+                    if cleanup.get("verified_absent") is True
+                    else "cleanup-pending",
+                    **(
+                        {"closed_at_ns": time.time_ns()}
+                        if cleanup.get("verified_absent") is True
+                        else {}
+                    ),
+                }
+            )
+            self._write_json(path, journal)
+            self._event(
+                key,
+                "pane-launch-closed"
+                if cleanup.get("verified_absent") is True
+                else "pane-launch-cleanup-pending",
+                launch_id=launch_id,
+                cleanup=cleanup,
+            )
+
+    def launch_journals(self) -> list[tuple[str, dict]]:
+        journals: list[tuple[str, dict]] = []
+        if not self.requests.is_dir():
+            return journals
+        for request in self.requests.iterdir():
+            launches = request / "launches"
+            if not launches.is_dir():
+                continue
+            for path in launches.glob("*.json"):
+                try:
+                    value = json.loads(path.read_text())
+                except (OSError, json.JSONDecodeError) as error:
+                    raise RecruiterError(
+                        f"launch journal {path} is unreadable: {error}"
+                    ) from error
+                if not isinstance(value, dict) or value.get("launch_id") != path.stem:
+                    raise RecruiterError(f"launch journal {path} has invalid identity")
+                journals.append((request.name, value))
+        return journals
 
     def mark_manager_ready(self, key: str, token: str, decision: Any) -> bool:
         claim_dir = self.active / "requests" / key
@@ -891,12 +1281,43 @@ class JobLedger:
             parsed = parse_result(
                 json.dumps(result), expected_order_id=order["order_id"]
             )
+            manifest = completion.build_manifest(
+                order,
+                self.request_dir(key),
+                token,
+                lifecycle.request_identity(order),
+            )
+            manifest_path = self.request_dir(key) / "artifact-manifest.json"
+            if not manifest_path.is_file():
+                raise CompletionError(
+                    f"typed completion manifest is missing: {manifest_path}"
+                )
+            completion.parse_manifest(manifest_path.read_text(), manifest)
+            mandatory_errors = completion.mandatory_consult_errors(
+                manifest, parsed, resolve_consult_claims(order, parsed)
+            )
+            if parsed.get("verdict") == "passed" and mandatory_errors:
+                parsed = completion.write_blocked_bundle(
+                    manifest,
+                    "mandatory consultation gate: " + "; ".join(mandatory_errors),
+                    write_result=lambda path, why: _write_blocked_result(
+                        order, why, path, preserve_valid=False
+                    ),
+                    failure_answer=contracts_consult.failure_answer,
+                )
+            projected = completion.project_bundle(
+                manifest,
+                load_result=load_result,
+                load_answer=contracts_consult.load_answer,
+            )
+            if projected != parsed:
+                raise CompletionError(
+                    "finalization result differs from the validated artifact bundle"
+                )
             # The hub keeps its own copy of what it published, so a pruned run tree cannot
             # strand this record without the result its receipt vouches for.
             published = self.published_result_path(key)
             self._write_json(published, parsed)
-            self._write_json(Path(order["result_path"]), parsed)
-            load_result(order["result_path"], expected_order_id=order["order_id"])
             terminal_state = "finished" if verified_absent else "cleanup-failed"
             if not verified_absent and parsed["verdict"] != "blocked":
                 raise RecruiterError(
@@ -918,7 +1339,12 @@ class JobLedger:
                 # reads a Python-checked fact instead of the worker's prose. Present only when
                 # the worker made claims; absent means it recorded no `consults` key at all.
                 **resolve_consult_claims(order, parsed),
+                "artifact_manifest_path": str(manifest_path),
+                "artifacts": [item.as_dict() for item in manifest.artifacts],
             }
+            # receipt.json is the commit marker. Durable terminal evidence is forbidden before
+            # this write, so await can wake only after all public artifacts validate.
+            self._write_json(self.request_dir(key) / "receipt.json", receipt)
             self._event(
                 key,
                 terminal_state,
@@ -926,7 +1352,6 @@ class JobLedger:
                 cleanup=cleanup,
                 **detail,
             )
-            self._write_json(self.request_dir(key) / "receipt.json", receipt)
             self._snapshot(
                 key,
                 terminal_state,
@@ -959,6 +1384,20 @@ def load_roster(path: str | Path) -> dict:
         # Surface an unreadable file or invalid YAML as a RecruiterError so cmd_recruit's
         # fallback catches it (a blocked result + DONE) instead of it escaping past main().
         raise RecruiterError(f"roster {p} is unreadable or invalid YAML: {e}") from e
+    if "offerings" in data:
+        try:
+            public_roster = offering_catalog.load_roster(p)
+        except OfferingError as error:
+            raise RecruiterError(
+                f"{p} has invalid public offerings: {error}"
+            ) from error
+        # Public launch commands are always rendered by offerings.py. These sentinels keep the
+        # legacy roster interface available to the lifecycle without making YAML executable.
+        data["harnesses"] = dict.fromkeys(
+            sorted({item.harness for item in public_roster.offerings.values()}),
+            "__code_owned_offering_renderer__",
+        )
+        data["management"] = offering_catalog.materialize_management(public_roster)
     harnesses = data.get("harnesses")
     if not isinstance(harnesses, dict) or not harnesses:
         raise RecruiterError(f"{p} must define a non-empty `harnesses:` map")
@@ -1026,7 +1465,8 @@ def specialist_roster_paths() -> tuple[Path | None, Path, str]:
     the silent-loss trap above reachable by an environment.
     """
     base = HERE / SPECIALIST_ROSTER_FILE
-    for parent in [Path.cwd(), *Path.cwd().parents]:
+    cwd = command_runtime.current_cwd()
+    for parent in [cwd, *cwd.parents]:
         this_repo = parent / SPECIALIST_OVERLAY_REL
         if this_repo.is_file():
             return (base if base.is_file() else None), this_repo, "this-repo"
@@ -1096,24 +1536,16 @@ def _named_specialists(entries: list, origin: str, path: Path) -> dict[str, dict
 
 
 def _validate_specialist(entry: dict) -> None:
-    """One merged entry must be launchable: the roster is the only thing that knows how."""
-    for key in ("name", "harness", "agent"):
+    """One merged entry must resolve one approved immutable offering."""
+    for key in ("name", "offering", "effort", "agent"):
         if not isinstance(entry.get(key), str) or not entry[key]:
             raise RecruiterError(f"every specialist needs a non-empty `{key}`: {entry}")
-    if not isinstance(entry.get("model"), str):
+    try:
+        offering_catalog.load_roster().resolve(entry["offering"], entry["effort"])
+    except OfferingError as error:
         raise RecruiterError(
-            f"every specialist needs a string `model` (may be empty): {entry}"
-        )
-    if entry["harness"] not in KNOWN_HARNESSES:
-        raise RecruiterError(
-            f"specialist {entry['name']!r} has unsupported harness {entry['harness']!r}"
-        )
-    if "effort" in entry and (
-        not isinstance(entry["effort"], str) or not entry["effort"]
-    ):
-        raise RecruiterError(
-            f"specialist {entry['name']!r} effort must be a non-empty string"
-        )
+            f"specialist {entry['name']!r} has invalid offering selection: {error}"
+        ) from error
 
 
 def load_specialist_roster() -> dict:
@@ -1190,14 +1622,18 @@ def _specialist_description(roster: dict, entry: dict) -> str:
 def _specialist_index(roster: dict) -> dict[str, dict]:
     """The merged roster keyed by name, with descriptions resolved. In memory only — it is
     cheap to compute, and a persisted copy is a cache with a staleness problem and no owner."""
+    offering_roster = offering_catalog.load_roster()
     return {
         entry["name"]: {
+            "name": entry["name"],
             "description": _specialist_description(roster, entry),
             "location": entry.get("location", ""),
             "agent": entry["agent"],
-            "effort": entry.get("effort", "medium"),
-            "harness": entry["harness"],
-            "model": entry["model"],
+            "effort": entry["effort"],
+            "offering": entry["offering"],
+            "offering_snapshot": offering_roster.resolve(
+                entry["offering"], entry["effort"]
+            ),
             "origin": entry.get("origin", ""),
         }
         for entry in roster["specialists"]
@@ -1360,8 +1796,24 @@ def _reject_legacy_order(order_path: str, reason: str) -> None:
 
 
 def resolve_launch_command(order: dict, roster: dict) -> str:
-    """Substitute an order's fields into its harness launch template. Pure. Fail-loud on an
-    unknown harness or a template referencing an unknown placeholder."""
+    """Resolve a code-owned public offering or a legacy controller launch template."""
+    snapshot = order.get("offering_snapshot")
+    if snapshot is not None:
+        try:
+            selected = offering_catalog.validate_snapshot(snapshot)
+            if (
+                order.get("harness") != selected["harness"]
+                or order.get("model") != selected["model"]
+                or order.get("effort") != selected["selected_effort"]
+            ):
+                raise RecruiterError(
+                    "order harness/model/effort does not match its immutable offering snapshot"
+                )
+            return offering_catalog.render_shell(
+                selected, order["agent"], order["instructions_path"]
+            )
+        except OfferingError as error:
+            raise RecruiterError(f"invalid offering snapshot: {error}") from error
     harness = order["harness"]
     template = roster.get("harnesses", {}).get(harness)
     if template is None:
@@ -1400,7 +1852,9 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
         errors.append("launch template requires a non-empty effort")
     model = order.get("model", "")
     if order["harness"] == "pi" and "/" not in model:
-        errors.append("Pi model must use provider/id[:thinking] form")
+        errors.append(
+            "Pi model must use provider/id form; effort is a separate --thinking token"
+        )
     if order["harness"] in ("claude", "codex") and "/" in model:
         errors.append(
             f"{order['harness']} model must use a harness-native id without provider/"
@@ -1548,13 +2002,13 @@ def _herdr_session_name_for_socket(socket_path: str, session_hint: str | None) -
 
 def _resolve_current_herdr_session_name() -> str:
     """Resolve the active Herdr session by socket identity, never by default fallback."""
-    raw_hint = os.environ.get(HERDR_SESSION_ENV)
+    raw_hint = command_runtime.getenv(HERDR_SESSION_ENV)
     session_hint = (
         _validate_herdr_session_name(raw_hint, HERDR_SESSION_ENV)
         if isinstance(raw_hint, str) and raw_hint
         else None
     )
-    socket_path = os.environ.get(HERDR_SOCKET_ENV)
+    socket_path = command_runtime.getenv(HERDR_SOCKET_ENV)
     if not isinstance(socket_path, str) or not socket_path:
         socket_path = _active_herdr_socket_from_status(session_hint)
     return _herdr_session_name_for_socket(socket_path, session_hint)
@@ -1899,8 +2353,171 @@ def _start_herdr_agent(
     return pane_id, workspace_id, address
 
 
+def _reconcile_exact_launch(
+    ledger: JobLedger,
+    key: str,
+    launch_id: str,
+    *,
+    known_pane: str | None,
+    herdr_session: str,
+    allow_not_found_absent: bool,
+    attempts: int = 3,
+) -> dict[str, object]:
+    """Boundedly resolve one journaled agent and prove its exact pane absent."""
+
+    path = ledger.launch_journal_path(key, launch_id)
+    errors: list[str] = []
+    pane = known_pane
+    agent_name: str | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            journal = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(
+                f"launch journal {path} is unreadable: {error}"
+            ) from error
+        if not isinstance(journal, dict) or journal.get("launch_id") != launch_id:
+            raise RecruiterError(f"launch journal {path} has invalid identity")
+        journal_agent = journal.get("agent_name")
+        if not isinstance(journal_agent, str) or not journal_agent:
+            raise RecruiterError(f"launch journal {launch_id} has no exact agent name")
+        agent_name = journal_agent
+        recorded_pane = journal.get("pane")
+        if isinstance(recorded_pane, str) and recorded_pane:
+            if pane is not None and pane != recorded_pane:
+                raise RecruiterError(
+                    f"launch {launch_id} returned pane {pane}, journal records {recorded_pane}"
+                )
+            pane = recorded_pane
+        not_found = False
+        try:
+            agent = (
+                _herdr_json("agent", "get", agent_name, herdr_session=herdr_session)
+                .get("result", {})
+                .get("agent")
+            )
+        except RecruiterError as error:
+            not_found = "agent_not_found" in str(error)
+            if not not_found:
+                errors.append(str(error))
+            agent = None
+        if isinstance(agent, dict) and agent:
+            if agent.get("name") != agent_name:
+                raise RecruiterError(
+                    f"launch {launch_id} resolved an agent with the wrong identity"
+                )
+            resolved_pane = agent.get("pane_id")
+            if not isinstance(resolved_pane, str) or not resolved_pane:
+                raise RecruiterError(f"launch {launch_id} resolved no exact pane")
+            if pane is not None and pane != resolved_pane:
+                raise RecruiterError(
+                    f"launch {launch_id} records pane {pane}, resolved {resolved_pane}"
+                )
+            pane = resolved_pane
+        if pane is not None:
+            try:
+                cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
+            except RecruiterError as error:
+                errors.append(str(error))
+            else:
+                evidence = {
+                    **cleanup,
+                    "agent_name": agent_name,
+                    "launch_id": launch_id,
+                    "reconciliation_attempt": attempt,
+                    "worker_pane": pane,
+                }
+                ledger.mark_launch_closed(key, launch_id, pane, evidence)
+                if evidence.get("verified_absent") is True:
+                    return evidence
+                errors.append(str(evidence.get("reason", "cleanup was not verified")))
+        elif allow_not_found_absent and not_found and attempt == attempts:
+            evidence = {
+                "agent_name": agent_name,
+                "launch_id": launch_id,
+                "reconciliation_attempt": attempt,
+                "status": "already-absent",
+                "verified_absent": True,
+                "worker_pane": None,
+            }
+            ledger.mark_launch_closed(key, launch_id, None, evidence)
+            return evidence
+        if attempt < attempts:
+            time.sleep(0.05)
+    pending = {
+        "agent_name": agent_name,
+        "launch_id": launch_id,
+        "reason": "; ".join(errors)
+        if errors
+        else "exact agent launch remains uncertain",
+        "status": "cleanup-pending",
+        "verified_absent": False,
+        "worker_pane": pane,
+    }
+    ledger.mark_launch_closed(key, launch_id, pane, pending)
+    return pending
+
+
+def _start_fenced_ledger_agent(
+    ledger: JobLedger,
+    key: str,
+    token: str,
+    role: str,
+    name: str,
+    order: dict,
+    launch: str,
+    *,
+    split_direction: str = "right",
+    tab_role: str | None = None,
+    herdr_session: str,
+    metadata: dict[str, object] | None = None,
+) -> tuple[str, str | None, str, str]:
+    """Journal before create; failed commit returns only truthful cleanup evidence."""
+
+    launch_id = ledger.begin_launch(
+        key,
+        token,
+        role,
+        name,
+        herdr_session,
+        order["cwd"],
+        metadata=metadata,
+    )
+    pane: str | None = None
+    try:
+        pane, workspace_id, address = _start_herdr_agent(
+            name,
+            order,
+            launch,
+            split_direction=split_direction,
+            tab_role=tab_role,
+            herdr_session=herdr_session,
+        )
+        ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
+        if ledger.mark_launch_started(
+            key, token, launch_id, pane, workspace_id, address
+        ):
+            return pane, workspace_id, address, launch_id
+        failure = RecruiterError(
+            f"lease ownership changed before {role} pane {pane} was committed"
+        )
+    except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
+        failure = error
+    cleanup = _reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane=pane,
+        herdr_session=herdr_session,
+        allow_not_found_absent=pane is None,
+    )
+    raise FencedLaunchError(
+        f"{role} fenced launch {launch_id} failed: {failure}", cleanup
+    ) from failure
+
+
 def _layout_warning(role: str, pane_id: str, reason: str) -> None:
-    sys.stderr.write(
+    command_runtime.write_stderr(
         f"recruiter: {role} pane {pane_id} layout adjustment failed: {reason}; "
         "worker lifecycle continues\n"
     )
@@ -2158,7 +2775,10 @@ def _close_worker_pane(
 
 
 def _write_worker_instructions(
-    order: dict, worker_result_path: Path, destination: Path
+    order: dict,
+    worker_result_path: Path,
+    destination: Path,
+    artifact_manifest: Any,
 ) -> None:
     """Append one final, literal delivery contract to the stage brief.
 
@@ -2170,13 +2790,25 @@ def _write_worker_instructions(
         original = source.read_text()
     except OSError as e:
         raise RecruiterError(f"worker instructions {source} are unreadable: {e}") from e
+    paths = {item.kind: item.staging_path for item in artifact_manifest.artifacts}
+    destinations = (
+        "Write ALL required artifacts to these literal lease-private paths:\n"
+        f"- result.json: {paths['result']}\n"
+        f"- compacted.md: {paths['compacted']}\n"
+        f"- handoff.md: {paths['handoff']}\n"
+        + (f"- answer.json: {paths['answer']}\n" if "answer" in paths else "")
+        + f'`result.json.order_id` must be exactly: "{order["order_id"]}".\n'
+        + (
+            f'`answer.json.consult_id` must be exactly: "{artifact_manifest.consult_id}".\n'
+            if artifact_manifest.consult_id is not None
+            else ""
+        )
+        + "Markdown artifacts must contain non-whitespace text. Do not write any public path.\n"
+    )
     suffix = (
         "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
-        "The Recruiter, not this worker, publishes the order's public result. "
-        "Ignore any earlier result destination in this brief.\n"
-        f"Write exactly one result JSON file to: {worker_result_path}\n"
-        f'Its `order_id` must be exactly: "{order["order_id"]}"\n'
-        "Do not write a result to any other path.\n"
+        "The Recruiter, not this worker, publishes completion artifacts. "
+        "Ignore every earlier artifact destination in this brief.\n" + destinations
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -2384,6 +3016,108 @@ def _may_preserve_worker_result(
 # --- commands ----------------------------------------------------------------
 
 
+def _complete_typed_bundle(
+    ledger: JobLedger,
+    key: str,
+    order: dict,
+    manifest: Any,
+    worker_address: str | None,
+    *,
+    herdr_session: str,
+) -> bool:
+    """Validate once, request one same-worker repair, then deterministically block if needed.
+
+    Return whether Python had to author a blocked bundle.
+    """
+    python_blocked = False
+
+    def validate() -> dict:
+        return cast(
+            dict,
+            completion.validate_bundle(
+                manifest,
+                load_result=load_result,
+                load_answer=contracts_consult.load_answer,
+            ),
+        )
+
+    result: dict | None = None
+    try:
+        result = validate()
+    except CompletionError as first_error:
+        ledger._event(
+            key,
+            "completion-artifact-invalid",
+            repair_number=1,
+            reason=str(first_error),
+        )
+        repair_error: Exception | None = None
+        if worker_address is None:
+            repair_error = RecruiterError(
+                "the original worker address is unavailable for the one allowed repair"
+            )
+        else:
+            paths = "\n".join(
+                f"- {item.kind}: {item.staging_path}" for item in manifest.artifacts
+            )
+            try:
+                _submit_agent_prompt(
+                    worker_address,
+                    "COMPLETION_REPAIR 1/1: Python rejected the required staged artifact "
+                    f"bundle: {first_error}\nRepair only the artifacts at these exact paths, "
+                    "then stop. Do not launch or delegate to another worker.\n"
+                    f"{paths}",
+                    idle_timeout_ms=WATCHDOG_CONTINUATION_TIMEOUT_MS,
+                    herdr_session=herdr_session,
+                )
+                result = validate()
+            except (RecruiterError, CompletionError, OSError) as error:
+                repair_error = error
+        if repair_error is not None:
+            reason = (
+                f"completion artifacts remained invalid after exactly one same-worker repair: "
+                f"{repair_error}"
+            )
+            result = completion.write_blocked_bundle(
+                manifest,
+                reason,
+                write_result=lambda path, why: _write_blocked_result(
+                    order, why, path, preserve_valid=False
+                ),
+                failure_answer=contracts_consult.failure_answer,
+            )
+            completion.validate_bundle(
+                manifest,
+                load_result=load_result,
+                load_answer=contracts_consult.load_answer,
+            )
+            ledger._event(key, "completion-repair-exhausted", reason=reason)
+            python_blocked = True
+
+    if result is None:
+        raise CompletionError("completion reactor produced no terminal artifact bundle")
+    resolved = resolve_consult_claims(order, result)
+    consult_errors = completion.mandatory_consult_errors(manifest, result, resolved)
+    if result.get("verdict") == "passed" and consult_errors:
+        reason = "mandatory consultation gate: " + "; ".join(consult_errors)
+        result = completion.write_blocked_bundle(
+            manifest,
+            reason,
+            write_result=lambda path, why: _write_blocked_result(
+                order, why, path, preserve_valid=False
+            ),
+            failure_answer=contracts_consult.failure_answer,
+        )
+        completion.validate_bundle(
+            manifest,
+            load_result=load_result,
+            load_answer=contracts_consult.load_answer,
+        )
+        ledger._event(key, "mandatory-consult-blocked", reasons=consult_errors)
+        python_blocked = True
+    return python_blocked
+
+
 def _start_completion_monitor(
     order: dict,
     worker_result_path: Path,
@@ -2391,6 +3125,7 @@ def _start_completion_monitor(
     *,
     inactivity_check_ms: int | None = None,
     on_inactivity: Callable[[int], None] | None = None,
+    artifact_manifest: Any,
 ) -> tuple[threading.Event, threading.Event, threading.Thread]:
     """Watch one lease's staging result and wake its job runner when it validates.
 
@@ -2407,8 +3142,6 @@ def _start_completion_monitor(
 
     def monitor() -> None:
         nonlocal next_check
-        invalid_signature: tuple[int, int] | None = None
-        invalid_since = 0.0
         check_number = 0
         while not stop.is_set():
             if (
@@ -2420,34 +3153,17 @@ def _start_completion_monitor(
                 on_inactivity(check_number)
                 next_check = time.monotonic() + cast(int, inactivity_check_ms) / 1000
             try:
-                load_result(worker_result_path, expected_order_id=order["order_id"])
-            except ContractError:
-                try:
-                    stat = worker_result_path.stat()
-                except FileNotFoundError:
-                    invalid_signature = None
-                    stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
-                    continue
-                signature = (stat.st_mtime_ns, stat.st_size)
-                if signature != invalid_signature:
-                    invalid_signature = signature
-                    invalid_since = time.monotonic()
-                elif time.monotonic() - invalid_since >= INVALID_RESULT_SETTLE_SECONDS:
-                    # A stable malformed file is terminal worker output, not an absence to wait
-                    # on for hours. Wake the owner; its strict load produces the blocked reason.
-                    finalized.set()
-                    while finalized.is_set() and not stop.wait(
-                        COMPLETION_MONITOR_POLL_SECONDS
-                    ):
-                        pass
-                    invalid_signature = None
-                    continue
+                completion.validate_bundle(
+                    artifact_manifest,
+                    load_result=load_result,
+                    load_answer=contracts_consult.load_answer,
+                )
+            except CompletionError:
                 stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
                 continue
             finalized.set()
             while finalized.is_set() and not stop.wait(COMPLETION_MONITOR_POLL_SECONDS):
                 pass
-            invalid_signature = None
 
     thread = threading.Thread(
         target=monitor, name=f"upagent-monitor-{order['order_id'][:24]}", daemon=True
@@ -2684,21 +3400,19 @@ def _start_account_manager(
         **order,
         "cockpit_pane": _manager_anchor_pane(order, herdr_session=session),
     }
-    manager_pane, workspace_id, manager_address = _start_herdr_agent(
+    manager_pane, workspace_id, manager_address, launch_id = _start_fenced_ledger_agent(
+        ledger,
+        key,
+        token,
+        "manager",
         name,
         manager_order,
         command,
         split_direction="down",
         tab_role="oversight",
         herdr_session=session,
+        metadata={"generation": generation},
     )
-    if not ledger.record_manager(
-        key, token, manager_pane, manager_address, workspace_id, generation
-    ):
-        _close_worker_pane(manager_pane, herdr_session=session)
-        raise RecruiterError(
-            f"lease ownership changed before manager {manager_address} was recorded"
-        )
     _resize_started_pane(
         manager_pane,
         split_direction="down",
@@ -2723,10 +3437,12 @@ def _start_account_manager(
             ),
         )
     except (RecruiterError, OSError):
-        _close_worker_pane(manager_pane, herdr_session=session)
+        cleanup = _close_worker_pane(manager_pane, herdr_session=session)
+        ledger.mark_launch_closed(key, launch_id, manager_pane, cleanup)
         raise
     if not ledger.mark_manager_ready(key, token, decision):
-        _close_worker_pane(manager_pane, herdr_session=session)
+        cleanup = _close_worker_pane(manager_pane, herdr_session=session)
+        ledger.mark_launch_closed(key, launch_id, manager_pane, cleanup)
         raise RecruiterError(
             f"lease ownership changed before manager {manager_address} became ready"
         )
@@ -2750,6 +3466,8 @@ def _start_account_manager(
         "generation": generation,
         "health": health,
         "herdr_session": session,
+        "launch_id": launch_id,
+        "lease_token": token,
         "pane": manager_pane,
         "workspace_id": workspace_id,
     }
@@ -2861,13 +3579,21 @@ def _run_one_shot_checker(
         manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
     )
     checker_order = {**order, "cockpit_pane": cast(str, checker_anchor)}
-    checker_pane, _, _ = _start_herdr_agent(
+    lease_token = manager.get("lease_token")
+    if not isinstance(lease_token, str) or not lease_token:
+        raise RecruiterError("one-shot checker requires the owning lease token")
+    checker_pane, _, _, launch_id = _start_fenced_ledger_agent(
+        ledger,
+        key,
+        lease_token,
+        "checker",
         name,
         checker_order,
         command,
         split_direction="down",
         tab_role="oversight",
         herdr_session=herdr_session,
+        metadata={"check_number": check_number, "generation": generation},
     )
     try:
         _resize_started_pane(
@@ -2893,7 +3619,8 @@ def _run_one_shot_checker(
             ),
         )
     finally:
-        _close_worker_pane(checker_pane, herdr_session=herdr_session)
+        checker_cleanup = _close_worker_pane(checker_pane, herdr_session=herdr_session)
+        ledger.mark_launch_closed(key, launch_id, checker_pane, checker_cleanup)
     ledger._event(
         key,
         "worker-checked",
@@ -3087,13 +3814,21 @@ def _startup_rescue_advice(
             config.checker, brief_path, order["cwd"], output_path
         )
         output_path.unlink(missing_ok=True)
-        rescue_pane, _, _ = _start_herdr_agent(
+        lease_token = manager.get("lease_token")
+        if not isinstance(lease_token, str) or not lease_token:
+            raise RecruiterError("startup rescue requires the owning lease token")
+        rescue_pane, _, _, launch_id = _start_fenced_ledger_agent(
+            ledger,
+            key,
+            lease_token,
+            "rescue",
             name,
             rescue_order,
             command,
             split_direction="down",
             tab_role="oversight",
             herdr_session=herdr_session,
+            metadata={"generation": generation},
         )
         try:
             _wait_for_agent_health(
@@ -3112,7 +3847,10 @@ def _startup_rescue_advice(
                 ),
             )
         finally:
-            _close_worker_pane(rescue_pane, herdr_session=herdr_session)
+            rescue_cleanup = _close_worker_pane(
+                rescue_pane, herdr_session=herdr_session
+            )
+            ledger.mark_launch_closed(key, launch_id, rescue_pane, rescue_cleanup)
     except (RecruiterError, LifecycleError, ContractError, OSError) as error:
         # The event is telemetry; the advice is the contract. A broken ledger write must
         # not turn "broker unavailable" into a raised exception.
@@ -3138,9 +3876,11 @@ def _run_order(
     worker_instructions_path: Path | None = None,
     on_worker_healthy: Callable[[dict[str, object]], None] | None = None,
     on_timeout: Callable[[int, threading.Event | None], int | None] | None = None,
-    before_worker_cleanup: Callable[[], None] | None = None,
+    before_worker_cleanup: Callable[[], bool | None] | None = None,
     attempt: int = 1,
     herdr_session: str | None = None,
+    start_worker_agent: Callable[..., tuple[str, str | None, str]] | None = None,
+    artifact_manifest: Any | None = None,
 ) -> tuple[int, dict, dict[str, object]]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -3148,6 +3888,8 @@ def _run_order(
     to the public result path and emit the terminal state/DONE contract.
     """
     order = load_order(order_path)
+    if artifact_manifest is None:
+        raise CompletionError("worker lifecycle requires a typed artifact manifest")
     session = _recorded_herdr_session(herdr_session, "worker lifecycle")
     order_id = order["order_id"]
     fell_back = False
@@ -3161,6 +3903,7 @@ def _run_order(
     monitor_finalized: threading.Event | None = None
     startup_validated = False
     startup_rejected = False
+    launch_recovery_pending = False
     # Direct dispatch runs in the phase leader's environment; never report Recruiter state onto
     # that pane. Resolve the broker's explicit persisted address instead.
     my_pane = _recruiter_pane_from_state()
@@ -3178,7 +3921,9 @@ def _run_order(
             worker_instructions_path
             or worker_result_path.with_name("worker-instructions.md")
         )
-        _write_worker_instructions(order, worker_result_path, effective_instructions)
+        _write_worker_instructions(
+            order, worker_result_path, effective_instructions, artifact_manifest
+        )
         execution_order["instructions_path"] = str(effective_instructions)
         launch = resolve_launch_command(execution_order, roster)
         management_config = llm_management.load_management_config(roster)
@@ -3186,7 +3931,8 @@ def _run_order(
         # The attempt number keeps a rescue relaunch's agent name distinct from attempt 1's.
         worker_name = _safe_agent_name("upagent", request_id, attempt)
         worker_tab = _worker_tab_role(execution_order)
-        worker_pane, workspace_id, worker_address = _start_herdr_agent(
+        start_agent = start_worker_agent or _start_herdr_agent
+        worker_pane, workspace_id, worker_address = start_agent(
             worker_name,
             execution_order,
             launch,
@@ -3256,7 +4002,7 @@ def _run_order(
             )
             if monitor_finalized is not None:
                 monitor_finalized.clear()
-            sys.stderr.write(
+            command_runtime.write_stderr(
                 f"recruiter: watchdog {order_id} produced premature result; "
                 f"archived {archived}: {premature_reason}\n"
             )
@@ -3269,6 +4015,13 @@ def _run_order(
                 herdr_session=session,
             )
     except (RecruiterError, ContractError, KeyError, TypeError, OSError) as e:
+        if isinstance(e, FencedLaunchError):
+            cleanup = dict(e.cleanup)
+            if cleanup.get("verified_absent") is not True:
+                # No result or receipt may claim absence. The standing supervisor keeps the
+                # active lease and exact launch journal until reconciliation proves cleanup.
+                launch_recovery_pending = True
+                raise
         # A dedicated manager's explicit refusal is a ruling, not a launch flake — callers
         # must not auto-relaunch against it.
         startup_rejected = isinstance(e, StartupRejectedByManager)
@@ -3283,28 +4036,38 @@ def _run_order(
         preserve_existing = existing_result is not None and _may_preserve_worker_result(
             order, existing_result, startup_validated=startup_validated
         )
-        result = _write_blocked_result(
-            order, str(e), worker_result_path, preserve_valid=preserve_existing
-        )
+        if preserve_existing:
+            result = cast(dict, existing_result)
+        else:
+            if artifact_manifest is None:
+                raise CompletionError(
+                    "worker fallback has no required typed artifact manifest"
+                ) from e
+            result = _write_required_blocked_bundle(order, artifact_manifest, str(e))
         fell_back = not preserve_existing
         if fell_back:
-            sys.stderr.write(f"recruiter: order {order_id} fell back to blocked: {e}\n")
+            command_runtime.write_stderr(
+                f"recruiter: order {order_id} fell back to blocked: {e}\n"
+            )
         else:
-            sys.stderr.write(
+            command_runtime.write_stderr(
                 f"recruiter: order {order_id} kept existing worker result after Recruiter wait fault: {e}\n"
             )
     finally:
-        if before_worker_cleanup is not None:
-            before_worker_cleanup()
+        if not launch_recovery_pending and before_worker_cleanup is not None:
+            completion_blocked = before_worker_cleanup()
+            if completion_blocked is not None:
+                fell_back = fell_back or completion_blocked
         if worker_pane is not None:
             try:
                 cleanup = _close_worker_pane(worker_pane, herdr_session=session)
             except RecruiterError as e:
-                result = _write_blocked_result(
-                    order,
-                    f"worker cleanup failed: {e}",
-                    worker_result_path,
-                    preserve_valid=False,
+                if artifact_manifest is None:
+                    raise CompletionError(
+                        "worker cleanup failed without the required typed artifact manifest"
+                    ) from e
+                result = _write_required_blocked_bundle(
+                    order, artifact_manifest, f"worker cleanup failed: {e}"
                 )
                 fell_back = True
                 # The failed pane address remains in the active lease for the supervisor to retry.
@@ -3318,6 +4081,9 @@ def _run_order(
     # and a manager's explicit refusal from a mechanical launch failure.
     cleanup["startup_validated"] = startup_validated
     cleanup["startup_rejected"] = startup_rejected
+    # The completion reactor may have repaired or deterministically replaced the staged result
+    # while the original worker was still addressable. Return that authoritative staged value.
+    result = load_result(worker_result_path, expected_order_id=order_id)
     final_label = "blocked" if fell_back else "done"
     _report_state(
         my_pane,
@@ -3354,6 +4120,7 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "env": ("env",),
     "requester": ("requester",),
     "management": ("management",),
+    "artifact_publication": ("artifact_publication",),
     "mode": ("mode",),
     "plan_id": ("plan_id",),
     "step_id": ("step_id",),
@@ -3394,6 +4161,7 @@ ORDER_INTAKE_PROTECTED = (
     "env",
     "requester",
     "management",
+    "artifact_publication",
     "mode",
     "plan_id",
     "step_id",
@@ -4374,11 +5142,20 @@ def _record_started_intake_clerk(
     workspace_id: str | None,
     address: str,
 ) -> None:
+    """CAS the pre-launch intake journal to started before any pane is trusted."""
+    current = _secure_json(ownership_path)
+    if (
+        current.get("state") != "launching"
+        or current.get("lease_token") != ownership.get("lease_token")
+        or current.get("agent_name") != ownership.get("agent_name")
+    ):
+        raise RecruiterError("intake launch journal changed before pane commit")
     ownership.update(
         {
             "address": address,
             "pane": pane,
-            "state": "starting",
+            "started_at_ns": time.time_ns(),
+            "state": "started",
             "workspace_id": workspace_id,
         }
     )
@@ -4485,9 +5262,16 @@ def _run_order_intake_clerk(
         ownership["pane"] = (
             pane  # local cleanup remains possible if journal update fails
         )
-        _record_started_intake_clerk(
-            ownership_path, ownership, pane, workspace_id, address
-        )
+        try:
+            _record_started_intake_clerk(
+                ownership_path, ownership, pane, workspace_id, address
+            )
+        except (RecruiterError, OSError):
+            compensation = _close_worker_pane(pane, herdr_session=herdr_session)
+            ownership.update({"cleanup": compensation, "state": "closed"})
+            _secure_write_json(ownership_path, ownership)
+            pane = None
+            raise
         _resize_started_pane(
             pane,
             split_direction="down",
@@ -4866,17 +5650,7 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
     Compatibility/manual surface only. Phase leaders use ``dispatch`` so their shell call blocks
     for the durable receipt without depending on this command's pane output.
     """
-    try:
-        order = _intake_order(order_path, roster_path)
-    except IntakeOutcomeError as e:
-        _print_intake_outcome(e)
-        _reject_legacy_order(
-            order_path, str(e)
-        )  # wake old waiters after the outcome is visible
-        return e.exit_code
-    except RecruiterError as e:
-        _reject_legacy_order(order_path, str(e))
-        return 1
+    order = _strict_order(order_path)
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -4890,49 +5664,16 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         # not open another job runner or worker pane.
         print(f"ORDER {order['order_id']} DONE", flush=True)
         return 0
-    # A duplicate of a queued or live order starts another contender: the atomic claim admits
-    # only one while a prior runner is live, and retries an earlier runner that died before claim.
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--roster",
-        roster_path,
-        "run-job",
-        key,
-    ]
+    # Duplicate submissions atomically attach to the one registered live runner. A missing
+    # handle for this Hub's durable claim is reconciled instead of launching a contender.
     owner: dict[str, object] = {"runner_pid": os.getpid()}
     try:
         # Resolve session ownership before launch so a correlated launch/session failure still
         # reaches the durable blocked-result path below.
         owner.update(_herdr_owner_record())
-        # Inherit the Recruiter pane's output: the per-job owner emits its terminal marker there.
-        subprocess.Popen(command, start_new_session=True)
-    except (OSError, RecruiterError) as e:
-        # A duplicate launch failure is not an owner. Claim first; only the successful claimant
-        # may publish a fallback result and terminal state for this request.
-        timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
-        token = ledger.claim(
-            key,
-            order["order_id"],
-            timeout_ms,
-            owner=owner,
-        )
-        if token is None:
-            ledger._event(key, "start-failed-unowned", reason=str(e))
-            return 1
-        result = _write_blocked_result(
-            order,
-            f"could not start job runner: {e}",
-            ledger.result_staging_path(key, token),
-        )
-        cleanup = {
-            "status": "not-created",
-            "worker_pane": None,
-            "verified_absent": True,
-        }
-        if not ledger.finalize(
-            key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1
-        ):
+        _spawn_job(key, roster_path)
+    except (OSError, RuntimeError, RecruiterError) as error:
+        if not _terminalize_start_failure(ledger, key, order, owner, error):
             return 1
         print(f"ORDER {order['order_id']} DONE", flush=True)
         return 1
@@ -4957,32 +5698,21 @@ def _process_cmdline(pid: int) -> list[str]:
 
 
 def _runner_alive(pid: object, key: str) -> bool:
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    if pid != os.getpid():
         return False
-    command = _process_cmdline(pid)
-    return (
-        "run-job" in command
-        and key in command
-        and str(Path(__file__).resolve()) in command
-    )
+    with _JOB_THREADS_LOCK:
+        handle = _JOB_THREADS.get(key)
+    return handle is not None and handle.thread.is_alive()
 
 
 def _terminate_owned_runner(pid: object, key: str) -> None:
-    if not _runner_alive(pid, key):
+    """Never signal the locked Hub process in an attempt to stop one daemon job thread.
+
+    Reconciliation fences the lease token before publication. The process itself terminates all
+    daemon jobs when the Hub exits, so no runner can retain mutation authority afterward.
+    """
+    if pid != os.getpid() or not _runner_alive(pid, key):
         return
-    assert isinstance(pid, int)
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + 1
-    while _runner_alive(pid, key) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    if _runner_alive(pid, key):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
 
 
 def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
@@ -5037,6 +5767,94 @@ def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
     }
 
 
+def _write_required_blocked_bundle(order: dict, manifest: Any, reason: str) -> dict:
+    """Regenerate every required staged artifact with one consistent blocked reason."""
+    return cast(
+        dict,
+        completion.write_blocked_bundle(
+            manifest,
+            reason,
+            write_result=lambda path, why: _write_blocked_result(
+                order, why, path, preserve_valid=False
+            ),
+            failure_answer=contracts_consult.failure_answer,
+        ),
+    )
+
+
+def _terminalize_start_failure(
+    ledger: JobLedger,
+    key: str,
+    order: dict,
+    owner: dict[str, object],
+    error: OSError | RuntimeError | RecruiterError,
+) -> bool:
+    """Publish the Python-authored blocked bundle for a runner launch failure."""
+    timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+    token = ledger.claim(key, order["order_id"], timeout_ms, owner=owner)
+    if token is None:
+        ledger._event(key, "start-failed-unowned", reason=str(error))
+        return False
+    manifest = completion.build_manifest(
+        order, ledger.request_dir(key), token, lifecycle.request_identity(order)
+    )
+    reason = f"could not start job runner: {error}"
+    result = _write_required_blocked_bundle(order, manifest, reason)
+    cleanup = {
+        "status": "not-created",
+        "worker_pane": None,
+        "verified_absent": True,
+    }
+    return ledger.finalize(
+        key,
+        token,
+        order,
+        result,
+        cleanup=cleanup,
+        reason=str(error),
+        exit_code=1,
+        completion_source="runner-start-failure",
+    )
+
+
+def _launch_receipt_evidence(ledger: JobLedger, key: str) -> list[dict[str, object]]:
+    """Return exact closed-launch evidence, refusing any unresolved journal."""
+
+    journals = [
+        journal
+        for candidate_key, journal in ledger.launch_journals()
+        if candidate_key == key
+    ]
+    unresolved = [
+        journal
+        for journal in journals
+        if journal.get("state") != "closed"
+        or not isinstance(journal.get("cleanup"), dict)
+        or journal["cleanup"].get("verified_absent") is not True
+    ]
+    if unresolved:
+        raise FencedLaunchError(
+            "launch cleanup remains unresolved for "
+            + ", ".join(str(journal.get("launch_id")) for journal in unresolved),
+            {
+                "launch_ids": [journal.get("launch_id") for journal in unresolved],
+                "status": "cleanup-pending",
+                "verified_absent": False,
+            },
+        )
+    return [
+        {
+            "agent_name": journal.get("agent_name"),
+            "cleanup": cast(dict[str, object], journal["cleanup"]),
+            "launch_id": journal.get("launch_id"),
+            "pane": journal.get("pane"),
+            "role": journal.get("role"),
+            "state": journal.get("state"),
+        }
+        for journal in sorted(journals, key=lambda item: str(item.get("launch_id")))
+    ]
+
+
 def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -> bool:
     """Close and terminalize one dead/expired owned job. Never touches an unrecorded pane."""
     expired = lease["expires_at"] <= int(time.time())
@@ -5047,23 +5865,49 @@ def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -
         _terminate_owned_runner(lease.get("runner_pid"), key)
 
     worker_pane = lease.get("worker_pane")
+    try:
+        launch_evidence = _launch_receipt_evidence(ledger, key)
+    except FencedLaunchError as error:
+        ledger._event(
+            key,
+            "terminalization-deferred-for-launch-cleanup",
+            launch_ids=error.cleanup.get("launch_ids", []),
+        )
+        return False
     cleanup = _cleanup_lease_panes(lease)
+    if launch_evidence:
+        cleanup["launches"] = launch_evidence
 
     order = ledger.order(key)
-    staging = ledger.result_staging_path(key, lease["token"])
+    manifest = completion.build_manifest(
+        order,
+        ledger.request_dir(key),
+        lease["token"],
+        lifecycle.request_identity(order),
+    )
+    manifest_path = ledger.request_dir(key) / "artifact-manifest.json"
+    try:
+        completion.parse_manifest(manifest_path.read_text(), manifest)
+    except (OSError, CompletionError):
+        # The manifest is Python-owned lease metadata. Recreate it deterministically before
+        # authoring a recovery bundle when the runner crashed before (or during) staging.
+        completion.write_manifest(manifest_path, manifest)
     if cleanup["verified_absent"]:
         try:
-            result = load_result(staging, expected_order_id=order["order_id"])
-        except ContractError as e:
-            result = _write_blocked_result(
-                order, f"runner reconciliation: {e}", staging
+            result = completion.validate_bundle(
+                manifest,
+                load_result=load_result,
+                load_answer=contracts_consult.load_answer,
+            )
+        except CompletionError as error:
+            result = _write_required_blocked_bundle(
+                order, manifest, f"runner reconciliation: {error}"
             )
     else:
-        result = _write_blocked_result(
+        result = _write_required_blocked_bundle(
             order,
+            manifest,
             f"runner reconciliation could not close worker pane {worker_pane}",
-            staging,
-            preserve_valid=False,
         )
     finalized = ledger.finalize(
         key,
@@ -5081,18 +5925,55 @@ def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -
     return finalized
 
 
+def _reconcile_launch_journals(ledger: JobLedger, *, force: bool) -> int:
+    """Boundedly compensate every nonterminal exact-agent launch journal."""
+
+    reconciled = 0
+    active_claims = dict(ledger.active_claims())
+    for key, journal in ledger.launch_journals():
+        if journal.get("state") == "closed":
+            continue
+        expires_at = journal.get("expires_at")
+        expired = isinstance(expires_at, int) and expires_at <= int(time.time())
+        if not force and not expired and _same_owner_process(journal):
+            lease = active_claims.get(key)
+            if lease is not None and _runner_alive(lease.get("runner_pid"), key):
+                continue
+        launch_id = journal.get("launch_id")
+        if not isinstance(launch_id, str):
+            raise RecruiterError("launch journal is missing launch_id")
+        herdr_session = _recorded_herdr_session(
+            journal.get("herdr_session"), "launch reconciliation"
+        )
+        cleanup = _reconcile_exact_launch(
+            ledger,
+            key,
+            launch_id,
+            known_pane=cast(str | None, journal.get("pane")),
+            herdr_session=herdr_session,
+            allow_not_found_absent=True,
+        )
+        if cleanup.get("verified_absent") is True:
+            reconciled += 1
+    return reconciled
+
+
 def _reconcile_intake_clerks(*, force: bool) -> int:
     """Resolve orphan clerks by journaled agent name; never close a recorded pane id alone."""
     try:
         layout = _prepare_intake_layout()
     except RecruiterError as error:
-        sys.stderr.write(f"recruiter: intake reconciliation unavailable: {error}\n")
+        command_runtime.write_stderr(
+            f"recruiter: intake reconciliation unavailable: {error}\n"
+        )
         return 0
     reconciled = 0
     try:
         entries = list(os.scandir(layout["attempts"]))
     except OSError as error:
-        sys.stderr.write(f"recruiter: could not scan intake attempts: {error}\n")
+        command_runtime.write_stderr(
+            f"recruiter: could not scan intake attempts: {error}\n"
+        )
         return 0
     for entry in entries:
         if not entry.name.startswith("attempt-"):
@@ -5144,29 +6025,32 @@ def _reconcile_intake_clerks(*, force: bool) -> int:
             if cleanup.get("verified_absent"):
                 reconciled += 1
         except RecruiterError as error:
-            sys.stderr.write(
+            command_runtime.write_stderr(
                 f"recruiter: unsafe or unreadable intake attempt {entry.name}: {error}\n"
             )
     return reconciled
 
 
-def cmd_reconcile(*, force: bool = False) -> int:
+def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
     ledger = JobLedger()
+    launches_reconciled = _reconcile_launch_journals(ledger, force=force)
     reconciled = 0
     for key, lease in ledger.active_claims():
         if _reconcile_claim(ledger, key, lease, force=force):
             reconciled += 1
     intake_reconciled = _reconcile_intake_clerks(force=force)
-    print(
-        json.dumps(
-            {
-                "reconciled": reconciled,
-                "intake_clerks_reconciled": intake_reconciled,
-                "force": force,
-            },
-            sort_keys=True,
+    if emit:
+        print(
+            json.dumps(
+                {
+                    "reconciled": reconciled,
+                    "intake_clerks_reconciled": intake_reconciled,
+                    "launches_reconciled": launches_reconciled,
+                    "force": force,
+                },
+                sort_keys=True,
+            )
         )
-    )
     return 0
 
 
@@ -5179,36 +6063,113 @@ def cmd_supervise(token: str) -> int:
             return 0
         if not isinstance(state, dict) or state.get("supervisor_token") != token:
             return 0
-        cmd_reconcile(force=False)
+        try:
+            cmd_reconcile(force=False, emit=False)
+        except RecruiterError as error:
+            command_runtime.write_stderr(
+                f"recruiter: supervisor reconciliation remains pending: {error}\n"
+            )
         time.sleep(2)
 
 
-def _spawn_job(key: str, roster_path: str) -> subprocess.Popen:
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--roster",
-        roster_path,
-        "run-job",
-        key,
-    ]
-    return subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+class _JobThread:
+    """Popen-shaped handle for one Hub-owned daemon runner thread."""
+
+    def __init__(self, key: str, roster_path: str):
+        self.key = key
+        self.cwd = command_runtime.current_cwd()
+        self.environ = command_runtime.current_environ()
+        self.roster_path = roster_path
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"upagent-job-{key[:12]}",
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        # Only cwd/environment follow the submission. Output deliberately has no request sink,
+        # so a background runner can never write into the response that happened to launch it.
+        with command_runtime.activate(self.cwd, self.environ):
+            cmd_run_job(self.key, self.roster_path)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def poll(self) -> int | None:
+        return None if self.thread.is_alive() else 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            raise subprocess.TimeoutExpired(
+                f"Hub-owned runner {self.key}", timeout if timeout is not None else 0
+            )
+        return 0
+
+
+_JOB_THREADS: dict[str, _JobThread] = {}
+_JOB_THREADS_LOCK = threading.Lock()
+
+
+def _spawn_job(key: str, roster_path: str) -> _JobThread | None:
+    """Atomically get-or-attach one runner, reconciling an orphaned owned claim."""
+    _require_hub_authority()
+    orphaned_claim: dict | None = None
+    with _JOB_THREADS_LOCK:
+        existing = _JOB_THREADS.get(key)
+        if existing is not None and existing.thread.is_alive():
+            return existing
+        if existing is not None:
+            del _JOB_THREADS[key]
+        orphaned_claim = next(
+            (
+                lease
+                for candidate, lease in JobLedger().active_claims()
+                if candidate == key and lease.get("runner_pid") == os.getpid()
+            ),
+            None,
+        )
+        if orphaned_claim is None:
+            handle = _JobThread(key, roster_path)
+            _JOB_THREADS[key] = handle
+            try:
+                handle.start()
+            except (OSError, RuntimeError):
+                if _JOB_THREADS.get(key) is handle:
+                    del _JOB_THREADS[key]
+                raise
+            return handle
+    # Never hold the registry lock while reconciliation calls back through _runner_alive().
+    assert orphaned_claim is not None
+    _reconcile_claim(JobLedger(), key, orphaned_claim, force=True)
+    return None
+
+
+def _strict_order(order_path: str) -> dict:
+    try:
+        order = load_order(order_path)
+        completion.ensure_publication_contract(order)
+        contracts.parse_order(json.dumps(order))
+    except (ContractError, CompletionError) as error:
+        raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    # Persist compatibility metadata before the first ledger mutation. Crash recovery therefore
+    # reads the exact required manifest contract used by the launching path.
+    JobLedger._write_json(Path(order_path), order)
+    return order
 
 
 def cmd_dispatch(order_path: str, roster_path: str) -> int:
-    """Submit one order and block until its durable terminal receipt exists.
+    """Strict legacy/controller socket shim; no intake LLM or form repair."""
+    return _dispatch_order(_strict_order(order_path), roster_path)
 
-    This is the phase leader's normal transport. It never writes command text into the shared
-    Recruiter shell, so adjacent orders cannot interleave. The child process is the zero-poll
-    wake-up path; an idempotent duplicate falls back to a bounded ledger wait.
-    """
-    order = _intake_order(order_path, roster_path)
+
+def cmd_dispatch_strict(order_path: str, roster_path: str) -> int:
+    """Strict public-path dispatch entry used only after closed-schema validation."""
+    return _dispatch_order(_strict_order(order_path), roster_path)
+
+
+def _dispatch_order(order: dict, roster_path: str) -> int:
+    """Submit one already-valid order and block for its durable terminal receipt."""
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -5218,38 +6179,15 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
             flush=True,
         )
     if ledger.completed_result(key, order) is None:
+        owner: dict[str, object] = {"runner_pid": os.getpid()}
         try:
+            owner.update(_herdr_owner_record())
             process = _spawn_job(key, roster_path)
-        except OSError as e:
-            timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
-            token = ledger.claim(
-                key,
-                order["order_id"],
-                timeout_ms,
-                owner={
-                    **_herdr_owner_record(),
-                    "runner_pid": os.getpid(),
-                    "phase_leader_pane": order["cockpit_pane"],
-                    "recruiter_pane": _recruiter_pane_from_state(),
-                },
-            )
-            if token is None:
+        except (OSError, RuntimeError, RecruiterError) as error:
+            if not _terminalize_start_failure(ledger, key, order, owner, error):
                 raise RecruiterError(
-                    f"could not start a contender for live order {order['order_id']}: {e}"
-                ) from e
-            result = _write_blocked_result(
-                order,
-                f"could not start job runner: {e}",
-                ledger.result_staging_path(key, token),
-            )
-            cleanup = {
-                "status": "not-created",
-                "worker_pane": None,
-                "verified_absent": True,
-            }
-            ledger.finalize(
-                key, token, order, result, cleanup=cleanup, reason=str(e), exit_code=1
-            )
+                    f"could not start a contender for live order {order['order_id']}: {error}"
+                ) from error
             process = None
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
         deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
@@ -5288,8 +6226,17 @@ def cmd_dispatch(order_path: str, roster_path: str) -> int:
 
 
 def cmd_request(order_path: str, roster_path: str) -> int:
-    """Submit directly and return only after the worker is healthy or terminally rejected."""
-    order = _intake_order(order_path, roster_path)
+    """Strict legacy socket shim; arbitrary or malformed intake is rejected in Python."""
+    return _request_order(_strict_order(order_path), roster_path)
+
+
+def cmd_request_strict(order_path: str, roster_path: str) -> int:
+    """Strict public-path request entry used only after closed-schema validation."""
+    return _request_order(_strict_order(order_path), roster_path)
+
+
+def _request_order(order: dict, roster_path: str) -> int:
+    """Submit one already-valid order and return after worker health or rejection."""
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
@@ -5300,12 +6247,16 @@ def cmd_request(order_path: str, roster_path: str) -> int:
         receipt = ledger.completed_receipt(key, order)
         print(f"REQUEST_TERMINAL {json.dumps(receipt, sort_keys=True)}")
         return 0 if existing["verdict"] == "passed" else 1
+    owner: dict[str, object] = {"runner_pid": os.getpid()}
     try:
+        owner.update(_herdr_owner_record())
         process = _spawn_job(key, roster_path)
-    except OSError as error:
-        raise RecruiterError(
-            f"could not start request owner for {order['order_id']}: {error}"
-        ) from error
+    except (OSError, RuntimeError, RecruiterError) as error:
+        if not _terminalize_start_failure(ledger, key, order, owner, error):
+            raise RecruiterError(
+                f"could not start request owner for {order['order_id']}: {error}"
+            ) from error
+        process = None
     deadline = (
         time.monotonic()
         + (config.account_manager.timeout_ms + config.startup_timeout_ms * 2) / 1000
@@ -5335,10 +6286,15 @@ def cmd_request(order_path: str, roster_path: str) -> int:
             receipt = ledger.completed_receipt(key, order)
             print(f"REQUEST_TERMINAL {json.dumps(receipt, sort_keys=True)}", flush=True)
             return 0 if receipt["verdict"] == "passed" else 1
-        if process.poll() is not None and state.get("state") not in (
-            "running",
-            "finished",
-            "cleanup-failed",
+        if (
+            process is not None
+            and cast(Any, process).poll() is not None
+            and state.get("state")
+            not in (
+                "running",
+                "finished",
+                "cleanup-failed",
+            )
         ):
             raise RecruiterError(
                 f"request owner for {order['order_id']} exited before worker health: state={state.get('state')}"
@@ -5438,6 +6394,8 @@ def cmd_verify(
     model: str = "",
     agent: str = "reviewer",
     effort: str = "low",
+    offering_snapshot: dict[str, object] | None = None,
+    wait: bool = True,
 ) -> int:
     """Hire one independent reviewer to poke holes in a finished order's result.
 
@@ -5494,10 +6452,17 @@ Use `passed` when the original claims hold, `failed` when they do not (include
         "instructions_path": str(instructions_path),
         "result_path": str(verify_result_path),
         "cockpit_pane": original["cockpit_pane"],
+        **(
+            {"offering_snapshot": offering_snapshot}
+            if offering_snapshot is not None
+            else {}
+        ),
     }
     verify_order_path = base.with_name("verify-order.json")
     JobLedger._write_json(verify_order_path, verify_order)
-    return cmd_dispatch(str(verify_order_path), roster_path)
+    if wait:
+        return cmd_dispatch(str(verify_order_path), roster_path)
+    return cmd_request(str(verify_order_path), roster_path)
 
 
 _AWAIT_ANY_VERDICT_KINDS = {
@@ -5724,7 +6689,13 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     token = ledger.claim(key, order["order_id"], lease_window_ms, owner=owner)
     if token is None:
         return 0
-    worker_result_path = ledger.result_staging_path(key, token)
+    artifact_manifest = completion.build_manifest(
+        order, ledger.request_dir(key), token, request_id
+    )
+    completion.write_manifest(
+        ledger.request_dir(key) / "artifact-manifest.json", artifact_manifest
+    )
+    worker_result_path = artifact_manifest.artifact("result").staging_path
     monitor: tuple[threading.Event, threading.Event, threading.Thread] | None = None
     manager: dict[str, object] | None = None
     mechanical_validation = inspect_worker_configuration(order, roster)
@@ -5751,51 +6722,64 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             manager = _direct_manager(
                 management_config, order, generation, herdr_session=herdr_session
             )
+        manager["lease_token"] = token
     except (RecruiterError, ManagementConfigError, LifecycleError, OSError) as error:
+        # Account Manager supervision is advisory. Losing it degrades observation only; Python
+        # still owns the lease, runs mechanically valid work, and guarantees a terminal bundle.
+        ledger._event(key, "account-manager-degraded", reason=str(error))
         _notify_requester(
             ledger,
             key,
             order,
             generation,
-            "account-manager-failed",
-            f"The Hub could not establish lifecycle ownership: {error}",
+            "account-manager-degraded",
+            f"Advisory Account Manager supervision is unavailable: {error}",
         )
-        result = _write_blocked_result(
-            order, f"account manager failed: {error}", worker_result_path
+        manager = _direct_manager(
+            management_config, order, generation, herdr_session=herdr_session
         )
-        cleanup = {
-            "status": "not-created",
-            "worker_pane": None,
-            "verified_absent": True,
-        }
-        ledger.finalize(
-            key,
-            token,
-            order,
-            result,
-            cleanup=cleanup,
-            exit_code=1,
-            completion_source="account-manager-startup",
-        )
-        return 1
+        manager["lease_token"] = token
 
-    decision = cast(Any, manager["decision"])
     configuration_errors = cast(list[str], mechanical_validation["errors"])
-    if decision.decision != "approved" or configuration_errors:
-        message = decision.message
-        message_type = decision.decision
-        if configuration_errors:
-            message_type = "needs-requester"
-            message = f"Worker configuration is invalid: {'; '.join(configuration_errors)}. {message}"
+    if configuration_errors:
+        message_type = "needs-requester"
+        message = f"Worker configuration is invalid: {'; '.join(configuration_errors)}."
         _notify_requester(ledger, key, order, generation, message_type, message)
-        result = _write_blocked_result(
-            order, f"account manager: {message}", worker_result_path
+        result = _write_required_blocked_bundle(
+            order, artifact_manifest, f"mechanical validation: {message}"
         )
-        manager_cleanup = (
-            _close_worker_pane(cast(str, manager["pane"]), herdr_session=herdr_session)
-            if manager["pane"] is not None
-            else {"status": "not-created", "worker_pane": None, "verified_absent": True}
-        )
+        try:
+            manager_cleanup = (
+                _close_worker_pane(
+                    cast(str, manager["pane"]), herdr_session=herdr_session
+                )
+                if manager["pane"] is not None
+                else {
+                    "status": "not-created",
+                    "worker_pane": None,
+                    "verified_absent": True,
+                }
+            )
+        except RecruiterError as error:
+            result = _write_required_blocked_bundle(
+                order,
+                artifact_manifest,
+                f"account manager cleanup failed: {error}",
+            )
+            manager_cleanup = {
+                "status": "cleanup-failed",
+                "worker_pane": manager["pane"],
+                "verified_absent": False,
+                "reason": str(error),
+            }
+        manager_launch_id = manager.get("launch_id")
+        if isinstance(manager_launch_id, str):
+            ledger.mark_launch_closed(
+                key,
+                manager_launch_id,
+                cast(str | None, manager["pane"]),
+                manager_cleanup,
+            )
         cleanup = {
             "manager": manager_cleanup,
             "status": "not-created",
@@ -5809,25 +6793,44 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             result,
             cleanup=cleanup,
             exit_code=1,
-            completion_source="account-manager-decision",
+            completion_source="mechanical-validation",
         )
         return 1
 
     inactivity_lock = threading.Lock()
     owned_worker_pane: str | None = None
+    owned_worker_address: str | None = None
+    worker_launches: list[tuple[str, str]] = []
+
+    def start_worker(
+        name: str,
+        execution_order: dict,
+        launch: str,
+        **kwargs: object,
+    ) -> tuple[str, str | None, str]:
+        pane, workspace_id, address, launch_id = _start_fenced_ledger_agent(
+            ledger,
+            key,
+            token,
+            "worker",
+            name,
+            execution_order,
+            launch,
+            tab_role=cast(str | None, kwargs.get("tab_role")),
+            herdr_session=herdr_session,
+            metadata={"attempt": len(worker_launches) + 1, "generation": generation},
+        )
+        worker_launches.append((launch_id, pane))
+        return pane, workspace_id, address
 
     def start_monitor(
         worker_pane: str, workspace_id: str | None, worker_address: str
     ) -> threading.Event:
+        nonlocal owned_worker_address
         nonlocal owned_worker_pane
         nonlocal monitor
+        owned_worker_address = worker_address
         owned_worker_pane = worker_pane
-        if not ledger.record_worker(
-            key, token, worker_pane, workspace_id, worker_address
-        ):
-            raise RecruiterError(
-                f"lease ownership changed before worker {worker_pane} was recorded"
-            )
 
         def check_inactivity(check_number: int) -> None:
             assert manager is not None
@@ -5865,6 +6868,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             timeout_ms,
             inactivity_check_ms=management_config.inactivity_check_ms,
             on_inactivity=check_inactivity,
+            artifact_manifest=artifact_manifest,
         )
         return monitor[1]
 
@@ -5884,15 +6888,22 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             finalized,
         )
 
-    def finish_monitor_before_cleanup() -> None:
-        if monitor is None:
-            return
-        monitor[0].set()
-        # A checker is bounded by its own startup/response timeouts. Taking this lock prevents
-        # worker cleanup from racing an in-flight evidence read.
-        with inactivity_lock:
-            pass
-        monitor[2].join()
+    def finish_monitor_before_cleanup() -> bool | None:
+        if monitor is not None:
+            monitor[0].set()
+            # A checker is bounded by its own startup/response timeouts. Taking this lock prevents
+            # worker cleanup from racing an in-flight evidence read.
+            with inactivity_lock:
+                pass
+            monitor[2].join()
+        return _complete_typed_bundle(
+            ledger,
+            key,
+            order,
+            artifact_manifest,
+            owned_worker_address,
+            herdr_session=herdr_session,
+        )
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
@@ -5942,19 +6953,28 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             )
             return
         if assessment.assessment not in ("healthy", "completed"):
-            message = assessment.message
+            # The assessment is evidence for the requester, never authority over a Python-valid
+            # startup. Keep the worker running and mark supervision degraded.
+            ledger._event(
+                key,
+                "worker-startup-advisory",
+                assessment=assessment.assessment,
+                message=assessment.message,
+            )
+            if not ledger.mark_worker_healthy(key, token, evidence):
+                raise RecruiterError(
+                    "lease ownership changed before advisory worker health could be published"
+                )
             _notify_requester(
                 ledger,
                 key,
                 order,
                 generation,
-                "startup-needs-requester",
-                message,
-                {"assessment": assessment.assessment},
+                "worker-healthy-advisory",
+                assessment.message,
+                {"assessment": assessment.assessment, **evidence},
             )
-            raise StartupRejectedByManager(
-                f"account manager did not validate worker startup: {message}"
-            )
+            return
         if not ledger.mark_worker_healthy(key, token, evidence):
             raise RecruiterError(
                 "lease ownership changed before worker health could be published"
@@ -5970,7 +6990,8 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         )
 
     def run_order_once(attempt: int) -> tuple[int, dict, dict[str, object]]:
-        return _run_order(
+        before = len(worker_launches)
+        outcome = _run_order(
             str(ledger.request_dir(key) / "request.json"),
             roster_path,
             worker_result_path,
@@ -5981,7 +7002,13 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             finish_monitor_before_cleanup,
             attempt=attempt,
             herdr_session=herdr_session,
+            start_worker_agent=start_worker,
+            artifact_manifest=artifact_manifest,
         )
+        if len(worker_launches) > before:
+            launch_id, pane = worker_launches[-1]
+            ledger.mark_launch_closed(key, launch_id, pane, outcome[2])
+        return outcome
 
     result_code, result, cleanup = run_order_once(1)
     if (
@@ -6025,11 +7052,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             else {"status": "not-created", "worker_pane": None, "verified_absent": True}
         )
     except RecruiterError as error:
-        result = _write_blocked_result(
+        result = _write_required_blocked_bundle(
             order,
+            artifact_manifest,
             f"account manager cleanup failed: {error}",
-            worker_result_path,
-            preserve_valid=False,
         )
         result_code = 1
         manager_cleanup = {
@@ -6038,20 +7064,25 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             "verified_absent": False,
             "reason": str(error),
         }
+    manager_launch_id = manager.get("launch_id")
+    if isinstance(manager_launch_id, str):
+        ledger.mark_launch_closed(
+            key, manager_launch_id, cast(str | None, manager["pane"]), manager_cleanup
+        )
     cleanup["manager"] = manager_cleanup
     cleanup["verified_absent"] = (
         cleanup["verified_absent"] is True
         and manager_cleanup["verified_absent"] is True
     )
-    _notify_requester(
-        ledger,
-        key,
-        order,
-        generation,
-        "result-ready",
-        f"Worker finished with verdict {result['verdict']}; lifecycle cleanup is being finalized.",
-        {"verdict": result["verdict"]},
-    )
+    launch_evidence = _launch_receipt_evidence(ledger, key)
+    if launch_evidence:
+        cleanup["launches"] = launch_evidence
+    if result.get("verdict") == "blocked":
+        result = _write_required_blocked_bundle(
+            order,
+            artifact_manifest,
+            str(result.get("reason", "worker lifecycle blocked")),
+        )
     finalized = ledger.finalize(
         key,
         token,
@@ -6063,6 +7094,17 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     )
     if not finalized:
         return 1
+    # Requester notification is post-receipt evidence. Await must never wake on an artifact that
+    # has not survived public projection and revalidation.
+    _notify_requester(
+        ledger,
+        key,
+        order,
+        generation,
+        "terminal",
+        f"Request finished with verdict {result['verdict']} after artifact publication.",
+        {"verdict": result["verdict"]},
+    )
     marker = "DONE" if cleanup["verified_absent"] else "CLEANUP_FAILED"
     print(f"ORDER {order['order_id']} {marker}", flush=True)
     return result_code
@@ -6089,22 +7131,19 @@ RECRUITER_PANE_LABEL = "recruiter"
 
 
 def _recruit_door_command(roster_path: str) -> str:
-    """A narrow compatibility door for the common ``recruit <path>`` pane command.
-
-    It accepts exactly one opaque path, quotes every configured value, and invokes the normal
-    verified request CLI. There is no eval and no free-form shell payload. Malformed order content
-    still walks the same strict/intake/strict ladder as every other public door.
-    """
+    """A strict compatibility door for exactly one order file over the Hub socket."""
     python = shlex.quote(sys.executable)
-    script = shlex.quote(str(Path(__file__).resolve()))
+    script = shlex.quote(str(_canonical_engine_path().with_name("client.py")))
     roster = shlex.quote(str(Path(roster_path).expanduser().resolve()))
+    socket_override = command_runtime.getenv("UPAGENT_SOCKET")
+    socket_env = (
+        f"UPAGENT_SOCKET={shlex.quote(socket_override)} " if socket_override else ""
+    )
     return (
         'recruit() { if [ "$#" -ne 1 ]; then '
-        "echo 'recruit expects exactly one order.json path. Use `recruit <order.json>`; "
-        "specialist questions use `just upagent-consult <consult.json>`.' >&2; "
-        "return 2; fi; "
-        f'{python} {script} --roster {roster} request -- "$1"; '
-        "} # normal verified request door"
+        "echo 'recruit expects exactly one strict order.json path' >&2; return 2; fi; "
+        f'{socket_env}{python} {script} --target recruiter --roster {roster} request -- "$1"; '
+        "} # strict socket request door"
     )
 
 
@@ -6263,20 +7302,15 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     JobLedger._write_json(STATE_FILE, state)
-    supervisor = subprocess.Popen(
-        [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--roster",
-            roster_path,
-            "supervise",
-            supervisor_token,
-        ],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    supervisor = threading.Thread(
+        target=command_runtime.run_detached,
+        args=(cmd_supervise, supervisor_token),
+        name="upagent-supervisor",
+        daemon=True,
     )
-    state["supervisor_pid"] = supervisor.pid
+    supervisor.start()
+    # A process id, not a transferable child authority: the supervisor dies with the Hub.
+    state["supervisor_pid"] = os.getpid()
     JobLedger._write_json(STATE_FILE, state)
     # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
     _report_state(
@@ -6516,7 +7550,7 @@ def _resolve_consult_cwd(roster: dict, consult: dict, consult_id: str) -> str:
         return str(requested)
     root = str(roster["repo_root"])
     if requested:
-        sys.stderr.write(
+        command_runtime.write_stderr(
             f"upagent-consult: consult {consult_id}: requested cwd {requested} does not "
             f"exist; running in {root}\n"
         )
@@ -6535,7 +7569,8 @@ def build_consult_brief(consult: dict, location: str, cwd: str) -> str:
         f"You are the '{consult['specialist']}' specialist answering ONE consult. "
         f"Load only your own definition at {location} and inspect the repo at {cwd}. "
         f"Question: {consult['question']} "
-        f"Answer concisely from your domain, then write STRICT JSON to {consult['answer_path']} "
+        "Answer concisely from your domain, then write STRICT JSON to the lease-private "
+        "answer path in the final Recruiter delivery contract appended below "
         f'with keys: "consult_id": "{consult["consult_id"]}", "answer": "<your answer>", '
         f'"citations": ["path/to/file:line", ...]. Every claim MUST carry a real file:line '
         f"citation into the repo. Write nothing outside that JSON file.\n"
@@ -6561,6 +7596,8 @@ def consult_artifact_paths(consult_path: str | Path) -> dict[str, Path]:
         "brief": path.with_name(path.name + ".brief.md"),
         "order": path.with_name(path.name + ".order.json"),
         "result": path.with_name(path.name + ".upagent-result.json"),
+        "compacted": path.with_name(path.name + ".compacted.md"),
+        "handoff": path.with_name(path.name + ".handoff.md"),
         "receipt": path.with_name(path.name + ".receipt.json"),
     }
 
@@ -6594,15 +7631,27 @@ def build_consult_order(
         },
         "phase_id": CONSULT_PHASE_ID,
         "stage_id": "stage-5-finalization",
-        "harness": entry["harness"],
-        "model": entry["model"],
+        "harness": entry["offering_snapshot"]["harness"],
+        "model": entry["offering_snapshot"]["model"],
         "agent": entry["agent"],
-        "effort": entry.get("effort", "medium"),
+        "effort": entry["effort"],
+        "offering_snapshot": entry["offering_snapshot"],
         "cwd": cwd,
         "instructions_path": str(artifacts["brief"]),
         "result_path": str(artifacts["result"]),
         "cockpit_pane": cockpit_pane,
         "timeout_ms": CONSULT_TIMEOUT_MS,
+        "artifact_publication": {
+            "schema_version": 1,
+            "compacted_path": str(artifacts["compacted"]),
+            "handoff_path": str(artifacts["handoff"]),
+            "answer_path": consult["answer_path"],
+            "consult_id": consult["consult_id"],
+            "consult_payload_sha256": hashlib.sha256(
+                json.dumps(consult, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "mandatory_consults": [],
+        },
     }
 
 
@@ -6628,24 +7677,23 @@ def _recover_consult_fields(consult_path: str) -> tuple[str, str] | None:
 
 
 def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> None:
-    """Leave a legible FAILURE answer.json so the caller reads a clear failure instead of a
-    stale or missing file. Best-effort: a filesystem fault here must not skip the receipt (the
-    caller's bounded wait then falls back to treating the consult as failed anyway)."""
-    try:
-        path = Path(answer_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+    """Atomically project and revalidate a legible FAILURE answer before any receipt."""
+    path = Path(answer_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_bytes_atomic(
+        path,
+        (
             json.dumps(
                 contracts_consult.failure_answer(
                     consult_id, f"upagent-consult: {reason}"
                 ),
                 indent=2,
+                sort_keys=True,
             )
-        )
-    except (OSError, ConsultError) as e:
-        sys.stderr.write(
-            f"upagent-consult: could not write failure answer for {consult_id}: {e}\n"
-        )
+            + "\n"
+        ).encode(),
+    )
+    contracts_consult.load_answer(path, expected_consult_id=consult_id)
 
 
 def consult_index_dir() -> Path:
@@ -6781,7 +7829,9 @@ def _record_consult_in_index(receipt: dict) -> Path | None:
     except OSError as e:
         # Loud, because the consequence lands on someone else: an unrecorded consult makes an
         # honest worker's claim read as unverified.
-        sys.stderr.write(f"upagent-consult: could not index consult at {path}: {e}\n")
+        command_runtime.write_stderr(
+            f"upagent-consult: could not index consult at {path}: {e}\n"
+        )
         return None
     return path
 
@@ -6796,11 +7846,10 @@ def _publish_consult_receipt(receipt: dict, receipt_path: Path) -> None:
     indexed = _record_consult_in_index(receipt)
     if indexed is not None:
         receipt = {**receipt, "index_path": str(indexed)}
-    try:
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    except OSError as e:
-        sys.stderr.write(f"upagent-consult: could not write {receipt_path}: {e}\n")
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_bytes_atomic(
+        receipt_path, (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+    )
     print(f"CONSULT_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
 
 
@@ -6815,10 +7864,10 @@ def _roster_names_or_reason() -> str:
 def cmd_consult(consult_path: str, roster_path: str) -> int:
     """Route one question into an ordinary UpAgent order and validate the answer it produces.
 
-    Guarantee: once the consult_id is known this ALWAYS leaves an answer.json (real or failure)
-    and ALWAYS publishes a receipt, on every path — so a bounded caller wait resolves to a
-    legible outcome rather than a hang. Failures are still written to stderr; nothing is
-    swallowed. The command BLOCKS, and its returning is the completion signal: there is no
+    Guarantee: once the consult_id is known, every recoverable path atomically leaves an
+    answer.json (real or failure), revalidates it, and only then publishes a receipt. A filesystem
+    fault propagates before receipt rather than advertising an answer that was not published. The
+    command BLOCKS, and its returning is the completion signal: there is no
     sentinel, because `cmd_dispatch` already blocks for the durable ORDER_RECEIPT.
 
     Everything that can fail lives inside the recoverable block once consult_id is known —
@@ -6935,7 +7984,9 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
         receipt["answer_verdict"] = "rejected"
         receipt["reason"] = str(e)
         _write_failure_answer(answer_path, consult_id, str(e))
-        sys.stderr.write(f"upagent-consult: consult {consult_id} failed: {e}\n")
+        command_runtime.write_stderr(
+            f"upagent-consult: consult {consult_id} failed: {e}\n"
+        )
     # Tier 2 (`consults_verified`) plugs in HERE and nowhere else: a second write of this same
     # receipt into a requester-keyed index under the Recruiter's state root, which order
     # finalization then resolves a worker's claimed `consults` against. Additive — no field
@@ -6945,7 +7996,9 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="recruiter", description="UpAgent Recruiter")
+    parser = command_runtime.ArgumentParser(
+        prog="recruiter", description="UpAgent Recruiter"
+    )
     parser.add_argument(
         "--roster",
         default=default_roster_path(),
@@ -6953,17 +8006,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     p_recruit = sub.add_parser(
-        "recruit", help="submit a worker order without blocking the Recruiter pane"
+        "recruit",
+        help="submit one strict order file without blocking the Recruiter pane",
     )
-    p_recruit.add_argument("order", help="path to order.json")
+    p_recruit.add_argument("order", help="path to one strict order.json")
     p_dispatch = sub.add_parser(
         "dispatch", help="submit an order and block for its durable completion receipt"
     )
     p_dispatch.add_argument("order", help="path to order.json")
     p_request = sub.add_parser(
-        "request", help="submit an order and return after verified worker startup"
+        "request",
+        help="submit one strict order and return after verified worker startup",
     )
-    p_request.add_argument("order", help="path to order.json")
+    p_request.add_argument("order", help="path to one strict order.json")
     p_await = sub.add_parser(
         "await", help="wait for completion or an owner decision point"
     )
@@ -7031,6 +8086,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        _require_hub_authority()
         if args.command == "recruit":
             return cmd_recruit(args.order, args.roster)
         if args.command == "dispatch":
@@ -7082,7 +8138,7 @@ def main(argv: list[str] | None = None) -> int:
         # One standardized non-accepted outcome: the machine line, the human reason, and an exit
         # code the caller can branch on without parsing anything.
         _print_intake_outcome(e)
-        print(f"recruiter: {e}", file=sys.stderr, flush=True)
+        command_runtime.write_stderr(f"recruiter: {e}\n")
         return e.exit_code
     except RecruiterError as e:
         sys.exit(f"recruiter: {e}")

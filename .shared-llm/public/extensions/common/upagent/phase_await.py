@@ -9,15 +9,31 @@ import fcntl
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Callable, cast
 import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
 
 HERE = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location("upagent_await_contracts", HERE / "contracts.py")
+_runtime_name = "upagent_command_runtime"
+if _runtime_name in sys.modules:
+    command_runtime = sys.modules[_runtime_name]
+else:
+    _runtime_spec = importlib.util.spec_from_file_location(
+        _runtime_name, HERE / "command_runtime.py"
+    )
+    if _runtime_spec is None or _runtime_spec.loader is None:
+        raise RuntimeError("could not load UpAgent command runtime")
+    command_runtime = importlib.util.module_from_spec(_runtime_spec)
+    sys.modules[_runtime_name] = command_runtime
+    _runtime_spec.loader.exec_module(command_runtime)
+
+_spec = importlib.util.spec_from_file_location(
+    "upagent_await_contracts", HERE / "contracts.py"
+)
 if _spec is None or _spec.loader is None:
     raise RuntimeError("could not load UpAgent contracts")
 contracts = cast(Any, importlib.util.module_from_spec(_spec))
@@ -29,7 +45,11 @@ DEFAULT_RECONCILE_MS = 20_000
 DEFAULT_INACTIVITY_MS = 15 * 60 * 1000
 DEFAULT_ESCALATE_MS = 10 * 60 * 1000
 STALL_CONFIRMATIONS = 2
-_RESULT_VERDICT_KINDS = {"passed": "completed", "failed": "failed", "blocked": "blocked"}
+_RESULT_VERDICT_KINDS = {
+    "passed": "completed",
+    "failed": "failed",
+    "blocked": "blocked",
+}
 _EPHEMERAL_KINDS = ("await-heartbeat", "progress")
 
 
@@ -49,7 +69,9 @@ class PhaseContext:
         if not isinstance(receipt, dict):
             raise AwaitError("phase-start receipt must be a JSON object")
         if receipt.get("state") not in ("ready", "ready-degraded"):
-            raise AwaitError(f"phase-start receipt state must be ready/ready-degraded (got {receipt.get('state')!r})")
+            raise AwaitError(
+                f"phase-start receipt state must be ready/ready-degraded (got {receipt.get('state')!r})"
+            )
         phase_id = receipt.get("phase_id")
         pass_number = receipt.get("pass")
         leader_pane = receipt.get("leader_pane")
@@ -92,9 +114,11 @@ class _JournalLock:
     def __init__(self, ctx: PhaseContext):
         ctx.events_dir.mkdir(parents=True, exist_ok=True)
         self._path = ctx.events_dir / ".lock"
+
     def __enter__(self):
         self._stream = self._path.open("a+", encoding="utf-8")
         fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
+
     def __exit__(self, *exc: object):
         fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
         self._stream.close()
@@ -107,7 +131,11 @@ def read_journal(ctx: PhaseContext) -> list[dict]:
     previous = None
     for path in sorted(ctx.events_dir.glob("*.json")):
         try:
-            event = contracts.parse_event(path.read_text(), expected_run_id=ctx.run_id, expected_phase_id=ctx.phase_id)
+            event = contracts.parse_event(
+                path.read_text(),
+                expected_run_id=ctx.run_id,
+                expected_phase_id=ctx.phase_id,
+            )
         except (OSError, contracts.ContractError) as error:
             raise AwaitError(f"journal event {path.name} invalid: {error}") from error
         previous = contracts.validate_event_order(previous, event)
@@ -120,7 +148,10 @@ def ack_state(ctx: PhaseContext, event_id: str) -> str | None:
     if not path.is_file():
         return None
     try:
-        return cast(str, contracts.parse_ack(path.read_text(), expected_event_id=event_id)["state"])
+        return cast(
+            str,
+            contracts.parse_ack(path.read_text(), expected_event_id=event_id)["state"],
+        )
     except (OSError, contracts.ContractError) as error:
         raise AwaitError(f"ack record for {event_id} invalid: {error}") from error
 
@@ -132,8 +163,15 @@ def record_ack(ctx: PhaseContext, event_id: str, state: str, actor: str) -> dict
     except contracts.ContractError as error:
         raise AwaitError(str(error)) from error
     if previous == state:
-        return contracts.parse_ack((ctx.acks_dir / f"{event_id}.json").read_text(), expected_event_id=event_id)
-    ack = {"event_id": event_id, "state": state, "actor": actor, "occurred_at": _now_iso()}
+        return contracts.parse_ack(
+            (ctx.acks_dir / f"{event_id}.json").read_text(), expected_event_id=event_id
+        )
+    ack = {
+        "event_id": event_id,
+        "state": state,
+        "actor": actor,
+        "occurred_at": _now_iso(),
+    }
     _write_json_atomic(ctx.acks_dir / f"{event_id}.json", ack)
     return ack
 
@@ -147,12 +185,25 @@ def _unresolved_dedupe_keys(ctx: PhaseContext, events: list[dict]) -> set[str]:
     return keys
 
 
-def publish_event(ctx: PhaseContext, kind: str, summary: str, *, severity: str = "info", ack_required: bool | None = None, dedupe_key: str | None = None, evidence: list[dict] | None = None, requested_action: str | None = None, request_id: str | None = None) -> dict | None:
+def publish_event(
+    ctx: PhaseContext,
+    kind: str,
+    summary: str,
+    *,
+    severity: str = "info",
+    ack_required: bool | None = None,
+    dedupe_key: str | None = None,
+    evidence: list[dict] | None = None,
+    requested_action: str | None = None,
+    request_id: str | None = None,
+) -> dict | None:
     if kind not in contracts.EVENT_KINDS:
         raise AwaitError(f"unknown event kind {kind!r}")
     with _JournalLock(ctx):
         events = read_journal(ctx)
-        if dedupe_key is not None and dedupe_key in _unresolved_dedupe_keys(ctx, events):
+        if dedupe_key is not None and dedupe_key in _unresolved_dedupe_keys(
+            ctx, events
+        ):
             return None
         if any(e.get("terminal") for e in events):
             return None
@@ -169,7 +220,9 @@ def publish_event(ctx: PhaseContext, kind: str, summary: str, *, severity: str =
             "terminal": contracts.EVENT_KINDS[kind],
             "severity": severity,
             "summary": summary,
-            "ack_required": ack_required if ack_required is not None else kind not in _EPHEMERAL_KINDS,
+            "ack_required": ack_required
+            if ack_required is not None
+            else kind not in _EPHEMERAL_KINDS,
             "source": {"component": "phase-await", "address": None},
         }
         if dedupe_key is not None:
@@ -180,7 +233,11 @@ def publish_event(ctx: PhaseContext, kind: str, summary: str, *, severity: str =
             event["requested_action"] = requested_action
         if request_id is not None:
             event["request_id"] = request_id
-        validated = contracts.parse_event(json.dumps(event), expected_run_id=ctx.run_id, expected_phase_id=ctx.phase_id)
+        validated = contracts.parse_event(
+            json.dumps(event),
+            expected_run_id=ctx.run_id,
+            expected_phase_id=ctx.phase_id,
+        )
         _write_json_atomic(ctx.events_dir / f"{sequence:08d}.json", validated)
         return validated
 
@@ -202,9 +259,26 @@ def promote_inbox(ctx: PhaseContext) -> None:
         except (OSError, ValueError, json.JSONDecodeError) as error:
             quarantine = path.with_suffix(".rejected")
             path.replace(quarantine)
-            publish_event(ctx, "advisory", f"Rejected malformed inbox envelope {path.name}: {error}", severity="attention", evidence=[{"kind": "durable-file", "path": str(quarantine)}], dedupe_key=f"inbox-rejected:{path.name}")
+            publish_event(
+                ctx,
+                "advisory",
+                f"Rejected malformed inbox envelope {path.name}: {error}",
+                severity="attention",
+                evidence=[{"kind": "durable-file", "path": str(quarantine)}],
+                dedupe_key=f"inbox-rejected:{path.name}",
+            )
             continue
-        publish_event(ctx, cast(str, kind), cast(str, summary), severity=cast(str, envelope.get("severity", "attention")), ack_required=cast(bool | None, envelope.get("ack_required")), dedupe_key=cast(str | None, envelope.get("dedupe_key")), evidence=cast(list[dict] | None, envelope.get("evidence")), requested_action=cast(str | None, envelope.get("requested_action")), request_id=cast(str | None, envelope.get("request_id")))
+        publish_event(
+            ctx,
+            cast(str, kind),
+            cast(str, summary),
+            severity=cast(str, envelope.get("severity", "attention")),
+            ack_required=cast(bool | None, envelope.get("ack_required")),
+            dedupe_key=cast(str | None, envelope.get("dedupe_key")),
+            evidence=cast(list[dict] | None, envelope.get("evidence")),
+            requested_action=cast(str | None, envelope.get("requested_action")),
+            request_id=cast(str | None, envelope.get("request_id")),
+        )
         path.unlink()
 
 
@@ -225,22 +299,54 @@ def check_phase_result(ctx: PhaseContext) -> None:
     revisit = result.get("revisit")
     if isinstance(revisit, list) and revisit:
         summary += f" revisit={','.join(str(item) for item in revisit)}"
-    publish_event(ctx, kind, summary, severity="info" if verdict == "passed" else "attention", ack_required=True, dedupe_key=f"phase-result:pass-{ctx.pass_number}:{verdict}", evidence=[{"kind": "durable-file", "path": str(ctx.result_path)}], requested_action=None if verdict == "passed" else "inspect-and-decide")
+    publish_event(
+        ctx,
+        kind,
+        summary,
+        severity="info" if verdict == "passed" else "attention",
+        ack_required=True,
+        dedupe_key=f"phase-result:pass-{ctx.pass_number}:{verdict}",
+        evidence=[{"kind": "durable-file", "path": str(ctx.result_path)}],
+        requested_action=None if verdict == "passed" else "inspect-and-decide",
+    )
 
 
 def _notify_human(title: str, body: str) -> bool:
     try:
-        proc = subprocess.run(["herdr", "notification", "show", title, "--body", body, "--sound", "request"], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(
+            [
+                "herdr",
+                "notification",
+                "show",
+                title,
+                "--body",
+                body,
+                "--sound",
+                "request",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
     except (OSError, subprocess.TimeoutExpired) as error:
-        sys.stderr.write(f"phase-await: human notification failed: {error}\n")
+        command_runtime.write_stderr(
+            f"phase-await: human notification failed: {error}\n"
+        )
         return False
     if proc.returncode != 0:
-        sys.stderr.write(f"phase-await: human notification exited {proc.returncode}: {proc.stderr.strip()}\n")
+        command_runtime.write_stderr(
+            f"phase-await: human notification exited {proc.returncode}: {proc.stderr.strip()}\n"
+        )
         return False
     return True
 
 
-def _escalate_unacked_urgent(ctx: PhaseContext, events: list[dict], escalate_ms: int, notify: Callable[[str, str], object]) -> None:
+def _escalate_unacked_urgent(
+    ctx: PhaseContext,
+    events: list[dict],
+    escalate_ms: int,
+    notify: Callable[[str, str], object],
+) -> None:
     if escalate_ms <= 0:
         return
     now_ns = time.time_ns()
@@ -253,13 +359,18 @@ def _escalate_unacked_urgent(ctx: PhaseContext, events: list[dict], escalate_ms:
         if marker.exists():
             continue
         try:
-            occurred = dt.datetime.strptime(event["occurred_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+            occurred = dt.datetime.strptime(
+                event["occurred_at"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=dt.timezone.utc)
         except ValueError:
             continue
         age_ms = (now_ns - int(occurred.timestamp() * 1_000_000_000)) / 1_000_000
         if age_ms < escalate_ms:
             continue
-        delivered = notify("Herdr plan needs attention", f"Phase {ctx.phase_id} pass {ctx.pass_number}: {event['kind']} is unacknowledged. Open the TUI for details.")
+        delivered = notify(
+            "Herdr plan needs attention",
+            f"Phase {ctx.phase_id} pass {ctx.pass_number}: {event['kind']} is unacknowledged. Open the TUI for details.",
+        )
         if delivered is not False:
             # A failed notification stays unmarked so the next sweep retries it.
             _write_json_atomic(marker, {"event_id": event["event_id"], "at_ns": now_ns})
@@ -267,7 +378,12 @@ def _escalate_unacked_urgent(ctx: PhaseContext, events: list[dict], escalate_ms:
 
 def _probe_leader(pane_id: str) -> dict:
     try:
-        proc = subprocess.run(["herdr", "pane", "get", pane_id], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(
+            ["herdr", "pane", "get", pane_id],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return {"alive": None, "agent_status": None}
     if proc.returncode != 0:
@@ -295,16 +411,29 @@ def _deliverable(ctx: PhaseContext, events: list[dict], after: int) -> dict | No
         state = ack_state(ctx, event["event_id"])
         if state in ("acknowledged", "resolved"):
             continue
-        if event["kind"] in _EPHEMERAL_KINDS:
-            if event["sequence"] < last_sequence or event["sequence"] <= after:
-                record_ack(ctx, event["event_id"], "resolved", "phase-await")
-                continue
+        if event["kind"] in _EPHEMERAL_KINDS and (
+            event["sequence"] < last_sequence or event["sequence"] <= after
+        ):
+            record_ack(ctx, event["event_id"], "resolved", "phase-await")
+            continue
         if event["sequence"] > after or event.get("ack_required"):
             return event
     return None
 
 
-def await_event(receipt_path: str | Path, *, after: int = 0, timeout_ms: int = DEFAULT_TIMEOUT_MS, poll_ms: int = DEFAULT_POLL_MS, reconcile_ms: int = DEFAULT_RECONCILE_MS, inactivity_ms: int = DEFAULT_INACTIVITY_MS, escalate_ms: int = DEFAULT_ESCALATE_MS, actor: str = "owner", probe: Callable[[str], dict] | None = None, notify: Callable[[str, str], object] | None = None) -> dict:
+def await_event(
+    receipt_path: str | Path,
+    *,
+    after: int = 0,
+    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    poll_ms: int = DEFAULT_POLL_MS,
+    reconcile_ms: int = DEFAULT_RECONCILE_MS,
+    inactivity_ms: int = DEFAULT_INACTIVITY_MS,
+    escalate_ms: int = DEFAULT_ESCALATE_MS,
+    actor: str = "owner",
+    probe: Callable[[str], dict] | None = None,
+    notify: Callable[[str, str], object] | None = None,
+) -> dict:
     ctx = PhaseContext(Path(receipt_path))
     probe = probe or _probe_leader
     notify = notify or _notify_human
@@ -330,21 +459,49 @@ def await_event(receipt_path: str | Path, *, after: int = 0, timeout_ms: int = D
             if alive is False and not _has_terminal_result(ctx):
                 dead_sweeps += 1
                 if dead_sweeps >= STALL_CONFIRMATIONS:
-                    publish_event(ctx, "leader-missing", f"Leader pane {ctx.leader_pane} cannot be resolved and no pass-{ctx.pass_number} phase result exists.", severity="urgent", dedupe_key=f"leader-missing:pass-{ctx.pass_number}", requested_action="inspect-and-decide")
+                    publish_event(
+                        ctx,
+                        "leader-missing",
+                        f"Leader pane {ctx.leader_pane} cannot be resolved and no pass-{ctx.pass_number} phase result exists.",
+                        severity="urgent",
+                        dedupe_key=f"leader-missing:pass-{ctx.pass_number}",
+                        requested_action="inspect-and-decide",
+                    )
             else:
                 dead_sweeps = 0
-            if alive is True and status in ("idle", "done") and not _has_terminal_result(ctx):
+            if (
+                alive is True
+                and status in ("idle", "done")
+                and not _has_terminal_result(ctx)
+            ):
                 stalled_sweeps += 1
                 if stalled_sweeps >= STALL_CONFIRMATIONS:
-                    publish_event(ctx, "leader-stalled", f"Leader pane {ctx.leader_pane} reports agent status {status!r} but durable state says pass {ctx.pass_number} is still active with no phase result.", severity="urgent", dedupe_key=f"leader-stalled:pass-{ctx.pass_number}", requested_action="inspect-and-decide")
+                    publish_event(
+                        ctx,
+                        "leader-stalled",
+                        f"Leader pane {ctx.leader_pane} reports agent status {status!r} but durable state says pass {ctx.pass_number} is still active with no phase result.",
+                        severity="urgent",
+                        dedupe_key=f"leader-stalled:pass-{ctx.pass_number}",
+                        requested_action="inspect-and-decide",
+                    )
             else:
                 stalled_sweeps = 0
         events = read_journal(ctx)
         if len(events) != last_journal_len:
             last_journal_len = len(events)
             last_material_change = time.monotonic()
-        if inactivity_ms > 0 and (time.monotonic() - last_material_change) * 1000 >= inactivity_ms:
-            published = publish_event(ctx, "inactivity-checkpoint", f"No durable movement for {inactivity_ms} ms on phase {ctx.phase_id} pass {ctx.pass_number}; ambiguous-state check advised.", severity="attention", dedupe_key=f"inactivity:pass-{ctx.pass_number}:{last_journal_len}", requested_action="run-one-shot-checker")
+        if (
+            inactivity_ms > 0
+            and (time.monotonic() - last_material_change) * 1000 >= inactivity_ms
+        ):
+            published = publish_event(
+                ctx,
+                "inactivity-checkpoint",
+                f"No durable movement for {inactivity_ms} ms on phase {ctx.phase_id} pass {ctx.pass_number}; ambiguous-state check advised.",
+                severity="attention",
+                dedupe_key=f"inactivity:pass-{ctx.pass_number}:{last_journal_len}",
+                requested_action="run-one-shot-checker",
+            )
             if published is not None:
                 events = read_journal(ctx)
         _escalate_unacked_urgent(ctx, events, escalate_ms, notify)
@@ -354,13 +511,23 @@ def await_event(receipt_path: str | Path, *, after: int = 0, timeout_ms: int = D
             return event
         terminal = next((e for e in events if e.get("terminal")), None)
         if terminal is not None:
-            raise AwaitError(f"phase {ctx.phase_id} pass {ctx.pass_number} is terminal ({terminal['kind']}, sequence {terminal['sequence']}) and already acknowledged; nothing to await")
+            raise AwaitError(
+                f"phase {ctx.phase_id} pass {ctx.pass_number} is terminal ({terminal['kind']}, sequence {terminal['sequence']}) and already acknowledged; nothing to await"
+            )
         if time.monotonic() >= deadline:
-            heartbeat = publish_event(ctx, "await-heartbeat", f"Quiet and healthy: leader {ctx.leader_pane} status {last_status!r}; {last_journal_len} journal event(s); re-await.", severity="info", ack_required=False)
+            heartbeat = publish_event(
+                ctx,
+                "await-heartbeat",
+                f"Quiet and healthy: leader {ctx.leader_pane} status {last_status!r}; {last_journal_len} journal event(s); re-await.",
+                severity="info",
+                ack_required=False,
+            )
             if heartbeat is None:
                 event = _deliverable(ctx, read_journal(ctx), after)
                 if event is None:
-                    raise AwaitError("await expired with a terminal journal but nothing deliverable")
+                    raise AwaitError(
+                        "await expired with a terminal journal but nothing deliverable"
+                    )
                 record_ack(ctx, event["event_id"], "returned-to-owner", actor)
                 return event
             record_ack(ctx, heartbeat["event_id"], "returned-to-owner", actor)
@@ -369,17 +536,26 @@ def await_event(receipt_path: str | Path, *, after: int = 0, timeout_ms: int = D
 
 
 def _cmd_wait(args: argparse.Namespace) -> int:
-    event = await_event(args.receipt, after=args.after, timeout_ms=args.timeout_ms, poll_ms=args.poll_ms, reconcile_ms=args.reconcile_ms, inactivity_ms=args.inactivity_ms, escalate_ms=args.escalate_ms, actor=args.actor)
-    json.dump(event, sys.stdout, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
+    event = await_event(
+        args.receipt,
+        after=args.after,
+        timeout_ms=args.timeout_ms,
+        poll_ms=args.poll_ms,
+        reconcile_ms=args.reconcile_ms,
+        inactivity_ms=args.inactivity_ms,
+        escalate_ms=args.escalate_ms,
+        actor=args.actor,
+    )
+    json.dump(event, command_runtime.stdout_stream(), indent=2, sort_keys=True)
+    command_runtime.write_stdout("\n")
     return 0
 
 
 def _cmd_ack(args: argparse.Namespace) -> int:
     ctx = PhaseContext(Path(args.receipt))
     ack = record_ack(ctx, args.event_id, args.state, args.actor)
-    json.dump(ack, sys.stdout, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
+    json.dump(ack, command_runtime.stdout_stream(), indent=2, sort_keys=True)
+    command_runtime.write_stdout("\n")
     return 0
 
 
@@ -387,7 +563,11 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     ctx = PhaseContext(Path(args.receipt))
     if args.kind not in contracts.EVENT_KINDS:
         raise AwaitError(f"unknown event kind {args.kind!r}")
-    envelope: dict[str, object] = {"kind": args.kind, "summary": args.summary, "severity": args.severity}
+    envelope: dict[str, object] = {
+        "kind": args.kind,
+        "summary": args.summary,
+        "severity": args.severity,
+    }
     if args.dedupe_key:
         envelope["dedupe_key"] = args.dedupe_key
     if args.request_id:
@@ -395,14 +575,16 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     if args.requested_action:
         envelope["requested_action"] = args.requested_action
     if args.evidence:
-        envelope["evidence"] = [{"kind": "durable-file", "path": path} for path in args.evidence]
+        envelope["evidence"] = [
+            {"kind": "durable-file", "path": path} for path in args.evidence
+        ]
     ctx.inbox_dir.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(ctx.inbox_dir / f"{uuid.uuid4().hex}.json", envelope)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="upagent-phase-await")
+    parser = command_runtime.ArgumentParser(prog="upagent-phase-await")
     sub = parser.add_subparsers(dest="command", required=True)
     wait = sub.add_parser("wait")
     wait.add_argument("--receipt", required=True)
@@ -417,7 +599,9 @@ def main(argv: list[str] | None = None) -> int:
     ack = sub.add_parser("ack")
     ack.add_argument("--receipt", required=True)
     ack.add_argument("--event-id", required=True)
-    ack.add_argument("--state", default="acknowledged", choices=list(contracts.ACK_STATES))
+    ack.add_argument(
+        "--state", default="acknowledged", choices=list(contracts.ACK_STATES)
+    )
     ack.add_argument("--actor", default="owner")
     ack.set_defaults(handler=_cmd_ack)
     publish = sub.add_parser("publish")
@@ -443,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return cast(int, args.handler(args))
     except (AwaitError, contracts.ContractError) as error:
-        sys.stderr.write(f"upagent-phase-await: {error}\n")
+        command_runtime.write_stderr(f"upagent-phase-await: {error}\n")
         return 2
 
 

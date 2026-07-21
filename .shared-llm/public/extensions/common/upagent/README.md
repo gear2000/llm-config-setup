@@ -6,6 +6,50 @@ request, uses Python-owned direct lifecycle by default, atomically launches and 
 collects the result, and reports to the recorded requester. See [FUNDAMENTALS.md](FUNDAMENTALS.md)
 for the authority model and use-case tree.
 
+## Canonical machine-local Hub
+
+Every imported recipe invokes `client.py`, a transport-only client. From a main checkout or any
+linked git worktree it resolves git's common directory, then connects to the same repository socket
+at `/tmp/.upagent/hubs/<repo-id>/hub.sock`; `UPAGENT_SOCKET` is the absolute-path override. Only
+`up` may start the canonical `hub.py`, and it starts the copy from the main checkout rather than the
+caller's worktree. The Hub holds `hub.lock` for its full lifetime, publishes `identity.json`, and
+performs a version-and-schema-fingerprint handshake before accepting a command. Protocol v3
+carries only the strictly validated Herdr caller fields required by controller operations
+(`HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SOCKET_PATH`, `HERDR_SESSION`, and the private absolute
+`HERDR_RUN_OWNER_TOKEN_FILE` path when set); arbitrary environment variables and raw secrets never
+cross the wire. Request-local stdin is bounded and accepted only for run-lifecycle `guard` or
+`cleanup` with exactly one `--token-stdin`; it never enters Hub identity, status, logs, or the
+process stdin. An incompatible resident is restarted by `up` only after its live handshake,
+canonical executable, exact PID/start identity, and zero-worker ledger all verify; otherwise the
+client fails with explicit manual restart guidance. The Hub removes its own Herdr fields before
+creating the request context.
+It imports canonical controllers under a narrow module-registration lock, then runs commands
+concurrently with request-local cwd, immutable environment views, argument parsing, and structured
+output sinks. Blocking awaits therefore do not stall status, response, reconciliation, or
+controller operations; usage/errors stay with the requesting client; and background-runner output
+cannot enter another request's response. Job runners and the reconciler are Hub-owned daemon threads, not
+detached mutating subprocesses. A Hub exit therefore ends every writer before the OS releases
+the lifetime lock. Status includes
+`hub_instance_id`, exact PID/start identity, protocol version and schema fingerprint, canonical
+Recruiter path, socket, ledger, and Herdr session.
+
+The client imports no Recruiter code and has no ledger, reconciliation, lifecycle-dispatch, or
+worker-runner implementation. Public, controller, and compatibility recipes all cross the socket.
+Direct `recruiter.py` and `public_api.py` execution fails loud. Authority is not an environment
+marker: the running PID, canonical paths, published identity, lock-file inode, and already-held lock
+descriptor must all prove the live Hub process. `plan_controller.py` and `run_lifecycle.py` are also
+canonical socket targets and never import a checkout-local Recruiter or inspect its ledger. The
+socket is deliberately open to machine-local callers (mode `0666`):
+there is no registration, API key, JWT, TLS, allowlist, or worktree approval layer.
+
+Every worker, manager, checker, and rescue helper persists a token-fenced
+`launching` journal before `herdr agent start`, records the exact returned pane as `created`, then
+compare-and-swaps it to `started`. A lost fence routes through bounded exact-agent cleanup. If
+cleanup cannot be proved immediately, the job thread publishes no terminal receipt: the standing
+supervisor retains the active lease, reconciles the journaled unique agent name and exact pane, and
+only then terminalizes with that cleanup evidence. A crash between pane creation and ledger
+publication therefore cannot leave an unowned agent or a false `verified_absent` receipt.
+
 ## Topology
 
 ```
@@ -20,81 +64,60 @@ Herdr session (with `up --separate-workspaces`)
     └── recruiter               deterministic Python Hub
 ```
 
-The Recruiter pane is a visible status surface, not a free-form command queue. Requests go directly
-to the durable ledger. A narrow compatibility function accepts exactly `recruit <order-path>` and
-forwards that opaque path to the normal verified request door; it never evaluates pane text. A
-request's manager, worker, and short-lived checkers start beside the
-`order.cockpit_pane` through atomic `herdr agent start` calls, making the whole dedicated lifecycle
-visible in one workspace. `manager_placement.mode: shared` remains an explicit opt-in for callers
-that truly want a peripheral manager. Pane placement is role-based: workers split right, while
-managers and one-shot checkers split down, forming a mixed grid instead of a vertical strip. Every
-watchdog targets 28% of its local horizontal split; managers and checkers target 20% of their local
-vertical split. This bounded, best-effort resizing happens only after atomic agent startup and
-ownership recording, so an unavailable layout control warns without blocking the worker. Every
-pane is closed only by its fenced lease owner.
+The Recruiter pane is a visible status surface, not a free-form command queue. Requests go through
+one variadic façade and the canonical socket:
 
-## LLM order intake (short leash)
+```text
+just upagent --help
+just upagent up
+just upagent status [--request ID] [--json]
+just upagent lists --type offerings|specialists|workers [--status active|terminal|all] [--json]
+just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
+  --prompt-file /absolute/brief.md [--cwd /absolute/worktree] [--wait] [--json]
+just upagent request --type specialist --specialist NAME \
+  --prompt-file /absolute/question.md [--cwd /absolute/worktree] [--wait] [--json]
+just upagent request --file /absolute/request.json [--wait] [--json]
+just upagent await --request ID [--notify-after-ms MS] [--json]
+just upagent await-any --request ID [--request ID ...] [--cursor JSON] [--timeout-ms MS] [--json]
+just upagent verify --request ID --offering ID --effort LEVEL --agent PERSONA [--wait] [--json]
+just upagent respond --request ID --control-token TOKEN --nonce NONCE \
+  --action extend|cancel --extension-ms MS [--json]
+just upagent reconcile [--json]
+```
 
-Every submission door (`recruit`/`dispatch`/`request`) takes one path. Python owns transport; an
-LLM owns interpretation:
+## Strict public request boundary
 
-1. Python preserves the exact submitted bytes, then launches one short-lived `intake-clerk` support
-   role from the trusted Recruiter pane and a broker-owned scratch cwd. Every distinct submission
-   goes through a clerk — canonical JSON, malformed JSON, prose, an incomplete object, unknown
-   fields, and specialist-worded requests alike; a byte-identical resubmission of the same file with
-   a clean prior attempt is idempotent and reuses that attempt's validated response rather than
-   launching again. Python cannot end a request because of its schema, wording, order id, agent
-   name, or intent; there is no canonical-order bypass and no Python form repair.
-2. The clerk flattens or renames a JSON envelope, returns an already-canonical order unchanged, or
-   explains why the submission is not executable. Prose labels are never execution authority: every
-   required and authority-bearing value must come from an unambiguous JSON object through a known
-   key or alias.
-3. The interpreted order passes Python provenance checks and the unchanged strict contract. Those
-   findings go back to the same clerk for a bounded number of correction rounds rather than
-   becoming a Python refusal; each round gets its own reuse identity so a correction can never be
-   answered by the response it was sent to correct. If a model wraps its one JSON object in exactly
-   one whole-response Markdown JSON fence, Python removes that fence as form normalization; prose
-   outside the fence and multiple objects remain invalid.
-4. Python then supplies only its own bookkeeping defaults — identifiers, a result path, missing
-   phase/stage bookkeeping, path anchoring — and hands the order to the unchanged worker lifecycle.
+Named flags and `--file` enter one closed `schema_version: 1` parser. A file must be one readable
+absolute JSON object and may contain only `schema_version`, `request_id`, `type`, `offering`,
+`effort`, `agent`, `specialist`, `prompt_file`, and `cwd`. `--file` is mutually exclusive with
+request-defining flags; `--wait` and `--json` are invocation controls and never enter the immutable
+payload. Worker requests require explicit offering, effort, persona, and prompt. Specialist
+requests require a specialist and prompt and resolve that specialist's pinned offering. Unknown
+keys, types, offerings, efforts, personas, specialists, relative/unreadable paths, and incompatible
+flags fail before the ledger, manager, pane, or worker. There is no intake LLM, prose repair,
+arbitrary argument materialization, or empty-request acceptance on this path.
 
-Every submission ends in exactly one visible outcome with durable evidence and its own exit code:
+A caller may supply one canonical lowercase hyphenated UUID or uppercase Crockford ULID; otherwise
+Python generates a UUID. The Hub hashes the canonical immutable payload, including the resolved
+offering snapshot and SHA-256 of the exact prompt bytes. It atomically snapshots those bytes before
+submission. The public bridge durably transitions `registered` → `submitting` → `submitted`
+under a per-request lock. An identical retry resumes a registration interrupted before submission;
+a retry interrupted after Recruiter acceptance resubmits the same order and reattaches through the
+Recruiter's idempotent ledger. Same id plus same hash attaches without another launch; same id plus
+a changed hash returns `request_id_conflict` before request mutation.
 
-| Outcome | Marker | Exit | Authored by |
-|---|---|---|---|
-| accepted | `REQUEST_ACCEPTED` / `ORDER_RECEIPT` / `ORDER … DONE` | `0` | — |
-| blocked | `REQUEST_BLOCKED` | `3` | intake clerk |
-| intake clerk failure | `REQUEST_INTAKE_FAILED` | `4` | recruiter |
-| infrastructure failure | `REQUEST_INFRASTRUCTURE_FAILED` | `5` | recruiter |
+`offerings.yaml` contains exactly nine validated stable ids: three Claude, one Codex, and five Pi.
+The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,
+and the immutable order snapshot. YAML selects only harness, model, and allowed efforts. It cannot
+supply a public worker or Account Manager shell command. `offerings.py` renders child tokens:
+Claude uses `--effort`,
+Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit
+`--thinking`. Legacy and controller recipes remain socket shims; their strict order files bypass no
+Hub authority.
 
-A non-executable request is blocked in the clerk's own words, recorded with `authored_by` so a
-reader can tell a judgement from a machine fault. An unavailable clerk, an exhausted correction
-budget, and a fault in the Hub's own machinery are each reported as themselves — never a hang, a
-crash, or a guessed order.
-
-The complete paper trail is written before the caller's order is atomically replaced:
-`<order>.raw-submitted` contains the exact bytes, `.interpreted.json` the attempted canonical
-interpretation, `.intake.json` the mode and changes, `.validation.json` the final gate, and
-`.refusal.json` the reason when no safe interpretation exists. No paper trail means no execution.
-The default clerk receives no filesystem, shell, web, or MCP tools. A trusted wrapper shell-quotes
-the broker brief/output paths, feeds the brief to `claude --print --tools ""`, and atomically
-captures the clerk's one-object stdout. `upagent.yaml` is trusted executable configuration: a
-roster owner can override the shipped command and thereby broaden its capabilities. Python does
-not claim to enforce no-tools on an arbitrary trusted override, so every override must be audited.
-The clerk timeout is capped at `300000` ms even for trusted overrides. Persona instructions are
-guidance; Python's structural provenance, typed-response parser, and strict order contract are the
-enforcement boundary.
-
-Each clerk attempt uses an unpredictable broker-created directory with mode `0700`. A pre-launch
-journal records an unguessable agent name, lease token, owner PID and process start time before
-Herdr creates a pane. Reuse requires a hash-matching response, ownership journal, and secure index.
-Cleanup resolves that unique agent name and rechecks agent/process/cwd identity; it never closes a
-stale pane id by itself. The reconciler can recover a crash before the pane id was journaled. A
-not-found lookup while that launch is uncertain keeps the tiny journal open for later sweeps,
-because the in-flight Herdr start may still publish the named agent. Reconciliation also rejects
-symlinked or escaped attempt metadata. Interpreted orders still face all submission checks,
-including the laundering guard that refuses an unsafe consult-shaped order id rather than
-regenerating it into a valid-looking one.
+A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
+atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
+its fenced lease owner.
 
 Phase startup has its own deterministic front door:
 
@@ -119,7 +142,9 @@ stored in the durable request ledger and modern startup responses.
 
 Run-level ownership uses a private token only for mutating lifecycle operations. New starts write
 the token to a per-run hashed 0600 file under `$HERDR_RUN_TOKEN_DIR` or the default same-user
-0700 runtime token directory, then pass only `HERDR_RUN_OWNER_TOKEN_FILE` to the TUI and heartbeat process; `HERDR_RUN_OWNER_TOKEN` remains a
+0700 runtime token directory, then pass only `HERDR_RUN_OWNER_TOKEN_FILE` to the TUI and heartbeat
+process. The Hub protocol whitelists that absolute, same-user private regular-file path and never
+transports the raw `HERDR_RUN_OWNER_TOKEN`; the raw variable remains only a non-protocol
 compatibility fallback. Recovery is explicit: use `just herdr-run-session-snapshot <run-dir>`,
 then `just herdr-run-session-reconcile <run-dir>`, and only then start with stale takeover when
 the reconciliation receipt proves the recorded owner is stale.
@@ -129,22 +154,34 @@ the reconciliation receipt proves the recorded owner is stale.
 Durable files are the source of truth; terminal text is display-only.
 
 - The requester writes `order.json`, including a globally scoped `request_id` and
-  `requester: {id, kind, address}`, then runs `just upagent-request <order.json>`. It returns only
-  after both the manager and worker have verified startup, with their current addresses and a
-  per-generation control token.
+  `requester: {id, kind, address}`, then runs `just upagent-request <order.json>`. It returns after
+  Python verifies worker startup, with the worker address and a per-generation control token.
+  A healthy Account Manager address is included when available; manager startup or assessment
+  failure is reported as degraded supervision and never prevents mechanically valid work from
+  reaching `running`.
 - The Recruiter validates and persists a copy-on-write request under
-  `$UPAGENT_HUB_DIR` (default `~/.local/state/herdr/upagent-hub`). One runner atomically claims
-  `active/requests/<scoped-request-id>/`, writes an authoritative generation lease, starts the
-  manager, then launches the requested harness. Health means expected foreground process,
-  detected harness, cwd, and typed manager assessment—not merely pane creation.
+  `$UPAGENT_HUB_DIR` (default `<socket-path>.ledger`, shared by the main checkout and its
+  worktrees). One runner atomically claims
+  `active/requests/<scoped-request-id>/`, writes an authoritative generation lease, attempts the
+  advisory manager, then launches the requested harness. Worker health means the expected
+  foreground process, detected harness, and cwd—not merely pane creation. Manager health and its
+  typed assessment are reported separately and may degrade without vetoing worker startup.
 - Before launch, Python checks absolute paths, required model/effort values, harness-native model
   shape, executable presence, and (for Claude `--agent` routes) the actual persona file. Those
   facts are given to the manager. A bad request is explained to the requester and terminalized
   without ever creating a worker, even if the LLM mistakenly recommends approval.
-- The Recruiter appends a final lease-specific delivery contract containing one private result
-  path and the literal order id. The worker does the stage and writes exactly that one private
-  `result.json` (verdict `passed|failed|blocked`, a `revisit` list of stage-ids on failure,
-  and a `full_log` pointer to its harness transcript) plus its `compacted.md` and handoff.
+- Public requests use one dedicated advisory Account Manager resolved through the approved
+  `claude-sonnet-5` offering at `low` effort with persona `upagent-account-manager`. Manager
+  failure degrades supervision only: it cannot veto Python-valid startup, mutate a lease,
+  publish artifacts, invent success, or terminalize the request. Fable remains explicit-only.
+- Every accepted order carries `artifact_publication`. Compatibility/controller orders that omit it
+  receive deterministic result-adjacent paths and an explicit mandatory-consult list before the
+  first ledger mutation. The Recruiter writes a closed-schema typed manifest
+  and appends literal lease-private paths for `result.json`, `compacted.md`, and `handoff.md`;
+  specialist workers additionally receive `answer.json`. Workers never receive a public answer
+  destination. The result carries `passed|failed|blocked`, `revisit`, and `full_log`; both markdown
+  artifacts must contain text, and specialist answers must pass `contracts_consult`, including
+  consult identity, success/error shape, and real `file:line` citations.
 - `just upagent-await <order.json>` waits in Python for a decision point or completion; no LLM
   loops over files. At inactivity checkpoints, a fresh cheap checker interprets one bounded pane
   and process snapshot, reports to the manager/requester, and exits.
@@ -152,22 +189,31 @@ Durable files are the source of truth; terminal text is display-only.
   `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`.
   Without an answer during `management.requester_grace_ms`, the Hub performs the declared hard
   stop. Managers/checkers can recommend actions but cannot execute them.
-- The job owner validates the result, closes only its recorded worker/manager panes, verifies
-  absence, then publishes the public result plus `receipt.json`. `ORDER_RECEIPT` wakes the caller.
-  If anything goes wrong it publishes a fail-loud `blocked` result/receipt. Publication also keeps
+- The deterministic completion reactor validates the whole staged bundle. Missing or malformed
+  required artifacts cause exactly one repair prompt to the same worker address—never a second
+  worker—and one revalidation. If that still fails, Python writes a schema-valid blocked
+  result/compacted/handoff bundle and, for specialists, a valid failure answer.
+- Publication is ordered: validate private staging, prepare and atomically replace every public
+  artifact, revalidate the public bundle, write `receipt.json`, then append the durable terminal
+  event/state and requester notification. `upagent-await` wakes only from that post-receipt
+  evidence; there is no pre-publication `result-ready` notification. If anything goes wrong it
+  fails loud without a terminal receipt. Publication also keeps
   the hub's own `published-result.json` and names it in the receipt, so a terminal record survives
   the pruning of the run tree that owns `result_path`: a later dispatch republishes that copy
   instead of failing in the strict result loader, and refuses with the evidence paths when no copy
   survives. The lease records the
   requester, manager, runner, Recruiter, worker, workspace, token, generation, and expiry; a
-  small Python supervisor safely
-  reconciles dead/expired owners. A request's immutable `request.json` and events are durable; its
+  Hub-owned Python supervisor thread safely reconciles dead/expired owners. Crash recovery uses the
+  manifest's typed staging paths and replaces an unvalidated or incomplete bundle with one
+  deterministic blocked bundle. A request's immutable `request.json` and events are durable; its
   `state/latest.json` is the copy-on-write current view. The lease is authoritative; retained
   `active/by-expiry` entries are merely reaping indexes and must be token-checked before reuse.
 
-`route.yaml` is authoritative for which harness/model/agent runs each worker. The Recruiter only
-holds mechanical launch templates, separate phase-controller templates, and configurable
-management-role commands in `upagent.yaml`; it never silently substitutes a requested worker.
+`route.yaml` is authoritative for which harness/model/agent runs each legacy/controller worker.
+For those explicitly non-public paths, the Recruiter holds mechanical launch templates, separate
+phase-controller templates, and configurable management-role commands in `upagent.yaml`; it never
+silently substitutes a requested worker. Public requests never use those raw lifecycle commands:
+they load `offerings.yaml`, and `offerings.py` renders the approved Account Manager command.
 
 A direct Codex worker uses this launcher shape; it is not routed through Pi:
 
@@ -198,33 +244,44 @@ Two files cross the boundary and they answer different questions. `result.json` 
 lifecycle receipt: the specialist worker ran and delivered. `answer.json` is the consult's
 product, and `contracts_consult.parse_answer` is the only mechanical check anywhere in the repo
 that an answer carries real `file:line` citations rather than confident prose. An answer is
-ALWAYS written — a failure answer names the reason — so a caller's bounded wait resolves to a
-legible outcome instead of a missing file.
+ALWAYS projected by Python — either a validated cited answer or a Python-authored contract-valid
+failure answer — before the consult receipt/event. Public `answer_path` never exposes the
+lease-private staging path, so a caller's bounded wait resolves to a legible outcome instead of a
+missing or worker-published file. Consult orders carry a canonical payload SHA-256: the same
+consult/request id with identical payload attaches, while a changed question or other payload
+conflicts instead of reusing stale work.
 
-**Who can be asked is a different roster from how to launch.** `upagent.yaml` is keyed by
-harness and REPLACES across files, because half a launch command from each file is dangerous.
-`specialists.yaml` is keyed by persona and MERGES: the kit base beside `recruiter.py` under this
-repo's own `.shared-llm/this_repo/extensions/common/upagent/specialists.yaml` (template:
-`specialists.yml.sample`). A destination that overrides one specialist keeps every other one the
-kit ships — the opposite rule would shrink the phone book with no error, and a short phone book
-reads to a worker as "no specialist owns this area".
+Orders may declare `artifact_publication.mandatory_consults` as a list of
+`{consult_id, specialist}` requirements. An otherwise-passing result is changed to a blocked
+bundle unless every requirement resolves to a matching Hub-indexed receipt whose answer verdict is
+`cited`. Missing, rejected, failed, borrowed, or forged claims fail the gate. Reading source files
+directly is not consultation evidence.
 
-## The roster (`upagent.yaml`) — how each harness launches
+**Who can be asked is separate from the offering catalogue.** `specialists.yaml` is keyed by
+persona and MERGES: the kit base is
+`.shared-llm/public/extensions/common/upagent/specialists.yaml`; a destination may add the
+repo-owned overlay `.shared-llm/this_repo/extensions/common/upagent/specialists.yaml` (template:
+`specialists.yml.sample`). Every specialist pins `offering` plus `effort`; both must resolve the
+nine approved entries. A destination that overrides one specialist keeps every other kit entry.
 
-The launch templates are pre-hardened; leaders and TUIs never hand-craft a worker command.
-Every template substitutes `{order_id}` / `{model}` / `{agent}` / `{effort}` / `{cwd}` /
-`{instructions_path}` / the lease-private `{result_path}` (`{effort}` is resolved by the leader
-from the route profile, `medium` when the profile omits it). Four properties every template
-must keep (see `upagent.yaml.example` for the full rationale):
+## Public offerings and legacy controller roster
+
+Public workers and their Account Managers never read a YAML launch command. `offerings.yaml`
+selects exactly one approved harness/model identity and effort allowlist, and `offerings.py` renders
+the exact child argv. Public Account Managers are always rendered from `claude-sonnet-5`, `low`,
+and `upagent-account-manager`, even when a legacy `upagent.yaml` exists. That legacy file remains
+only for explicitly route-driven controller compatibility, where existing phase routes still
+provide raw harness/model profiles and may configure raw lifecycle-role commands. Four launch
+properties remain load-bearing:
 
 1. **Non-interactive.** Workers run unattended in panes — every template bypasses
    trust/permission prompts (`claude --dangerously-skip-permissions`,
    `codex exec --dangerously-bypass-approvals-and-sandbox`, `pi --approve`) or the hire hangs
    until the Recruiter's timeout.
-2. **Harness-native model ids.** claude takes an alias or full name (plus `--effort`); Codex
-   takes a bare model id such as `gpt-5.6-sol` plus `model_reasoning_effort`; pi takes
-   `provider/id[:thinking]`, so pi's effort rides inside the model string. Codex has no
-   `--agent` flag: its persona comes from the stage instructions.
+2. **Harness-native model ids.** Claude takes its model plus `--effort`; Codex takes a bare model
+   plus `-c model_reasoning_effort=...`; Pi takes a provider-qualified model plus a separate
+   `--thinking` token. Codex and Pi have no `--agent` flag, so their persona comes from the lease
+   instructions.
 3. **Codex completion uses the generic fenced monitor.** Codex does not reliably report a
    terminal Herdr agent-status transition. The Recruiter's token-scoped staging-result monitor
    validates and finalizes its result exactly like every other harness; there is no separate
@@ -246,14 +303,21 @@ harness has no phase-leader template.
 
 1. Copy this whole directory to the same relative path (public tool modules land under a
    destination's `.shared-llm/public/extensions/common/upagent/` via `just update`).
-2. Copy `upagent.yaml.example` → `upagent.yaml` and adapt the launch templates to your
-   harnesses. In a split destination the filled roster is repo-owned (`this_repo`).
+2. Use the shipped `offerings.yaml` unchanged for the public façade. Copy
+   `upagent.yaml.example` → the repo-owned `this_repo` path only when legacy route/controller
+   profiles still need it.
 3. Add `import '.shared-llm/public/extensions/common/upagent/justfile'` to the root justfile.
 
 ## Tests
 
-`just test` covers contracts, typed LLM responses, mandatory clerk intake and its bounded
-correction rounds, the four standardized submission outcomes, exact audit
-artifacts, request mailboxes, identity/lease fencing, startup health, timeout authority, roster
-resolution, and cleanup behavior. The socket-driving path is also exercised in a live Herdr
-session before release.
+`just test` covers the closed public schema, zero-launch rejection, prompt hashing/snapshotting,
+UUID/ULID idempotency and conflict behavior, the exact nine-entry text/JSON roster, exact Claude /
+Codex / Pi child tokens, specialist offering resolution, request mailboxes, identity/lease fencing,
+startup health, timeout authority, typed manifests, every missing/malformed artifact, one bounded
+same-worker repair, manager degradation, specialist projection, mandatory-consult enforcement,
+publication fault ordering, and cleanup. Focused Hub tests also cover non-serializing blocked
+awaits, concurrent request-local parser/output isolation, caller-context whitelisting and pane
+identity propagation, duplicate attachment to one live runner, typed thread-start-failure
+terminalization, protocol mismatch, lifetime locking, socket override,
+main/worktree discovery identity, forbidden direct bypasses, canonical child engine selection,
+and launch fault compensation/reconciliation.

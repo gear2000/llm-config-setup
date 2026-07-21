@@ -8,7 +8,6 @@ resources that were structurally recorded as created and still validate by ident
 
 from __future__ import annotations
 
-import argparse
 import fcntl
 import hashlib
 import importlib.util
@@ -28,14 +27,26 @@ from pathlib import Path
 from typing import Any, cast
 
 HERE = Path(__file__).resolve().parent
-UPAGENT_DIR = HERE.parent / "upagent"
-_recruiter_spec = importlib.util.spec_from_file_location(
-    "upagent_run_lifecycle_recruiter", UPAGENT_DIR / "recruiter.py"
+_runtime_name = "upagent_command_runtime"
+if _runtime_name in sys.modules:
+    command_runtime = sys.modules[_runtime_name]
+else:
+    _runtime_spec = importlib.util.spec_from_file_location(
+        _runtime_name, HERE.parent / "upagent" / "command_runtime.py"
+    )
+    if _runtime_spec is None or _runtime_spec.loader is None:
+        raise RuntimeError("could not load UpAgent command runtime")
+    command_runtime = importlib.util.module_from_spec(_runtime_spec)
+    sys.modules[_runtime_name] = command_runtime
+    _runtime_spec.loader.exec_module(command_runtime)
+
+_control_spec = importlib.util.spec_from_file_location(
+    "herdr_run_controller_transport", HERE / "controller_transport.py"
 )
-if _recruiter_spec is None or _recruiter_spec.loader is None:
-    raise RuntimeError("could not load UpAgent Recruiter")
-recruiter = cast(Any, importlib.util.module_from_spec(_recruiter_spec))
-_recruiter_spec.loader.exec_module(recruiter)
+if _control_spec is None or _control_spec.loader is None:
+    raise RuntimeError("could not load canonical Herdr controller transport")
+control = cast(Any, importlib.util.module_from_spec(_control_spec))
+_control_spec.loader.exec_module(control)
 
 SCHEMA = "herdr-run-lifecycle.v1"
 SNAPSHOT_SCHEMA = "herdr-run-snapshot.v1"
@@ -224,8 +235,14 @@ def read_owner_token_file(path: Path) -> str:
         info = path.lstat()
     except FileNotFoundError as error:
         raise LifecycleError(f"owner token file not found: {path}") from error
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
-        raise LifecycleError(f"owner token file must be a 0600 regular file: {path}")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise LifecycleError(
+            f"owner token file must be a same-user 0600 regular file: {path}"
+        )
     return _validate_token(path.read_text().strip(), "owner token file")
 
 
@@ -249,10 +266,10 @@ def remove_owner_token_file(run_dir: Path) -> bool:
 
 
 def token_from_env_or_file() -> str | None:
-    token_file = os.environ.get(HERDR_RUN_OWNER_TOKEN_FILE_ENV)
+    token_file = command_runtime.getenv(HERDR_RUN_OWNER_TOKEN_FILE_ENV)
     if token_file:
         return read_owner_token_file(Path(token_file))
-    token = os.environ.get(HERDR_RUN_OWNER_TOKEN_ENV)
+    token = command_runtime.getenv(HERDR_RUN_OWNER_TOKEN_ENV)
     return _validate_token(token) if token else None
 
 
@@ -322,7 +339,7 @@ def current_process_identity(kind: str = "operator") -> dict[str, object]:
     return {
         "kind": kind,
         "process_pid": os.getpid(),
-        "process_start_time": recruiter._process_start_time(os.getpid()),
+        "process_start_time": control._process_start_time(os.getpid()),
     }
 
 
@@ -338,7 +355,7 @@ def tui_owner_identity(
     ):
         health = {
             **health,
-            "process_start_time": recruiter._process_start_time(process_pid),
+            "process_start_time": control._process_start_time(process_pid),
         }
     pane_id = tui.get("pane_id")
     herdr_session = tui.get("herdr_session")
@@ -389,7 +406,7 @@ def _process_identity_live(identity: dict[str, Any]) -> bool:
     return (
         isinstance(recorded, str)
         and bool(recorded)
-        and recruiter._process_start_time(pid) == recorded
+        and control._process_start_time(pid) == recorded
     )
 
 
@@ -400,18 +417,18 @@ def _pane_identity_verified(identity: dict[str, Any]) -> tuple[bool, str]:
         return False, "owner has no recorded pane/session"
     try:
         pane = (
-            recruiter._herdr_json("pane", "get", pane_id, herdr_session=herdr_session)
+            control._herdr_json("pane", "get", pane_id, herdr_session=herdr_session)
             .get("result", {})
             .get("pane", {})
         )
         process_info = (
-            recruiter._herdr_json(
+            control._herdr_json(
                 "pane", "process-info", "--pane", pane_id, herdr_session=herdr_session
             )
             .get("result", {})
             .get("process_info", {})
         )
-    except recruiter.RecruiterError as error:
+    except control.ControllerTransportError as error:
         return False, f"pane lookup failed: {error}"
     if not isinstance(pane, dict) or pane.get("pane_id", pane_id) != pane_id:
         return False, "pane identity changed"
@@ -448,7 +465,7 @@ def _pane_identity_verified(identity: dict[str, Any]) -> tuple[bool, str]:
     )
     if not isinstance(match, dict):
         return False, "expected foreground process is absent"
-    if match.get("pid") != identity.get("process_pid") or recruiter._process_start_time(
+    if match.get("pid") != identity.get("process_pid") or control._process_start_time(
         match.get("pid")
     ) != identity.get("process_start_time"):
         return False, "foreground process identity no longer matches owner"
@@ -815,23 +832,8 @@ def _cleanup_reports(
 
 
 def _upagent_claims() -> list[dict[str, object]]:
-    claims = []
-    try:
-        for key, lease in recruiter.JobLedger().active_claims():
-            claims.append(
-                {
-                    "key": key,
-                    "generation": lease.get("generation", 1),
-                    "herdr_session": lease.get("herdr_session"),
-                    "order_id": lease.get("order_id"),
-                    "phase_leader_pane": lease.get("phase_leader_pane"),
-                    "request_id": lease.get("request_id"),
-                    "worker_pane": lease.get("worker_pane"),
-                }
-            )
-    except (OSError, recruiter.RecruiterError, ValueError) as error:
-        claims.append({"error": str(error), "projection": "unavailable"})
-    return claims
+    """Never inspect a checkout-local ledger; the canonical Hub owns claim projection."""
+    return [{"projection": "canonical-hub-only"}]
 
 
 def _derive_run_state(
@@ -1202,7 +1204,7 @@ def _resource_cleanup_decisions(
 
 def _live_pane_ids(herdr_session: str) -> set[str]:
     panes = (
-        recruiter._herdr_json("pane", "list", herdr_session=herdr_session)
+        control._herdr_json("pane", "list", herdr_session=herdr_session)
         .get("result", {})
         .get("panes", [])
     )
@@ -1249,7 +1251,7 @@ def cleanup(
         if decision.get("action") == "close":
             pane_id = cast(str, decision["pane_id"])
             session = cast(str, decision["herdr_session"])
-            recruiter._herdr("pane", "close", pane_id, herdr_session=session)
+            control._herdr("pane", "close", pane_id, herdr_session=session)
             verified_absent = pane_id not in _live_pane_ids(session)
             closed.append(
                 {
@@ -1292,9 +1294,13 @@ def _resolve_run_dir(value: Path, repo: Path) -> Path:
     return path.resolve()
 
 
+def _request_cwd() -> Path:
+    return command_runtime.current_cwd()
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="herdr-run-lifecycle")
-    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser = command_runtime.ArgumentParser(prog="herdr-run-lifecycle")
+    parser.add_argument("--repo", type=Path, default=_request_cwd())
     sub = parser.add_subparsers(dest="command", required=True)
     for name in (
         "session-start",
@@ -1369,22 +1375,22 @@ def main(argv: list[str] | None = None) -> int:
             token = resolve_token_sources(
                 args.token,
                 args.token_file,
-                sys.stdin.read() if args.token_stdin else None,
+                command_runtime.stdin_stream().read() if args.token_stdin else None,
             )
             result = guard(run_dir, action=args.action, token=token)
         elif args.command == "cleanup":
             token = resolve_token_sources(
                 args.token,
                 args.token_file,
-                sys.stdin.read() if args.token_stdin else None,
+                command_runtime.stdin_stream().read() if args.token_stdin else None,
             )
             result = cleanup(run_dir, repo=repo, token=token)
         else:
             raise AssertionError(args.command)
-    except (LifecycleError, OSError, recruiter.RecruiterError) as error:
-        sys.stderr.write(f"herdr-run-lifecycle: {error}\n")
+    except (LifecycleError, OSError, control.ControllerTransportError) as error:
+        command_runtime.write_stderr(f"herdr-run-lifecycle: {error}\n")
         return 1
-    print(json.dumps(result, sort_keys=True))
+    command_runtime.command_print(json.dumps(result, sort_keys=True))
     return 0
 
 

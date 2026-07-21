@@ -6,86 +6,93 @@
 # roster lives in upagent.yaml (template: upagent.yaml.example); a split destination points
 # $UPAGENT_CONFIG at its own repo-owned (this_repo) roster.
 #
-# Paths anchor on `{{justfile_directory()}}` (the ROOT justfile's dir — in an imported
-# module that is the repo root, NOT this file's dir) + the module's fixed repo-relative
-# path, which is identical in the kit and in every destination.
+# Paths anchor on `{{justfile_directory()}}` only to find the thin client. The client resolves
+# the main checkout through git's common directory and connects every checkout/worktree to the
+# same locked machine-local Hub; it never imports the nearby Recruiter.
+
+_UPAGENT_CLIENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/client.py"
+
+# One public grammar for local users and agents. With no args, print complete help.
+upagent *args:
+    @${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" {{args}}
 
 # Ensure the services workspace + an armed Recruiter pane (unified `herdr` workspace by
 # default; pass --separate-workspaces for the dedicated `shared-services` workspace).
 upagent-up *FLAGS:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py up {{FLAGS}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" up {{FLAGS}}
 
 # Recruiter state.
 upagent-status:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py status
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" status
 
 # Hire one worker for one order.json. This is a blocking dispatch: it returns only after the
 # Recruiter has published a durable ORDER_RECEIPT (including verified pane cleanup). Never send
 # recruit commands into the shared Recruiter shell; terminal input is not a message queue.
 upagent-recruit order:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py dispatch "{{order}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter dispatch "{{order}}"
 
-# Submit one worker asynchronously, returning only after its Dedicated Account Manager and worker
-# have both passed startup health validation. The JSON response contains their current addresses.
+# Submit one worker asynchronously, returning after Python verifies worker startup. A healthy
+# Dedicated Account Manager address is included when available; manager startup or assessment
+# failure is reported as degraded supervision while the Python-owned worker lifecycle continues.
 upagent-request order:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py request "{{order}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter request "{{order}}"
 
 # Start one phase transaction. The phase leader remains behind a filesystem gate until
 # its durable receipt records the leader identity; coordination v2 creates no standing watchdog.
 upagent-phase-start route run_root phase pass_number:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_controller.py "{{route}}" "{{run_root}}" "{{phase}}" "{{pass_number}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-controller "{{route}}" "{{run_root}}" "{{phase}}" "{{pass_number}}"
 
 # Block until one typed phase event is available for the owner. Re-run with after=<last sequence>.
 upagent-phase-await receipt after='0' timeout_ms='600000':
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_await.py wait --receipt "{{receipt}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await wait --receipt "{{receipt}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
 
 # Acknowledge one delivered phase event.
 upagent-phase-ack receipt event_id state='acknowledged':
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_await.py ack --receipt "{{receipt}}" --event-id "{{event_id}}" --state "{{state}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await ack --receipt "{{receipt}}" --event-id "{{event_id}}" --state "{{state}}"
 
 # Publish a typed phase event into the owner journal.
 upagent-phase-publish receipt kind summary:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/phase_await.py publish --receipt "{{receipt}}" --kind "{{kind}}" --summary "{{summary}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await publish --receipt "{{receipt}}" --kind "{{kind}}" --summary "{{summary}}"
 
 # Direct plans have no phase leader; the caller sequences ready steps and human approval.
 upagent-direct-steps route:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py steps --route "{{route}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller steps --route "{{route}}"
 
 upagent-direct-order route plan_id step_id cwd run_root tui_pane:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}"
 
 upagent-direct-apply-order route plan_id step_id cwd run_root tui_pane approval plan_artifact:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/direct_controller.py apply-order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}" --approval "{{approval}}" --plan-artifact "{{plan_artifact}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller apply-order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}" --approval "{{approval}}" --plan-artifact "{{plan_artifact}}"
 
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
 # Waits past notify_after_ms also ping the human via herdr notification (0 disables).
 upagent-await order notify_after_ms='600000':
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await "{{order}}" --notify-after-ms "{{notify_after_ms}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter await "{{order}}" --notify-after-ms "{{notify_after_ms}}"
 
 # Optional second opinion on a finished one-shot: hire one independent reviewer against
 # its result. Off by default — nothing runs this automatically.
 upagent-verify order *args:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py verify "{{order}}" {{args}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter verify "{{order}}" {{args}}
 
 # Block until any watched request moves; prints one AWAIT_EVENT tagged with request_id.
 upagent-await-any timeout_ms cursor +orders:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py await-any --timeout-ms "{{timeout_ms}}" --cursor "{{cursor}}" {{orders}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter await-any --timeout-ms "{{timeout_ms}}" --cursor "{{cursor}}" {{orders}}
 
 # Answer the current timeout decision. Use extension_ms=0 with cancel.
 upagent-respond order control_token nonce action extension_ms:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"
 
 # Print the merged specialist roster (kit base UNION this repo's overlay) as the paste-ready
 # phone book a phase leader embeds VERBATIM in every stage brief. `--json` prints the raw index.
 upagent-specialists *args:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py specialists {{args}}
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter specialists {{args}}
 
 # Ask one specialist one question. Blocking: returns only after the consult is terminal, having
 # written an answer.json (real or failure) at the consult's answer_path plus a sidecar receipt.
 # The consult runs as an ordinary UpAgent order — same ledger, same worker lifecycle.
 upagent-consult consult:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py consult "{{consult}}"
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter consult "{{consult}}"
 
 # Reconcile dead/expired runners using their durable lease ownership records.
 upagent-reconcile:
-    ${PYTHON_BIN:-python3} {{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py reconcile
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter reconcile

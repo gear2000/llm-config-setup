@@ -9,9 +9,9 @@ The fundamental separation is:
 
 ```text
 Requester                  owns intent and consequential decisions
-Intake clerk               reshapes every submitted envelope; never creates intent or authority
-Dedicated Account Manager  owns conversation and lifecycle interpretation
-Python Recruiter Hub       owns facts, durable state, validation, and execution
+Strict Python boundary     validates one closed schema; never repairs or guesses intent
+Dedicated Account Manager  observes and advises on one request; never owns authority
+Python Recruiter Hub       owns facts, leases, validation, execution, publication, and terminality
 UpAgent worker             owns the requested work and its result
 One-shot check agent       advises on ambiguous evidence only
 ```
@@ -27,30 +27,30 @@ REQUESTER
    ▼
 PYTHON RECRUITER HUB
 │
-├─ preserves the exact submitted bytes, then starts a fresh intake clerk for every distinct
-│  submission (a byte-identical resubmission reuses that request's own validated response)
-├─ accepts intent provenance only from known keys in a structurally unambiguous JSON object
-├─ writes raw/interpreted/audit/validation artifacts before replacing the order
-├─ returns its own provenance/contract findings to that same clerk, bounded, to correct
-├─ answers with exactly one outcome: accepted, clerk-authored block, clerk failure, or
-│  infrastructure failure — each with durable evidence paths and its own exit code
-├─ strict-validates the interpreted order again
+├─ accepts only one closed `schema_version: 1` JSON object or the equivalent named flags
+├─ rejects unknown keys, wrong types, invalid combinations, unapproved offerings, and bad paths
+│  before creating a ledger entry, Account Manager, pane, or worker
+├─ never invokes an intake LLM, repairs prose, guesses a field, or materializes arbitrary arguments
+├─ snapshots the exact prompt bytes and approved offering selection as immutable evidence
+├─ makes same-id/same-payload retries idempotent and rejects same-id/changed-payload conflicts
 ├─ assigns a globally unique request identity and generation
 ├─ persists ownership, deadlines, and an event ledger atomically
-└─ creates one Dedicated Account Manager
+└─ attempts one code-rendered `claude-sonnet-5`/low Dedicated Account Manager;
+   manager failure records degraded supervision and does not stop the worker lifecycle
    │
    ▼
 DEDICATED ACCOUNT MANAGER (LLM)
 │
-├─ validates the requested harness/model/agent combination semantically
-├─ explains a bad or ambiguous request to the Requester
-├─ proposes structured lifecycle actions to the Hub
-└─ never creates, closes, or kills a pane directly
+├─ observes bounded lifecycle evidence for one request
+├─ explains ambiguity and may recommend one artifact repair
+├─ proposes structured advisory actions to the Hub
+└─ never approves/rejects Python-valid startup, mutates leases, publishes, or terminalizes
    │
    ▼
 PYTHON RECRUITER HUB
 │
-├─ validates the proposed action against the request and ownership token
+├─ validates any proposed manager action against the request and ownership token
+├─ continues under direct Python supervision when the manager is unavailable
 ├─ atomically starts the worker through Herdr
 ├─ proves that the expected process and detected agent became healthy
 └─ publishes worker-healthy before anybody may report "running"
@@ -59,7 +59,8 @@ PYTHON RECRUITER HUB
 UPAGENT WORKER
 │
 ├─ performs only the requested work
-├─ writes one lease-private result
+├─ stages lease-private result.json, compacted.md, and handoff.md
+├─ additionally stages answer.json when it is a specialist
 └─ exits when its work is complete
    │
    ▼
@@ -70,7 +71,7 @@ PYTHON LIFECYCLE MONITOR
 └─ requests a one-shot LLM check only when evidence is ambiguous or suspicious
    │
    ▼
-DEDICATED ACCOUNT MANAGER
+DEDICATED ACCOUNT MANAGER (WHEN AVAILABLE)
 │
 ├─ explains completion, misconfiguration, suspected stalls, and timeouts to the Requester
 └─ asks the Requester to continue, extend, inspect, or cancel when a decision is required
@@ -82,7 +83,9 @@ PYTHON RECRUITER HUB
 ├─ performs staged termination after an unanswered hard deadline
 ├─ closes only the pane owned by the current lease generation
 ├─ verifies absence before releasing ownership
-└─ publishes the result and durable lifecycle receipt
+├─ validates staging; requests at most one repair from the same worker/address
+├─ writes a Python-authored blocked bundle if that one repair fails
+└─ projects and revalidates every public artifact before receipt and terminal evidence
 ```
 
 ## Reliability invariants
@@ -94,33 +97,24 @@ PYTHON RECRUITER HUB
 4. Terminal keystrokes and pane scrollback are never a request, acknowledgement, or verdict.
 5. `pane created` is not `worker healthy`. Health requires the expected foreground process,
    detected harness, expected working directory, and a non-terminal agent state.
-6. Python records mechanical facts. An LLM interprets ambiguity but cannot override ownership,
-   invent configuration, or execute an unvalidated lifecycle action. The shipped intake command
-   gives the clerk no tools, a private random scratch directory, and only the trusted Recruiter
-   pane. The roster is trusted executable configuration and can override that command; Python does
-   not police an override's tool choices, so roster overrides require audit. The clerk timeout is
-   always capped at 300000 ms. A shell-quoting Python-owned wrapper feeds the brief and captures one
-   stdout object. Persona text is guidance; structurally keyed JSON provenance, typed parsing, and
-   the unchanged strict order contract enforce safety. Prose labels cannot authorize execution.
-   Interpreting every request rather than only a failed one widens what the clerk is asked, never
-   what it may do: the same no-tools launch, the same private scratch directory, the same cap, the
-   same provenance and contract gates on its answer. A byte-identical resubmission is idempotent
-   (invariant 3): it reuses that request's own already-validated response rather than launching a
-   new clerk, which changes nothing about what a clerk may do. Bounded correction rounds re-ask that same
-   role with Python's findings; Python never edits an interpretation itself, and an exhausted
-   budget is a reported clerk failure, not an accepted order.
-7. A missing or malformed pre-launch manager decision becomes `needs-requester` or `blocked`; it
-   never becomes guessed success. After Python has mechanically proved worker process, harness, and
-   cwd health, a missing or malformed advisory startup assessment becomes `worker-healthy-degraded`
-   and the worker continues. An advisory bookkeeping fault may not destroy a proven healthy worker.
+6. Python records mechanical facts and rejects invalid public input without launching anything.
+   An LLM may interpret bounded lifecycle ambiguity only after Python has accepted the closed
+   request schema; it cannot repair intake, override ownership, invent configuration, or execute
+   an unvalidated action. Persona text is guidance. Typed parsing, immutable offering snapshots,
+   and the strict order contract enforce safety; prose labels cannot authorize execution.
+7. Account Manager output is advisory. A missing, malformed, or crashed manager degrades
+   supervision and is reported, but Python still runs mechanically valid work and produces a
+   terminal bundle. After Python proves worker process, harness, and cwd health, no manager
+   classification may veto startup. An advisory bookkeeping fault may not destroy a proven healthy
+   worker, publish success, or leave the request non-terminal.
 8. The Requester owns continue/extend/cancel decisions. The Hub may act without a response only
    for valid terminal completion, proven orphan recovery, or a declared hard deadline after its
    grace period.
 9. The Hub mechanically supervises Dedicated Account Managers. Managers do not recursively hire
    managers to watch managers.
 10. No manager failure may leave an unowned worker. No cleanup receipt may claim success until
-    the owned pane is verified absent. Intake clerk ownership is journaled before launch with a
-    random agent name/lease token and the owner's PID plus process start time. Reconciliation
+    the owned pane is verified absent. Every launched lifecycle role is journaled before launch
+    with a random agent name/lease token and the owner's PID plus process start time. Reconciliation
     resolves that name and verifies agent, process, cwd, and lease identity; a stale pane id alone
     is never enough to close a pane. If an owner dies during an in-flight start, one not-found
     lookup keeps the journal `launch-uncertain` and open for later reconciliation sweeps.
@@ -139,22 +133,37 @@ PYTHON RECRUITER HUB
     record owned by the plan or phase controller. If the watchdog writes a result before that
     record is terminal, the Hub archives the premature result, keeps the lifecycle open, and tells
     the same watchdog to resume. Only the matching durable terminal record permits cleanup.
-14. Detached job runners inherit no request command pipes. A caller receives the mechanically
-    verified `REQUEST_ACCEPTED` response when startup finishes; a background runner cannot keep a
-    captured stdout or stderr descriptor open and turn healthy startup into a false timeout.
-15. A terminal record always answers with exactly one structured outcome. Publication writes the
-    validated result, the Hub's own durable copy of it, and the receipt naming that copy together.
+14. There are no detached mutating job-runner or supervisor processes. Canonical commands,
+    reconciliation, and job runners execute inside the one lock-owning Hub process; background
+    daemon threads die with that process before its lifetime lock is released. Authority requires
+    the live published PID/identity and held lock descriptor, not forgeable environment strings.
+    A caller receives `REQUEST_ACCEPTED` when startup finishes without a captured command pipe.
+15. A terminal record always answers with exactly one structured outcome. Typed completion
+    validates lease-private staging, projects every public artifact, revalidates public paths,
+    writes the receipt, and only then writes terminal state/event/requester evidence. Await cannot
+    wake from pre-receipt `result-ready` evidence. Publication writes the validated result, the
+    Hub's own durable copy of it, and the receipt naming that copy together.
     When the caller's `result_path` is later absent or unreadable, the Hub republishes from that
     copy; when no trustworthy copy survives, it refuses visibly with the order id, the loader's
     reason, the receipt path, and the recorded verdict. A terminal record never crashes the result
     loader and never silently reopens finished work.
+16. Every accepted path has a required typed manifest. Compatibility input is normalized before
+    ledger mutation, never given a result-only fallback. Missing or malformed required artifacts
+    receive exactly one repair request at the original worker address. A second worker is never
+    launched. One failed revalidation, crash reconciliation, or worker/manager cleanup failure
+    regenerates one Python-authored schema-valid blocked three-file bundle; specialists also
+    receive a valid failure answer. Success prose is never retained beside a blocked result.
+17. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
+    can pass only with matching Hub-verified receipts whose answers are cited successes. Absent,
+    rejected, failed, borrowed, or forged claims block finalization; direct source reading is not
+    consult evidence.
 
 ## Lifecycle states
 
 ```text
-requested → manager-starting → manager-ready → negotiating
+requested → manager-starting → manager-ready | manager-degraded
     → spawning → startup-check → running
-    → result-ready → awaiting-requester → completing → cleanup-verified → finished
+    → awaiting-requester → completing → artifacts-projected → receipt-written → finished
 
 negotiating/startup-check/running
     → needs-requester → retrying | cancelling | blocked
@@ -185,10 +194,10 @@ surfaces; pane ids may change or be reused and therefore never serve as durable 
 | May a pane be terminated? | Python, after validating owner authority or hard-deadline policy |
 
 The LLM roles consume bounded evidence snapshots and return typed assessments. Python remains
-correct when an LLM is unavailable: a failed intake clerk produces a durable actionable refusal
-with no target worker — a named reason, the raw/interpreted/validation/refusal paths, and its own
-exit code, never a hang, a crash, or a guessed order — while lifecycle-role failure is recorded and
-follows the configured deadline policy without silently losing the request.
+correct when an LLM is unavailable: invalid public intake is rejected directly with zero ledger,
+manager, pane, or worker launch, while Account Manager failure is recorded as degraded supervision
+and the Python-owned worker lifecycle continues to a terminal bundle under the configured deadline
+policy.
 
 ## Use case: start one plan
 
@@ -236,8 +245,10 @@ terminal marker.
 Recovery is deliberate. A second launcher that finds a fresh live owner becomes an observer; a
 stale owner still requires `just herdr-run-session-snapshot <run-dir>` and
 `just herdr-run-session-reconcile <run-dir>` before takeover. Mutating commands read the owner
-token from `HERDR_RUN_OWNER_TOKEN_FILE` or an explicit `--token-file`; stdin is supported for
-one-off recovery. Avoid passing raw owner tokens in process command lines.
+token from `HERDR_RUN_OWNER_TOKEN_FILE` or an explicit `--token-file`; `--token-stdin` is
+supported only by the `guard` and `cleanup` lifecycle operations for one-off recovery. The thin
+client reads it into bounded request-local transport input, and the Hub target never reads process
+stdin. Avoid passing raw owner tokens in process command lines.
 
 ## Use case: start one phase
 

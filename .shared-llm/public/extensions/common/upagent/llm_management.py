@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import shlex
 import string
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 
 ROLE_TEMPLATE_FIELDS = {"brief_path", "cwd", "output_path"}
 MAX_INTAKE_CLERK_TIMEOUT_MS = 300_000
 DEFAULT_ACCOUNT_MANAGER_COMMAND = (
-    'claude --dangerously-skip-permissions --agent upagent-account-manager --model sonnet --effort low '
+    "claude --dangerously-skip-permissions --agent upagent-account-manager --model claude-sonnet-5 --effort low "
     '"Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available."'
 )
 DEFAULT_CHECKER_COMMAND = (
-    'claude --dangerously-skip-permissions --agent upagent-checker --model haiku --effort low '
+    "claude --dangerously-skip-permissions --agent upagent-checker --model haiku --effort low "
     '"Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."'
 )
 DEFAULT_INTAKE_CLERK_COMMAND = (
     'claude --print --output-format text --tools "" --agent intake-clerk '
-    '--model sonnet --effort low < {brief_path}'
+    "--model sonnet --effort low < {brief_path}"
 )
 
 
@@ -78,8 +78,14 @@ def _role(
         raise ManagementConfigError(f"management.{name} must be an object")
     command = value.get("command", default_command)
     if not isinstance(command, str) or not command.strip():
-        raise ManagementConfigError(f"management.{name}.command must be a non-empty string")
-    fields = {field_name for _, field_name, _, _ in string.Formatter().parse(command) if field_name}
+        raise ManagementConfigError(
+            f"management.{name}.command must be a non-empty string"
+        )
+    fields = {
+        field_name
+        for _, field_name, _, _ in string.Formatter().parse(command)
+        if field_name
+    }
     unknown = fields - ROLE_TEMPLATE_FIELDS
     if unknown:
         raise ManagementConfigError(
@@ -88,9 +94,13 @@ def _role(
     expected_agent = value.get("expected_agent", "claude")
     expected_process = value.get("expected_process", "claude")
     if not isinstance(expected_agent, str) or not expected_agent:
-        raise ManagementConfigError(f"management.{name}.expected_agent must be a non-empty string")
+        raise ManagementConfigError(
+            f"management.{name}.expected_agent must be a non-empty string"
+        )
     if not isinstance(expected_process, str) or not expected_process:
-        raise ManagementConfigError(f"management.{name}.expected_process must be a non-empty string")
+        raise ManagementConfigError(
+            f"management.{name}.expected_process must be a non-empty string"
+        )
     timeout_ms = _positive_int(value.get("timeout_ms"), f"{name}.timeout_ms", 120_000)
     if max_timeout_ms is not None and timeout_ms > max_timeout_ms:
         raise ManagementConfigError(
@@ -105,12 +115,20 @@ def load_management_config(roster: dict) -> ManagementConfig:
         raise ManagementConfigError("management must be an object")
     mode = raw.get("mode", "direct")
     if mode not in MANAGEMENT_MODES:
-        raise ManagementConfigError("management.mode must be one of " + ", ".join(MANAGEMENT_MODES))
+        raise ManagementConfigError(
+            "management.mode must be one of " + ", ".join(MANAGEMENT_MODES)
+        )
     rescue = raw.get("rescue_on_startup_failure", True)
     if not isinstance(rescue, bool):
-        raise ManagementConfigError("management.rescue_on_startup_failure must be a boolean")
+        raise ManagementConfigError(
+            "management.rescue_on_startup_failure must be a boolean"
+        )
     return ManagementConfig(
-        account_manager=_role(raw.get("account_manager"), "account_manager", DEFAULT_ACCOUNT_MANAGER_COMMAND),
+        account_manager=_role(
+            raw.get("account_manager"),
+            "account_manager",
+            DEFAULT_ACCOUNT_MANAGER_COMMAND,
+        ),
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
         intake_clerk=_role(
             raw.get("intake_clerk"),
@@ -118,15 +136,23 @@ def load_management_config(roster: dict) -> ManagementConfig:
             DEFAULT_INTAKE_CLERK_COMMAND,
             max_timeout_ms=MAX_INTAKE_CLERK_TIMEOUT_MS,
         ),
-        startup_timeout_ms=_positive_int(raw.get("startup_timeout_ms"), "startup_timeout_ms", 45_000),
-        inactivity_check_ms=_positive_int(raw.get("inactivity_check_ms"), "inactivity_check_ms", 900_000),
-        requester_grace_ms=_positive_int(raw.get("requester_grace_ms"), "requester_grace_ms", 300_000),
+        startup_timeout_ms=_positive_int(
+            raw.get("startup_timeout_ms"), "startup_timeout_ms", 45_000
+        ),
+        inactivity_check_ms=_positive_int(
+            raw.get("inactivity_check_ms"), "inactivity_check_ms", 900_000
+        ),
+        requester_grace_ms=_positive_int(
+            raw.get("requester_grace_ms"), "requester_grace_ms", 300_000
+        ),
         mode=mode,
         rescue_on_startup_failure=rescue,
     )
 
 
-def render_role_command(role: ManagementRole, brief_path: Path, cwd: str, output_path: Path) -> str:
+def render_role_command(
+    role: ManagementRole, brief_path: Path, cwd: str, output_path: Path
+) -> str:
     return role.command.format(brief_path=brief_path, cwd=cwd, output_path=output_path)
 
 
@@ -153,8 +179,8 @@ def render_intake_clerk_command(
         f"_out={shlex.quote(str(output_path))}; "
         f"_tmp={shlex.quote(str(temporary))}; "
         "trap 'rm -f -- \"$_tmp\"' EXIT HUP INT TERM; "
-        f"{command} >\"$_tmp\"; "
-        "mv -f -- \"$_tmp\" \"$_out\"; trap - EXIT HUP INT TERM"
+        f'{command} >"$_tmp"; '
+        'mv -f -- "$_tmp" "$_out"; trap - EXIT HUP INT TERM'
     )
 
 
@@ -253,7 +279,7 @@ Generation: `{generation}`
 Requested worker configuration:
 
 ```json
-{json.dumps({key: order.get(key) for key in ('order_id', 'harness', 'model', 'agent', 'effort', 'cwd')}, indent=2)}
+{json.dumps({key: order.get(key) for key in ("order_id", "harness", "model", "agent", "effort", "cwd")}, indent=2)}
 ```
 
 Python mechanical validation (authoritative for its stated facts):
@@ -262,12 +288,16 @@ Python mechanical validation (authoritative for its stated facts):
 {json.dumps(mechanical_validation or {"valid": True, "errors": []}, indent=2)}
 ```
 
-Decide whether the request is semantically coherent. An unsupported model, effort, persona, or
-contradictory request is `needs-requester`; any mechanical validation error must also be
-`needs-requester`; an unrecoverable unsafe request is `blocked`; otherwise it is `approved`.
-The route and roster are authoritative: do not infer that a model is review-only, coding-only, or
-otherwise restricted from its name or prior model knowledge. Reject only an explicit mechanical
-error or explicit supplied policy. For requester clarification, list concrete `requested_changes`.
+Classify the request for advisory reporting only. You cannot approve or reject Python-valid
+startup, mutate leases, publish artifacts, declare success, or terminalize a request. Python may
+continue despite any classification. If Python later provides bounded invalid-artifact evidence,
+you may recommend at most one repair to the original worker/address; never send the repair or
+create a replacement worker yourself. An unsupported model, effort, persona, contradictory request,
+or mechanical validation error is `needs-requester`; any mechanical validation error must be
+reported verbatim. Explicit unrecoverable supplied-policy danger
+is `blocked`; otherwise `approved` means only "no advisory concern observed". The route and roster
+are authoritative: never infer restrictions from a model name or prior model knowledge. For
+requester clarification, list concrete `requested_changes`.
 Write exactly one JSON object to `{output_path}`:
 
 ```json
@@ -282,7 +312,9 @@ Write exactly one JSON object to `{output_path}`:
 """
 
 
-def checker_brief(request_id: str, generation: int, evidence_path: Path, output_path: Path) -> str:
+def checker_brief(
+    request_id: str, generation: int, evidence_path: Path, output_path: Path
+) -> str:
     return f"""# One-shot UpAgent lifecycle assessment
 
 This assessment is advisory. Python supplied bounded mechanical evidence at `{evidence_path}`.

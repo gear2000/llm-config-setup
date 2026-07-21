@@ -11,7 +11,6 @@ the leader process itself is healthy.
 
 from __future__ import annotations
 
-import argparse
 import errno
 import fcntl
 import importlib.util
@@ -31,13 +30,29 @@ from typing import Any, cast
 import yaml
 
 HERE = Path(__file__).resolve().parent
-_recruiter_spec = importlib.util.spec_from_file_location(
-    "upagent_phase_recruiter", HERE / "recruiter.py"
-)
-if _recruiter_spec is None or _recruiter_spec.loader is None:
-    raise RuntimeError("could not load UpAgent Recruiter")
-recruiter = cast(Any, importlib.util.module_from_spec(_recruiter_spec))
-_recruiter_spec.loader.exec_module(recruiter)
+_runtime_name = "upagent_command_runtime"
+if _runtime_name in sys.modules:
+    command_runtime = sys.modules[_runtime_name]
+else:
+    _runtime_spec = importlib.util.spec_from_file_location(
+        _runtime_name, HERE / "command_runtime.py"
+    )
+    if _runtime_spec is None or _runtime_spec.loader is None:
+        raise RuntimeError("could not load UpAgent command runtime")
+    command_runtime = importlib.util.module_from_spec(_runtime_spec)
+    sys.modules[_runtime_name] = command_runtime
+    _runtime_spec.loader.exec_module(command_runtime)
+
+recruiter: Any = None
+
+
+def _bind_recruiter_runtime(runtime: Any) -> None:
+    """Accept the Hub's one canonical Recruiter module; never load a target-local copy."""
+    global recruiter
+    if recruiter is not None and recruiter is not runtime:
+        raise RuntimeError("phase controller Recruiter runtime is already bound")
+    recruiter = runtime
+
 
 STARTUP_TIMEOUT_MS = 45_000
 PHASE_LEADER_TEMPLATE_FIELDS = (
@@ -52,6 +67,10 @@ PHASE_LEADER_TEMPLATE_FIELDS = (
 
 class PhaseStartError(RuntimeError):
     """A fail-loud phase-start contract or transaction fault."""
+
+
+def _request_cwd() -> Path:
+    return command_runtime.current_cwd()
 
 
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
@@ -432,11 +451,11 @@ def start_phase(
     roster_path: str,
 ) -> dict[str, object]:
     """Start one verified leader. Coordination v2 creates no standing phase watchdog."""
-    if os.environ.get("HERDR_ENV") != "1":
+    if command_runtime.getenv("HERDR_ENV") != "1":
         raise PhaseStartError(
             "phase startup must run inside a Herdr-managed pane (HERDR_ENV=1)"
         )
-    current_pane = os.environ.get("HERDR_PANE_ID")
+    current_pane = command_runtime.getenv("HERDR_PANE_ID")
     if current_pane is not None and current_pane != tui_pane:
         raise PhaseStartError(
             f"owning TUI pane {tui_pane} does not match current Herdr pane {current_pane}"
@@ -666,7 +685,7 @@ def start_phase(
                         subprocess.SubprocessError,
                     ) as close_error:
                         # Never let cleanup mask the startup error that got us here.
-                        sys.stderr.write(
+                        command_runtime.write_stderr(
                             f"phase-start cleanup: could not close gated leader {leader_pane}: {close_error}\n"
                         )
                     active = _active_leaders(active_path).get(phase_id)
@@ -679,16 +698,21 @@ def start_phase(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="upagent-phase-start")
+    parser = command_runtime.ArgumentParser(prog="upagent-phase-start")
     parser.add_argument("route", type=Path, help="frozen run route.yaml")
     parser.add_argument("run_root", type=Path, help="frozen run tree root")
     parser.add_argument("phase", help="phase id from route.yaml")
     parser.add_argument("pass_number", type=int, help="positive phase pass number")
     parser.add_argument(
-        "--cwd", type=Path, default=Path.cwd(), help="leader/watchdog working directory"
+        "--cwd",
+        type=Path,
+        default=_request_cwd(),
+        help="leader/watchdog working directory",
     )
     parser.add_argument(
-        "--tui-pane", default=os.environ.get("HERDR_PANE_ID"), help="owning TUI pane"
+        "--tui-pane",
+        default=command_runtime.getenv("HERDR_PANE_ID"),
+        help="owning TUI pane",
     )
     parser.add_argument(
         "--roster", default=recruiter.default_roster_path(), help="UpAgent roster"

@@ -24,7 +24,7 @@ def _resolved_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         plan_controller.run_lifecycle.HERDR_RUN_TOKEN_DIR_ENV, str(tmp_path / "tokens")
     )
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_resolve_current_herdr_session_name",
         lambda: "llm-lab-test",
     )
@@ -106,7 +106,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     run_dir, _ = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_herdr_json",
         lambda *args, **kwargs: {
             "result": {
@@ -119,12 +119,12 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
         },
     )
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_herdr",
         lambda *args, **kwargs: calls.append(args),
     )
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_wait_for_agent_health",
         lambda *args, **kwargs: {"healthy": True},
     )
@@ -162,7 +162,7 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
     def run_for(harness: str) -> str:
         calls: list[tuple[str, ...]] = []
         monkeypatch.setattr(
-            plan_controller.recruiter,
+            plan_controller.control,
             "_herdr_json",
             lambda *args, **kwargs: {
                 "result": {
@@ -176,12 +176,12 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
             },
         )
         monkeypatch.setattr(
-            plan_controller.recruiter,
+            plan_controller.control,
             "_herdr",
             lambda *args, **kwargs: calls.append(args),
         )
         monkeypatch.setattr(
-            plan_controller.recruiter,
+            plan_controller.control,
             "_wait_for_agent_health",
             lambda *args, **kwargs: {"healthy": True},
         )
@@ -230,14 +230,14 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
             }
         raise AssertionError(args)
 
-    monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(plan_controller.control, "_herdr_json", herdr_json)
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_herdr",
         lambda *args, **kwargs: calls.append(args),
     )
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_place_started_agent_in_role_tab",
         lambda pane_id, workspace_id, tab_role, split_direction, **kwargs: (
             placements.append((pane_id, workspace_id, tab_role, split_direction))
@@ -245,7 +245,7 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
         ),
     )
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_wait_for_agent_health",
         lambda *args, **kwargs: {"healthy": True},
     )
@@ -287,12 +287,10 @@ def test_separate_workspaces_mode_creates_the_per_run_workspace(
             }
         raise AssertionError(args)
 
-    monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(plan_controller.control, "_herdr_json", herdr_json)
+    monkeypatch.setattr(plan_controller.control, "_herdr", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        plan_controller.recruiter, "_herdr", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_wait_for_agent_health",
         lambda *args, **kwargs: {"healthy": True},
     )
@@ -327,9 +325,9 @@ def test_tui_metadata_failure_closes_created_pane(
             return {"result": {"pane": {}}}
         raise AssertionError(args)
 
-    monkeypatch.setattr(plan_controller.recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(plan_controller.control, "_herdr_json", herdr_json)
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_herdr",
         lambda *args, **kwargs: calls.append(args),
     )
@@ -656,7 +654,7 @@ def test_start_plan_never_touches_agent_panes_for_notification(
     run_dir, roster = _inputs(tmp_path)
     monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
     monkeypatch.setattr(
-        plan_controller.recruiter,
+        plan_controller.control,
         "_submit_agent_prompt",
         lambda *args, **kwargs: pytest.fail("startup must not inject into panes"),
     )
