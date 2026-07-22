@@ -71,6 +71,7 @@ one variadic façade and the canonical socket:
 just upagent --help
 just upagent up
 just upagent status [--request ID] [--json]
+just upagent get --request ID [--json]
 just upagent lists --type offerings|specialists|workers [--status active|terminal|all] [--json]
 just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
   --prompt-file /absolute/brief.md [--cwd /absolute/worktree] [--wait] [--json]
@@ -82,6 +83,9 @@ just upagent await-any --request ID [--request ID ...] [--cursor JSON] [--timeou
 just upagent verify --request ID --offering ID --effort LEVEL --agent PERSONA [--wait] [--json]
 just upagent respond --request ID --control-token TOKEN --nonce NONCE \
   --action extend|cancel --extension-ms MS [--json]
+just upagent cancel --request ID --control-token-file /absolute/private-token [--json]
+just upagent cleanup (--request ID | --all-terminal) \
+  [--older-than-seconds N] [--apply] [--json]
 just upagent reconcile [--json]
 ```
 
@@ -104,7 +108,49 @@ submission. The public bridge durably transitions `registered` → `submitting` 
 under a per-request lock. An identical retry resumes a registration interrupted before submission;
 a retry interrupted after Recruiter acceptance resubmits the same order and reattaches through the
 Recruiter's idempotent ledger. Same id plus same hash attaches without another launch; same id plus
-a changed hash returns `request_id_conflict` before request mutation.
+a changed hash returns `request_id_conflict` before request mutation. This remains true after
+history pruning: the compact tombstone retains the immutable payload hash, so an identical retry
+attaches and a changed payload still conflicts without launching.
+
+### Read, cancel, and terminal cleanup
+
+`status` without a request describes the Hub; `get --request ID` is the read-only request view. It
+returns submission and lifecycle state, retained result and receipt values, and typed
+result/compacted/handoff/receipt/log pointers. After pruning it reports `state: pruned`, the prior
+terminal state/verdict/timestamp, and which Hub-owned pointers were pruned. It never reconstructs,
+republishes, or mutates an artifact. Mutation credentials are redacted from `status`, `get`,
+`await`, listing, cancellation output, and tombstones; the requester control token appears only in
+the originating asynchronous `request` response after healthy startup, whose caller must store it
+privately if later cancellation is needed. A same-hash attachment never receives that capability.
+
+Any active request can be cancelled with its existing requester control token stored in an
+absolute, same-user, non-symlink regular file with no group/world access:
+`cancel --request ID --control-token-file /private/token`. Unlike `respond ... cancel`, this
+command is not tied to a timeout decision nonce and never places the token value in process
+arguments. Under the request fence it rotates the lease token, serializes against
+pane creation, closes only exact journaled and identity-verified worker/manager/checker launches,
+and publishes the ordinary schema-valid `blocked` bundle with `cancelled: true` receipt evidence.
+It introduces no new verdict value. A wrong or stale control token fails without mutation. If terminal publication
+wins the race, cancellation authenticates and returns that already-published result idempotently.
+
+`cleanup` prunes history; it never cancels or terminates runtime. It is a dry-run unless `--apply`
+is explicit. A request is eligible only after successful terminal `finished` state, a terminal
+receipt whose `cleanup.verified_absent` is true, no active lease or Hub runner, no unresolved launch,
+and a fresh read-only proof that every recorded pane remains absent. Active,
+`awaiting-requester`, malformed, and `cleanup-failed` requests are refused for `--request` and
+reported as skipped by `--all-terminal`. `--older-than-seconds N` uses the authoritative terminal
+receipt/state timestamp and includes equality (`age >= N`).
+
+Apply commits two individually atomic tombstones in recoverable order—private Recruiter request
+first, then the Hub-owned public snapshot—and prunes only each tombstone's Hub-owned siblings.
+An interruption between stores is completed idempotently by the next cleanup. It does not follow or
+delete caller paths: the original caller prompt/run tree and
+any artifact outside those two Hub directories remain untouched. The tombstone retains request id,
+immutable payload hash, terminal verdict/timestamp, compact receipt/result values, typed pointer
+status, requester-control proof, and cleanup timestamp. That is enough for `get`, listing,
+authenticated terminal cancellation, audit, identical reattachment, and changed-hash conflict
+after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
+no-op that also retries removal of a previously swapped Hub-owned residual.
 
 `offerings.yaml` contains exactly nine validated stable ids: three Claude, one Codex, and five Pi.
 The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,

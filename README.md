@@ -256,7 +256,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 
-### Slash-command skills (25)
+### Slash-command skills (30)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -287,6 +287,11 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
 | `security` | Generic security best practices. Use when implementing auth flows, secrets management, IAM… |
+| `upagent-cancel` | Authenticate and cancel one active UpAgent request at any lifecycle point using its existing… |
+| `upagent-cleanup` | Dry-run or explicitly apply terminal-only UpAgent history pruning while retaining auditable,… |
+| `upagent-get` | Read one UpAgent request's state, retained result, receipt, and typed artifact pointers, including… |
+| `upagent-ls` | List active, terminal, or all requests known to the canonical machine-local UpAgent Hub without… |
+| `upagent-run` | Run one bounded ad-hoc task through the canonical machine-local UpAgent Hub with an explicit… |
 <!-- END:inventory -->
 
 ## The compose engine

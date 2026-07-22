@@ -1,0 +1,6 @@
+type: skill
+name: upagent-ls
+description: .shared-llm/public/layers/slash-commands/common/common/upagent-ls/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/upagent-ls/command.md
+output: .claude/skills/upagent-ls/SKILL.md

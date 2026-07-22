@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -70,6 +71,76 @@ def _worker_argv(tmp_path: Path, **overrides: str) -> list[str]:
 
 def _args(argv: list[str]) -> Any:
     return public_api.contract.parse_argv(argv)
+
+
+def _control_token_file(tmp_path: Path, token: str) -> str:
+    path = tmp_path / "control-token"
+    path.write_text(token)
+    path.chmod(0o600)
+    return str(path)
+
+
+def _registered_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any, Any, str, str]:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    validated = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+    store = public_api.PublicRequestStore()
+    registered = store.register(validated, "recruiter-pane")
+    store.transition_submission(registered, "submitting")
+    store.transition_submission(registered, "submitted")
+    order = recruiter.load_order(registered.order_path)
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": REQUEST_ID,
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    control_token = ledger.state(key)["requester_control_token"]
+    assert isinstance(control_token, str)
+    return store, registered, ledger, token, control_token
+
+
+def _finish_registered_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cleanup_verified: bool = True,
+) -> tuple[Any, Any, Any, str, str]:
+    store, registered, ledger, token, control_token = _registered_request(
+        tmp_path, monkeypatch
+    )
+    order = recruiter.load_order(registered.order_path)
+    key = ledger.key_for_order(order)
+    manifest = recruiter.completion.build_manifest(
+        order, ledger.request_dir(key), token, REQUEST_ID
+    )
+    recruiter.completion.write_manifest(
+        ledger.request_dir(key) / "artifact-manifest.json", manifest
+    )
+    result = recruiter._write_required_blocked_bundle(order, manifest, "test terminal")
+    receipt = ledger.finalize(
+        key,
+        token,
+        order,
+        result,
+        cleanup={
+            "status": "closed" if cleanup_verified else "cleanup-failed",
+            "verified_absent": cleanup_verified,
+            "worker_pane": None,
+        },
+        completion_source="test",
+    )
+    assert receipt is not None
+    return store, registered, ledger, token, control_token
 
 
 def test_public_help_describes_manager_degradation_and_cursor_map() -> None:
@@ -439,3 +510,493 @@ def test_request_id_accepts_only_canonical_uuid_or_ulid() -> None:
     for invalid in (REQUEST_ID.upper(), ulid.lower(), "01I00000000000000000000000"):
         with pytest.raises(public_api.PublicError):
             public_api._canonical_request_id(invalid)
+
+
+def test_get_cancel_and_cleanup_grammar_is_explicit_and_fail_loud() -> None:
+    assert _args(["get", "--request", REQUEST_ID]).request == REQUEST_ID
+    cancel = _args(
+        [
+            "cancel",
+            "--request",
+            REQUEST_ID,
+            "--control-token-file",
+            "/private/token",
+        ]
+    )
+    assert cancel.control_token_file == "/private/token"
+    cleanup = _args(
+        [
+            "cleanup",
+            "--all-terminal",
+            "--older-than-seconds",
+            "5",
+            "--apply",
+        ]
+    )
+    assert cleanup.all_terminal is True and cleanup.apply is True
+    with pytest.raises(public_api.contract.PublicCommandError):
+        _args(["cancel", "--request", REQUEST_ID])
+    with pytest.raises(public_api.contract.PublicCommandError):
+        _args(["cleanup", "--request", REQUEST_ID, "--all-terminal"])
+    with pytest.raises(public_api.contract.PublicCommandError, match="zero or greater"):
+        _args(["cleanup", "--request", REQUEST_ID, "--older-than-seconds", "-1"])
+
+
+def test_cancel_control_token_file_must_be_absolute_private_regular_file(
+    tmp_path: Path,
+) -> None:
+    token = "a" * 32
+    private = Path(_control_token_file(tmp_path, token))
+    assert public_api._private_control_token_file(str(private)) == token
+
+    private.chmod(0o644)
+    with pytest.raises(public_api.PublicError, match="group/world"):
+        public_api._private_control_token_file(str(private))
+    private.chmod(0o600)
+
+    symlink = tmp_path / "token-link"
+    symlink.symlink_to(private)
+    with pytest.raises(public_api.PublicError, match="non-symlink"):
+        public_api._private_control_token_file(str(symlink))
+
+    fifo = tmp_path / "token-fifo"
+    os.mkfifo(fifo, mode=0o600)
+    with pytest.raises(public_api.PublicError, match="regular file"):
+        public_api._private_control_token_file(str(fifo))
+
+    with pytest.raises(public_api.PublicError, match="must be absolute"):
+        public_api._private_control_token_file("relative-token")
+
+
+def test_get_is_read_only_and_includes_typed_artifact_and_log_pointers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, registered, _ledger, _token, _control = _finish_registered_request(
+        tmp_path, monkeypatch
+    )
+    before = {
+        path.relative_to(registered.request_dir): path.stat().st_mtime_ns
+        for path in registered.request_dir.rglob("*")
+        if path.is_file()
+    }
+
+    assert (
+        public_api.execute(_args(["get", "--request", REQUEST_ID, "--json"]), tmp_path)
+        == 0
+    )
+
+    value = json.loads(capsys.readouterr().out)
+    assert value["state"]["state"] == "finished"
+    assert "requester_control_token" not in value["state"]
+    assert value["result"]["verdict"] == "blocked"
+    assert {item["kind"] for item in value["artifacts"]} >= {
+        "result",
+        "compacted",
+        "handoff",
+        "receipt",
+        "log",
+    }
+    after = {
+        path.relative_to(registered.request_dir): path.stat().st_mtime_ns
+        for path in registered.request_dir.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert store.load(REQUEST_ID).pruned is False
+
+
+def test_originating_async_request_token_file_can_cancel_the_active_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+
+    def submit_running(order_path: str, _roster_path: str) -> int:
+        order = recruiter.load_order(Path(order_path))
+        ledger = recruiter.JobLedger()
+        key, _ = ledger.submit(order)
+        token = ledger.claim(
+            key,
+            order["order_id"],
+            60_000,
+            owner={
+                "generation": 1,
+                "herdr_session": "test-session",
+                "request_id": REQUEST_ID,
+                "runner_pid": -1,
+            },
+        )
+        assert isinstance(token, str)
+        return 0
+
+    monkeypatch.setattr(public_api.recruiter, "cmd_request_strict", submit_running)
+
+    assert public_api.execute(_args([*_worker_argv(tmp_path), "--json"]), tmp_path) == 0
+    request_value = json.loads(capsys.readouterr().out)
+    control_token = request_value["state"]["requester_control_token"]
+    token_file = _control_token_file(tmp_path, control_token)
+
+    assert (
+        public_api.execute(
+            _args(
+                [
+                    "cancel",
+                    "--request",
+                    REQUEST_ID,
+                    "--control-token-file",
+                    token_file,
+                    "--json",
+                ]
+            ),
+            tmp_path,
+        )
+        == 0
+    )
+
+    cancelled = json.loads(capsys.readouterr().out)
+    assert cancelled["cancellation"]["cancelled"] is True
+    assert cancelled["result"]["verdict"] == "blocked"
+    assert control_token not in json.dumps(cancelled)
+
+
+def test_anytime_cancel_authenticates_fences_and_publishes_blocked_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, registered, ledger, old_token, control_token = _registered_request(
+        tmp_path, monkeypatch
+    )
+    with pytest.raises(recruiter.RecruiterError, match="control token"):
+        recruiter.cmd_cancel(str(registered.order_path), "wrong")
+
+    outcome = recruiter.cmd_cancel(str(registered.order_path), control_token)
+
+    order = recruiter.load_order(registered.order_path)
+    key = ledger.key_for_order(order)
+    assert outcome["cancelled"] is True
+    assert outcome["result"]["verdict"] == "blocked"
+    assert "cancelled" in outcome["result"]["reason"]
+    assert outcome["receipt"]["state"] == "finished"
+    assert outcome["receipt"]["cancelled"] is True
+    assert outcome["receipt"]["cleanup"]["verified_absent"] is True
+    assert (
+        ledger.finalize(
+            key,
+            old_token,
+            order,
+            outcome["result"],
+            cleanup={"status": "closed", "verified_absent": True},
+        )
+        is False
+    )
+    assert public_api._public_status(store, registered)["state"]["state"] == "finished"
+
+
+def test_control_token_is_exposed_only_to_originating_request_and_cancel_redacts_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, _registered, _ledger, old_token, control_token = _registered_request(
+        tmp_path, monkeypatch
+    )
+    active = public_api._public_status(store, store.load(REQUEST_ID))
+    assert "token" not in active["state"]
+    assert "requester_control_token" not in active["state"]
+    originating = public_api._public_status(
+        store,
+        store.load(REQUEST_ID),
+        include_requester_control_token=True,
+    )
+    assert originating["state"]["requester_control_token"] == control_token
+
+    assert (
+        public_api.execute(
+            _args(
+                [
+                    "cancel",
+                    "--request",
+                    REQUEST_ID,
+                    "--control-token-file",
+                    _control_token_file(tmp_path, control_token),
+                    "--json",
+                ]
+            ),
+            tmp_path,
+        )
+        == 0
+    )
+
+    rendered = capsys.readouterr().out
+    value = json.loads(rendered)
+    assert old_token not in rendered
+    assert control_token not in rendered
+    assert ".staging" not in rendered
+    assert "requester_control_token_sha256" not in rendered
+    assert all(
+        "staging_path" not in artifact for artifact in value["receipt"]["artifacts"]
+    )
+
+
+def test_identical_active_reattachment_never_discloses_control_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _store, _registered, _ledger, _old_token, control_token = _registered_request(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+
+    assert public_api.execute(_args([*_worker_argv(tmp_path), "--json"]), tmp_path) == 0
+
+    rendered = capsys.readouterr().out
+    value = json.loads(rendered)
+    assert value["attached"] is True
+    assert control_token not in rendered
+    assert "requester_control_token" not in value["state"]
+
+
+def test_cancel_returns_existing_terminal_result_when_publication_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _store, registered, _ledger, _token, control_token = _finish_registered_request(
+        tmp_path, monkeypatch
+    )
+
+    outcome = recruiter.cmd_cancel(str(registered.order_path), control_token)
+
+    assert outcome["terminal"] is True
+    assert outcome["cancelled"] is False
+    assert outcome["result"]["reason"].endswith("test terminal")
+
+
+def test_cleanup_dry_run_apply_tombstone_get_and_hash_idempotency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, registered, ledger, _token, control_token = _finish_registered_request(
+        tmp_path, monkeypatch
+    )
+    original_prompt = tmp_path / "prompt.md"
+    evidence = ledger.terminal_cleanup_evidence(
+        ledger.key(REQUEST_ID),
+        REQUEST_ID,
+        registered.record["payload_sha256"],
+    )
+    terminal_at_ns = evidence["terminal_at_ns"]
+    assert isinstance(terminal_at_ns, int)
+
+    planned = public_api._cleanup_one(
+        store,
+        REQUEST_ID,
+        older_than_seconds=5,
+        apply=False,
+        now_ns=terminal_at_ns + 5_000_000_000,
+    )
+    assert planned["status"] == "planned"
+    assert registered.order_path.exists()
+
+    cleaned = public_api._cleanup_one(
+        store,
+        REQUEST_ID,
+        older_than_seconds=5,
+        apply=True,
+        now_ns=terminal_at_ns + 5_000_000_000,
+    )
+    assert cleaned["status"] == "cleaned"
+    assert original_prompt.is_file(), "caller-owned prompt must never be deleted"
+    assert {path.name for path in registered.request_dir.iterdir()} == {
+        "tombstone.json"
+    }
+    assert {
+        path.name for path in ledger.request_dir(ledger.key(REQUEST_ID)).iterdir()
+    } == {"tombstone.json"}
+    status = public_api._public_status(store, store.load(REQUEST_ID))
+    assert status["state"]["state"] == "pruned"
+    assert status["result"]["verdict"] == "blocked"
+    assert {item["kind"] for item in status["artifacts"]} >= {
+        "result",
+        "compacted",
+        "handoff",
+        "receipt",
+        "log",
+    }
+    (registered.request_dir / "interrupted-public-residual").write_text("residual")
+    recruiter_dir = ledger.request_dir(ledger.key(REQUEST_ID))
+    (recruiter_dir / "interrupted-private-residual").write_text("residual")
+    assert (
+        public_api._cleanup_one(
+            store,
+            REQUEST_ID,
+            older_than_seconds=0,
+            apply=True,
+            now_ns=terminal_at_ns + 6_000_000_000,
+        )["status"]
+        == "already-pruned"
+    )
+    assert {path.name for path in registered.request_dir.iterdir()} == {
+        "tombstone.json"
+    }
+    assert {path.name for path in recruiter_dir.iterdir()} == {"tombstone.json"}
+
+    validated = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+    assert store.register(validated, "recruiter-pane").pruned is True
+    launches: list[str] = []
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda order, _roster: launches.append(order) or 0,
+    )
+    assert public_api.execute(_args(_worker_argv(tmp_path)), tmp_path) == 1
+    assert launches == []
+    capsys.readouterr()
+    changed_argv = _worker_argv(tmp_path)
+    _prompt(tmp_path, "changed immutable prompt\n")
+    changed = public_api.validate_request(_args(changed_argv), tmp_path)
+    with pytest.raises(public_api.PublicError, match="request_id_conflict"):
+        store.register(changed, "recruiter-pane")
+
+    assert (
+        public_api.execute(
+            _args(
+                [
+                    "cancel",
+                    "--request",
+                    REQUEST_ID,
+                    "--control-token-file",
+                    _control_token_file(tmp_path, control_token),
+                    "--json",
+                ]
+            ),
+            tmp_path,
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["state"]["state"] == "pruned"
+
+
+def test_cleanup_recovers_after_private_tombstone_commits_before_public_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, registered, ledger, _token, _control_token = _finish_registered_request(
+        tmp_path, monkeypatch
+    )
+    key = ledger.key(REQUEST_ID)
+    payload_sha256 = registered.record["payload_sha256"]
+    evidence = ledger.terminal_cleanup_evidence(key, REQUEST_ID, payload_sha256)
+    terminal_at_ns = evidence["terminal_at_ns"]
+    assert isinstance(terminal_at_ns, int)
+    tombstone = public_api._cleanup_tombstone(
+        registered,
+        public_api._public_status(store, registered),
+        evidence,
+        terminal_at_ns + 1,
+    )
+
+    ledger.prune_terminal(
+        key,
+        REQUEST_ID,
+        payload_sha256,
+        tombstone,
+        verify_absence=recruiter._verify_terminal_cleanup_absence,
+    )
+
+    assert (registered.request_dir / "request.json").is_file()
+    assert public_api._public_status(store, registered)["state"]["state"] == "pruned"
+    recovered = public_api._cleanup_one(
+        store,
+        REQUEST_ID,
+        older_than_seconds=0,
+        apply=True,
+        now_ns=terminal_at_ns + 2,
+    )
+    assert recovered["status"] == "cleaned"
+    assert {path.name for path in registered.request_dir.iterdir()} == {
+        "tombstone.json"
+    }
+    assert {path.name for path in ledger.request_dir(key).iterdir()} == {
+        "tombstone.json"
+    }
+
+
+def test_cleanup_refuses_active_cleanup_failed_and_batch_skips_malformed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, _registered, active_ledger, _token, _control = _registered_request(
+        tmp_path, monkeypatch
+    )
+    active_ledger._snapshot(
+        active_ledger.key(REQUEST_ID), "awaiting-requester", decision_nonce="nonce"
+    )
+    with pytest.raises(recruiter.RecruiterError, match="awaiting-requester"):
+        public_api._cleanup_one(
+            store,
+            REQUEST_ID,
+            older_than_seconds=0,
+            apply=False,
+            now_ns=10**20,
+        )
+
+    second = "01957f4e-7f7f-7f8b-9c42-6e7f52f9321b"
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    args = _worker_argv(second_root, request_id=second)
+    validated = public_api.validate_request(_args(args), second_root)
+    registered = store.register(validated, "recruiter-pane")
+    order = recruiter.load_order(registered.order_path)
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test",
+            "request_id": second,
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    manifest = recruiter.completion.build_manifest(
+        order, ledger.request_dir(key), token, second
+    )
+    recruiter.completion.write_manifest(
+        ledger.request_dir(key) / "artifact-manifest.json", manifest
+    )
+    result = recruiter._write_required_blocked_bundle(order, manifest, "failed cleanup")
+    assert (
+        ledger.finalize(
+            key,
+            token,
+            order,
+            result,
+            cleanup={"status": "cleanup-failed", "verified_absent": False},
+        )
+        is not None
+    )
+    with pytest.raises(recruiter.RecruiterError, match="cleanup-failed"):
+        public_api._cleanup_one(
+            store, second, older_than_seconds=0, apply=False, now_ns=10**20
+        )
+
+    malformed = "01957f4e-7f7f-7f8b-9c42-6e7f52f9321c"
+    (store.path(malformed)).mkdir(parents=True)
+    (store.path(malformed) / "request.json").write_text("not-json")
+    assert (
+        public_api._cleanup(_args(["cleanup", "--all-terminal", "--json"]), store) == 0
+    )
+    rows = json.loads(capsys.readouterr().out)
+    by_id = {row["request_id"]: row for row in rows}
+    assert by_id[REQUEST_ID]["status"] == "skipped"
+    assert by_id[second]["status"] == "skipped"
+    assert by_id[malformed]["status"] == "skipped"

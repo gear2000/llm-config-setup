@@ -17,13 +17,25 @@ upagent *args:
     @${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" {{args}}
 
 # Ensure the services workspace + an armed Recruiter pane (unified `herdr` workspace by
-# default; pass --separate-workspaces for the dedicated `shared-services` workspace).
+# default; pass --separate-workspaces for the dedicated `shared-services` workspace), then
+# print the status table so the active service is visible.
 upagent-up *FLAGS:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" up {{FLAGS}}
+    @{{just_executable()}} --justfile "{{justfile()}}" upagent-status
 
-# Recruiter state.
+# Recruiter state comes from the canonical socket, so main checkouts and worktrees display the
+# same Hub identity instead of reading a checkout-local state path.
 upagent-status:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" status
+
+# Tear down the shared services. The Recruiter first terminalizes every durably owned active
+# worker and verifies pane cleanup; it never closes a foreign or unrecorded pane. Teardown and
+# its final status report remain fail-tolerant so cleanup can continue after a partial failure.
+upagent-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter down || true
+    {{just_executable()}} --justfile "{{justfile()}}" upagent-status || true
 
 # Hire one worker for one order.json. This is a blocking dispatch: it returns only after the
 # Recruiter has published a durable ORDER_RECEIPT (including verified pane cleanup). Never send

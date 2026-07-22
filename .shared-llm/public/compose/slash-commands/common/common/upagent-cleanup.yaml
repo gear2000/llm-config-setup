@@ -1,0 +1,6 @@
+type: skill
+name: upagent-cleanup
+description: .shared-llm/public/layers/slash-commands/common/common/upagent-cleanup/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/upagent-cleanup/command.md
+output: .claude/skills/upagent-cleanup/SKILL.md

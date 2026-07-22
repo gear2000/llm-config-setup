@@ -14,6 +14,20 @@ SHARED_PROTOCOL = PROTOCOL.parent.parent / "meta-runner-phase-protocol.md"
 EXTENSIONS = ROOT / ".shared-llm/public/extensions"
 HERDR_JUSTFILE = EXTENSIONS / "common/herdr/justfile"
 PLAN_CONTROLLER = HERDR_JUSTFILE.with_name("plan_controller.py")
+SERVICE_RECIPES = {"upagent-up", "upagent-status", "upagent-down"}
+REMOVED_SERVICE_RECIPES = {"herdr-up", "herdr-status", "herdr-down"}
+GENUINE_HERDR_RECIPES = {
+    "herdr-start",
+    "herdr-plan",
+    "herdr-run-session-finish",
+    "herdr-run-session-start",
+    "herdr-run-session-heartbeat",
+    "herdr-run-session-snapshot",
+    "herdr-run-session-reconcile",
+    "herdr-run-session-guard",
+    "herdr-run-session-cleanup",
+    "herdr-lab",
+}
 
 # A runnable command in these documents is always in code formatting, so the extraction reads
 # inline code spans and fenced blocks only — never bare prose, where "just to pass tests" is
@@ -50,14 +64,22 @@ def _defining_module(recipe: str) -> str:
     raise AssertionError(f"no extension module defines the `just {recipe}` recipe")
 
 
-def _modules_started_by(recipe: str) -> set[str]:
-    """The extension modules whose engine `recipe` launches, read from the recipe body."""
-    text = HERDR_JUSTFILE.read_text()
-    variables = dict(_JUST_VARIABLE.findall(text))
+def _recipe_body(justfile: Path, recipe: str) -> str:
+    text = justfile.read_text()
     body = re.search(rf"^{recipe}[^\n]*:\n((?:[ \t]+[^\n]*\n)+)", text, re.M)
-    assert body is not None, f"{HERDR_JUSTFILE} defines no `{recipe}` recipe"
+    assert body is not None, f"{justfile} defines no `{recipe}` recipe"
+    return body.group(1)
+
+
+def _modules_started_by(recipe: str) -> set[str]:
+    """The extension modules whose engine `recipe` launches, read from its defining module."""
+    justfile = EXTENSIONS / "common" / _defining_module(recipe) / "justfile"
+    text = justfile.read_text()
+    variables = dict(_JUST_VARIABLE.findall(text))
     expanded = re.sub(
-        r"\{\{(_[A-Z_]+)\}\}", lambda m: variables.get(m.group(1), ""), body.group(1)
+        r"\{\{(_[A-Z_]+)\}\}",
+        lambda match: variables.get(match.group(1), ""),
+        _recipe_body(justfile, recipe),
     )
     return set(_ENGINE_MODULE.findall(expanded))
 
@@ -302,9 +324,35 @@ def test_every_command_the_protocol_names_resolves_to_a_real_recipe() -> None:
     )
 
 
-def test_every_service_the_runner_health_checks_is_started_by_herdr_up() -> None:
+def test_upagent_owns_service_lifecycle_and_herdr_keeps_runner_commands() -> None:
+    summary = subprocess.run(
+        ["just", "--justfile", str(ROOT / "justfile"), "--summary"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    defined = set(summary.stdout.split())
+
+    assert defined >= SERVICE_RECIPES
+    assert not REMOVED_SERVICE_RECIPES & defined
+    assert defined >= GENUINE_HERDR_RECIPES
+    assert {_defining_module(recipe) for recipe in SERVICE_RECIPES} == {"upagent"}
+    assert {_defining_module(recipe) for recipe in GENUINE_HERDR_RECIPES} == {"herdr"}
+
+    upagent_justfile = EXTENSIONS / "common/upagent/justfile"
+    up_body = _recipe_body(upagent_justfile, "upagent-up")
+    down_body = _recipe_body(upagent_justfile, "upagent-down")
+    assert "upagent-status" in up_body
+    assert "--target recruiter down || true" in down_body
+    assert "upagent-status || true" in down_body
+    assert down_body.index("--target recruiter down") < down_body.index(
+        "upagent-status"
+    )
+
+
+def test_every_service_the_runner_health_checks_is_started_by_upagent_up() -> None:
     """The cockpit's health checks are matched against the bring-up that has to satisfy
-    them. Removing a service from `herdr-up` while the runner still tells the TUI to verify
+    them. Removing a service from `upagent-up` while the runner still tells the TUI to verify
     it fails here — the runner would otherwise send the TUI to check a service nothing
     starts, which reads as a broken environment rather than as the removal it is."""
     # Both spellings a health check can take: a module command with a `status` subcommand
@@ -319,7 +367,7 @@ def test_every_service_the_runner_health_checks_is_started_by_herdr_up() -> None
     }
     assert health_checked, "the runner health-checks no service at cockpit setup"
 
-    assert health_checked <= _modules_started_by("herdr-up")
+    assert _modules_started_by("upagent-up") >= health_checked
 
 
 # NOT MECHANICALLY VERIFIABLE — deliberately not asserted here.

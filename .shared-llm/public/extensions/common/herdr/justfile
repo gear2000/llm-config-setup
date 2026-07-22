@@ -24,34 +24,11 @@ _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagen
 # plan_controller.py and run_lifecycle.py execute only as canonical Hub controller targets.
 _HERDR_LAB := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/lab_session.py"
 
-# Bring up the always-up shared service (the UpAgent Recruiter, in its own role-labeled pane,
-# registered in Herdr's agents sidebar), then print the status table so you can SEE it is up.
-# By default everything shares ONE `herdr` workspace — the service lives in a `services` tab
-# and each run adds control/workers/oversight tabs beside it. Pass `--separate-workspaces` to
-# restore the dedicated `shared-services` workspace plus a per-run `<slug>` workspace (runs
-# started later inherit whichever mode was chosen here).
-herdr-up *FLAGS:
-    ${PYTHON_BIN:-python3} {{_UPAGENT}} up {{FLAGS}}
-    @{{just_executable()}} --justfile "{{justfile()}}" herdr-status
-
-# Status comes from the canonical socket, so main checkouts and worktrees display the same Hub
-# identity instead of reading a checkout-local state path.
-herdr-status:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" status
-
-# Tear down the shared services. The Recruiter engine first terminalizes every durably owned
-# active worker and verifies pane cleanup; it never closes a foreign/unrecorded pane.
-herdr-down:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ${PYTHON_BIN:-python3} {{_UPAGENT}} --target recruiter down || true
-    {{just_executable()}} --justfile "{{justfile()}}" herdr-status || true
-
 # Kick off a checked plan through one deterministic Python transaction. It starts
 # and health-checks a FRESH TUI — nothing else. There is no standing plan watchdog:
 # the TUI hears every phase condition as the typed return of its blocking
 # `upagent-phase-await`, and urgent unacknowledged events escalate to the human via
-# `herdr notification`. Run `just herdr-up` first.
+# `herdr notification`. Run `just upagent-up` first.
 #
 # The TUI is launched fully NON-INTERACTIVE (claude --dangerously-skip-permissions
 # / pi --approve) — it trusts its cwd and never blocks on a trust/permission dialog
@@ -62,7 +39,7 @@ herdr-down:
 # claude.ai phone list under the run's name.
 #
 # The TUI joins the unified `herdr` workspace as a `control` tab by default; it
-# inherits `--separate-workspaces` (per-run `<slug>` workspace) when `herdr-up`
+# inherits `--separate-workspaces` (per-run `<slug>` workspace) when `upagent-up`
 # chose that mode, or when passed here explicitly.
 #
 #   just herdr-start ops/work-log/2026-07-12/my-feature
