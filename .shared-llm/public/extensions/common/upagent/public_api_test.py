@@ -150,6 +150,70 @@ def test_public_help_describes_manager_degradation_and_cursor_map() -> None:
     assert "--cursor '{\"ID\": 12}'" in help_text
 
 
+def test_worker_request_ignores_unrelated_invalid_specialist_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    persona_dir = tmp_path / ".claude/agents"
+    persona_dir.mkdir(parents=True)
+    (persona_dir / "backend.md").write_text("---\nname: backend\n---\n")
+
+    def invalid_specialists() -> dict[str, object]:
+        raise recruiter.RecruiterError("retired specialist schema")
+
+    monkeypatch.setattr(
+        public_api.recruiter, "load_specialist_roster", invalid_specialists
+    )
+
+    validated = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+
+    assert validated.payload["type"] == "worker"
+    assert validated.payload["agent"] == "backend"
+
+
+def test_verifier_request_ignores_unrelated_invalid_specialist_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _store, _registered, _ledger, _token, _control = _registered_request(
+        tmp_path, monkeypatch
+    )
+    persona_dir = tmp_path / ".claude/agents"
+    persona_dir.mkdir(parents=True)
+    (persona_dir / "reviewer.md").write_text("---\nname: reviewer\n---\n")
+
+    def invalid_specialists() -> dict[str, object]:
+        raise recruiter.RecruiterError("retired specialist schema")
+
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        public_api.recruiter, "load_specialist_roster", invalid_specialists
+    )
+    monkeypatch.setattr(public_api.recruiter, "_require_hub_authority", lambda: None)
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_verify",
+        lambda *args, **kwargs: calls.append(args) or 0,
+    )
+
+    assert (
+        public_api.main(
+            [
+                "verify",
+                "--request",
+                REQUEST_ID,
+                "--offering",
+                "pi-gpt-5-4-mini",
+                "--effort",
+                "low",
+                "--agent",
+                "reviewer",
+            ]
+        )
+        == 0
+    )
+    assert len(calls) == 1
+
+
 def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:
     prompt = _prompt(tmp_path)
     file_path = tmp_path / "request.json"

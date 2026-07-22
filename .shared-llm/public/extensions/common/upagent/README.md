@@ -13,16 +13,21 @@ linked git worktree it resolves git's common directory, then connects to the sam
 at `/tmp/.upagent/hubs/<repo-id>/hub.sock`; `UPAGENT_SOCKET` is the absolute-path override. Only
 `up` may start the canonical `hub.py`, and it starts the copy from the main checkout rather than the
 caller's worktree. The Hub holds `hub.lock` for its full lifetime, publishes `identity.json`, and
-performs a version-and-schema-fingerprint handshake before accepting a command. Protocol v3
+performs a version-and-runtime-fingerprint handshake before accepting a command. The fingerprint
+covers both the wire schema and the Python modules cached by the resident Hub, so `up` safely
+replaces an idle Hub after deployment instead of continuing to run stale imports. Protocol v5
 carries only the strictly validated Herdr caller fields required by controller operations
 (`HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SOCKET_PATH`, `HERDR_SESSION`, and the private absolute
 `RUNNER_OWNER_TOKEN_FILE` path when set); arbitrary environment variables and raw secrets never
 cross the wire. Request-local stdin is bounded and accepted only for run-lifecycle `guard` or
 `cleanup` with exactly one `--token-stdin`; it never enters Hub identity, status, logs, or the
-process stdin. An incompatible resident is restarted by `up` only after its live handshake,
-canonical executable, exact PID/start identity, and zero-worker ledger all verify; otherwise the
-client fails with explicit manual restart guidance. The Hub removes its own Herdr fields before
-creating the request context.
+process stdin. An incompatible v5 resident is restarted by `up` only after its live handshake and
+canonical executable/PID identity verify. The resident then performs one server-side idle-stop
+transaction: it closes launch admission, waits for already-admitted commands, checks both active
+ledger claims and registered runner threads, and stops itself only when both are empty. Otherwise it
+resumes admission and reports the activity; no client-side signal or separate resume command can
+race the decision. Pre-v5 residents require a one-time explicit restart because they cannot provide
+that atomic handoff. The Hub removes its own Herdr fields before creating the request context.
 It imports canonical controllers under a narrow module-registration lock, then runs commands
 concurrently with request-local cwd, immutable environment views, argument parsing, and structured
 output sinks. Blocking awaits therefore do not stall status, response, reconciliation, or
@@ -30,7 +35,7 @@ controller operations; usage/errors stay with the requesting client; and backgro
 cannot enter another request's response. Job runners and the reconciler are Hub-owned daemon threads, not
 detached mutating subprocesses. A Hub exit therefore ends every writer before the OS releases
 the lifetime lock. Status includes
-`hub_instance_id`, exact PID/start identity, protocol version and schema fingerprint, canonical
+`hub_instance_id`, exact PID/start identity, protocol version and runtime fingerprint, canonical
 Recruiter path, socket, ledger, and Herdr session.
 
 The client imports no Recruiter code and has no ledger, reconciliation, lifecycle-dispatch, or
@@ -309,6 +314,8 @@ persona and MERGES: the kit base is
 repo-owned overlay `.shared-llm/this_repo/extensions/common/upagent/specialists.yaml` (template:
 `specialists.yml.sample`). Every specialist pins `offering` plus `effort`; both must resolve the
 nine approved entries. A destination that overrides one specialist keeps every other kit entry.
+The roster is loaded only for specialist requests and specialist listing: an invalid specialist
+overlay cannot block an ordinary worker request.
 
 ## Public offerings and legacy controller roster
 

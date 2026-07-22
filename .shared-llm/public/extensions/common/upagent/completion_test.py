@@ -219,6 +219,54 @@ def test_mandatory_consult_accepts_only_matching_cited_hub_receipt(
         assert completion.mandatory_consult_errors(manifest, result, bad)
 
 
+def test_public_reactor_owns_internal_revisit_instead_of_rejecting_worker_stage_guess(
+    tmp_path: Path,
+) -> None:
+    recruiter = _load("completion_public_recruiter_under_test", "recruiter.py")
+    order = _order(tmp_path)
+    order["public_request"] = {
+        "payload_sha256": "a" * 64,
+        "prompt_sha256": "b" * 64,
+        "prompt_snapshot": str(tmp_path / "prompt.md"),
+        "type": "worker",
+    }
+    manifest = recruiter.completion.build_manifest(
+        order, tmp_path / "request", "lease-token", "request-1"
+    )
+    assert manifest is not None
+    result_path = manifest.artifact("result").staging_path
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "order_id": "stage-1",
+                "verdict": "passed",
+                "revisit": ["worker"],
+                "full_log": "worker-session",
+            }
+        )
+    )
+    manifest.artifact("compacted").staging_path.write_text("# Compact\n")
+    manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
+
+    class Ledger:
+        def _event(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    assert (
+        recruiter._complete_typed_bundle(
+            Ledger(),
+            "key",
+            order,
+            manifest,
+            None,
+            herdr_session="test-session",
+        )
+        is False
+    )
+    assert json.loads(result_path.read_text())["revisit"] == []
+
+
 def test_reactor_sends_exactly_one_repair_to_the_original_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

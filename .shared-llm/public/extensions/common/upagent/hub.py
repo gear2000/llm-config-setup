@@ -153,6 +153,9 @@ class HubRuntime:
         self._stopping = threading.Event()
         self._threads: set[threading.Thread] = set()
         self._threads_lock = threading.Lock()
+        self._admission_condition = threading.Condition()
+        self._active_admissions = 0
+        self._quiescing = False
         self._module_lock = threading.RLock()
         self._target_modules: dict[str, Any] = {}
         self._recruiter_module: Any = None
@@ -227,6 +230,7 @@ class HubRuntime:
             "process_start_time": transport.process_start_time(self.pid),
             "protocol_fingerprint": transport.PROTOCOL_FINGERPRINT,
             "protocol_version": transport.PROTOCOL_VERSION,
+            "quiescing": self._quiescing,
             "socket_path": str(self.socket_path),
             "started_at_ns": self.started_at_ns,
         }
@@ -347,6 +351,74 @@ class HubRuntime:
                     returned = 1
         return CommandResult(int(returned or 0), stdout.getvalue(), stderr.getvalue())
 
+    @staticmethod
+    def _recruiter_command(argv: list[str]) -> str | None:
+        """Return the subcommand after the Recruiter's one repeatable global option shape."""
+        index = 0
+        while index < len(argv):
+            item = argv[index]
+            if item == "--roster":
+                if index + 1 >= len(argv):
+                    return None
+                index += 2
+                continue
+            if item.startswith("--roster="):
+                index += 1
+                continue
+            return item
+        return None
+
+    @classmethod
+    def _requires_admission(cls, target: str, argv: list[str]) -> bool:
+        """True for commands that may create or mutate Hub-owned runtime."""
+        if target == "public":
+            return argv[:1] in (["request"], ["verify"])
+        if target == "recruiter":
+            return cls._recruiter_command(argv) in {
+                "recruit",
+                "dispatch",
+                "request",
+                "verify",
+                "consult",
+                "run-job",
+            }
+        if target == "direct-controller":
+            return argv[:1] in (["order"], ["apply-order"])
+        return target in ("phase-controller", "plan-controller", "run-lifecycle")
+
+    def _stop_if_idle(
+        self, expected_instance_id: str, expected_start_time: str
+    ) -> dict[str, object]:
+        """Atomically close admission and stop only when no work can still become active."""
+        if expected_instance_id != self.instance_id or expected_start_time != (
+            transport.process_start_time(self.pid)
+        ):
+            raise HubError(
+                "runtime-upgrade stop identity does not match this Hub process"
+            )
+        with self._admission_condition:
+            self._quiescing = True
+            while self._active_admissions:
+                self._admission_condition.wait()
+            try:
+                activity = self._canonical_recruiter().migration_activity()
+            except Exception as error:
+                self._quiescing = False
+                self._admission_condition.notify_all()
+                self._publish_identity()
+                raise HubError(
+                    f"runtime-upgrade idle check failed after admission resumed: {error}"
+                ) from error
+            idle = not activity["active_requests"] and not activity["live_runners"]
+            if not idle:
+                self._quiescing = False
+                self._admission_condition.notify_all()
+        if idle:
+            self.stop()
+        else:
+            self._publish_identity()
+        return {"activity": activity, "stopping": idle}
+
     def _dispatch(self, request: dict[str, Any]) -> dict[str, object]:
         _strict_keys(
             request,
@@ -392,14 +464,24 @@ class HubRuntime:
                 "request cwd must be an existing absolute directory"
             )
         if target == "hub":
-            if argv != ["status"]:
-                raise transport.ProtocolError("Hub target supports only status")
+            decision: dict[str, object] | None = None
+            if len(argv) == 3 and argv[0] == "stop-if-idle":
+                decision = self._stop_if_idle(argv[1], argv[2])
+            elif argv != ["status"]:
+                raise transport.ProtocolError(
+                    "Hub target supports status or the fenced runtime-upgrade transaction"
+                )
             payload = self.identity()
             return {
                 "exit_code": 0,
                 "identity": payload,
                 "stderr": "",
-                "stdout": json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                "stdout": json.dumps(
+                    decision if decision is not None else payload,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
                 "type": "response",
             }
         script = TARGETS[target].resolve()
@@ -410,9 +492,21 @@ class HubRuntime:
         # Import registration is the only process-shared mutation and is guarded separately.
         # Command execution itself is concurrent: cwd, environment, and output are request-local.
         module = self._load_target(target, script)
-        result = self._invoke_target(
-            module, argv, Path(cwd), caller_context, request_stdin
-        )
+        admitted = self._requires_admission(target, argv)
+        if admitted:
+            with self._admission_condition:
+                if self._quiescing:
+                    raise HubError("UpAgent Hub is quiescing for a runtime upgrade")
+                self._active_admissions += 1
+        try:
+            result = self._invoke_target(
+                module, argv, Path(cwd), caller_context, request_stdin
+            )
+        finally:
+            if admitted:
+                with self._admission_condition:
+                    self._active_admissions -= 1
+                    self._admission_condition.notify_all()
         self._publish_identity()
         return {
             "exit_code": result.exit_code,

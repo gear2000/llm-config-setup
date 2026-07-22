@@ -279,12 +279,6 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     request_id = _canonical_request_id(raw.get("request_id"))
 
     roster = offerings.load_roster()
-    try:
-        specialist_roster = recruiter.load_specialist_roster()
-        specialist_index = recruiter._specialist_index(specialist_roster)
-    except recruiter.RecruiterError as error:
-        raise PublicError(f"specialist roster is invalid: {error}") from error
-    known_personas = _known_personas(cwd, specialist_index)
     specialist_entry: dict[str, object] | None = None
 
     if request_type == "worker":
@@ -299,6 +293,7 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
                 detail.append("incompatible " + ", ".join(prohibited))
             raise PublicError("worker request is invalid: " + "; ".join(detail))
         agent = cast(str, raw["agent"])
+        known_personas = _known_personas(cwd, {})
         if PERSONA_RE.fullmatch(agent) is None or agent not in known_personas:
             raise PublicError(
                 f"unknown worker persona {agent!r}; expected one of {', '.join(sorted(known_personas))}"
@@ -311,6 +306,11 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
             raise PublicError(str(error)) from error
         specialist_name: str | None = None
     else:
+        try:
+            specialist_roster = recruiter.load_specialist_roster()
+            specialist_index = recruiter._specialist_index(specialist_roster)
+        except recruiter.RecruiterError as error:
+            raise PublicError(f"specialist roster is invalid: {error}") from error
         missing = [field for field in ("specialist",) if field not in raw]
         prohibited = [
             field for field in ("offering", "effort", "agent") if field in raw
@@ -1340,8 +1340,7 @@ def execute(args: Any, cwd: Path) -> int:
             snapshot = roster.resolve(args.offering, args.effort)
         except offerings.OfferingError as error:
             raise PublicError(str(error)) from error
-        specialists = recruiter._specialist_index(recruiter.load_specialist_roster())
-        if args.agent not in _known_personas(cwd, specialists):
+        if args.agent not in _known_personas(cwd, {}):
             raise PublicError(f"unknown verifier persona {args.agent!r}")
         code, output = _capture(
             recruiter.cmd_verify,

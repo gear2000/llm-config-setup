@@ -3149,9 +3149,16 @@ def _write_worker_instructions(
         f"- compacted.md: {paths['compacted']}\n"
         f"- handoff.md: {paths['handoff']}\n"
         + (f"- answer.json: {paths['answer']}\n" if "answer" in paths else "")
-        + f'`result.json.order_id` must be exactly: "{order["order_id"]}".\n'
+        + "Write result.json as a JSON object with these required fields:\n"
+        + f'- `order_id`: exactly "{order["order_id"]}"\n'
+        + '- `verdict`: exactly one of "passed", "failed", or "blocked"\n'
+        + "- `full_log`: a non-empty transcript path, session id, or worker-session description\n"
+        + "Do not invent workflow stage names; omit `revisit` unless the assignment names one.\n"
         + (
-            f'`answer.json.consult_id` must be exactly: "{artifact_manifest.consult_id}".\n'
+            "Write answer.json as either a cited success object "
+            f'`{{"consult_id":"{artifact_manifest.consult_id}","answer":"...",'
+            '"citations":["file:line"]}}` or a failure object '
+            f'`{{"consult_id":"{artifact_manifest.consult_id}","error":"..."}}`.\n'
             if artifact_manifest.consult_id is not None
             else ""
         )
@@ -3368,6 +3375,33 @@ def _may_preserve_worker_result(
 # --- commands ----------------------------------------------------------------
 
 
+def _normalize_public_result_revisit(order: dict, manifest: Any) -> None:
+    """Keep route-stage mechanics out of ad-hoc public worker output.
+
+    Public requests are assigned an internal compatibility stage, but their workers do not know
+    the route vocabulary and must not be asked to manufacture it. Python owns this envelope field.
+    """
+    if not isinstance(order.get("public_request"), dict):
+        return
+    path = manifest.artifact("result").staging_path
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(value, dict):
+        return
+    verdict = value.get("verdict")
+    if verdict in ("passed", "blocked"):
+        revisit: list[str] = []
+    elif verdict == "failed":
+        revisit = [order["stage_id"]]
+    else:
+        return
+    if value.get("revisit") == revisit:
+        return
+    JobLedger._write_json(path, {**value, "revisit": revisit})
+
+
 def _complete_typed_bundle(
     ledger: JobLedger,
     key: str,
@@ -3384,6 +3418,7 @@ def _complete_typed_bundle(
     python_blocked = False
 
     def validate() -> dict:
+        _normalize_public_result_revisit(order, manifest)
         return cast(
             dict,
             completion.validate_bundle(
@@ -4349,7 +4384,7 @@ def _run_order(
                 remaining_ms = max(
                     1, math.ceil((wait_deadline - time.monotonic()) * 1000)
                 )
-                _wait_for_agent_status(
+                agent_finished = _wait_for_agent_status(
                     worker_pane,
                     remaining_ms,
                     monitor_finalized,
@@ -4367,8 +4402,18 @@ def _run_order(
                 wait_deadline = time.monotonic() + extension_ms / 1000
                 continue
 
-            # Invalid aliases are a worker contract failure, not a repair.
-            result = load_result(worker_result_path, expected_order_id=order_id)
+            # Ordinary workers proceed directly to the completion reactor, which validates the
+            # whole bundle and can repair it while the original worker is still addressable.
+            # Watchdogs alone need an early semantic check because a syntactically valid result
+            # may still be premature relative to their authoritative terminal record.
+            if order.get("agent") not in WATCHDOG_AGENTS:
+                break
+            try:
+                result = load_result(worker_result_path, expected_order_id=order_id)
+            except ContractError:
+                if agent_finished:
+                    break
+                raise
             premature_reason = _watchdog_terminal_reason(order, result)
             if premature_reason is None:
                 break
@@ -6603,6 +6648,28 @@ _JOB_THREADS: dict[str, _JobThread] = {}
 _JOB_THREADS_LOCK = threading.Lock()
 
 
+def migration_activity() -> dict[str, list[str]]:
+    """Return every request that makes runtime replacement unsafe.
+
+    A newly spawned runner is visible in the thread registry before it can claim the ledger, so
+    the Hub's atomic stop transaction cannot miss the submit-to-claim window.
+    """
+    _require_hub_authority()
+    # Snapshot runners before claims. A registered live runner may transition into a durable
+    # claim after this first read; seeing it live is already sufficient to refuse replacement.
+    # A runner that is no longer alive cannot create a future claim, so the following ledger read
+    # closes the opposite side of the transition without a missed-empty window.
+    with _JOB_THREADS_LOCK:
+        live_runners = sorted(
+            key for key, handle in _JOB_THREADS.items() if handle.thread.is_alive()
+        )
+    active_requests = sorted(key for key, _lease in JobLedger().active_claims())
+    return {
+        "active_requests": active_requests,
+        "live_runners": live_runners,
+    }
+
+
 def _spawn_job(key: str, roster_path: str) -> _JobThread | None:
     """Atomically get-or-attach one runner, reconciling an orphaned owned claim."""
     _require_hub_authority()
@@ -8564,7 +8631,9 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = command_runtime.ArgumentParser(
-        prog="recruiter", description="UpAgent Recruiter"
+        prog="recruiter",
+        description="UpAgent Recruiter",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--roster",

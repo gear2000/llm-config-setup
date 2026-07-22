@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 5
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_STDIN_BYTES = 64 * 1024
 SOCKET_ENV = "UPAGENT_SOCKET"
@@ -62,9 +62,50 @@ _PROTOCOL_SCHEMA = {
         "max_bytes": MAX_REQUEST_STDIN_BYTES,
     },
 }
-PROTOCOL_FINGERPRINT = hashlib.sha256(
-    json.dumps(_PROTOCOL_SCHEMA, separators=(",", ":"), sort_keys=True).encode()
-).hexdigest()
+
+
+_CACHED_HERDR_RUNTIME = (
+    "controller_transport.py",
+    "plan_controller.py",
+    "run_lifecycle.py",
+)
+
+
+def _runtime_source_fingerprint(upagent_dir: Path | None = None) -> str:
+    """Fingerprint every Python source cached by one resident Hub process."""
+    directory = (upagent_dir or Path(__file__).resolve().parent).resolve()
+    herdr_dir = directory.parent / "herdr"
+    sources = sorted(
+        path for path in directory.glob("*.py") if not path.name.endswith("_test.py")
+    ) + [herdr_dir / name for name in _CACHED_HERDR_RUNTIME]
+    missing = [str(path) for path in sources if not path.is_file()]
+    if missing:
+        raise RuntimeError(
+            "UpAgent runtime fingerprint sources are missing: " + ", ".join(missing)
+        )
+    digest = hashlib.sha256()
+    for path in sources:
+        digest.update(str(path.relative_to(directory.parent)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _protocol_fingerprint(upagent_dir: Path) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "runtime_source_fingerprint": _runtime_source_fingerprint(upagent_dir),
+                "schema": _PROTOCOL_SCHEMA,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+PROTOCOL_FINGERPRINT = _protocol_fingerprint(Path(__file__).resolve().parent)
 
 
 class ProtocolError(RuntimeError):
@@ -245,6 +286,14 @@ def canonical_repo_root(cwd: str | Path | None = None) -> Path:
             f"unsupported git common directory (expected .git): {common}"
         )
     return common.parent
+
+
+def canonical_protocol_fingerprint(cwd: str | Path | None = None) -> str:
+    """Fingerprint the main checkout runtime even when the caller is in a linked worktree."""
+    upagent_dir = (
+        canonical_repo_root(cwd) / ".shared-llm/public/extensions/common/upagent"
+    )
+    return _protocol_fingerprint(upagent_dir)
 
 
 def repository_id(cwd: str | Path | None = None) -> str:

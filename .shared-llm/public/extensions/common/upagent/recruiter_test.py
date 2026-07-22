@@ -1694,6 +1694,8 @@ def test_worker_instructions_have_no_result_only_fallback(tmp_path: Path) -> Non
     text = generated.read_text()
     assert "Write ALL required artifacts" in text
     assert "compacted.md" in text and "handoff.md" in text
+    assert '`verdict`: exactly one of "passed", "failed", or "blocked"' in text
+    assert "`full_log`: a non-empty transcript path" in text
     assert "Write exactly one result JSON file" not in text
 
 
@@ -2522,6 +2524,83 @@ def test_worker_cleanup_failure_replaces_the_entire_success_bundle(
         text = manifest.artifact(kind).staging_path.read_text().lower()
         assert "blocked" in text and "worker close transport failed" in text
         assert "worker compacted evidence" not in text
+
+
+def test_run_order_repairs_a_malformed_finished_worker_bundle_before_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result_path = tmp_path / "public/result.json"
+    private_result = tmp_path / "private/result.json"
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Do the stage.\n")
+    order = _order(result_path=str(result_path), instructions_path=str(instructions))
+    recruiter.completion.ensure_publication_contract(order)
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text('harnesses:\n  claude: "worker write:{result_path}"\n')
+    manifest = _manifest_for_private(order, private_result)
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    key, _created = ledger.submit(order)
+
+    monkeypatch.setattr(
+        recruiter,
+        "_start_herdr_agent",
+        lambda *args, **kwargs: ("worker-pane", "workspace", "worker-address"),
+    )
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
+    )
+
+    def finish(*args: object, **kwargs: object) -> bool:
+        private_result.parent.mkdir(parents=True, exist_ok=True)
+        private_result.write_text(
+            json.dumps({"order_id": order["order_id"], "full_log": "worker-session"})
+        )
+        manifest.artifact("compacted").staging_path.write_text("# Compact\n")
+        manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
+        return True
+
+    repairs: list[str] = []
+
+    def repair(address: str, prompt: str, **kwargs: object) -> None:
+        repairs.append(address)
+        assert "COMPLETION_REPAIR 1/1" in prompt
+        private_result.write_text(json.dumps(_result(order["order_id"])))
+
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", finish)
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", repair)
+    monkeypatch.setattr(
+        recruiter,
+        "_close_worker_pane",
+        lambda pane, **kwargs: {
+            "status": "closed",
+            "worker_pane": pane,
+            "verified_absent": True,
+        },
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
+
+    code, result, cleanup = recruiter._run_order(
+        str(order_path),
+        str(roster_path),
+        private_result,
+        before_worker_cleanup=lambda: recruiter._complete_typed_bundle(
+            ledger,
+            key,
+            order,
+            manifest,
+            "worker-address",
+            herdr_session="llm-lab-test",
+        ),
+        herdr_session="llm-lab-test",
+        artifact_manifest=manifest,
+    )
+
+    assert code == 0
+    assert result["verdict"] == "passed"
+    assert repairs == ["worker-address"]
+    assert cleanup["verified_absent"] is True
 
 
 def test_manager_cleanup_failure_replaces_the_entire_success_bundle(

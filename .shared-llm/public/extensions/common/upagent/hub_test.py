@@ -540,6 +540,26 @@ def test_protocol_mismatch_fails_before_request_dispatch(tmp_path: Path) -> None
         _stop_runtime(runtime, thread)
 
 
+def test_runtime_source_change_changes_compatibility_fingerprint(
+    tmp_path: Path,
+) -> None:
+    herdr = tmp_path.parent / "herdr"
+    herdr.mkdir()
+    for name in transport._CACHED_HERDR_RUNTIME:
+        (herdr / name).write_text("VERSION = 1\n")
+    (tmp_path / "hub.py").write_text("VERSION = 1\n")
+    (tmp_path / "hub_test.py").write_text("ignored = True\n")
+    before = transport._runtime_source_fingerprint(tmp_path)
+
+    (tmp_path / "hub.py").write_text("VERSION = 2\n")
+    after_upagent_change = transport._runtime_source_fingerprint(tmp_path)
+    (herdr / "plan_controller.py").write_text("VERSION = 2\n")
+    after_herdr_change = transport._runtime_source_fingerprint(tmp_path)
+
+    assert before != after_upagent_change
+    assert after_upagent_change != after_herdr_change
+
+
 def test_schema_fingerprint_mismatch_fails_before_request_dispatch(
     tmp_path: Path,
 ) -> None:
@@ -555,6 +575,290 @@ def test_schema_fingerprint_mismatch_fails_before_request_dispatch(
             )
     finally:
         _stop_runtime(runtime, thread)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--roster", "roster.yaml", "recruit", "order.json"],
+        ["--roster=roster.yaml", "request", "order.json"],
+        ["--roster", "roster.yaml", "dispatch", "order.json"],
+    ],
+)
+def test_recruiter_global_roster_prefix_cannot_bypass_admission(
+    argv: list[str],
+) -> None:
+    assert hub.HubRuntime._requires_admission("recruiter", argv) is True
+    assert (
+        hub.HubRuntime._requires_admission(
+            "recruiter", ["--roster", "roster.yaml", "status"]
+        )
+        is False
+    )
+
+
+def test_recruiter_rejects_abbreviated_global_roster_option() -> None:
+    with pytest.raises(SystemExit) as failure:
+        recruiter.main(["--rost=roster.yaml", "recruit", "order.json"])
+    assert failure.value.code == 2
+    assert (
+        hub.HubRuntime._requires_admission(
+            "recruiter", ["--rost=roster.yaml", "recruit", "order.json"]
+        )
+        is False
+    )
+
+
+def test_idle_stop_waits_for_admitted_launch_and_rejects_new_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = hub.HubRuntime(tmp_path / "hub.sock", HERE / "recruiter.py")
+    runtime.acquire()
+    started = threading.Event()
+    release = threading.Event()
+    stop_responses: list[dict[str, object]] = []
+
+    class Target:
+        pass
+
+    monkeypatch.setattr(runtime, "_load_target", lambda *args: Target())
+
+    def invoke(*args: object, **kwargs: object) -> Any:
+        started.set()
+        assert release.wait(timeout=3)
+        return hub.CommandResult(0, "", "")
+
+    monkeypatch.setattr(runtime, "_invoke_target", invoke)
+
+    def request(argv: list[str], target: str = "public") -> dict[str, object]:
+        return {
+            "argv": argv,
+            "caller_context": {},
+            "cwd": str(tmp_path),
+            "protocol_fingerprint": transport.PROTOCOL_FINGERPRINT,
+            "protocol_version": transport.PROTOCOL_VERSION,
+            "stdin": None,
+            "target": target,
+            "type": "request",
+        }
+
+    launch = threading.Thread(target=lambda: runtime._dispatch(request(["request"])))
+    process_start_time = transport.process_start_time(runtime.pid)
+    assert isinstance(process_start_time, str)
+    idle_stop = threading.Thread(
+        target=lambda: stop_responses.append(
+            runtime._dispatch(
+                request(
+                    [
+                        "stop-if-idle",
+                        runtime.instance_id,
+                        process_start_time,
+                    ],
+                    "hub",
+                )
+            )
+        )
+    )
+    try:
+        launch.start()
+        assert started.wait(timeout=1)
+        idle_stop.start()
+        deadline = time.monotonic() + 1
+        while not runtime._quiescing and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert runtime._quiescing is True
+        assert idle_stop.is_alive()
+        with pytest.raises(hub.HubError, match="quiescing"):
+            runtime._dispatch(request(["request"]))
+        release.set()
+        launch.join(timeout=1)
+        idle_stop.join(timeout=1)
+        assert not launch.is_alive() and not idle_stop.is_alive()
+        response_text = stop_responses[0]["stdout"]
+        assert isinstance(response_text, str)
+        assert json.loads(response_text)["stopping"] is True
+        assert runtime._stopping.is_set()
+    finally:
+        release.set()
+        launch.join(timeout=1)
+        idle_stop.join(timeout=1)
+        runtime.release()
+
+
+def test_runtime_migration_racing_admission_resumes_without_killing_active_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, thread, socket_path = _start_runtime(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    migration_errors: list[BaseException] = []
+
+    class Target:
+        pass
+
+    monkeypatch.setattr(runtime, "_load_target", lambda *args: Target())
+
+    def invoke(*args: object, **kwargs: object) -> Any:
+        started.set()
+        assert release.wait(timeout=3)
+        active = runtime.ledger_path / "active/requests/racing-request"
+        active.mkdir(parents=True)
+        (active / "lease.json").write_text(
+            json.dumps({"token": "racing-token", "expires_at": int(time.time()) + 60})
+        )
+        return hub.CommandResult(0, "", "")
+
+    monkeypatch.setattr(runtime, "_invoke_target", invoke)
+    monkeypatch.setattr(client, "_expected_protocol_fingerprint", lambda cwd: "0" * 64)
+    monkeypatch.setattr(
+        client,
+        "_process_cmdline",
+        lambda pid: [sys.executable, str((HERE / "hub.py").resolve())],
+    )
+    launch = threading.Thread(
+        target=lambda: client._round_trip(
+            socket_path,
+            "public",
+            ["request"],
+            cwd=Path.cwd().resolve(),
+            protocol_fingerprint=transport.PROTOCOL_FINGERPRINT,
+        )
+    )
+
+    def migrate() -> None:
+        try:
+            client._migrate_incompatible_hub(socket_path, Path.cwd().resolve())
+        except BaseException as error:
+            migration_errors.append(error)
+
+    migration = threading.Thread(target=migrate)
+    try:
+        launch.start()
+        assert started.wait(timeout=1)
+        migration.start()
+        deadline = time.monotonic() + 1
+        while not runtime._quiescing and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert runtime._quiescing is True
+        release.set()
+        launch.join(timeout=2)
+        migration.join(timeout=2)
+        assert not launch.is_alive() and not migration.is_alive()
+        assert len(migration_errors) == 1
+        assert "atomic idle check found 1 active request" in str(migration_errors[0])
+        assert "admission was resumed" in str(migration_errors[0])
+        assert runtime._quiescing is False
+    finally:
+        release.set()
+        launch.join(timeout=1)
+        migration.join(timeout=1)
+        shutil.rmtree(runtime.ledger_path / "active/requests", ignore_errors=True)
+        _stop_runtime(runtime, thread)
+
+
+def test_migration_activity_sees_spawned_runner_before_ledger_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = hub.HubRuntime(tmp_path / "hub.sock", HERE / "recruiter.py")
+    runtime.acquire()
+    recruiter_module = runtime._canonical_recruiter()
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_run(self: object) -> None:
+        started.set()
+        assert release.wait(timeout=3)
+
+    monkeypatch.setattr(recruiter_module._JobThread, "_run", delayed_run)
+    handle = recruiter_module._spawn_job("not-yet-claimed", "roster.yaml")
+    assert handle is not None
+    try:
+        assert started.wait(timeout=1)
+        assert recruiter_module.migration_activity() == {
+            "active_requests": [],
+            "live_runners": ["not-yet-claimed"],
+        }
+        process_start_time = transport.process_start_time(runtime.pid)
+        assert isinstance(process_start_time, str)
+        assert runtime._stop_if_idle(runtime.instance_id, process_start_time) == {
+            "activity": {
+                "active_requests": [],
+                "live_runners": ["not-yet-claimed"],
+            },
+            "stopping": False,
+        }
+        assert runtime._quiescing is False
+        assert not runtime._stopping.is_set()
+    finally:
+        release.set()
+        handle.wait(timeout=1)
+        with recruiter_module._JOB_THREADS_LOCK:
+            recruiter_module._JOB_THREADS.pop("not-yet-claimed", None)
+        runtime.release()
+
+
+def test_idle_stop_cannot_miss_runner_transitioning_into_active_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = hub.HubRuntime(tmp_path / "hub.sock", HERE / "recruiter.py")
+    runtime.acquire()
+    recruiter_module = runtime._canonical_recruiter()
+    ledger = recruiter_module.JobLedger()
+    order = _order(tmp_path)
+    key, _created = ledger.submit(order)
+    started = threading.Event()
+    allow_claim = threading.Event()
+    claimed = threading.Event()
+
+    def claim_then_exit(self: object) -> None:
+        started.set()
+        assert allow_claim.wait(timeout=3)
+        token = ledger.claim(
+            key,
+            order["order_id"],
+            60_000,
+            owner={"runner_pid": os.getpid()},
+        )
+        assert isinstance(token, str)
+        claimed.set()
+
+    monkeypatch.setattr(recruiter_module._JobThread, "_run", claim_then_exit)
+    handle = recruiter_module._spawn_job(key, "roster.yaml")
+    assert handle is not None
+    assert started.wait(timeout=1)
+    original_active_claims = recruiter_module.JobLedger.active_claims
+
+    def transition_after_snapshot(self: object) -> list[tuple[str, dict]]:
+        snapshot = original_active_claims(self)
+        allow_claim.set()
+        assert claimed.wait(timeout=1)
+        handle.wait(timeout=1)
+        return snapshot
+
+    monkeypatch.setattr(
+        recruiter_module.JobLedger, "active_claims", transition_after_snapshot
+    )
+    process_start_time = transport.process_start_time(runtime.pid)
+    assert isinstance(process_start_time, str)
+    try:
+        decision = runtime._stop_if_idle(runtime.instance_id, process_start_time)
+        assert decision["stopping"] is False
+        assert decision["activity"] == {
+            "active_requests": [],
+            "live_runners": [key],
+        }
+        assert [candidate for candidate, _lease in original_active_claims(ledger)] == [
+            key
+        ]
+        assert runtime._quiescing is False
+        assert not runtime._stopping.is_set()
+    finally:
+        allow_claim.set()
+        handle.wait(timeout=1)
+        with recruiter_module._JOB_THREADS_LOCK:
+            recruiter_module._JOB_THREADS.pop(key, None)
+        shutil.rmtree(ledger.active / "requests" / key, ignore_errors=True)
+        runtime.release()
 
 
 def test_lifetime_lock_excludes_a_second_hub(tmp_path: Path) -> None:
@@ -593,8 +897,9 @@ def test_main_checkout_and_linked_worktree_share_identity(
         check=True,
     )
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    shutil.copytree(HERE.parent, repo / ".shared-llm/public/extensions/common")
     (repo / "tracked").write_text("one\n")
-    subprocess.run(["git", "-C", str(repo), "add", "tracked"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
     subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "topic", str(worktree)],
@@ -607,7 +912,24 @@ def test_main_checkout_and_linked_worktree_share_identity(
     shared_socket = transport.socket_path(repo)
     assert shared_socket == transport.socket_path(worktree)
 
-    runtime = hub.HubRuntime(shared_socket, HERE / "recruiter.py")
+    canonical_upagent = repo / ".shared-llm/public/extensions/common/upagent"
+    (
+        worktree / ".shared-llm/public/extensions/common/upagent/public_api.py"
+    ).write_text("# worktree-only runtime drift\n")
+    assert transport.canonical_protocol_fingerprint(repo) == (
+        transport.canonical_protocol_fingerprint(worktree)
+    )
+
+    canonical_hub_spec = importlib.util.spec_from_file_location(
+        "hub_test_canonical_main_hub", canonical_upagent / "hub.py"
+    )
+    assert canonical_hub_spec and canonical_hub_spec.loader
+    canonical_hub = importlib.util.module_from_spec(canonical_hub_spec)
+    previous_command_runtime = sys.modules.get("upagent_command_runtime")
+    canonical_hub_spec.loader.exec_module(canonical_hub)
+    runtime = canonical_hub.HubRuntime(
+        shared_socket, canonical_upagent / "recruiter.py"
+    )
     thread = threading.Thread(target=runtime.serve)
     thread.start()
     _wait_for_protocol_ready(shared_socket, repo.resolve())
@@ -621,10 +943,14 @@ def test_main_checkout_and_linked_worktree_share_identity(
         assert main_identity == worktree_identity
         assert main_identity["hub_instance_id"] == runtime.instance_id
         assert main_identity["canonical_engine_path"] == str(
-            (HERE / "recruiter.py").resolve()
+            (canonical_upagent / "recruiter.py").resolve()
         )
     finally:
         _stop_runtime(runtime, thread)
+        if previous_command_runtime is None:
+            sys.modules.pop("upagent_command_runtime", None)
+        else:
+            sys.modules["upagent_command_runtime"] = previous_command_runtime
         runtime.lock_path.unlink(missing_ok=True)
         shared_socket.parent.rmdir()
 
@@ -886,6 +1212,11 @@ def test_startup_failure_reports_durable_log_diagnostics(
         lambda filename, _cwd: failing_hub if filename == "hub.py" else engine,
     )
     monkeypatch.setattr(client.transport, "canonical_repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr(
+        client,
+        "_expected_protocol_fingerprint",
+        lambda _cwd: transport.PROTOCOL_FINGERPRINT,
+    )
     socket_path = tmp_path / "failing.sock"
 
     with pytest.raises(
@@ -1348,7 +1679,76 @@ def test_token_stdin_is_request_local_bounded_and_direct_hub_equivalent(
         )
 
 
-def test_old_v2_zero_worker_hub_is_safely_replaced_by_current(
+def test_same_protocol_stale_runtime_is_safely_replaced_when_idle(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    common = repo / ".shared-llm/public/extensions/common"
+    shutil.copytree(HERE.parent, common)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    upagent = common / "upagent"
+    socket_path = tmp_path / "runtime-migration/hub.sock"
+    socket_path.parent.mkdir()
+    hub_path = upagent / "hub.py"
+    engine_path = upagent / "recruiter.py"
+    resident = subprocess.Popen(
+        [
+            sys.executable,
+            str(hub_path),
+            "serve",
+            "--socket",
+            str(socket_path),
+            "--engine",
+            str(engine_path),
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
+    deadline = time.monotonic() + 3
+    while not identity_path.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert identity_path.is_file()
+    old_identity = json.loads(identity_path.read_text())
+
+    public_api_path = upagent / "public_api.py"
+    public_api_path.write_text(
+        public_api_path.read_text() + "\n# deployed runtime change\n"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hub_test_fresh_deployed_client", upagent / "client.py"
+    )
+    assert spec and spec.loader
+    deployed_client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(deployed_client)
+
+    try:
+        deployed_client._ensure_current_hub_for_up(socket_path, repo)
+        resident.wait(timeout=3)
+        response = deployed_client._round_trip(socket_path, "hub", ["status"], cwd=repo)
+        new_identity = response["identity"]
+        assert new_identity["protocol_version"] == old_identity["protocol_version"]
+        assert (
+            new_identity["protocol_fingerprint"] != old_identity["protocol_fingerprint"]
+        )
+        assert new_identity["pid"] != old_identity["pid"]
+    finally:
+        if resident.poll() is None:
+            resident.terminate()
+            resident.wait(timeout=3)
+        if identity_path.is_file():
+            current = json.loads(identity_path.read_text())
+            current_pid = current.get("pid")
+            if isinstance(current_pid, int) and current_pid != os.getpid():
+                os.kill(current_pid, signal.SIGTERM)
+                deadline = time.monotonic() + 3
+                while identity_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+
+def test_pre_quiesce_hub_requires_explicit_one_time_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -1444,15 +1844,11 @@ def test_old_v2_zero_worker_hub_is_safely_replaced_by_current(
     shutil.copy2(HERE / "hub.py", hub_path)
     monkeypatch.setenv(transport.SOCKET_ENV, str(socket_path))
     try:
-        client._ensure_current_hub_for_up(socket_path, repo)
-        legacy.wait(timeout=3)
-        response = client._round_trip(socket_path, "hub", ["status"], cwd=repo)
-        current_identity = response["identity"]
-        assert current_identity["protocol_version"] == transport.PROTOCOL_VERSION
-        assert (
-            current_identity["protocol_fingerprint"] == transport.PROTOCOL_FINGERPRINT
-        )
-        assert current_identity["pid"] != old_identity["pid"]
+        with pytest.raises(
+            client.ClientError, match="predates the atomic idle-stop transaction"
+        ):
+            client._ensure_current_hub_for_up(socket_path, repo)
+        assert legacy.poll() is None
     finally:
         if legacy.poll() is None:
             legacy.terminate()

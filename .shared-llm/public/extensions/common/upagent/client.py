@@ -12,7 +12,6 @@ import fcntl
 import importlib.util
 import json
 import os
-import signal
 import stat
 import subprocess
 import sys
@@ -48,6 +47,15 @@ class ClientError(RuntimeError):
     """A Hub discovery, startup, or protocol fault."""
 
 
+def _expected_protocol_fingerprint(cwd: Path) -> str:
+    try:
+        return transport.canonical_protocol_fingerprint(cwd)
+    except transport.ProtocolError:
+        # Explicit socket users may operate outside a git checkout; in that case both client and
+        # Hub come from this one installed runtime directory.
+        return transport.PROTOCOL_FINGERPRINT
+
+
 def _round_trip(
     socket_path: Path,
     target: str,
@@ -55,13 +63,14 @@ def _round_trip(
     *,
     cwd: Path,
     protocol_version: int = transport.PROTOCOL_VERSION,
-    protocol_fingerprint: str = transport.PROTOCOL_FINGERPRINT,
+    protocol_fingerprint: str | None = None,
     caller_context: dict[str, str] | None = None,
     request_stdin: str | None = None,
 ) -> dict[str, Any]:
     request_context = transport.validate_caller_context(
         transport.caller_context() if caller_context is None else caller_context
     )
+    fingerprint = protocol_fingerprint or _expected_protocol_fingerprint(cwd)
     try:
         connection = transport.connect(socket_path)
     except OSError as error:
@@ -74,7 +83,7 @@ def _round_trip(
         transport.write_frame(
             stream,
             {
-                "protocol_fingerprint": protocol_fingerprint,
+                "protocol_fingerprint": fingerprint,
                 "protocol_version": protocol_version,
                 "type": "hello",
             },
@@ -85,7 +94,7 @@ def _round_trip(
         if (
             hello.get("type") != "hello"
             or hello.get("protocol_version") != protocol_version
-            or hello.get("protocol_fingerprint") != protocol_fingerprint
+            or hello.get("protocol_fingerprint") != fingerprint
             or not isinstance(hello.get("identity"), dict)
         ):
             raise ClientError(f"invalid Hub handshake response: {hello}")
@@ -95,7 +104,7 @@ def _round_trip(
                 "argv": argv,
                 "caller_context": request_context,
                 "cwd": str(cwd),
-                "protocol_fingerprint": protocol_fingerprint,
+                "protocol_fingerprint": fingerprint,
                 "protocol_version": protocol_version,
                 "stdin": transport.validate_request_stdin(target, argv, request_stdin),
                 "target": target,
@@ -126,7 +135,7 @@ def _probe_protocol_ready(socket_path: Path, cwd: Path) -> dict[str, Any] | None
         response["exit_code"] != 0
         or not isinstance(identity, dict)
         or identity.get("protocol_version") != transport.PROTOCOL_VERSION
-        or identity.get("protocol_fingerprint") != transport.PROTOCOL_FINGERPRINT
+        or identity.get("protocol_fingerprint") != _expected_protocol_fingerprint(cwd)
         or identity.get("socket_path") != str(socket_path.resolve())
     ):
         return None
@@ -214,6 +223,71 @@ def _migration_guidance(socket_path: Path, reason: str) -> ClientError:
     )
 
 
+def _status_for_incompatible_hub(
+    socket_path: Path, identity: dict[str, Any], cwd: Path
+) -> dict[str, Any]:
+    """Read status using the resident's own handshake before deciding it is safe to replace."""
+    version = identity["protocol_version"]
+    fingerprint = identity.get("protocol_fingerprint")
+    if isinstance(fingerprint, str):
+        return _round_trip(
+            socket_path,
+            "hub",
+            ["status"],
+            cwd=cwd,
+            protocol_version=version,
+            protocol_fingerprint=fingerprint,
+        )
+    return _legacy_status(socket_path, version, cwd)
+
+
+def _active_worker_ids(active_root: Path, socket_path: Path) -> list[str]:
+    try:
+        return [
+            entry.name
+            for entry in active_root.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        ]
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise _migration_guidance(
+            socket_path, f"its active-worker ledger cannot be inspected: {error}"
+        ) from error
+
+
+def _request_idle_stop(
+    socket_path: Path, identity: dict[str, Any], cwd: Path, start_time: str
+) -> dict[str, Any]:
+    fingerprint = identity.get("protocol_fingerprint")
+    instance_id = identity.get("hub_instance_id")
+    if not isinstance(fingerprint, str) or not isinstance(instance_id, str):
+        raise _migration_guidance(
+            socket_path, "its protocol cannot perform a fenced idle-stop transaction"
+        )
+    response = _round_trip(
+        socket_path,
+        "hub",
+        ["stop-if-idle", instance_id, start_time],
+        cwd=cwd,
+        protocol_version=identity["protocol_version"],
+        protocol_fingerprint=fingerprint,
+    )
+    try:
+        decision = json.loads(response["stdout"])
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise _migration_guidance(
+            socket_path, f"its idle-stop response is invalid: {error}"
+        ) from error
+    if (
+        not isinstance(decision, dict)
+        or not isinstance(decision.get("stopping"), bool)
+        or not isinstance(decision.get("activity"), dict)
+    ):
+        raise _migration_guidance(socket_path, "its idle-stop decision is malformed")
+    return decision
+
+
 def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
     """Stop an old canonical zero-worker Hub only after exact live-process verification."""
 
@@ -225,10 +299,9 @@ def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
         raise _migration_guidance(
             socket_path, "its identity has no valid protocol version"
         )
-    if (
-        version == transport.PROTOCOL_VERSION
-        and identity.get("protocol_fingerprint") == transport.PROTOCOL_FINGERPRINT
-    ):
+    if version == transport.PROTOCOL_VERSION and identity.get(
+        "protocol_fingerprint"
+    ) == _expected_protocol_fingerprint(cwd):
         return False
     canonical_hub = transport.canonical_module_path("hub.py", cwd)
     canonical_engine = transport.canonical_module_path("recruiter.py", cwd)
@@ -260,7 +333,7 @@ def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
         raise _migration_guidance(
             socket_path, "the published PID uses a different Python executable"
         )
-    response = _legacy_status(socket_path, version, cwd)
+    response = _status_for_incompatible_hub(socket_path, identity, cwd)
     live_identity = response.get("identity")
     identity_keys = (
         "canonical_engine_path",
@@ -268,6 +341,7 @@ def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
         "hub_path",
         "ledger_path",
         "pid",
+        "protocol_fingerprint",
         "protocol_version",
         "socket_path",
         "started_at_ns",
@@ -290,33 +364,28 @@ def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
             "its active-worker ledger is not the canonical socket-local ledger",
         )
     active_root = expected_ledger / "active" / "requests"
-    try:
-        active_workers = [
-            entry.name
-            for entry in active_root.iterdir()
-            if entry.is_dir() and not entry.name.startswith(".")
-        ]
-    except FileNotFoundError:
-        active_workers = []
-    except OSError as error:
-        raise _migration_guidance(
-            socket_path, f"its active-worker ledger cannot be inspected: {error}"
-        ) from error
+    active_workers = _active_worker_ids(active_root, socket_path)
     if active_workers:
         raise _migration_guidance(
             socket_path,
             f"its ledger records {len(active_workers)} active worker(s)",
         )
-    if transport.process_start_time(pid) != start_time:
+    if version < 5:
         raise _migration_guidance(
-            socket_path, "its PID/start identity changed during verification"
+            socket_path,
+            "its protocol predates the atomic idle-stop transaction",
         )
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as error:
+
+    decision = _request_idle_stop(socket_path, identity, cwd, start_time)
+    if decision["stopping"] is not True:
+        activity = decision["activity"]
+        active_count = len(activity.get("active_requests", []))
+        runner_count = len(activity.get("live_runners", []))
         raise _migration_guidance(
-            socket_path, f"safe SIGTERM failed: {error}"
-        ) from error
+            socket_path,
+            f"its atomic idle check found {active_count} active request(s) and "
+            f"{runner_count} live runner(s); admission was resumed",
+        )
     identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
     deadline = time.monotonic() + MIGRATION_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -327,7 +396,9 @@ def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
         if not socket_path.exists() and not identity_path.exists():
             return True
         time.sleep(0.05)
-    raise _migration_guidance(socket_path, f"PID {pid} did not exit after safe SIGTERM")
+    raise _migration_guidance(
+        socket_path, f"PID {pid} did not exit after its atomic idle-stop decision"
+    )
 
 
 @contextmanager
