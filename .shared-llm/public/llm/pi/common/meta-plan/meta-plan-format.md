@@ -1,6 +1,6 @@
 # Meta plan runnable input format
 
-This format defines the runnable `plan.md` + `route.yaml` input that planners prepare for Herdr. Herdr is the sole active runner. Do not invent a runner-specific plan shape.
+This format defines the runnable `plan.md` + `route.yaml` input that planners prepare for Herdr. The TUI controller is the sole active runner; Herdr supplies its pane transport. Do not invent a runner-specific plan shape.
 
 A runnable meta job is **two files**:
 
@@ -10,7 +10,7 @@ runnable-meta-job/
 └── route.yaml    # who runs it, when it merges, and how finalization proves green
 ```
 
-The runner only starts when both files pass validation. Herdr automatically assigns a 3-hour worker timeout to `stage-1-implementation` and `stage-2-adversarial-audit`; an order may explicitly override it with `timeout_ms`. There is only ever one live route file for a run: `route.yaml`. Conversion may preserve non-runnable drafts for evidence, but `just herdr-start` consumes exactly `plan.md` + `route.yaml`.
+The runner only starts when both files pass validation. The run controller automatically assigns a 3-hour worker timeout to `stage-1-implementation` and `stage-2-adversarial-audit`; an order may explicitly override it with `timeout_ms`. There is only ever one live route file for a run: `route.yaml`. Conversion may preserve non-runnable drafts for evidence, but `just run-start` consumes exactly `plan.md` + `route.yaml`.
 
 ```text
 approved big plan
@@ -24,7 +24,7 @@ cc/do-convert --herdr
           ▼
 internal runnable validation
    │
-   ├── PASS → just herdr-start may start
+   ├── PASS → just run-start may start
    └── DESIGN_REQUIRED / FAIL → human fixes design, plan, or route first
 ```
 
@@ -66,7 +66,7 @@ No model names, harness names, agents, teams, worker rosters, stage routing, bra
 ### Strict body rules (enforced by the runtime validator)
 
 The runtime validator (`meta-plan-schema.ts` — the same `validateRunnable` check
-`/cc-convert --herdr`, `/do-convert --herdr`, and `/herdr-control` run before launching any worker) is the authority, and it is stricter
+`/cc-convert --herdr`, `/do-convert --herdr`, and `/tui-control` run before launching any worker) is the authority, and it is stricter
 than the shape sketch above:
 
 - `##` (H2) headings are for phases ONLY — `## Phase <N> — <title>`, separated by an em dash
@@ -122,7 +122,7 @@ llm_profiles:
 # MUST carry the scope-discipline block from scope-leash.md (same directory) verbatim —
 # it reins in models that write far more code and tests than a stage needs. Route authors
 # set the flag on the profile; phase leaders copy the block into the brief (see
-# /herdr-phase). The flag decides who gets the leash — the rule itself names no model.
+# /phase-leader). The flag decides who gets the leash — the rule itself names no model.
 
 worktree:
   branch_template: tmp-worktree-{date}-{repo}-phase-{phase}-{run_id}
@@ -155,7 +155,7 @@ phases:
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
-      agent: herdr-phase-leader  # the phase-leader controller that runs /herdr-phase
+      agent: phase-leader  # the phase-leader controller that runs /phase-leader
     stages:
       # stage-0-alignment goes here ONLY when accuracy: high — e.g.:
       #   stage-0-alignment:
@@ -224,7 +224,7 @@ llm_profile: <profile from llm_profiles>
 agent: <real configured agent/persona name>
 ```
 
-In a meta run, every `lead.agent` is `herdr-phase-leader`. That dedicated Claude agent runs the `/herdr-phase` controller protocol. `phase-evaluator` remains an optional evidence-only worker that can recommend a verdict to the leader; never use `phase-evaluator` as a lead.
+In a meta run, every `lead.agent` is `phase-leader`. That dedicated Claude agent runs the `/phase-leader` controller protocol. `phase-evaluator` remains an optional evidence-only worker that can recommend a verdict to the leader; never use `phase-evaluator` as a lead.
 
 `runner_adapters` are optional launch hints. They are not part of the required MVP runnable schema.
 
@@ -252,7 +252,7 @@ Stage 2 must be independent from Stage 1 by profile, agent, harness, model famil
 
 ### IaC phases (`kind: iac`)
 
-One terraform layer runs as one ordinary phase; the ladder is reused with IaC meanings. Stage-1 writes the terraform (stage workers stay plan-only: `fmt`, `validate`, `init`, `plan`, `show` — never apply). Stage-2 is the adversarial review of the terraform, best on a different model family. Stage-3 runs init and plan, saves the plan artifact, runs `terraform show -json` over it, and builds the approval table (`just iac-plan-table`; replace is broken out because it destroys and recreates). The leader then publishes a `decision-required` event tagged `iac-approval` and waits on durable answer files. The TUI shows the human the table verbatim, collects the typed destroy total when it is above zero, writes the SHA-bound approval file, performs the apply itself with the saved artifact, and writes the apply receipt (see /herdr-control). Stage-4 is that approved apply, recorded from the receipt. Stage-5 finalizes as usual.
+One terraform layer runs as one ordinary phase; the ladder is reused with IaC meanings. Stage-1 writes the terraform (stage workers stay plan-only: `fmt`, `validate`, `init`, `plan`, `show` — never apply). Stage-2 is the adversarial review of the terraform, best on a different model family. Stage-3 runs init and plan, saves the plan artifact, runs `terraform show -json` over it, and builds the approval table (`just iac-plan-table`; replace is broken out because it destroys and recreates). The leader then publishes a `decision-required` event tagged `iac-approval` and waits on durable answer files. The TUI shows the human the table verbatim, collects the typed destroy total when it is above zero, writes the SHA-bound approval file, performs the apply itself with the saved artifact, and writes the apply receipt (see /tui-control). Stage-4 is that approved apply, recorded from the receipt. Stage-5 finalizes as usual.
 
 IaC layers run strictly in order because a later layer's plan is only truthful after the earlier layer's apply. `parallel_group` is the explicit per-run escape hatch for genuinely independent stacks (urgent fixes) — the human owns that risk.
 
@@ -299,18 +299,18 @@ If merge, checks, log review, or cleanup fails, the runner preserves evidence, k
 ## Check/convert behavior
 
 - `/cc-convert --herdr <approved-plan.md>` and `/do-convert --herdr <approved-plan.md>` convert an approved big plan into a runnable Herdr directory and validate it internally.
-- `just herdr-start <converted-run-dir>` starts the checked run and revalidates before launching `/herdr-control`.
+- `just run-start <converted-run-dir>` starts the checked run and revalidates before launching `/tui-control`.
 
 Conversion preserves the source plan's intent. It must not invent model, harness, profile, agent choices, finalization commands, environment names, account details, URLs, credentials, or deployment gates. If route information is missing, conversion asks the human or returns a non-runnable result; it does not declare a TODO route runnable. Non-interactive conversion still fills `merge_back_at: stage-3-integration-acceptance-seams` as the safe default local seam/contract merge point.
 
 If the approved plan calls for an external candidate gate such as an exact-SHA shared environment check and the public route inputs do not configure that gate, conversion records it as deferred `not-configured` evidence in the conversion receipt/review and stops short of inventing private infrastructure.
 
-## Herdr runner gate
+## Run controller gate
 
-Before execution, Herdr validates both files:
+Before execution, the run controller validates both files:
 
 ```text
-Herdr checks plan.md + route.yaml first
+The run controller checks plan.md + route.yaml first
 ```
 
-Invalid input stops before execution and points the user to check/convert. Herdr does not silently auto-convert at runtime.
+Invalid input stops before execution and points the user to check/convert. The run controller does not silently auto-convert at runtime.

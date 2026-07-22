@@ -78,7 +78,7 @@ skills from `~/.pi/agent/skills/`, not `<repo>/.pi/skills/`.
 - Pi primary workflow commands are `do-plan`, `do-implement`, `do-convert`, and `do-full`.
 - `do-*` remains Pi-only and `cc-*` remains Claude-only. The one-release `meta-plan-convert` and
   `meta-plan-check` aliases are common-route skills, so Codex can still discover those aliases.
-- `just herdr-start` launches the checked pair into internal `/herdr-control`; that controller
-  creates one internal `/herdr-phase` leader per phase. `/herdr-run` is a one-release warning alias.
+- `just run-start` launches the checked pair into internal `/tui-control`; that controller
+  creates one internal `/phase-leader` leader per phase.
 - The redundant `meta-cc-plan-and-grill` wrapper is retired and pruned. `rphase-*`, `cc-loop`, and
   `do-loop` are not installed command surfaces.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable Herdr run lifecycle ownership, snapshot, reconciliation, and cleanup.
+"""Durable run lifecycle ownership, snapshot, reconciliation, and cleanup.
 
 This is a local, file-backed control plane for one run tree. It is deliberately
 conservative: typed receipts beat panes, panes beat prose, and cleanup closes only
@@ -41,23 +41,23 @@ else:
     _runtime_spec.loader.exec_module(command_runtime)
 
 _control_spec = importlib.util.spec_from_file_location(
-    "herdr_run_controller_transport", HERE / "controller_transport.py"
+    "runner_herdr_transport", HERE.parent / "herdr" / "herdr_transport.py"
 )
 if _control_spec is None or _control_spec.loader is None:
-    raise RuntimeError("could not load canonical Herdr controller transport")
+    raise RuntimeError("could not load canonical Herdr transport")
 control = cast(Any, importlib.util.module_from_spec(_control_spec))
 _control_spec.loader.exec_module(control)
 
-SCHEMA = "herdr-run-lifecycle.v1"
-SNAPSHOT_SCHEMA = "herdr-run-snapshot.v1"
-RECONCILE_SCHEMA = "herdr-run-reconciliation.v1"
-CLEANUP_SCHEMA = "herdr-run-cleanup.v1"
+SCHEMA = "run-lifecycle.v1"
+SNAPSHOT_SCHEMA = "run-snapshot.v1"
+RECONCILE_SCHEMA = "run-reconciliation.v1"
+CLEANUP_SCHEMA = "run-cleanup.v1"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 300
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60
-HERDR_RUN_OWNER_TOKEN_ENV = "HERDR_RUN_OWNER_TOKEN"
-HERDR_RUN_OWNER_TOKEN_FILE_ENV = "HERDR_RUN_OWNER_TOKEN_FILE"
-HERDR_RUN_TOKEN_DIR_ENV = "HERDR_RUN_TOKEN_DIR"
-HERDR_RUN_DIR_ENV = "HERDR_RUN_DIR"
+RUNNER_OWNER_TOKEN_ENV = "RUNNER_OWNER_TOKEN"
+RUNNER_OWNER_TOKEN_FILE_ENV = "RUNNER_OWNER_TOKEN_FILE"
+RUNNER_TOKEN_DIR_ENV = "RUNNER_TOKEN_DIR"
+RUNNER_RUN_DIR_ENV = "RUNNER_RUN_DIR"
 SAFE_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 MUTATING_ACTIONS = frozenset(("mutation", "session-start", "stop", "cleanup"))
 READ_ACTIONS = frozenset(("snapshot", "reconcile", "recovery-read"))
@@ -183,11 +183,11 @@ def _token_hash(token: object) -> str | None:
 
 
 def _owner_token_dir() -> Path:
-    configured = os.environ.get(HERDR_RUN_TOKEN_DIR_ENV)
+    configured = os.environ.get(RUNNER_TOKEN_DIR_ENV)
     directory = (
         Path(configured).expanduser()
         if configured
-        else Path(tempfile.gettempdir()) / f"herdr-run-tokens-{os.getuid()}"
+        else Path(tempfile.gettempdir()) / f"runner-tokens-{os.getuid()}"
     )
     return _ensure_private_dir(directory, "owner token directory")
 
@@ -266,10 +266,10 @@ def remove_owner_token_file(run_dir: Path) -> bool:
 
 
 def token_from_env_or_file() -> str | None:
-    token_file = command_runtime.getenv(HERDR_RUN_OWNER_TOKEN_FILE_ENV)
+    token_file = command_runtime.getenv(RUNNER_OWNER_TOKEN_FILE_ENV)
     if token_file:
         return read_owner_token_file(Path(token_file))
-    token = command_runtime.getenv(HERDR_RUN_OWNER_TOKEN_ENV)
+    token = command_runtime.getenv(RUNNER_OWNER_TOKEN_ENV)
     return _validate_token(token) if token else None
 
 
@@ -428,7 +428,7 @@ def _pane_identity_verified(identity: dict[str, Any]) -> tuple[bool, str]:
             .get("result", {})
             .get("process_info", {})
         )
-    except control.ControllerTransportError as error:
+    except control.HerdrTransportError as error:
         return False, f"pane lookup failed: {error}"
     if not isinstance(pane, dict) or pane.get("pane_id", pane_id) != pane_id:
         return False, "pane identity changed"
@@ -650,10 +650,10 @@ def start_background_heartbeat(
 ) -> dict[str, object]:
     env = {
         **os.environ,
-        HERDR_RUN_DIR_ENV: str(run_dir),
-        HERDR_RUN_OWNER_TOKEN_FILE_ENV: str(write_owner_token_file(run_dir, token)),
+        RUNNER_RUN_DIR_ENV: str(run_dir),
+        RUNNER_OWNER_TOKEN_FILE_ENV: str(write_owner_token_file(run_dir, token)),
     }
-    env.pop(HERDR_RUN_OWNER_TOKEN_ENV, None)
+    env.pop(RUNNER_OWNER_TOKEN_ENV, None)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -1299,7 +1299,7 @@ def _request_cwd() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = command_runtime.ArgumentParser(prog="herdr-run-lifecycle")
+    parser = command_runtime.ArgumentParser(prog="run-lifecycle")
     parser.add_argument("--repo", type=Path, default=_request_cwd())
     sub = parser.add_subparsers(dest="command", required=True)
     for name in (
@@ -1350,7 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
             token = token_from_env_or_file()
             if not token:
                 raise LifecycleError(
-                    f"{HERDR_RUN_OWNER_TOKEN_FILE_ENV} or {HERDR_RUN_OWNER_TOKEN_ENV} is required"
+                    f"{RUNNER_OWNER_TOKEN_FILE_ENV} or {RUNNER_OWNER_TOKEN_ENV} is required"
                 )
             result = public_owner_receipt(
                 heartbeat_once(run_dir, token=token, ttl_seconds=args.ttl_seconds)
@@ -1359,7 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
             token = token_from_env_or_file()
             if not token:
                 raise LifecycleError(
-                    f"{HERDR_RUN_OWNER_TOKEN_FILE_ENV} or {HERDR_RUN_OWNER_TOKEN_ENV} is required"
+                    f"{RUNNER_OWNER_TOKEN_FILE_ENV} or {RUNNER_OWNER_TOKEN_ENV} is required"
                 )
             result = heartbeat_loop(
                 run_dir,
@@ -1387,8 +1387,8 @@ def main(argv: list[str] | None = None) -> int:
             result = cleanup(run_dir, repo=repo, token=token)
         else:
             raise AssertionError(args.command)
-    except (LifecycleError, OSError, control.ControllerTransportError) as error:
-        command_runtime.write_stderr(f"herdr-run-lifecycle: {error}\n")
+    except (LifecycleError, OSError, control.HerdrTransportError) as error:
+        command_runtime.write_stderr(f"run-lifecycle: {error}\n")
         return 1
     command_runtime.command_print(json.dumps(result, sort_keys=True))
     return 0

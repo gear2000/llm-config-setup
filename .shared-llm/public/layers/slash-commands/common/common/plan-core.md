@@ -55,5 +55,5 @@ Keep these under the resolved plan directory:
 - This command always grills. Skipping the grill is not a valid default.
 - The adversary is the separate `plan-adversary` persona. Do not reuse the code-focused `adversarial-evaluator`.
 - The reviewer is read-only and writes typed findings only.
-- Do not create `route.yaml`, run `/cc-convert`, run `/do-convert`, run Herdr, start workers, or edit implementation code.
+- Do not create `route.yaml`, run `/cc-convert`, run `/do-convert`, start a managed run, start workers, or edit implementation code.
 - If a conditional design artifact is needed but cannot be resolved from available context and the human, stop with the unresolved fork and evidence rather than inventing architecture.

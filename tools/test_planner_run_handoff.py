@@ -32,7 +32,6 @@ ALIASES = {
     "cc-plan-and-grill": LAYERS / "common/claude/cc-plan-and-grill/command.md",
     "cc-planish": LAYERS / "common/claude/cc-planish/command.md",
     "do-plan-and-grill": LAYERS / "common/common/do-plan-and-grill/command.md",
-    "herdr-run": LAYERS / "common/common/herdr-run/command.md",
     "meta-plan-check": LAYERS / "common/common/meta-plan-check/command.md",
     "meta-plan-convert": LAYERS / "common/common/meta-plan-convert/command.md",
 }
@@ -50,8 +49,8 @@ RETIRED_EXECUTION_INSTRUCTIONS = (
 RETIRED_RUNNER_NAMES = ("Meta-CC", "Meta-ORCH/Pi", "Meta-Herdr")
 META_PLAN_FORMAT = PUBLIC / "llm/pi/common/meta-plan/meta-plan-format.md"
 HERDR_SKILLS = (
-    LAYERS / "common/common/herdr-control/command.md",
-    LAYERS / "common/common/herdr-phase/command.md",
+    LAYERS / "common/common/tui-control/command.md",
+    LAYERS / "common/common/phase-leader/command.md",
 )
 ROOT_JUSTFILE = ROOT / "justfile"
 ADVERSARIAL_EVALUATOR_RECIPE = PUBLIC / "compose/agents/adversarial-evaluator.yaml"
@@ -90,11 +89,11 @@ def test_plan_commands_own_grill_design_and_two_round_plan_adversary() -> None:
 
 
 def test_convert_commands_share_herdr_core_and_design_required_contract() -> None:
-    core = (LAYERS / "common/common/convert-herdr-core.md").read_text()
+    core = (LAYERS / "common/common/plan-conversion-contract.md").read_text()
     for name, path in CONVERT_COMMANDS.items():
         recipe = (RECIPES / f"common/{'claude' if name.startswith('cc-') else 'common'}/{name}.yaml").read_text()
         text = path.read_text() + "\n" + core
-        assert "convert-herdr-core.md" in recipe, name
+        assert "plan-conversion-contract.md" in recipe, name
         assert "--herdr" in text, name
         assert "idempotent" in text, name
         assert "DESIGN_REQUIRED" in text, name
@@ -124,7 +123,7 @@ def test_full_commands_call_each_primitive_exactly_once() -> None:
         text = path.read_text()
         for token in expectations[name]:
             assert text.count(token) == 1, f"{name} should mention {token} exactly once"
-        assert text.count("just herdr-start") == 1, name
+        assert text.count("just run-start") == 1, name
         assert "With neither flag, prompt the human once" in text, name
         assert "Do not run a standalone check command" in text, name
         assert "DESIGN_REQUIRED" in text, name
@@ -137,7 +136,6 @@ def test_aliases_are_warning_delegate_only() -> None:
         assert "alias" in text.lower() or "Deprecated" in text or "deprecated" in text, name
         assert "Do not" in text, name
         assert "route.todo.yaml" not in text, name
-    assert "/herdr-control <same arguments>" in ALIASES["herdr-run"].read_text()
     assert "/cc-plan <same arguments>" in ALIASES["cc-plan-and-grill"].read_text()
     assert "/do-plan <same arguments>" in ALIASES["do-plan-and-grill"].read_text()
     assert "/cc-convert --herdr" in ALIASES["meta-plan-convert"].read_text()
@@ -185,7 +183,8 @@ def test_recipe_inventory_has_new_surface_and_retired_meta_wrapper_removed() -> 
         "do-research",
     }
     assert {"meta-plan-check", "meta-plan-convert"} <= recipes
-    assert {"herdr-control", "herdr-run", "herdr-phase"} <= recipes
+    assert {"tui-control", "phase-leader"} <= recipes
+    assert "herdr-run" not in recipes
     assert "meta-cc-plan-and-grill" not in recipes
     assert not any(name.startswith("rphase-") for name in recipes)
 
@@ -194,10 +193,10 @@ def test_meta_plan_format_names_new_converter_and_controller() -> None:
     source = META_PLAN_FORMAT.read_text()
     for retired_name in RETIRED_RUNNER_NAMES:
         assert retired_name not in source, retired_name
-    assert "Herdr is the sole active runner." in source
+    assert "The TUI controller is the sole active runner; Herdr supplies its pane transport." in source
     assert "cc/do-convert --herdr" in source
-    assert "/herdr-control" in source
-    assert "just herdr-start" in source
+    assert "/tui-control" in source
+    assert "just run-start" in source
     assert "/meta-plan-check" not in source
     assert "/meta-plan-convert" not in source
     assert "/herdr-run" not in source
@@ -228,7 +227,7 @@ def test_composed_plan_adversary_is_separate_from_code_adversary(tmp_path: Path)
     assert "candidate implementation plans" in plan
     assert "Do not suggest implementation patches" in plan
     assert "Do not reuse the code-focused adversarial-evaluator framing" in plan
-    assert "Herdr phase leader" in code
+    assert "phase leader" in code
     assert "candidate implementation plans" not in code
 
 
@@ -265,13 +264,13 @@ def test_active_agents_and_watchers_follow_the_herdr_dispatch_model(
 def test_shared_herdr_protocol_names_new_controller() -> None:
     protocol = (LAYERS / "common/common/meta-runner-phase-protocol.md").read_text()
     assert "transitional `/meta-*` runners" not in protocol
-    assert "/herdr-control" in protocol
+    assert "/tui-control" in protocol
 
 
 def test_public_route_guidance_uses_the_phase_leader_not_the_evaluator() -> None:
     for path in ROUTE_LEAD_EXAMPLES:
         text = path.read_text()
-        assert "agent: herdr-phase-leader" in text, path
+        assert "agent: phase-leader" in text, path
 
     evaluator = PHASE_EVALUATOR_SOURCE.read_text()
     assert "optional, independent **phase evaluator**" in evaluator

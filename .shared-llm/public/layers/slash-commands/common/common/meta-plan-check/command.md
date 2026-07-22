@@ -1,6 +1,6 @@
 # /meta-plan-check
 
-Deprecated one-release alias. Validation is part of `/cc-convert --herdr` and `/do-convert --herdr`, and Herdr rechecks at `just herdr-start`.
+Deprecated one-release alias. Validation is part of `/cc-convert --herdr` and `/do-convert --herdr`, and the run controller rechecks at `just run-start`.
 
 Warn the user:
 
@@ -18,7 +18,7 @@ Then delegate to the matching harness converter when a source plan is provided:
 If only a converted run directory was provided, tell the user to run:
 
 ```text
-just herdr-start <converted-run-dir>
+just run-start <converted-run-dir>
 ```
 
 Do not maintain a separate active checking path in this alias.

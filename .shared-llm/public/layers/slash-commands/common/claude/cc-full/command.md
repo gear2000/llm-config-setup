@@ -17,17 +17,17 @@ Phone-friendly Claude Code composer for the approved plan workflow.
    - `--execute-with-herdr` preselects Herdr conversion/execution.
    - With neither flag, prompt the human once: direct implementation, Herdr execution, or stop after planning.
 4. Direct path: run `/cc-implement <approved-plan.md>` exactly once. Do not convert for Herdr.
-5. Herdr path: run `/cc-convert --herdr <approved-plan.md>` exactly once. If it returns `DESIGN_REQUIRED`, stop and send the work back to the planner with the evidence; do not start Herdr. If conversion passes, run exactly one shell launcher:
+5. Herdr path: run `/cc-convert --herdr <approved-plan.md>` exactly once. If it returns `DESIGN_REQUIRED`, stop and send the work back to the planner with the evidence; do not start the checked run. If conversion passes, run exactly one shell launcher:
 
    ```text
-   just herdr-start <converted-run-dir>
+   just run-start <converted-run-dir>
    ```
 
-6. Report the resulting direct implementation session or Herdr controller name.
+6. Report the resulting direct implementation session or TUI controller name.
 
 ## Hard rules
 
 - Do not implement a second planning review loop here; the planning command owns it.
-- Do not run a standalone check command; conversion validates internally and Herdr rechecks at startup.
+- Do not run a standalone check command; conversion validates internally and the run launcher rechecks at startup.
 - Do not call both execution paths.
 - Execution flags never bypass final human approval of the plan.

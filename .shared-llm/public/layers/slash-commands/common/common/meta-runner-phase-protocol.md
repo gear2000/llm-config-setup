@@ -1,6 +1,6 @@
 # Shared meta-runner phase protocol
 
-This is the shared execution contract for the Herdr-native runners: `/herdr-control` (the TUI) and `/herdr-phase` (the phase leader). It is deliberately generic and public: examples use placeholder model and agent names only.
+This is the shared execution contract for the run controllers: `/tui-control` (the TUI) and `/phase-leader` (the phase leader). It is deliberately generic and public: examples use placeholder model and agent names only.
 
 The defining rule of this protocol: **LLM implementation, audit, verifier, advisor, and consult work is always a work ORDER placed to the UpAgent Recruiter, which hires a fresh worker for it — never a native or nested subagent of the leader.** The ordinary deterministic stages are controller actions with durable result receipts, not native subagents. The phase leader does not call the harness's own agent/task tool to run stage work. It writes durable order/result files, drives the Recruiter over the Herdr socket when a worker is needed, and reads typed worker `result.json`, controller `controller-result.json`, and `phase-result.json` files as the authoritative outcomes. Everything else — the two-file input, the five-stage worktree lifecycle, the Stage 2 audit gate, the adversarial-evaluator persona — is transport-agnostic substrate that survives unchanged.
 
@@ -76,7 +76,7 @@ phases:
     merge_back_at: stage-3-integration-acceptance-seams
     lead:
       llm_profile: claude-low
-      agent: herdr-phase-leader
+      agent: phase-leader
     stages:
       # stage-0-alignment goes here ONLY when accuracy: high (independent from stage-1)
       stage-1-implementation:
@@ -325,7 +325,7 @@ If `merge_back_at` is `stage-4-upstream-dag-verification`, merge the temporary w
 
 For ordinary phases, Stage 4 must not become a per-phase shared-environment, deployment, CI, upstream-DAG, or global acceptance stage. Broad shared acceptance belongs once at candidate level, after planned phase work has accumulated into a candidate branch and the runner has yielded custody to the route-owned candidate-level finalization/gate. If that gate fails later, it returns evidence to the responsible phase and the run replays forward.
 
-Real residual cross-slice production wiring is construction, not verification. Add it as an explicit integration-construction phase only when the plan identifies production code still to write across slices. That phase uses the normal Stage 1 implementation plus Stage 2 independent audit path, then the same deterministic Stage 3/5 checks. Non-ordinary variants keep their explicit contracts; in particular, IaC phases still use the Stage 3 plan/approval table, TUI-owned apply receipt, and Stage 5 finalization described in `/herdr-phase`'s "IaC phases (kind: iac)" section and the meta-plan format's "IaC phases (`kind: iac`)" section.
+Real residual cross-slice production wiring is construction, not verification. Add it as an explicit integration-construction phase only when the plan identifies production code still to write across slices. That phase uses the normal Stage 1 implementation plus Stage 2 independent audit path, then the same deterministic Stage 3/5 checks. Non-ordinary variants keep their explicit contracts; in particular, IaC phases still use the Stage 3 plan/approval table, TUI-owned apply receipt, and Stage 5 finalization described in `/phase-leader`'s "IaC phases (kind: iac)" section and the meta-plan format's "IaC phases (`kind: iac`)" section.
 
 ### Stage 5 — finalization, green checks, log review, and cleanup
 

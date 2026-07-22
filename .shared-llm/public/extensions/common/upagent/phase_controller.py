@@ -535,7 +535,7 @@ def start_phase(
             )
 
         leader_command = (
-            f"/herdr-phase --phase {shlex.quote(phase_id)} --plan {shlex.quote(str(plan_path))} "
+            f"/phase-leader --phase {shlex.quote(phase_id)} --plan {shlex.quote(str(plan_path))} "
             f"--route {shlex.quote(str(route_path))} --run-root {shlex.quote(str(run_root))}"
         )
         lead = cast(dict[str, Any], route["lead"])

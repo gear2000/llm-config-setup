@@ -228,7 +228,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 
 | Name | Description |
 | --- | --- |
-| `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a Herdr phase run. NOT a watchdog and NOT a live… |
+| `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a plan phase. NOT a watchdog and NOT a live monitor —… |
 | `architecture` | Use when designing new modules, defining package boundaries, making architectural decisions, or… |
 | `aws` | AWS infrastructure and operations specialist for architecture, IAM, networking, and evidence-backed… |
 | `backend` | Use when writing or modifying backend services — serverless functions, API routes, or worker… |
@@ -244,19 +244,19 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `intake-clerk` | Normalizes imperfect broker envelopes without inventing or changing task, addressee, or execution… |
 | `monorepo-pkgs` | Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
-| `phase-evaluator` | Optional independent evaluator for one Herdr phase. The phase leader resolves its route profile and… |
+| `phase-evaluator` | Optional independent evaluator for one plan phase. The phase leader resolves its route profile and… |
 | `plan-adversary` | Read-only adversarial reviewer for approved candidate plans. Challenges feasibility, missing… |
-| `plan-watchdog` | Optional Herdr phase plan-conformance advisor. The phase leader resolves the route and sends one… |
+| `plan-watchdog` | Optional plan-phase conformance advisor. The managed phase leader sends one blocking review order… |
 | `playwright-cli` | Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend.… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
 | `reviewer` | Independent read-only reviewer for code, infrastructure, plans, and durable execution evidence. |
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
-| `team-pulse` | Narrow mechanical result watcher for a Herdr run. The TUI agent and phase leader own orchestration;… |
+| `team-pulse` | Narrow mechanical result watcher for a plan run. The TUI agent and phase leader own orchestration;… |
 | `terraform` | Terraform infrastructure specialist that writes and validates IaC, produces plans, and keeps apply… |
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 
-### Slash-command skills (30)
+### Slash-command skills (29)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -278,15 +278,14 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `do-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
 | `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
-| `herdr-control` | Internal Herdr plan controller for a checked runnable `plan.md + route.yaml` pair. Requires… |
-| `herdr-phase` | Run one canonical plan phase as the Herdr-native phase leader, sent to a cockpit pane by… |
-| `herdr-run` | Deprecated one-release alias for internal `/herdr-control`. Warns, then delegates with the same… |
 | `meta-plan-check` | Deprecated alias for the converter's internal validation. Warns, then delegates to `/cc-convert… |
 | `meta-plan-convert` | Deprecated alias for `/cc-convert --herdr` or `/do-convert --herdr`. Warns, then delegates to the… |
+| `phase-leader` | Run one canonical plan phase as the phase leader, sent to a cockpit pane by `/tui-control`.… |
 | `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
 | `security` | Generic security best practices. Use when implementing auth flows, secrets management, IAM… |
+| `tui-control` | Internal TUI plan controller for a checked runnable `plan.md + route.yaml` pair. Requires… |
 | `upagent-cancel` | Authenticate and cancel one active UpAgent request at any lifecycle point using its existing… |
 | `upagent-cleanup` | Dry-run or explicitly apply terminal-only UpAgent history pruning while retaining auditable,… |
 | `upagent-get` | Read one UpAgent request's state, retained result, receipt, and typed artifact pointers, including… |

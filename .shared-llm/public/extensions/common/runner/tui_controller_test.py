@@ -10,30 +10,30 @@ from pathlib import Path
 import pytest
 
 _spec = importlib.util.spec_from_file_location(
-    "herdr_plan_controller_tested", Path(__file__).with_name("plan_controller.py")
+    "herdr_tui_controller_tested", Path(__file__).with_name("tui_controller.py")
 )
 assert _spec and _spec.loader
-plan_controller = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(plan_controller)
-PlanStartError = plan_controller.PlanStartError
+tui_controller = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(tui_controller)
+PlanStartError = tui_controller.PlanStartError
 
 
 @pytest.fixture(autouse=True)
 def _resolved_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
-        plan_controller.run_lifecycle.HERDR_RUN_TOKEN_DIR_ENV, str(tmp_path / "tokens")
+        tui_controller.run_lifecycle.RUNNER_TOKEN_DIR_ENV, str(tmp_path / "tokens")
     )
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_resolve_current_herdr_session_name",
         lambda: "llm-lab-test",
     )
     monkeypatch.setattr(
-        plan_controller.run_lifecycle,
+        tui_controller.run_lifecycle,
         "start_background_heartbeat",
         lambda run_dir, token: {
             "state": "started",
-            "token_sha256": plan_controller.run_lifecycle._token_hash(token),
+            "token_sha256": tui_controller.run_lifecycle._token_hash(token),
         },
     )
 
@@ -88,10 +88,10 @@ def test_main_resolves_relative_run_dir_from_repo(
         return {"state": "ready"}
 
     monkeypatch.chdir(Path(__file__).parent)
-    monkeypatch.setattr(plan_controller, "start_plan", capture_start)
+    monkeypatch.setattr(tui_controller, "start_plan", capture_start)
 
     assert (
-        plan_controller.main(
+        tui_controller.main(
             [run_dir.name, "--repo", str(tmp_path), "--slug", "sample-run"]
         )
         == 0
@@ -106,7 +106,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     run_dir, _ = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_herdr_json",
         lambda *args, **kwargs: {
             "result": {
@@ -119,17 +119,17 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
         },
     )
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_herdr",
         lambda *args, **kwargs: calls.append(args),
     )
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_wait_for_agent_health",
         lambda *args, **kwargs: {"healthy": True},
     )
 
-    tui = plan_controller._create_tui(
+    tui = tui_controller._create_tui(
         repo=tmp_path,
         plan_path=run_dir / "plan.md",
         route_path=run_dir / "route.yaml",
@@ -144,10 +144,10 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
     assert "--remote-control=sample-run" in run_call[3]
-    assert "/herdr-control --plan" in run_call[3]
-    assert "HERDR_RUN_OWNER_TOKEN_FILE=" in run_call[3]
+    assert "/tui-control --plan" in run_call[3]
+    assert "RUNNER_OWNER_TOKEN_FILE=" in run_call[3]
     assert "tok-test" not in run_call[3]
-    token_file = plan_controller.run_lifecycle.owner_token_path(run_dir)
+    token_file = tui_controller.run_lifecycle.owner_token_path(run_dir)
     assert token_file.parent == tmp_path / "tokens"
     assert token_file.read_text().strip() == "tok-test"
     assert oct(token_file.stat().st_mode & 0o777) == "0o600"
@@ -162,7 +162,7 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
     def run_for(harness: str) -> str:
         calls: list[tuple[str, ...]] = []
         monkeypatch.setattr(
-            plan_controller.control,
+            tui_controller.control,
             "_herdr_json",
             lambda *args, **kwargs: {
                 "result": {
@@ -176,16 +176,16 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
             },
         )
         monkeypatch.setattr(
-            plan_controller.control,
+            tui_controller.control,
             "_herdr",
             lambda *args, **kwargs: calls.append(args),
         )
         monkeypatch.setattr(
-            plan_controller.control,
+            tui_controller.control,
             "_wait_for_agent_health",
             lambda *args, **kwargs: {"healthy": True},
         )
-        plan_controller._create_tui(
+        tui_controller._create_tui(
             repo=tmp_path,
             plan_path=run_dir / "plan.md",
             route_path=run_dir / "route.yaml",
@@ -230,14 +230,14 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
             }
         raise AssertionError(args)
 
-    monkeypatch.setattr(plan_controller.control, "_herdr_json", herdr_json)
+    monkeypatch.setattr(tui_controller.control, "_herdr_json", herdr_json)
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_herdr",
         lambda *args, **kwargs: calls.append(args),
     )
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_place_started_agent_in_role_tab",
         lambda pane_id, workspace_id, tab_role, split_direction, **kwargs: (
             placements.append((pane_id, workspace_id, tab_role, split_direction))
@@ -245,12 +245,12 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
         ),
     )
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_wait_for_agent_health",
         lambda *args, **kwargs: {"healthy": True},
     )
 
-    tui = plan_controller._create_tui(
+    tui = tui_controller._create_tui(
         repo=tmp_path,
         plan_path=run_dir / "plan.md",
         route_path=run_dir / "route.yaml",
@@ -287,15 +287,15 @@ def test_separate_workspaces_mode_creates_the_per_run_workspace(
             }
         raise AssertionError(args)
 
-    monkeypatch.setattr(plan_controller.control, "_herdr_json", herdr_json)
-    monkeypatch.setattr(plan_controller.control, "_herdr", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tui_controller.control, "_herdr_json", herdr_json)
+    monkeypatch.setattr(tui_controller.control, "_herdr", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_wait_for_agent_health",
         lambda *args, **kwargs: {"healthy": True},
     )
 
-    tui = plan_controller._create_tui(
+    tui = tui_controller._create_tui(
         repo=tmp_path,
         plan_path=run_dir / "plan.md",
         route_path=run_dir / "route.yaml",
@@ -325,15 +325,15 @@ def test_tui_metadata_failure_closes_created_pane(
             return {"result": {"pane": {}}}
         raise AssertionError(args)
 
-    monkeypatch.setattr(plan_controller.control, "_herdr_json", herdr_json)
+    monkeypatch.setattr(tui_controller.control, "_herdr_json", herdr_json)
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_herdr",
         lambda *args, **kwargs: calls.append(args),
     )
 
     with pytest.raises(PlanStartError, match="has no workspace_id"):
-        plan_controller._create_tui(
+        tui_controller._create_tui(
             repo=tmp_path,
             plan_path=run_dir / "plan.md",
             route_path=run_dir / "route.yaml",
@@ -349,9 +349,9 @@ def test_starts_tui_without_a_watchdog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, roster = _inputs(tmp_path)
-    monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
+    monkeypatch.setattr(tui_controller, "_create_tui", _healthy_tui)
 
-    receipt = plan_controller.start_plan(
+    receipt = tui_controller.start_plan(
         run_dir=run_dir,
         slug="sample-run",
         tui_harness="claude",
@@ -370,7 +370,7 @@ def test_starts_tui_without_a_watchdog(
     assert persisted == receipt
     assert oct((run_dir / "control").stat().st_mode & 0o777) == "0o700"
     with pytest.raises(PlanStartError, match="startup artifacts already exist"):
-        plan_controller.start_plan(
+        tui_controller.start_plan(
             run_dir=run_dir,
             slug="sample-run",
             tui_harness="claude",
@@ -396,18 +396,18 @@ def test_finish_plan_writes_the_terminal_marker_only_after_summary_exists(
     )
 
     with pytest.raises(PlanStartError, match="run summary not found"):
-        plan_controller.finish_plan(
+        tui_controller.finish_plan(
             run_dir=run_dir, slug="sample-run", state="succeeded"
         )
 
     (run_dir / "run-status.md").write_text("# Complete\n")
     with pytest.raises(PlanStartError, match="missing phase result"):
-        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+        tui_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
     phase_result = run_dir / "phases/phase-0/phase-result.json"
     phase_result.parent.mkdir(parents=True)
     phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
-    marker = plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+    marker = tui_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
     assert marker["plan_id"] == "sample-run"
     assert marker["state"] == "succeeded"
@@ -421,14 +421,14 @@ def test_finish_plan_requires_env_or_cli_owner_token_for_new_receipts(
     run_dir, _roster = _inputs(tmp_path)
     control = run_dir / "control"
     control.mkdir()
-    token = plan_controller.uuid.uuid4().hex
+    token = tui_controller.uuid.uuid4().hex
     (control / "plan-start.json").write_text(
         json.dumps(
             {
                 "run_owner": {
                     "generation": 1,
                     "role": "owner",
-                    "token_sha256": plan_controller.run_lifecycle._token_hash(token),
+                    "token_sha256": tui_controller.run_lifecycle._token_hash(token),
                 },
                 "slug": "sample-run",
                 "state": "ready",
@@ -438,24 +438,24 @@ def test_finish_plan_requires_env_or_cli_owner_token_for_new_receipts(
     )
     (run_dir / "run-status.md").write_text("# Stopped\n")
     monkeypatch.delenv(
-        plan_controller.run_lifecycle.HERDR_RUN_OWNER_TOKEN_ENV, raising=False
+        tui_controller.run_lifecycle.RUNNER_OWNER_TOKEN_ENV, raising=False
     )
     monkeypatch.setattr(
-        plan_controller.run_lifecycle,
+        tui_controller.run_lifecycle,
         "guard",
         lambda *args, **kwargs: pytest.fail(
             "finish must not depend on heartbeat guard"
         ),
     )
 
-    with pytest.raises(PlanStartError, match="requires HERDR_RUN_OWNER_TOKEN_FILE"):
-        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+    with pytest.raises(PlanStartError, match="requires RUNNER_OWNER_TOKEN_FILE"):
+        tui_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
     with pytest.raises(PlanStartError, match="does not match"):
-        plan_controller.finish_plan(
+        tui_controller.finish_plan(
             run_dir=run_dir, slug=None, state="stopped", owner_token=f"{token}x"
         )
 
-    marker = plan_controller.finish_plan(
+    marker = tui_controller.finish_plan(
         run_dir=run_dir, slug=None, state="stopped", owner_token=token
     )
 
@@ -469,7 +469,7 @@ def test_finish_plan_accepts_0600_owner_token_file(
     run_dir, _roster = _inputs(tmp_path)
     control = run_dir / "control"
     control.mkdir()
-    token = plan_controller.uuid.uuid4().hex
+    token = tui_controller.uuid.uuid4().hex
     token_file = control / "run-owner.token"
     token_file.write_text(f"{token}\n")
     token_file.chmod(0o600)
@@ -479,7 +479,7 @@ def test_finish_plan_accepts_0600_owner_token_file(
                 "run_owner": {
                     "generation": 1,
                     "role": "owner",
-                    "token_sha256": plan_controller.run_lifecycle._token_hash(token),
+                    "token_sha256": tui_controller.run_lifecycle._token_hash(token),
                 },
                 "slug": "sample-run",
                 "state": "ready",
@@ -489,11 +489,11 @@ def test_finish_plan_accepts_0600_owner_token_file(
     )
     (run_dir / "run-status.md").write_text("# Stopped\n")
     monkeypatch.setenv(
-        plan_controller.run_lifecycle.HERDR_RUN_OWNER_TOKEN_FILE_ENV,
+        tui_controller.run_lifecycle.RUNNER_OWNER_TOKEN_FILE_ENV,
         str(token_file),
     )
 
-    marker = plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+    marker = tui_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
 
     assert marker["state"] == "stopped"
 
@@ -506,7 +506,7 @@ def test_finish_plan_rejects_a_non_object_start_receipt(tmp_path: Path) -> None:
     (control / "plan-start.json").write_text("[]\n")
 
     with pytest.raises(PlanStartError, match="must be an object"):
-        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+        tui_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
 
 
 def test_finish_plan_rejects_missing_tui_session(tmp_path: Path) -> None:
@@ -528,7 +528,7 @@ def test_finish_plan_rejects_missing_tui_session(tmp_path: Path) -> None:
     phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
 
     with pytest.raises(PlanStartError, match="TUI identity"):
-        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+        tui_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
 
 def test_finish_plan_rejects_tui_without_session(tmp_path: Path) -> None:
@@ -547,7 +547,7 @@ def test_finish_plan_rejects_tui_without_session(tmp_path: Path) -> None:
     (run_dir / "run-status.md").write_text("# Complete\n")
 
     with pytest.raises(PlanStartError, match="no recorded Herdr session"):
-        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
+        tui_controller.finish_plan(run_dir=run_dir, slug=None, state="stopped")
 
 
 def test_finish_plan_rejects_tui_session_mismatch(tmp_path: Path) -> None:
@@ -569,7 +569,7 @@ def test_finish_plan_rejects_tui_session_mismatch(tmp_path: Path) -> None:
     phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
 
     with pytest.raises(PlanStartError, match="different Herdr session"):
-        plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+        tui_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
 
 def test_ready_degraded_receipt_with_tui_session_is_finishable(tmp_path: Path) -> None:
@@ -591,7 +591,7 @@ def test_ready_degraded_receipt_with_tui_session_is_finishable(tmp_path: Path) -
     phase_result.parent.mkdir(parents=True)
     phase_result.write_text(json.dumps({"phase_id": "phase-0", "verdict": "passed"}))
 
-    marker = plan_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
+    marker = tui_controller.finish_plan(run_dir=run_dir, slug=None, state="succeeded")
 
     assert marker["plan_id"] == "sample-run"
     assert marker["state"] == "succeeded"
@@ -602,13 +602,13 @@ def test_tui_failure_is_terminal_and_durable(
 ) -> None:
     run_dir, roster = _inputs(tmp_path)
     monkeypatch.setattr(
-        plan_controller,
+        tui_controller,
         "_create_tui",
         lambda **kwargs: (_ for _ in ()).throw(PlanStartError("no TUI process")),
     )
 
     with pytest.raises(PlanStartError, match="no TUI process"):
-        plan_controller.start_plan(
+        tui_controller.start_plan(
             run_dir=run_dir,
             slug="sample-run",
             tui_harness="claude",
@@ -627,15 +627,15 @@ def test_lifecycle_error_during_start_is_durable_failed_not_preparing(
 ) -> None:
     run_dir, roster = _inputs(tmp_path)
     monkeypatch.setattr(
-        plan_controller.run_lifecycle,
+        tui_controller.run_lifecycle,
         "acquire_owner",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            plan_controller.run_lifecycle.LifecycleError("bad lease")
+            tui_controller.run_lifecycle.LifecycleError("bad lease")
         ),
     )
 
     with pytest.raises(PlanStartError, match="bad lease"):
-        plan_controller.start_plan(
+        tui_controller.start_plan(
             run_dir=run_dir,
             slug="sample-run",
             tui_harness="claude",
@@ -652,14 +652,14 @@ def test_start_plan_never_touches_agent_panes_for_notification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, roster = _inputs(tmp_path)
-    monkeypatch.setattr(plan_controller, "_create_tui", _healthy_tui)
+    monkeypatch.setattr(tui_controller, "_create_tui", _healthy_tui)
     monkeypatch.setattr(
-        plan_controller.control,
+        tui_controller.control,
         "_submit_agent_prompt",
         lambda *args, **kwargs: pytest.fail("startup must not inject into panes"),
     )
 
-    receipt = plan_controller.start_plan(
+    receipt = tui_controller.start_plan(
         run_dir=run_dir,
         slug="sample-run",
         tui_harness="claude",

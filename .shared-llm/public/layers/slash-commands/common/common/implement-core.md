@@ -19,7 +19,7 @@ Implement an approved big plan directly in one fresh human-in-the-loop TUI. Do n
 
 ## Hard rules
 
-- Do not call `/cc-convert`, `/do-convert`, `just herdr-start`, `/herdr-control`, or `/herdr-phase`.
-- Do not create `route.yaml` or Herdr phase files.
+- Do not call `/cc-convert`, `/do-convert`, `just run-start`, `/tui-control`, or `/phase-leader`.
+- Do not create `route.yaml` or runner phase files.
 - Do not perform a second planning/adversarial review loop. The input plan is already approved.
 - If the plan reveals a material unresolved architecture or product fork during implementation, stop for the human instead of filling the gap silently.

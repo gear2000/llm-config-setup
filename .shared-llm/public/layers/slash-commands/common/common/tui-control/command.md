@@ -1,17 +1,17 @@
-# /herdr-control
+# /tui-control
 
-Run a checked `plan.md + route.yaml` pair end to end through the Herdr-native meta runner. This is the kickoff command — the **TUI agent** — the one pane you talk to. It sets up the run cockpit, loops the plan's phases, creates one phase leader per phase, and applies phase-level backtracking and escalation. It stays small: it decides only whether a phase re-runs or the run continues, and delegates every hard evaluation to an advisor worker (when configured) rather than doing the work itself.
+Run a checked `plan.md + route.yaml` pair end to end through the TUI controller. This is the kickoff command — the **TUI agent** — the one pane you talk to. It sets up the run cockpit, loops the plan's phases, creates one phase leader per phase, and applies phase-level backtracking and escalation. It stays small: it decides only whether a phase re-runs or the run continues, and delegates every hard evaluation to an advisor worker (when configured) rather than doing the work itself.
 
 ## Invocation
 
 ```text
-/herdr-control --plan <plan.md> --route <route.yaml> [--run-tree <exact-dir> | --run-root <parent-dir>] [--slug <name>] [--start-phase <N>] [--max-phases <N>]
+/tui-control --plan <plan.md> --route <route.yaml> [--run-tree <exact-dir> | --run-root <parent-dir>] [--slug <name>] [--start-phase <N>] [--max-phases <N>]
 ```
 
 - `--plan <plan.md>` — canonical meta plan. Routing stays out of the plan body.
 - `--route <route.yaml>` — route profile with `llm_profiles`, inline `agent` names, per-phase `accuracy`, and optional `advisor_profile`/budgets.
-- `--run-tree <exact-dir>` — exact, already-created run directory containing the supplied `plan.md` and `route.yaml`. `just herdr-start` always supplies this; use it directly and never create another dated/slug directory around it.
-- `--run-root <dir>` — optional root under which the run tree is written. Defaults to the repo's configured work-log root, or a local `./.herdr-runs/` when none is configured.
+- `--run-tree <exact-dir>` — exact, already-created run directory containing the supplied `plan.md` and `route.yaml`. `just run-start` always supplies this; use it directly and never create another dated/slug directory around it.
+- `--run-root <dir>` — optional root under which the run tree is written. Defaults to the repo's configured work-log root, or a local `./.runner-runs/` when none is configured.
 - `--slug <name>` — optional run name. Defaults to a slug derived from the plan title.
 - `--start-phase <N>` — optional phase to start from. Default `0`.
 - `--max-phases <N>` — optional safety cap.
@@ -20,7 +20,7 @@ Run a checked `plan.md + route.yaml` pair end to end through the Herdr-native me
 
 ## Pre-flight
 
-1. Verify `HERDR_ENV=1`. If not, stop with: `ERROR: /herdr-control must run inside a Herdr-managed pane.`
+1. Verify `HERDR_ENV=1`. If not, stop with: `ERROR: /tui-control must run inside a Herdr-managed pane.`
 2. Run `herdr pane list` to identify the current pane — this pane is the **tui-agent** (the top, full-width pane of the cockpit; the one the human talks to). Do not control Herdr from outside Herdr.
 3. Validate the installed Herdr command surface (`herdr workspace list/create`, `herdr pane list/split/run/read/close`, `herdr wait output`, `herdr wait agent-status`). Adapt only after validating any local syntax differences.
 4. Read the plan and route profile and run the same runnable gate used by `/cc-convert --herdr` and `/do-convert --herdr`. If it fails, stop **before** creating any workspace and tell the user to rerun the matching converter or fix the files. The check must confirm: canonical plan shape; `llm_profiles` defined; every phase to run has `lead.llm_profile`, `lead.agent`, `merge_back_at`, and its stage entries; `stage-0-alignment` present iff `accuracy: high` or `max`; when `max`, stage-2 also names a `second_llm_profile` on a different harness or model; worktree branch template, green checks, and log checks configured; all referenced profiles exist; each named agent resolves; Stage 2 (and stage-0's audit when high or max) independent from Stage 1.
@@ -53,9 +53,9 @@ ws: shared-services            ← recruiter, peripheral
 
 Concurrent runs in the single-workspace default share the role tabs (each adds its own
 tui-agent/leader panes); start heavy parallel runs with `--separate-workspaces` when you want
-per-run isolation. The mode is chosen once at `just upagent-up` and inherited by `just herdr-start`.
+per-run isolation. The mode is chosen once at `just upagent-up` and inherited by `just run-start`.
 
-1. The cockpit is the workspace holding this (tui-agent) pane. `just herdr-start` has already created and health-checked this TUI. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` (its `watchdog` block says `not-configured` by design — there is no standing plan-lifecycle-watchdog in coordination v2; a legacy run may still show `ready-degraded`, which is equally continuable). Liveness does not come from an observer agent: this TUI hears every phase condition — completion, blocked, crash, stall, quiet — as the typed return value of its own blocking `upagent-phase-await` call, and urgent unacknowledged events additionally escalate to the human through `herdr notification`. **The TUI has no authority to create, launch, prompt, adopt, or replace a watchdog agent or a phase leader.** Its sole phase-start authority is the controller command in the phase loop below; never attempt an ad-hoc monitoring repair.
+1. The cockpit is the workspace holding this (tui-agent) pane. `just run-start` has already created and health-checked this TUI. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` (its `watchdog` block says `not-configured` by design — there is no standing plan-lifecycle-watchdog in coordination v2; a legacy run may still show `ready-degraded`, which is equally continuable). Liveness does not come from an observer agent: this TUI hears every phase condition — completion, blocked, crash, stall, quiet — as the typed return value of its own blocking `upagent-phase-await` call, and urgent unacknowledged events additionally escalate to the human through `herdr notification`. **The TUI has no authority to create, launch, prompt, adopt, or replace a watchdog agent or a phase leader.** Its sole phase-start authority is the controller command in the phase loop below; never attempt an ad-hoc monitoring repair.
 2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible Recruiter services pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates. There is one service and one door: specialist consultation is an ordinary UpAgent order placed with `just upagent-consult`, and the phone book every stage brief embeds comes from `just upagent-specialists`. A Recruiter that is not up therefore stops mandated consults as well as stage work, so confirm `just upagent-status` now rather than discovering it mid-phase.
 3. Every order includes a `requester` (`id`, `kind`, `address`) and a caller-stable `request_id`; the Hub still assigns/scopes its durable identity. Each phase leader uses its own pane as requester and `cockpit_pane`. The Hub defaults to direct lifecycle: Python validates configuration, atomically starts the worker, returns `worker-healthy` after process/agent/cwd proof, and publishes durable requester mailbox events consumed by `upagent-await` / `upagent-await-any`. A roster may opt into `management.mode: dedicated` for the historical Account Manager pane. The worker itself receives no controller addresses.
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
@@ -72,9 +72,9 @@ per-run isolation. The mode is chosen once at `just upagent-up` and inherited by
 
 For each phase, in canonical order starting at `--start-phase` (respecting `--max-phases`):
 
-1. **Start one complete phase transaction.** Run exactly `just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>` from the TUI pane. This is mandatory, not guidance. Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`, launch an LLM, or `just upagent-request` yourself for phase startup. Do not send `/herdr-phase` to any pane yourself. Those actions create an unmanaged phase and are a protocol violation. Python validates the route and roster, starts the leader behind a filesystem gate, releases and health-checks the leader, updates `active-leader-panes.json`, and atomically writes `<phase>/pass-<n>/control/phase-start.json`.
+1. **Start one complete phase transaction.** Run exactly `just upagent-phase-start <run-tree>/route.yaml <run-tree> <phase-id> <pass-number>` from the TUI pane. This is mandatory, not guidance. Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`, launch an LLM, or `just upagent-request` yourself for phase startup. Do not send `/phase-leader` to any pane yourself. Those actions create an unmanaged phase and are a protocol violation. Python validates the route and roster, starts the leader behind a filesystem gate, releases and health-checks the leader, updates `active-leader-panes.json`, and atomically writes `<phase>/pass-<n>/control/phase-start.json`.
 2. **Require a terminal startup response.** Continue after `PHASE_STARTED` with a live `leader_pane` and `state: ready` (the receipt's `watchdog` block is `not-configured` by design; a legacy `state: ready-degraded` receipt is equally continuable). Any command failure or missing leader means the phase never started; report the recorded cause and stop. The controller closes a gated leader on leader-start failure, but never destroys a previously owned live leader.
-3. **The controller hands the phase to the leader.** The gated launch carries exactly one `/herdr-phase --phase <phase-id> --plan <run-tree>/plan.md --route <run-tree>/route.yaml --run-root <run-tree>` assignment. The leader owns stages, Recruiter orders, stage-level backtracking, and `phase-status.md`.
+3. **The controller hands the phase to the leader.** The gated launch carries exactly one `/phase-leader --phase <phase-id> --plan <run-tree>/plan.md --route <run-tree>/route.yaml --run-root <run-tree>` assignment. The leader owns stages, Recruiter orders, stage-level backtracking, and `phase-status.md`.
 4. **Wait inside the deterministic await — never by watching panes.** After `PHASE_STARTED`, block in exactly one repeated command:
 
    ```bash
@@ -153,7 +153,7 @@ When every in-scope phase has a passing `phase-result.json` (or the human has re
 After that summary exists, you **MUST** publish the terminal lifecycle fact through the controller:
 
 ```bash
-just herdr-run-session-finish <exact-run-tree> succeeded
+just run-session-finish <exact-run-tree> succeeded
 ```
 
 Use `stopped` instead of `succeeded` for any non-successful terminal outcome. This command is
@@ -162,7 +162,7 @@ not write `control/run-terminal.json` yourself. If the command fails, report tha
 failure and do not claim the workspace is safe to close. The marker is the run's only terminal
 authority (any in-flight legacy watchdog also retires from it); quiet panes and completed turns
 are never completion authority.
-The launcher passes `HERDR_RUN_OWNER_TOKEN_FILE` to this TUI, pointing at the run's hashed 0600 file
+The launcher passes `RUNNER_OWNER_TOKEN_FILE` to this TUI, pointing at the run's hashed 0600 file
 under the same-user runtime token directory; do not paste raw owner tokens into shell command lines.
 
 Keep the final TUI message deliberately short. After writing the durable summary, wait a bounded
@@ -195,7 +195,7 @@ the run tree. The terminal message exists solely to make outcome and close-safet
 
 1. Herdr-only: require `HERDR_ENV=1`.
 2. Canonical plan body stays clean; the route profile owns profiles, agents, accuracy, and budgets.
-3. Do not auto-convert at execution time. `/herdr-control` only runs an already-runnable `plan.md + route.yaml`.
+3. Do not auto-convert at execution time. `/tui-control` only runs an already-runnable `plan.md + route.yaml`.
 4. Stage work is done by workers hired through the Recruiter — never by native subagents or Claude team mode. The only exceptions are small, disposable non-stage helpers for watchdog monitoring or static status rendering; they perform no stage work, do not delegate, and return only their alert or artifact path.
 5. The run tree files (`phase-result.json`, `result.json`, the `*-status.md` logs) are the source of truth; pane scrollback is live-view only.
 6. Stay small: decide re-run/continue and delegate hard calls to the advisor when configured.

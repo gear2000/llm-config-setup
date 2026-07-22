@@ -1,22 +1,22 @@
-# /herdr-phase
+# /phase-leader
 
-Run one phase as the Herdr-native **phase leader**. This command is sent to a cockpit pane by `/herdr-control`, once per phase. The leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders with the UpAgent Recruiter — never by spawning a native or nested subagent — and runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence. It applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
+Run one phase as the **phase leader**. This command is sent to a cockpit pane by `/tui-control`, once per phase. The leader runs LLM implementation, audit, verifier, advisor, and consult work by placing work orders with the UpAgent Recruiter — never by spawning a native or nested subagent — and runs ordinary Stage 3 seam checks and Stage 5 finalization as deterministic controller actions with typed evidence. It applies stage-level backtracking and the stage-try budget ladder, maintains `phase-status.md`, and writes `phase-result.json` (the source of truth the TUI reads).
 
 ## Invocation
 
 ```text
-/herdr-phase --phase <phase-id> --plan <plan.md> --route <route.yaml> --run-root <dir>
+/phase-leader --phase <phase-id> --plan <plan.md> --route <route.yaml> --run-root <dir>
 ```
 
 All four flags are required. Fail loud on any missing or unreadable path.
 
 - `--phase` identifies one canonical plan phase, for example `phase-0` or `0`.
 - `--plan` / `--route` are the run-tree frozen copies. During a run, the run-tree `route.yaml` is the only live route: a human profile addition edits that copy only, never the origin.
-- `--run-root` is the run tree root `<run-root>/<date>/<slug>/` that `/herdr-control` created; this leader writes under `phases/<phase-id>/`.
+- `--run-root` is the run tree root `<run-root>/<date>/<slug>/` that `/tui-control` created; this leader writes under `phases/<phase-id>/`.
 
 ## Pre-flight
 
-1. Verify `HERDR_ENV=1`, else stop: `ERROR: /herdr-phase must run inside a Herdr-managed pane.`
+1. Verify `HERDR_ENV=1`, else stop: `ERROR: /phase-leader must run inside a Herdr-managed pane.`
 2. **Inspect controller ownership without making monitoring a work gate.** When `$UPAGENT_PHASE_START_RECEIPT` names a readable `phase-start.json`, record its state (`ready`; the `watchdog` block reads `not-configured` by design — the TUI's blocking `upagent-phase-await` on that same receipt owns liveness, and this leader publishes to its journal via `upagent-phase-publish`). If the variable or receipt is missing or mismatched, append `phase-monitoring: degraded — <reason>` to `phase-status.md` and continue the phase. Do not create, adopt, or repair a watchdog yourself — none exists to repair. Monitoring failure must never become an infinite wait or prevent plan work.
 3. Confirm `just upagent-up` has persisted a live Recruiter in `/tmp/.upagent/recruiter.json` (or `UPAGENT_STATE`). The pane is a visible status surface, not a command mailbox. Determine this leader's OWN pane id — the `cockpit_pane` stamped on every order — from `$HERDR_PANE_ID` (or `herdr pane current`). Do **not** infer it from UI focus.
 4. Validate this phase's route entry:

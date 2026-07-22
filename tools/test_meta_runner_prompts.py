@@ -22,7 +22,7 @@ PI_HUB = REPO_ROOT / ".shared-llm/public/llm/pi/common/meta-plan"
 PHASE_PROTOCOL = LAYERS / "slash-commands/common/common/meta-runner-phase-protocol.md"
 HANDOFF_PROTOCOL = LAYERS / "slash-commands/common/common/meta-runner-handoff-protocol.md"
 COMPOSE_SLASH_COMMANDS = REPO_ROOT / ".shared-llm/public/compose/slash-commands"
-HERDR_PHASE = LAYERS / "slash-commands/common/common/herdr-phase/command.md"
+HERDR_PHASE = LAYERS / "slash-commands/common/common/phase-leader/command.md"
 ADVERSARIAL_EVALUATOR_SRC = LAYERS / "agents/common/adversarial-evaluator.md"
 ADVERSARIAL_EVALUATOR_ARTIFACT = REPO_ROOT / ".claude/agents/adversarial-evaluator.md"
 META_PLAN_FORMAT = PI_HUB / "meta-plan-format.md"
@@ -107,7 +107,7 @@ def test_ordinary_stage4_is_not_per_phase_deployment_or_acceptance() -> None:
     assert "Broad shared acceptance belongs once at candidate level" in text
     assert "route-owned candidate-level finalization/gate" in text
     assert "TUI-owned apply receipt" in text
-    assert "/herdr-phase`'s \"IaC phases (kind: iac)\" section" in text
+    assert "/phase-leader`'s \"IaC phases (kind: iac)\" section" in text
     assert "meta-plan format's \"IaC phases (`kind: iac`)\" section" in text
     assert "described below" not in text
     assert "Stage 4 — upstream DAG dependent build/deploy/test verification" not in text

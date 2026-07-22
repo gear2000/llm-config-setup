@@ -506,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         "phase-controller",
         "phase-await",
         "direct-controller",
-        "plan-controller",
+        "tui-controller",
         "run-lifecycle",
         "hub",
     }

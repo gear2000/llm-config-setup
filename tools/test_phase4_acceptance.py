@@ -88,8 +88,8 @@ SECOND_HUB_COMMAND = "specialist-hub"
 _LAYERS = ".shared-llm/public/layers/slash-commands/common/common"
 # The documents that tell an agent which commands to run.
 PROTOCOL_DOCS = (
-    f"{_LAYERS}/herdr-phase/command.md",
-    f"{_LAYERS}/herdr-control/command.md",
+    f"{_LAYERS}/phase-leader/command.md",
+    f"{_LAYERS}/tui-control/command.md",
     f"{_LAYERS}/meta-runner-phase-protocol.md",
 )
 # The gates that must still pass through whichever module owns the capability after the move.
@@ -580,17 +580,17 @@ def demolished(tmp_path: Path) -> Path:
         "upagent-consult *A:\n"
         "    python3 {{_UPAGENT}} consult {{A}}\n",
     )
-    _write(ext / "common/herdr/plan_controller.py", _ENGINE_STUB)
+    _write(ext / "common/runner/tui_controller.py", _ENGINE_STUB)
     _write(
-        ext / "common/herdr/justfile",
-        "herdr-start D:\n"
+        ext / "common/runner/justfile",
+        "run-start D:\n"
         "    python3 {{justfile_directory()}}/.shared-llm/public/extensions/"
-        "common/herdr/plan_controller.py {{D}}\n",
+        "common/runner/tui_controller.py {{D}}\n",
     )
     _write(
         root / "justfile",
         "import '.shared-llm/public/extensions/common/upagent/justfile'\n"
-        "import '.shared-llm/public/extensions/common/herdr/justfile'\n"
+        "import '.shared-llm/public/extensions/common/runner/justfile'\n"
         "\n"
         "default:\n"
         "    @just --list\n",

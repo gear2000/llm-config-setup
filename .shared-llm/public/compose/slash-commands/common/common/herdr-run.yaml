@@ -1,8 +1,0 @@
-type: skill
-name: herdr-run
-description: .shared-llm/public/layers/slash-commands/common/common/herdr-run/description.md
-frontmatter:
-  argument-hint: "--plan <plan.md> --route <route.yaml> [--run-tree <exact-dir> | --run-root <parent-dir>] [--slug <name>] [--start-phase <N>] [--max-phases <N>]"
-inputs:
-  - .shared-llm/public/layers/slash-commands/common/common/herdr-run/command.md
-output: .claude/skills/herdr-run/SKILL.md

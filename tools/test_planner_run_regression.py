@@ -32,9 +32,8 @@ PI_SKILLS = {
     "do-plan-and-grill": ".pi-skills/do-plan-and-grill/SKILL.md",
 }
 COMMON_REQUIRED_SKILLS = {
-    "herdr-control": ".claude/skills/herdr-control",
-    "herdr-phase": ".claude/skills/herdr-phase",
-    "herdr-run": ".claude/skills/herdr-run",
+    "tui-control": ".claude/skills/tui-control",
+    "phase-leader": ".claude/skills/phase-leader",
     "meta-plan-check": ".claude/skills/meta-plan-check",
     "meta-plan-convert": ".claude/skills/meta-plan-convert",
 }
@@ -53,7 +52,7 @@ FORBIDDEN_SKILL_NAMES = {
     "meta-cc-plan-and-grill",
     "meta-connect",
     "meta-herdr",
-    "meta-herdr-phase",
+    "meta-phase-leader",
     "meta-response",
     "meta-run",
     "rphase-create",
@@ -111,7 +110,7 @@ def _add_repository_overlay(destination: Path) -> None:
     )
     _write(
         overlay / "layers/agents/this_repo/plan-watchdog.md",
-        "Repository-specific reporting stays with the Herdr TUI agent.\n",
+        "Repository-specific reporting stays with the TUI agent.\n",
     )
     _write(
         overlay / "compose/agents/plan-watchdog.yaml",
@@ -179,8 +178,8 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
     assert "Do not create `route.yaml`" in (destination / ".pi-skills/do-plan/SKILL.md").read_text()
     assert "DESIGN_REQUIRED" in (destination / ".claude/skills/cc-convert/SKILL.md").read_text()
     assert "DESIGN_REQUIRED" in (destination / ".pi-skills/do-convert/SKILL.md").read_text()
-    assert "just herdr-start" in (destination / ".claude/skills/herdr-control/SKILL.md").read_text()
-    assert "/herdr-control <same arguments>" in (destination / ".claude/skills/herdr-run/SKILL.md").read_text()
+    assert "just run-start" in (destination / ".claude/skills/tui-control/SKILL.md").read_text()
+    assert not (destination / ".claude/skills/herdr-run").exists()
     assert not (destination / ".claude/skills/meta-cc-plan-and-grill").exists()
 
     active = _active_artifacts(destination)

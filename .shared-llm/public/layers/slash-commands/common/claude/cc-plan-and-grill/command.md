@@ -14,4 +14,4 @@ Then delegate to:
 /cc-plan <same arguments>
 ```
 
-Do not create `route.yaml`, run conversion, run a separate check, implement, or start Herdr in this alias.
+Do not create `route.yaml`, run conversion, run a separate check, implement, or start the checked run in this alias.

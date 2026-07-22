@@ -1,4 +1,4 @@
-"""Static contract test for generated Herdr phase-worker instructions."""
+"""Static contract test for generated plan phase-worker instructions."""
 
 import re
 import subprocess
@@ -7,27 +7,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL = (
     ROOT
-    / ".shared-llm/public/layers/slash-commands/common/common/herdr-phase/command.md"
+    / ".shared-llm/public/layers/slash-commands/common/common/phase-leader/command.md"
 )
-RUNNER = PROTOCOL.parent.parent / "herdr-control/command.md"
+RUNNER = PROTOCOL.parent.parent / "tui-control/command.md"
 SHARED_PROTOCOL = PROTOCOL.parent.parent / "meta-runner-phase-protocol.md"
 EXTENSIONS = ROOT / ".shared-llm/public/extensions"
+RUNNER_JUSTFILE = EXTENSIONS / "common/runner/justfile"
 HERDR_JUSTFILE = EXTENSIONS / "common/herdr/justfile"
-PLAN_CONTROLLER = HERDR_JUSTFILE.with_name("plan_controller.py")
+PLAN_CONTROLLER = RUNNER_JUSTFILE.with_name("tui_controller.py")
 SERVICE_RECIPES = {"upagent-up", "upagent-status", "upagent-down"}
 REMOVED_SERVICE_RECIPES = {"herdr-up", "herdr-status", "herdr-down"}
-GENUINE_HERDR_RECIPES = {
-    "herdr-start",
-    "herdr-plan",
-    "herdr-run-session-finish",
-    "herdr-run-session-start",
-    "herdr-run-session-heartbeat",
-    "herdr-run-session-snapshot",
-    "herdr-run-session-reconcile",
-    "herdr-run-session-guard",
-    "herdr-run-session-cleanup",
-    "herdr-lab",
+RUNNER_RECIPES = {
+    "run-start",
+    "run-session-finish",
+    "run-session-start",
+    "run-session-heartbeat",
+    "run-session-snapshot",
+    "run-session-reconcile",
+    "run-session-guard",
+    "run-session-cleanup",
 }
+GENUINE_HERDR_RECIPES = {"herdr-lab"}
 
 # A runnable command in these documents is always in code formatting, so the extraction reads
 # inline code spans and fenced blocks only — never bare prose, where "just to pass tests" is
@@ -138,7 +138,7 @@ def test_tui_runs_one_managed_phase_start_without_a_watchdog() -> None:
         "Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`" in text
     )
     assert "This is mandatory, not guidance." in text
-    assert "Do not send `/herdr-phase` to any pane yourself." in text
+    assert "Do not send `/phase-leader` to any pane yourself." in text
 
 
 def test_tui_final_message_is_short_and_unambiguous() -> None:
@@ -157,7 +157,7 @@ def test_tui_final_message_is_short_and_unambiguous() -> None:
 
 def test_plan_launcher_owns_tui_startup_and_never_hires_a_watchdog() -> None:
     runner = RUNNER.read_text()
-    launcher = HERDR_JUSTFILE.read_text()
+    launcher = RUNNER_JUSTFILE.read_text()
     controller = PLAN_CONTROLLER.read_text()
 
     assert "There is no standing plan watchdog" in launcher
@@ -168,13 +168,13 @@ def test_plan_launcher_owns_tui_startup_and_never_hires_a_watchdog() -> None:
         "The TUI has no authority to create, launch, prompt, adopt, or replace a "
         "watchdog agent or a phase leader." in runner
     )
-    assert "plan_controller.py" in launcher
+    assert "--target tui-controller" in launcher
     assert 'herdr pane run "$pane"' not in launcher
     assert "--run-tree" in controller
-    assert "/herdr-control --plan" in controller
-    assert "HERDR_RUN_OWNER_TOKEN_FILE" in controller
-    assert "HERDR_RUN_OWNER_TOKEN=" not in controller
-    assert '--working-directory "{{invocation_directory()}}"' in launcher
+    assert "/tui-control --plan" in controller
+    assert "RUNNER_OWNER_TOKEN_FILE" in controller
+    assert "RUNNER_OWNER_TOKEN=" not in controller
+    assert '--repo "{{invocation_directory()}}"' in launcher
     assert "_submit_agent_prompt" not in controller
     assert "plan-lifecycle-watchdog" not in controller
     assert 'recruiter._herdr("agent", "send"' not in controller
@@ -324,7 +324,7 @@ def test_every_command_the_protocol_names_resolves_to_a_real_recipe() -> None:
     )
 
 
-def test_upagent_owns_service_lifecycle_and_herdr_keeps_runner_commands() -> None:
+def test_upagent_owns_services_runner_owns_runs_and_herdr_keeps_lab_commands() -> None:
     summary = subprocess.run(
         ["just", "--justfile", str(ROOT / "justfile"), "--summary"],
         check=True,
@@ -335,8 +335,9 @@ def test_upagent_owns_service_lifecycle_and_herdr_keeps_runner_commands() -> Non
 
     assert defined >= SERVICE_RECIPES
     assert not REMOVED_SERVICE_RECIPES & defined
-    assert defined >= GENUINE_HERDR_RECIPES
+    assert defined >= RUNNER_RECIPES | GENUINE_HERDR_RECIPES
     assert {_defining_module(recipe) for recipe in SERVICE_RECIPES} == {"upagent"}
+    assert {_defining_module(recipe) for recipe in RUNNER_RECIPES} == {"runner"}
     assert {_defining_module(recipe) for recipe in GENUINE_HERDR_RECIPES} == {"herdr"}
 
     upagent_justfile = EXTENSIONS / "common/upagent/justfile"
@@ -384,7 +385,7 @@ def test_every_service_the_runner_health_checks_is_started_by_upagent_up() -> No
 
 def test_workspace_mode_defaults_to_single_and_flag_restores_separate() -> None:
     runner = RUNNER.read_text()
-    launcher = HERDR_JUSTFILE.read_text()
+    launcher = RUNNER_JUSTFILE.read_text()
     controller = PLAN_CONTROLLER.read_text()
 
     assert "ws: herdr" in runner
@@ -396,7 +397,7 @@ def test_workspace_mode_defaults_to_single_and_flag_restores_separate() -> None:
 
 def test_claude_tui_always_launches_with_remote_control() -> None:
     controller = PLAN_CONTROLLER.read_text()
-    launcher = HERDR_JUSTFILE.read_text()
+    launcher = RUNNER_JUSTFILE.read_text()
 
     assert "--remote-control=" in controller
     assert "--remote-control=<slug>" in launcher

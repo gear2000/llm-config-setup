@@ -42,18 +42,18 @@ else:
     _runtime_spec.loader.exec_module(command_runtime)
 
 _control_spec = importlib.util.spec_from_file_location(
-    "herdr_controller_transport", HERE / "controller_transport.py"
+    "runner_herdr_transport", HERE.parent / "herdr" / "herdr_transport.py"
 )
 if _control_spec is None or _control_spec.loader is None:
-    raise RuntimeError("could not load canonical Herdr controller transport")
+    raise RuntimeError("could not load canonical Herdr transport")
 control = cast(Any, importlib.util.module_from_spec(_control_spec))
 _control_spec.loader.exec_module(control)
 
 _lifecycle_spec = importlib.util.spec_from_file_location(
-    "herdr_run_lifecycle", HERE / "run_lifecycle.py"
+    "runner_run_lifecycle", HERE / "run_lifecycle.py"
 )
 if _lifecycle_spec is None or _lifecycle_spec.loader is None:
-    raise RuntimeError("could not load Herdr run lifecycle")
+    raise RuntimeError("could not load run lifecycle")
 run_lifecycle = cast(Any, importlib.util.module_from_spec(_lifecycle_spec))
 _lifecycle_spec.loader.exec_module(run_lifecycle)
 
@@ -213,7 +213,7 @@ def _create_tui(
         # Remote Control session named after the run (= form keeps the trailing prompt
         # argument from being read as the session name).
         launch += (
-            f" --remote-control={shlex.quote(_safe_name(slug) or 'herdr-control')}"
+            f" --remote-control={shlex.quote(_safe_name(slug) or 'tui-control')}"
         )
     herdr_session = control._resolve_current_herdr_session_name()
     pane_id: str | None = None
@@ -247,12 +247,12 @@ def _create_tui(
     )
     env_prefix = " ".join(
         [
-            f"{run_lifecycle.HERDR_RUN_DIR_ENV}={shlex.quote(str(plan_path.parent))}",
-            f"{run_lifecycle.HERDR_RUN_OWNER_TOKEN_FILE_ENV}={shlex.quote(str(owner_token_file))}",
+            f"{run_lifecycle.RUNNER_RUN_DIR_ENV}={shlex.quote(str(plan_path.parent))}",
+            f"{run_lifecycle.RUNNER_OWNER_TOKEN_FILE_ENV}={shlex.quote(str(owner_token_file))}",
         ]
     )
     command = f"cd {shlex.quote(str(repo))} && {env_prefix} {launch} " + shlex.quote(
-        f"/herdr-control --plan {plan_path} --route {route_path} "
+        f"/tui-control --plan {plan_path} --route {route_path} "
         f"--run-tree {plan_path.parent} --slug {slug}"
     )
     try:
@@ -308,7 +308,7 @@ def _create_tui(
         process_pid = health.get("process_pid")
         if isinstance(process_pid, int):
             health["process_start_time"] = control._process_start_time(process_pid)
-    except (OSError, PlanStartError, control.ControllerTransportError) as error:
+    except (OSError, PlanStartError, control.HerdrTransportError) as error:
         cleanup_error: str | None = None
         try:
             # Close the workspace only when this startup created it; a reused unified
@@ -319,7 +319,7 @@ def _create_tui(
                 )
             elif isinstance(pane_id, str) and pane_id:
                 control._herdr("pane", "close", pane_id, herdr_session=herdr_session)
-        except control.ControllerTransportError as cleanup:
+        except control.HerdrTransportError as cleanup:
             cleanup_error = str(cleanup)
         detail = f"TUI startup failed: {error}"
         if cleanup_error is not None:
@@ -349,7 +349,7 @@ def finish_plan(
     state: str,
     owner_token: str | None = None,
 ) -> dict[str, object]:
-    """Publish the durable plan terminal fact that authorizes watchdog cleanup."""
+    """Publish the durable plan terminal fact that authorizes run cleanup."""
     if not run_dir.is_absolute() or not run_dir.is_dir():
         raise PlanStartError(
             f"run dir must be an existing absolute directory: {run_dir}"
@@ -382,7 +382,7 @@ def finish_plan(
         token = owner_token or run_lifecycle.token_from_env_or_file()
         if not token:
             raise PlanStartError(
-                "finish requires HERDR_RUN_OWNER_TOKEN_FILE, HERDR_RUN_OWNER_TOKEN, "
+                "finish requires RUNNER_OWNER_TOKEN_FILE, RUNNER_OWNER_TOKEN, "
                 "--owner-token-file, or --owner-token"
             )
         if run_lifecycle._token_hash(token) != run_owner.get("token_sha256"):
@@ -575,7 +575,7 @@ def _start_plan_locked(
     except (
         OSError,
         PlanStartError,
-        control.ControllerTransportError,
+        control.HerdrTransportError,
         run_lifecycle.LifecycleError,
     ) as error:
         with suppress(run_lifecycle.LifecycleError):
@@ -643,7 +643,7 @@ def _request_cwd() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = command_runtime.ArgumentParser(prog="herdr-start")
+    parser = command_runtime.ArgumentParser(prog="run-start")
     parser.add_argument(
         "run_dir", type=Path, help="directory containing plan.md and route.yaml"
     )
@@ -656,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--finish-state", choices=PLAN_TERMINAL_STATES)
     parser.add_argument(
         "--owner-token",
-        help="run owner token for --finish-state; prefer --owner-token-file or HERDR_RUN_OWNER_TOKEN_FILE",
+        help="run owner token for --finish-state; prefer --owner-token-file or RUNNER_OWNER_TOKEN_FILE",
     )
     parser.add_argument(
         "--owner-token-file",
@@ -711,10 +711,10 @@ def main(argv: list[str] | None = None) -> int:
     except (
         OSError,
         PlanStartError,
-        control.ControllerTransportError,
+        control.HerdrTransportError,
         run_lifecycle.LifecycleError,
     ) as error:
-        sys.exit(f"herdr-start: {error}")
+        sys.exit(f"run-start: {error}")
     command_runtime.command_print(
         f"PLAN_STARTED {json.dumps(result, sort_keys=True)}", flush=True
     )

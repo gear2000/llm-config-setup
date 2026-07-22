@@ -1,1 +1,1 @@
-Phone-friendly Claude Code composer: run `/cc-plan` exactly once, then either `/cc-implement` once for direct work or `/cc-convert --herdr` once plus `just herdr-start` once. Prompts for mode when no execution flag is supplied.
+Phone-friendly Claude Code composer: run `/cc-plan` exactly once, then either `/cc-implement` once for direct work or `/cc-convert --herdr` once plus `just run-start` once. Prompts for mode when no execution flag is supplied.

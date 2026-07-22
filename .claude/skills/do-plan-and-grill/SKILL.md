@@ -1,6 +1,6 @@
 ---
 name: do-plan-and-grill
-description: Deprecated alias for `/do-plan`. Warns, then delegates to the new Pi planning front door; it no longer creates `route.yaml`, checks, implements, or starts Herdr.
+description: Deprecated alias for `/do-plan`. Warns, then delegates to the new Pi planning front door; it no longer creates `route.yaml`, checks, implements, or starts the checked run.
 ---
 
 # /do-plan-and-grill
@@ -19,4 +19,4 @@ Then delegate to:
 /do-plan <same arguments>
 ```
 
-Do not create `route.yaml`, run conversion, run a separate check, implement, or start Herdr in this alias.
+Do not create `route.yaml`, run conversion, run a separate check, implement, or start the checked run in this alias.

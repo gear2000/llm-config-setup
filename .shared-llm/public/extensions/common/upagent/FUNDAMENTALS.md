@@ -204,20 +204,20 @@ policy.
 Plan startup is one deterministic transaction; liveness comes from blocking awaits, not observers:
 
 ```text
-just herdr-start <run-dir>
+just run-start <run-dir>
 └─ PYTHON PLAN CONTROLLER
    ├─ takes an exclusive run-start lock
    ├─ creates and health-checks the TUI in a fresh cockpit
    ├─ names the TUI/leader tab `control`
    ├─ writes a per-run hashed 0600 token file under the same-user 0700 runtime token directory
-   ├─ passes HERDR_RUN_OWNER_TOKEN_FILE, not a raw token, to the TUI
+   ├─ passes RUNNER_OWNER_TOKEN_FILE, not a raw token, to the TUI
    ├─ writes control/plan-start.json with the TUI address
    └─ writes control/plan-start.json (watchdog block: `not-configured` by design)
    ...
    TUI per phase: upagent-phase-start → blocking upagent-phase-await loop
    ...
    └─ TUI writes the final run-status.md
-      └─ just herdr-run-session-finish <run-dir> succeeded|stopped
+      └─ just run-session-finish <run-dir> succeeded|stopped
          ├─ atomically writes control/run-terminal.json
          ├─ fences stale owners by token hash
          └─ cleanup closes only structurally owned, identity-verified panes
@@ -243,9 +243,9 @@ end this lifecycle. The plan controller requires the final run summary before it
 terminal marker.
 
 Recovery is deliberate. A second launcher that finds a fresh live owner becomes an observer; a
-stale owner still requires `just herdr-run-session-snapshot <run-dir>` and
-`just herdr-run-session-reconcile <run-dir>` before takeover. Mutating commands read the owner
-token from `HERDR_RUN_OWNER_TOKEN_FILE` or an explicit `--token-file`; `--token-stdin` is
+stale owner still requires `just run-session-snapshot <run-dir>` and
+`just run-session-reconcile <run-dir>` before takeover. Mutating commands read the owner
+token from `RUNNER_OWNER_TOKEN_FILE` or an explicit `--token-file`; `--token-stdin` is
 supported only by the `guard` and `cleanup` lifecycle operations for one-off recovery. The thin
 client reads it into bounded request-local transport input, and the Hub target never reads process
 stdin. Avoid passing raw owner tokens in process command lines.

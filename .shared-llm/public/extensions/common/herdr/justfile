@@ -1,86 +1,11 @@
-# Herdr runner entry module — justfile-driven bring-up and plan kickoff.
+# Herdr communication-channel tools.
 #
-# Herdr runs agents NATIVELY in panes (visible TUIs, agent-status tracked in the
-# sidebar); nothing here ever runs a harness headless. These recipes are the
-# alternative entry point to starting Claude Code / Pi by hand and typing the
-# slash command — `just` drives the Herdr socket directly.
-#
-# This module is PUBLIC (kit-synced) and lands in a destination at
-#   .shared-llm/public/extensions/common/herdr/
-# To adopt, import it (plus its sibling engine) from your root justfile:
-#   import '.shared-llm/public/extensions/common/upagent/justfile'
-#   import '.shared-llm/public/extensions/common/herdr/justfile'
-#
-# Requires the `herdr` CLI on PATH with a running Herdr. The engines are driven
-# over the Herdr unix socket, so these work from any shell (HERDR_ENV is set
-# explicitly where an engine insists on it).
-#
-# FUTURE: a `herdr-start-from-issue <github-or-linear-ref>` recipe can fetch the
-# plan/details from a GitHub or Linear issue into a run dir (plan.md +
-# route.yaml) and then delegate to `herdr-start` — the kickoff below stays the
-# single entry seam, so issue-driven runs are an additive fetcher, not a fork.
+# This module contains only operations that directly exercise Herdr sessions.
+# Run orchestration lives in extensions/common/runner/justfile.
 
-_UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/client.py"
-# plan_controller.py and run_lifecycle.py execute only as canonical Hub controller targets.
 _HERDR_LAB := justfile_directory() + "/.shared-llm/public/extensions/common/herdr/lab_session.py"
 
-# Kick off a checked plan through one deterministic Python transaction. It starts
-# and health-checks a FRESH TUI — nothing else. There is no standing plan watchdog:
-# the TUI hears every phase condition as the typed return of its blocking
-# `upagent-phase-await`, and urgent unacknowledged events escalate to the human via
-# `herdr notification`. Run `just upagent-up` first.
-#
-# The TUI is launched fully NON-INTERACTIVE (claude --dangerously-skip-permissions
-# / pi --approve) — it trusts its cwd and never blocks on a trust/permission dialog
-# — and the harness self-registers as a Herdr agent (name `tui-agent`), so it shows
-# up in the agents sidebar and in Herdr's remote/phone agent list for you to watch
-# and drive on the move. A Claude Code TUI ADDITIONALLY always starts with Claude's
-# own Remote Control (`--remote-control=<slug>`), so the session appears in the
-# claude.ai phone list under the run's name.
-#
-# The TUI joins the unified `herdr` workspace as a `control` tab by default; it
-# inherits `--separate-workspaces` (per-run `<slug>` workspace) when `upagent-up`
-# chose that mode, or when passed here explicitly.
-#
-#   just herdr-start ops/work-log/2026-07-12/my-feature
-#   just herdr-start ops/work-log/2026-07-12/my-feature/plan/v1 my-feature
-#   just herdr-start ops/work-log/2026-07-12/my-feature "" pi
-herdr-start dir slug="" harness="claude" *FLAGS="":
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target plan-controller "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}" {{FLAGS}}
-
-# One-release warning alias for the old launcher name.
-herdr-plan dir slug="" harness="claude" *FLAGS="":
-    @echo "WARNING: just herdr-plan is deprecated; use 'just herdr-start <converted-run-dir>'." >&2
-    @{{just_executable()}} --working-directory "{{invocation_directory()}}" --justfile "{{justfile()}}" herdr-start "{{dir}}" "{{slug}}" "{{harness}}" {{FLAGS}}
-
-# Publish the plan's durable terminal fact after run-status.md is complete. It is the run's
-# only terminal authority (and lets any in-flight legacy watchdog retire safely).
-herdr-run-session-finish dir state slug="" owner_token_file="":
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target plan-controller "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}" {{ if owner_token_file != "" { "--owner-token-file " + quote(owner_token_file) } else { "" } }}
-
-# Durable run lifecycle operations. `session-start` acquires or observes, `heartbeat` refreshes
-# the owner token, `snapshot` is read-only, `reconcile` writes the typed recovery receipt,
-# `guard` refuses blind mutation, and `cleanup` preserves anything not structurally owned.
-herdr-run-session-start dir *FLAGS:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" session-start "{{dir}}" {{FLAGS}}
-
-herdr-run-session-heartbeat dir *FLAGS:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" heartbeat "{{dir}}" {{FLAGS}}
-
-herdr-run-session-snapshot dir:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" snapshot "{{dir}}"
-
-herdr-run-session-reconcile dir:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" reconcile "{{dir}}"
-
-herdr-run-session-guard dir action token_file="":
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" guard "{{dir}}" --action "{{action}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
-
-herdr-run-session-cleanup dir token_file="":
-    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" cleanup "{{dir}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
-
 # Guarded non-default Herdr lab/session helper for smoke tests.
-# Generate a name first, then provision/run/teardown through that exact name:
 #   just herdr-lab name smoke
 #   just herdr-lab provision <generated-session>
 #   just herdr-lab run <generated-session> workspace list

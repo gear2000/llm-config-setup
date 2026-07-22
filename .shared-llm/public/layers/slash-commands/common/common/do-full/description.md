@@ -1,1 +1,1 @@
-Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for direct work or `/do-convert --herdr` once plus `just herdr-start` once. Prompts for mode when no execution flag is supplied.
+Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for direct work or `/do-convert --herdr` once plus `just run-start` once. Prompts for mode when no execution flag is supplied.

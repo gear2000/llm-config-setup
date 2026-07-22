@@ -120,8 +120,8 @@ def test_caller_context_is_strictly_whitelisted_and_validated(
         "HERDR_PANE_ID": "caller-pane",
         "HERDR_SESSION": "caller-session",
         "HERDR_SOCKET_PATH": "/tmp/herdr/caller.sock",
-        "HERDR_RUN_OWNER_TOKEN_FILE": str(token_file),
-        "HERDR_RUN_OWNER_TOKEN": "raw-token-must-not-cross-the-wire",
+        "RUNNER_OWNER_TOKEN_FILE": str(token_file),
+        "RUNNER_OWNER_TOKEN": "raw-token-must-not-cross-the-wire",
         "UNRELATED_SECRET": "must-not-cross-the-wire",
     }
     assert transport.caller_context(environment) == {
@@ -129,7 +129,7 @@ def test_caller_context_is_strictly_whitelisted_and_validated(
         "HERDR_PANE_ID": "caller-pane",
         "HERDR_SESSION": "caller-session",
         "HERDR_SOCKET_PATH": "/tmp/herdr/caller.sock",
-        "HERDR_RUN_OWNER_TOKEN_FILE": str(token_file.resolve()),
+        "RUNNER_OWNER_TOKEN_FILE": str(token_file.resolve()),
     }
     with pytest.raises(transport.ProtocolError, match="unknown keys"):
         transport.validate_caller_context(
@@ -140,15 +140,15 @@ def test_caller_context_is_strictly_whitelisted_and_validated(
     with pytest.raises(transport.ProtocolError, match="absolute path"):
         transport.validate_caller_context({"HERDR_SOCKET_PATH": "relative.sock"})
     with pytest.raises(transport.ProtocolError, match="unknown keys"):
-        transport.validate_caller_context({"HERDR_RUN_OWNER_TOKEN": "raw-token"})
+        transport.validate_caller_context({"RUNNER_OWNER_TOKEN": "raw-token"})
     with pytest.raises(transport.ProtocolError, match="absolute path"):
         transport.validate_caller_context(
-            {"HERDR_RUN_OWNER_TOKEN_FILE": "relative.token"}
+            {"RUNNER_OWNER_TOKEN_FILE": "relative.token"}
         )
     token_file.chmod(0o644)
     with pytest.raises(transport.ProtocolError, match="same-user private"):
         transport.validate_caller_context(
-            {"HERDR_RUN_OWNER_TOKEN_FILE": str(token_file)}
+            {"RUNNER_OWNER_TOKEN_FILE": str(token_file)}
         )
     with pytest.raises(client.transport.ProtocolError, match="unknown keys"):
         client._round_trip(
@@ -274,7 +274,7 @@ def test_clean_hub_finish_inherits_only_caller_owner_token_file(
             }
         )
     )
-    plan = runtime._load_target("plan-controller", hub.TARGETS["plan-controller"])
+    plan = runtime._load_target("tui-controller", hub.TARGETS["tui-controller"])
     monkeypatch.setattr(
         plan.control,
         "_resolve_current_herdr_session_name",
@@ -299,7 +299,7 @@ def test_clean_hub_finish_inherits_only_caller_owner_token_file(
     try:
         response = client._round_trip(
             socket_path,
-            "plan-controller",
+            "tui-controller",
             [str(run_dir), "--finish-state", "stopped"],
             cwd=tmp_path.resolve(),
         )
@@ -336,12 +336,12 @@ def test_run_lifecycle_recipes_send_parent_repo_before_subcommand_through_hub(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     recipes = [
-        ("herdr-run-session-start", []),
-        ("herdr-run-session-heartbeat", []),
-        ("herdr-run-session-snapshot", []),
-        ("herdr-run-session-reconcile", []),
-        ("herdr-run-session-guard", ["mutation"]),
-        ("herdr-run-session-cleanup", []),
+        ("run-session-start", []),
+        ("run-session-heartbeat", []),
+        ("run-session-snapshot", []),
+        ("run-session-reconcile", []),
+        ("run-session-guard", ["mutation"]),
+        ("run-session-cleanup", []),
     ]
     environment = {
         **os.environ,
@@ -434,7 +434,7 @@ def test_blocked_dispatch_does_not_serialize_other_commands_or_capture_runner_ou
             return 0
 
     runtime._target_modules["public"] = ConcurrentTarget
-    runtime._target_modules["plan-controller"] = ConcurrentTarget
+    runtime._target_modules["tui-controller"] = ConcurrentTarget
     waited: list[dict[str, Any]] = []
     waiter = threading.Thread(
         target=lambda: waited.append(
@@ -452,7 +452,7 @@ def test_blocked_dispatch_does_not_serialize_other_commands_or_capture_runner_ou
         ]
         responses.append(
             client._round_trip(
-                socket_path, "plan-controller", ["controller"], cwd=tmp_path
+                socket_path, "tui-controller", ["controller"], cwd=tmp_path
             )
         )
         assert time.monotonic() - started < 1
@@ -632,16 +632,16 @@ def test_main_checkout_and_linked_worktree_share_identity(
 def test_thin_client_and_imported_recipes_have_no_checkout_local_bypass() -> None:
     client_text = (HERE / "client.py").read_text()
     upagent_just = (HERE / "justfile").read_text()
-    herdr_just = (HERE.parent / "herdr" / "justfile").read_text()
+    runner_just = (HERE.parent / "runner" / "justfile").read_text()
     assert 'spec_from_file_location("upagent_recruiter"' not in client_text
     assert "JobLedger" not in client_text
     assert "cmd_dispatch" not in client_text
     assert "run-job" not in client_text
     assert "recruiter.py" not in upagent_just
-    assert "recruiter.py" not in herdr_just
+    assert "recruiter.py" not in runner_just
     for target in ("public_api.py", "direct_controller.py", "phase_controller.py"):
         assert "recruiter.py" not in (HERE / target).read_text()
-    assert "client.py" in upagent_just and "client.py" in herdr_just
+    assert "client.py" in upagent_just and "client.py" in runner_just
 
 
 def test_direct_recruiter_cli_bypass_is_forbidden(tmp_path: Path) -> None:

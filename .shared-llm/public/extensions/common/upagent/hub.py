@@ -53,8 +53,8 @@ TARGETS = {
     "phase-controller": HERE / "phase_controller.py",
     "phase-await": HERE / "phase_await.py",
     "direct-controller": HERE / "direct_controller.py",
-    "plan-controller": HERE.parent / "herdr" / "plan_controller.py",
-    "run-lifecycle": HERE.parent / "herdr" / "run_lifecycle.py",
+    "tui-controller": HERE.parent / "runner" / "tui_controller.py",
+    "run-lifecycle": HERE.parent / "runner" / "run_lifecycle.py",
 }
 RECRUITER_TARGETS = frozenset(
     ("public", "recruiter", "phase-controller", "direct-controller")

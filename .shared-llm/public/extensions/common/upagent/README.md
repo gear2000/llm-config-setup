@@ -16,7 +16,7 @@ caller's worktree. The Hub holds `hub.lock` for its full lifetime, publishes `id
 performs a version-and-schema-fingerprint handshake before accepting a command. Protocol v3
 carries only the strictly validated Herdr caller fields required by controller operations
 (`HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SOCKET_PATH`, `HERDR_SESSION`, and the private absolute
-`HERDR_RUN_OWNER_TOKEN_FILE` path when set); arbitrary environment variables and raw secrets never
+`RUNNER_OWNER_TOKEN_FILE` path when set); arbitrary environment variables and raw secrets never
 cross the wire. Request-local stdin is bounded and accepted only for run-lifecycle `guard` or
 `cleanup` with exactly one `--token-stdin`; it never enters Hub identity, status, logs, or the
 process stdin. An incompatible resident is restarted by `up` only after its live handshake,
@@ -37,7 +37,7 @@ The client imports no Recruiter code and has no ledger, reconciliation, lifecycl
 worker-runner implementation. Public, controller, and compatibility recipes all cross the socket.
 Direct `recruiter.py` and `public_api.py` execution fails loud. Authority is not an environment
 marker: the running PID, canonical paths, published identity, lock-file inode, and already-held lock
-descriptor must all prove the live Hub process. `plan_controller.py` and `run_lifecycle.py` are also
+descriptor must all prove the live Hub process. `tui_controller.py` and `run_lifecycle.py` are also
 canonical socket targets and never import a checkout-local Recruiter or inspect its ledger. The
 socket is deliberately open to machine-local callers (mode `0666`):
 there is no registration, API key, JWT, TLS, allowlist, or worktree approval layer.
@@ -187,12 +187,12 @@ the warning says so plainly, is announced once per phase pass instead of once pe
 stored in the durable request ledger and modern startup responses.
 
 Run-level ownership uses a private token only for mutating lifecycle operations. New starts write
-the token to a per-run hashed 0600 file under `$HERDR_RUN_TOKEN_DIR` or the default same-user
-0700 runtime token directory, then pass only `HERDR_RUN_OWNER_TOKEN_FILE` to the TUI and heartbeat
+the token to a per-run hashed 0600 file under `$RUNNER_TOKEN_DIR` or the default same-user
+0700 runtime token directory, then pass only `RUNNER_OWNER_TOKEN_FILE` to the TUI and heartbeat
 process. The Hub protocol whitelists that absolute, same-user private regular-file path and never
-transports the raw `HERDR_RUN_OWNER_TOKEN`; the raw variable remains only a non-protocol
-compatibility fallback. Recovery is explicit: use `just herdr-run-session-snapshot <run-dir>`,
-then `just herdr-run-session-reconcile <run-dir>`, and only then start with stale takeover when
+transports the raw `RUNNER_OWNER_TOKEN`; the raw variable remains only a non-protocol
+compatibility fallback. Recovery is explicit: use `just run-session-snapshot <run-dir>`,
+then `just run-session-reconcile <run-dir>`, and only then start with stale takeover when
 the reconciliation receipt proves the recorded owner is stale.
 
 ## The order → result contract (`contracts.py`)

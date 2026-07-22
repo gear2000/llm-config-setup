@@ -1,5 +1,5 @@
 # pyright: reportMissingImports=false
-"""Hermetic tests for Herdr run lifecycle ownership and recovery."""
+"""Hermetic tests for run lifecycle ownership and recovery."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 _spec = importlib.util.spec_from_file_location(
-    "herdr_run_lifecycle_tested", Path(__file__).with_name("run_lifecycle.py")
+    "runner_run_lifecycle_tested", Path(__file__).with_name("run_lifecycle.py")
 )
 assert _spec and _spec.loader
 life = importlib.util.module_from_spec(_spec)
@@ -38,7 +38,7 @@ def _owner(
 @pytest.fixture(autouse=True)
 def _isolated_recruiter_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
-    monkeypatch.setenv(life.HERDR_RUN_TOKEN_DIR_ENV, str(tmp_path / "tokens"))
+    monkeypatch.setenv(life.RUNNER_TOKEN_DIR_ENV, str(tmp_path / "tokens"))
     monkeypatch.setattr(life.control, "STATE_FILE", tmp_path / "state/recruiter.json")
 
 
@@ -182,8 +182,8 @@ def test_owner_token_file_is_0600_and_env_file_is_preferred(
     assert token_file.read_text().strip() == "safe-token"
     assert oct(token_file.stat().st_mode & 0o777) == "0o600"
 
-    monkeypatch.setenv(life.HERDR_RUN_OWNER_TOKEN_FILE_ENV, str(token_file))
-    monkeypatch.setenv(life.HERDR_RUN_OWNER_TOKEN_ENV, "mismatched-capability")
+    monkeypatch.setenv(life.RUNNER_OWNER_TOKEN_FILE_ENV, str(token_file))
+    monkeypatch.setenv(life.RUNNER_OWNER_TOKEN_ENV, "mismatched-capability")
 
     assert life.token_from_env_or_file() == "safe-token"
 
@@ -244,7 +244,7 @@ def test_token_source_conflicts_fail_and_empty_stdin_uses_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     capability = life.uuid.uuid4().hex
-    monkeypatch.setenv(life.HERDR_RUN_OWNER_TOKEN_ENV, capability)
+    monkeypatch.setenv(life.RUNNER_OWNER_TOKEN_ENV, capability)
     assert life.resolve_token_sources(None, None, "") == capability
     with pytest.raises(LifecycleError, match="sources conflict"):
         life.resolve_token_sources(capability, Path("other"), None)

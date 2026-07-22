@@ -1,4 +1,4 @@
-"""Herdr controller transport primitives with no Recruiter or ledger dependency."""
+"""Herdr transport primitives with no Recruiter or ledger dependency."""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ TAB_ROLES = frozenset(("workers", "oversight", "services", "control"))
 STATE_FILE = Path(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json"))
 
 
-class ControllerTransportError(RuntimeError):
-    """A canonical Herdr controller transport or identity failure."""
+class HerdrTransportError(RuntimeError):
+    """A canonical Herdr transport or identity failure."""
 
 
 def _getenv(name: str, default: str | None = None) -> str | None:
@@ -53,7 +53,7 @@ def default_roster_path() -> str:
 
 def _validate_session(value: object, field: str = "Herdr session") -> str:
     if not isinstance(value, str) or not SESSION_RE.fullmatch(value):
-        raise ControllerTransportError(f"{field} has an invalid value: {value!r}")
+        raise HerdrTransportError(f"{field} has an invalid value: {value!r}")
     return value
 
 
@@ -65,26 +65,26 @@ def _raw(
             ["herdr", *args], capture_output=True, text=True, timeout=timeout_seconds
         )
     except subprocess.TimeoutExpired as error:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"herdr {' '.join(args)} timed out after {timeout_seconds} seconds"
         ) from error
     except OSError as error:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"herdr {' '.join(args)} could not run: {error}"
         ) from error
 
 
 def _json_process(process: subprocess.CompletedProcess[str], display: str) -> dict:
     if process.returncode != 0:
-        raise ControllerTransportError(f"{display} failed: {process.stderr.strip()}")
+        raise HerdrTransportError(f"{display} failed: {process.stderr.strip()}")
     try:
         value = json.loads(process.stdout)
     except json.JSONDecodeError as error:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"{display} did not print JSON: {process.stdout[:200]}"
         ) from error
     if not isinstance(value, dict):
-        raise ControllerTransportError(f"{display} must return a JSON object")
+        raise HerdrTransportError(f"{display} must return a JSON object")
     return value
 
 
@@ -99,19 +99,19 @@ def resolve_current_herdr_session_name() -> str:
         )
         server = status.get("server")
         if not isinstance(server, dict) or server.get("running") is not True:
-            raise ControllerTransportError(
+            raise HerdrTransportError(
                 "could not resolve Herdr session: server is not running"
             )
         socket_path = server.get("socket") or server.get("socket_path")
     if not isinstance(socket_path, str) or not socket_path:
-        raise ControllerTransportError("could not resolve Herdr session socket")
+        raise HerdrTransportError("could not resolve Herdr session socket")
     listing = _json_process(
         _raw(("session", "list", "--json"), timeout_seconds=15),
         "herdr session list --json",
     )
     sessions = listing.get("sessions")
     if not isinstance(sessions, list):
-        raise ControllerTransportError("herdr session list returned no sessions list")
+        raise HerdrTransportError("herdr session list returned no sessions list")
     matches = [
         item
         for item in sessions
@@ -120,12 +120,12 @@ def resolve_current_herdr_session_name() -> str:
         and item.get("socket_path") == socket_path
     ]
     if len(matches) != 1:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"expected one running Herdr session for {socket_path!r}, found {len(matches)}"
         )
     name = _validate_session(matches[0].get("name"))
     if hint is not None and name != hint:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"resolved Herdr socket belongs to {name!r}, not {hint!r}"
         )
     return name
@@ -156,7 +156,7 @@ def herdr(*args: str, herdr_session: str | None = None) -> None:
     argv = ["--session", session, *args]
     process = _raw(argv)
     if process.returncode != 0:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"herdr {' '.join(argv)} failed: {process.stderr.strip()}"
         )
 
@@ -187,7 +187,7 @@ def _pane_recent_output(pane: str, herdr_session: str) -> str:
         )
     )
     if process.returncode != 0:
-        raise ControllerTransportError(
+        raise HerdrTransportError(
             f"could not read pane {pane}: {process.stderr.strip()}"
         )
     return process.stdout
@@ -261,7 +261,7 @@ def wait_for_agent_health(
             and latest["agent_status"] in ("working", "idle", "done")
         ):
             if latest["cwd_matches"] is not True:
-                raise ControllerTransportError(
+                raise HerdrTransportError(
                     f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}"
                 )
             latest["healthy"] = True
@@ -271,11 +271,11 @@ def wait_for_agent_health(
             and time.monotonic() - started >= STARTUP_FAILURE_SETTLE_SECONDS
         ):
             output = _pane_recent_output(pane_id, herdr_session)
-            raise ControllerTransportError(
+            raise HerdrTransportError(
                 f"agent pane {pane_id} did not start {expected_process}; recent output: {output[-1000:]}"
             )
         time.sleep(HEALTH_PROBE_SECONDS)
-    raise ControllerTransportError(
+    raise HerdrTransportError(
         f"agent pane {pane_id} did not become healthy within {timeout_ms} ms; evidence={json.dumps(latest)}"
     )
 
@@ -283,7 +283,7 @@ def wait_for_agent_health(
 @contextmanager
 def _layout_lock(workspace_id: str) -> Iterator[None]:
     key = hashlib.sha256(workspace_id.encode()).hexdigest()
-    path = Path("/tmp/.upagent/herdr-controller-layout") / f"{key}.lock"
+    path = Path("/tmp/.upagent/tui-controller-layout") / f"{key}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as stream:
         deadline = time.monotonic() + LAYOUT_LOCK_TIMEOUT_SECONDS
@@ -293,7 +293,7 @@ def _layout_lock(workspace_id: str) -> Iterator[None]:
                 break
             except BlockingIOError as error:
                 if time.monotonic() >= deadline:
-                    raise ControllerTransportError(
+                    raise HerdrTransportError(
                         f"layout lock for workspace {workspace_id} timed out"
                     ) from error
                 time.sleep(HEALTH_PROBE_SECONDS)
@@ -312,7 +312,7 @@ def place_started_agent_in_role_tab(
     herdr_session: str,
 ) -> str:
     if tab_role not in TAB_ROLES:
-        raise ControllerTransportError(f"unknown controller tab role {tab_role!r}")
+        raise HerdrTransportError(f"unknown controller tab role {tab_role!r}")
     with _layout_lock(workspace_id):
         tabs = (
             herdr_json(
@@ -327,7 +327,7 @@ def place_started_agent_in_role_tab(
             if isinstance(item, dict) and item.get("label") == tab_role
         ]
         if len(matches) > 1:
-            raise ControllerTransportError(f"workspace has multiple {tab_role!r} tabs")
+            raise HerdrTransportError(f"workspace has multiple {tab_role!r} tabs")
         if matches:
             tab_id = matches[0].get("tab_id")
             panes = (
@@ -362,7 +362,7 @@ def place_started_agent_in_role_tab(
                 None,
             )
             if not isinstance(tab_id, str) or not isinstance(target, str):
-                raise ControllerTransportError(f"{tab_role!r} tab has no target pane")
+                raise HerdrTransportError(f"{tab_role!r} tab has no target pane")
             response = herdr_json(
                 "pane",
                 "move",
@@ -393,7 +393,7 @@ def place_started_agent_in_role_tab(
         pane = moved.get("pane", {}) if isinstance(moved, dict) else {}
         moved_id = pane.get("pane_id") if isinstance(pane, dict) else None
         if moved.get("changed") is not True or not isinstance(moved_id, str):
-            raise ControllerTransportError(
+            raise HerdrTransportError(
                 f"Herdr did not place pane {pane_id} in {tab_role!r} tab"
             )
         return moved_id

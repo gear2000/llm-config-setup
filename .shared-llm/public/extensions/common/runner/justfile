@@ -1,0 +1,46 @@
+# Run-controller entry module — checked plan kickoff and lifecycle control.
+#
+# This module owns orchestration. Herdr is the communication channel underneath it.
+# Import it with the UpAgent and Herdr transport modules:
+#   import '.shared-llm/public/extensions/common/upagent/justfile'
+#   import '.shared-llm/public/extensions/common/herdr/justfile'
+#   import '.shared-llm/public/extensions/common/runner/justfile'
+
+_UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/client.py"
+
+# Start one checked plan through the deterministic TUI-controller transaction.
+# There is no standing plan watchdog. The TUI receives phase conditions through
+# blocking UpAgent awaits, while urgent unacknowledged conditions reach the human
+# through `herdr notification`. The TUI joins Herdr's unified workspace by default.
+# Use --separate-workspaces when the shared services use that mode. A Claude TUI
+# also starts Claude Remote Control as --remote-control=<slug>.
+#
+#   just run-start work-log/2026-07-12/my-feature
+#   just run-start work-log/2026-07-12/my-feature/plan/v1 my-feature
+#   just run-start work-log/2026-07-12/my-feature "" pi
+run-start dir slug="" harness="claude" *FLAGS="":
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target tui-controller "{{dir}}" --slug "{{slug}}" --harness "{{harness}}" --repo "{{invocation_directory()}}" {{FLAGS}}
+
+# Publish the run's durable terminal fact after run-status.md is complete.
+run-session-finish dir state slug="" owner_token_file="":
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target tui-controller "{{dir}}" --slug "{{slug}}" --finish-state "{{state}}" {{ if owner_token_file != "" { "--owner-token-file " + quote(owner_token_file) } else { "" } }}
+
+# Durable run lifecycle operations. Snapshot is read-only. Reconciliation writes
+# a recovery receipt. Guard and cleanup refuse mutation without matching ownership.
+run-session-start dir *FLAGS:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" session-start "{{dir}}" {{FLAGS}}
+
+run-session-heartbeat dir *FLAGS:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" heartbeat "{{dir}}" {{FLAGS}}
+
+run-session-snapshot dir:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" snapshot "{{dir}}"
+
+run-session-reconcile dir:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" reconcile "{{dir}}"
+
+run-session-guard dir action token_file="":
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" guard "{{dir}}" --action "{{action}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}
+
+run-session-cleanup dir token_file="":
+    ${PYTHON_BIN:-python3} "{{_UPAGENT}}" --target run-lifecycle --repo "{{invocation_directory()}}" cleanup "{{dir}}" {{ if token_file != "" { "--token-file " + quote(token_file) } else { "" } }}

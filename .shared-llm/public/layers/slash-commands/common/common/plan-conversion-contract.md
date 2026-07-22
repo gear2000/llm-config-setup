@@ -50,7 +50,7 @@ The command is idempotent. Re-running with the same source plan and same explici
 11. On pass, report the converted run directory and the public launcher:
 
     ```text
-    just herdr-start <converted-run-dir>
+    just run-start <converted-run-dir>
     ```
 
 ## Deferred external gates
@@ -61,6 +61,6 @@ If the approved plan requires an external candidate gate such as an exact-SHA sh
 
 - `--herdr` is required. Without it, stop and say this converter currently supports only Herdr conversion.
 - Conversion performs validation itself; do not ask the user to run `/meta-plan-check`.
-- Herdr startup rechecks the frozen pair, but conversion must still validate before declaring the output runnable.
+- Run startup rechecks the frozen pair, but conversion must still validate before declaring the output runnable.
 - A TODO route is not runnable. Either resolve the value with the human or return a clear non-runnable result.
-- Do not implement the plan and do not start Herdr from this command.
+- Do not implement the plan and do not start the checked run from this command.

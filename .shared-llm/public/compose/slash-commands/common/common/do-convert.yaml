@@ -6,5 +6,5 @@ frontmatter:
 inputs:
 - .shared-llm/public/llm/pi/common/meta-plan/meta-plan-format.md
 - .shared-llm/public/layers/slash-commands/common/common/do-convert/command.md
-- .shared-llm/public/layers/slash-commands/common/common/convert-herdr-core.md
+- .shared-llm/public/layers/slash-commands/common/common/plan-conversion-contract.md
 output: .claude/skills/do-convert/SKILL.md
