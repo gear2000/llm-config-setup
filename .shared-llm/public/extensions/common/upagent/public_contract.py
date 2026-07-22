@@ -44,7 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
   just upagent request --type worker --offering pi-gpt-5-6-sol --effort high \\
     --agent backend --prompt-file /abs/brief.md
   just upagent request --file /abs/request.json --wait --json
-  just upagent await --request 01957f4e-7f7f-7f8b-9c42-6e7f52f9321a
+  just upagent get --request 01957f4e-7f7f-7f8b-9c42-6e7f52f9321a --json
+  just upagent cancel --request ID --control-token-file /private/token
+  just upagent cleanup --all-terminal --older-than-seconds 86400
   just upagent await-any --request ID --cursor '{"ID": 12}'
 """,
         add_help=True,
@@ -57,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show Hub or request state")
     status.add_argument("--request")
     status.add_argument("--json", action="store_true")
+
+    get = sub.add_parser(
+        "get", help="read one request state and its retained artifact pointers"
+    )
+    get.add_argument("--request", required=True)
+    get.add_argument("--json", action="store_true")
 
     lists = sub.add_parser("lists", help="list offerings, specialists, or workers")
     lists.add_argument(
@@ -124,6 +132,23 @@ def build_parser() -> argparse.ArgumentParser:
     respond.add_argument("--action", required=True, choices=("extend", "cancel"))
     respond.add_argument("--extension-ms", required=True, type=int)
     respond.add_argument("--json", action="store_true")
+
+    cancel = sub.add_parser(
+        "cancel", help="cancel one owned request without a timeout nonce"
+    )
+    cancel.add_argument("--request", required=True)
+    cancel.add_argument("--control-token-file", required=True)
+    cancel.add_argument("--json", action="store_true")
+
+    cleanup = sub.add_parser(
+        "cleanup", help="dry-run or prune successfully terminal Hub history"
+    )
+    selection = cleanup.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--request")
+    selection.add_argument("--all-terminal", action="store_true")
+    cleanup.add_argument("--older-than-seconds", type=int, default=0)
+    cleanup.add_argument("--apply", action="store_true")
+    cleanup.add_argument("--json", action="store_true")
 
     reconcile = sub.add_parser(
         "reconcile", help="reconcile dead or expired owned workers"
@@ -198,6 +223,8 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
             raise PublicCommandError("cancel requires --extension-ms 0")
         if args.action == "extend" and args.extension_ms <= 0:
             raise PublicCommandError("extend requires a positive --extension-ms")
+    if args.command == "cleanup" and args.older_than_seconds < 0:
+        raise PublicCommandError("--older-than-seconds must be zero or greater")
     return args
 
 

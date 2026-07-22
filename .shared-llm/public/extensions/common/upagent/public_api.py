@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -92,10 +93,21 @@ class RegisteredRequest:
     created: bool
     record: dict[str, object]
 
+    @property
+    def pruned(self) -> bool:
+        return self.record.get("pruned") is True
+
 
 def _canonical_hash(value: dict[str, object]) -> str:
     raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+def _payload_hash(record: dict[str, object], request_id: str) -> str:
+    value = record.get("payload_sha256")
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise PublicError(f"request {request_id} has an invalid immutable payload hash")
+    return value
 
 
 def _canonical_request_id(value: object | None) -> str:
@@ -131,6 +143,52 @@ def _absolute_readable_file(value: object, field: str) -> tuple[Path, bytes]:
             f"{field} must contain UTF-8 text: {path}: {error}"
         ) from error
     return path.resolve(), content
+
+
+def _private_control_token_file(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise PublicError("--control-token-file must be a non-empty absolute path")
+    path = Path(value)
+    if not path.is_absolute():
+        raise PublicError(f"--control-token-file must be absolute: {path}")
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise PublicError(
+            f"--control-token-file is not a readable non-symlink file: {path}: {error}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise PublicError(
+                f"--control-token-file must name a non-symlink regular file: {path}"
+            )
+        if metadata.st_uid != os.geteuid():
+            raise PublicError(
+                f"--control-token-file must be owned by the current user: {path}"
+            )
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise PublicError(
+                f"--control-token-file must not be group/world accessible: {path}"
+            )
+        if metadata.st_size <= 0 or metadata.st_size > 256:
+            raise PublicError(f"--control-token-file has an invalid size: {path}")
+        raw = os.read(descriptor, 257)
+    finally:
+        os.close(descriptor)
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise PublicError("--control-token-file must contain UTF-8 text") from error
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise PublicError("--control-token-file does not contain a valid control token")
+    return token
 
 
 def _absolute_directory(value: object | None, caller_cwd: Path) -> Path:
@@ -353,14 +411,20 @@ class PublicRequestStore:
     def load(self, request_id: str) -> RegisteredRequest:
         canonical = _canonical_request_id(request_id)
         directory = self.path(canonical)
+        tombstone_path = directory / "tombstone.json"
+        source = (
+            tombstone_path if tombstone_path.is_file() else directory / "request.json"
+        )
         try:
-            record = json.loads((directory / "request.json").read_text())
+            record = json.loads(source.read_text())
         except (OSError, json.JSONDecodeError) as error:
             raise PublicError(
                 f"unknown or unreadable request {canonical}: {error}"
             ) from error
         if not isinstance(record, dict) or record.get("request_id") != canonical:
             raise PublicError(f"public request record {directory} has invalid identity")
+        if source == tombstone_path:
+            record = {**record, "pruned": True}
         return RegisteredRequest(
             canonical,
             directory,
@@ -371,6 +435,13 @@ class PublicRequestStore:
         )
 
     def submission(self, registered: RegisteredRequest) -> dict[str, object]:
+        if registered.pruned:
+            value = registered.record.get("submission")
+            if isinstance(value, dict):
+                return cast(dict[str, object], value)
+            raise PublicError(
+                f"pruned request {registered.request_id} has no retained submission state"
+            )
         try:
             value = json.loads(registered.submission_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
@@ -552,6 +623,39 @@ class PublicRequestStore:
                 record,
             )
 
+    def request_ids(self) -> list[str]:
+        if not self.requests.is_dir():
+            return []
+        return sorted(
+            path.name
+            for path in self.requests.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        )
+
+    def prune(
+        self, registered: RegisteredRequest, tombstone: dict[str, object]
+    ) -> RegisteredRequest:
+        """Commit one atomic tombstone, then prune only its Hub-owned siblings."""
+        request_dir = registered.request_dir
+        if not registered.pruned:
+            _write_json_atomic(request_dir / "tombstone.json", tombstone)
+        for child in request_dir.iterdir():
+            if child.name == "tombstone.json":
+                continue
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            else:
+                shutil.rmtree(child)
+        directory_fd = os.open(request_dir, os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        garbage = self.requests / f".{registered.request_id}.cleanup-old"
+        if garbage.exists():
+            shutil.rmtree(garbage)
+        return self.load(registered.request_id)
+
 
 def _public_lifecycle_roster_path() -> str:
     """Return the code-owned public roster, never a legacy configurable roster."""
@@ -573,42 +677,147 @@ def _capture(call: Any, *args: object, **kwargs: object) -> tuple[int, str]:
     return int(code), stdout.getvalue()
 
 
-def _public_status(
-    store: PublicRequestStore, registered: RegisteredRequest
+def _public_state(
+    value: dict[str, object], *, include_requester_control_token: bool = False
 ) -> dict[str, object]:
+    """Expose no mutation credential except in the originating request response."""
+    hidden = {"token", "lease_token"}
+    if not include_requester_control_token:
+        hidden.add("requester_control_token")
+    return {key: item for key, item in value.items() if key not in hidden}
+
+
+def _public_receipt(value: dict[str, object] | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    sanitized = {
+        key: item
+        for key, item in value.items()
+        if key not in ("artifact_manifest_path", "published_result_path")
+    }
+    artifacts = value.get("artifacts")
+    if isinstance(artifacts, list):
+        sanitized["artifacts"] = [
+            {
+                key: item
+                for key, item in artifact.items()
+                if key not in ("staging_path", "lease_token")
+            }
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+        ]
+    return sanitized
+
+
+def _read_json_optional(path: Path, label: str) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PublicError(f"{label} is unreadable: {error}") from error
+    if not isinstance(value, dict):
+        raise PublicError(f"{label} is not an object")
+    return cast(dict[str, object], value)
+
+
+def _tombstone_status(tombstone: dict[str, object]) -> dict[str, object]:
+    artifacts = tombstone.get("artifacts")
+    submission = tombstone.get("submission")
+    receipt = tombstone.get("receipt")
+    result = tombstone.get("result")
+    request_id = tombstone.get("request_id")
+    terminal_state = tombstone.get("terminal_state")
+    terminal_verdict = tombstone.get("terminal_verdict")
+    terminal_at_ns = tombstone.get("terminal_at_ns")
+    cleanup_at_ns = tombstone.get("cleanup_at_ns")
+    if (
+        not isinstance(request_id, str)
+        or not isinstance(artifacts, list)
+        or not isinstance(submission, dict)
+        or not isinstance(receipt, dict)
+        or not isinstance(result, dict)
+        or not isinstance(terminal_state, str)
+        or not isinstance(terminal_verdict, str)
+        or isinstance(terminal_at_ns, bool)
+        or not isinstance(terminal_at_ns, int)
+        or isinstance(cleanup_at_ns, bool)
+        or not isinstance(cleanup_at_ns, int)
+    ):
+        raise PublicError("pruned request tombstone lacks retained terminal evidence")
+    payload_sha256 = _payload_hash(tombstone, request_id)
+    return {
+        "request_id": request_id,
+        "submission": submission,
+        "payload": None,
+        "payload_pruned": True,
+        "payload_sha256": payload_sha256,
+        "offering_snapshot": tombstone.get("offering_snapshot"),
+        "order_path": None,
+        "artifacts": artifacts,
+        "state": {
+            "state": "pruned",
+            "terminal_state": terminal_state,
+            "terminal_verdict": terminal_verdict,
+            "terminal_at_ns": terminal_at_ns,
+            "cleanup_at_ns": cleanup_at_ns,
+        },
+        "receipt": receipt,
+        "result": result,
+        "pruned": True,
+    }
+
+
+def _public_status(
+    store: PublicRequestStore,
+    registered: RegisteredRequest,
+    *,
+    include_requester_control_token: bool = False,
+) -> dict[str, object]:
+    if registered.pruned:
+        return _tombstone_status(registered.record)
     order = recruiter.load_order(registered.order_path)
     ledger = recruiter.JobLedger()
     key = ledger.key_for_order(order)
     ledger_request = ledger.request_dir(key)
+    ledger_tombstone = _read_json_optional(
+        ledger_request / "tombstone.json", "Recruiter tombstone"
+    )
+    if ledger_tombstone is not None:
+        return _tombstone_status(ledger_tombstone)
     receipt_path = ledger_request / "receipt.json"
+    result_path = ledger.published_result_path(key)
     submission = store.submission(registered)
     if not ledger_request.is_dir():
         state: dict[str, object] = {"state": submission["state"]}
         receipt = None
+        result = None
     else:
         state = ledger.state(key)
-        receipt = (
-            json.loads(receipt_path.read_text()) if receipt_path.is_file() else None
-        )
+        receipt = _public_receipt(_read_json_optional(receipt_path, "terminal receipt"))
+        result = _read_json_optional(result_path, "published result")
     public_evidence = cast(dict[str, object], order["public_request"])
-    artifacts = [
+    publication = cast(dict[str, object], order["artifact_publication"])
+    artifacts: list[dict[str, object]] = [
         {"kind": "prompt", "path": registered.record["prompt_snapshot"]},
         {"kind": "order", "path": str(registered.order_path)},
         {"kind": "result", "path": order["result_path"]},
-        {
-            "kind": "compacted",
-            "path": cast(dict[str, object], order["artifact_publication"])[
-                "compacted_path"
-            ],
-        },
-        {
-            "kind": "handoff",
-            "path": cast(dict[str, object], order["artifact_publication"])[
-                "handoff_path"
-            ],
-        },
+        {"kind": "compacted", "path": publication["compacted_path"]},
+        {"kind": "handoff", "path": publication["handoff_path"]},
         {"kind": "receipt", "path": str(receipt_path)},
     ]
+    if isinstance(result, dict) and isinstance(result.get("full_log"), str):
+        full_log = cast(str, result["full_log"])
+        artifacts.append(
+            {
+                "kind": "log",
+                **(
+                    {"path": full_log}
+                    if Path(full_log).is_absolute()
+                    else {"value": full_log}
+                ),
+            }
+        )
     if isinstance(public_evidence.get("answer_path"), str):
         artifacts.append({"kind": "answer", "path": public_evidence["answer_path"]})
     return {
@@ -619,8 +828,13 @@ def _public_status(
         "offering_snapshot": registered.record["offering_snapshot"],
         "order_path": str(registered.order_path),
         "artifacts": artifacts,
-        "state": state,
+        "state": _public_state(
+            state,
+            include_requester_control_token=include_requester_control_token,
+        ),
         "receipt": receipt,
+        "result": result,
+        "pruned": False,
     }
 
 
@@ -654,6 +868,25 @@ def _list_workers(status_filter: str) -> list[dict[str, object]]:
     if not ledger.requests.is_dir():
         return rows
     for request_dir in sorted(ledger.requests.iterdir()):
+        tombstone_path = request_dir / "tombstone.json"
+        if tombstone_path.is_file():
+            tombstone = _read_json_optional(tombstone_path, "request tombstone")
+            if tombstone is None:
+                raise PublicError(f"request tombstone {tombstone_path} disappeared")
+            if status_filter == "active":
+                continue
+            rows.append(
+                {
+                    "request_id": tombstone.get("request_id"),
+                    "order_id": tombstone.get("order_id"),
+                    "state": "pruned",
+                    "terminal_verdict": tombstone.get("terminal_verdict"),
+                    "worker_address": None,
+                    "worker_pane": None,
+                    "manager_address": None,
+                }
+            )
+            continue
         state_path = request_dir / "state/latest.json"
         order_path = request_dir / "request.json"
         if not state_path.is_file() or not order_path.is_file():
@@ -680,11 +913,300 @@ def _list_workers(status_filter: str) -> list[dict[str, object]]:
     return rows
 
 
+def _cleanup_tombstone(
+    registered: RegisteredRequest,
+    status: dict[str, object],
+    evidence: dict[str, object],
+    cleanup_at_ns: int,
+) -> dict[str, object]:
+    retained: list[dict[str, object]] = []
+    artifacts = status.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise PublicError("terminal request has invalid artifact pointers")
+    tombstone_path = registered.request_dir / "tombstone.json"
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise PublicError("terminal request has malformed artifact pointers")
+        kind = artifact.get("kind")
+        if kind == "receipt":
+            retained.append(
+                {
+                    "kind": "receipt",
+                    "path": str(tombstone_path),
+                    "embedded_field": "receipt",
+                }
+            )
+            continue
+        artifact_path = artifact.get("path")
+        hub_owned = (
+            isinstance(artifact_path, str)
+            and Path(artifact_path).is_absolute()
+            and Path(artifact_path).is_relative_to(registered.request_dir)
+        )
+        if kind in ("prompt", "order") or hub_owned:
+            retained.append(
+                {
+                    "kind": kind,
+                    "pruned": True,
+                    **(
+                        {"previous_path": artifact_path}
+                        if isinstance(artifact_path, str)
+                        else {}
+                    ),
+                }
+            )
+        else:
+            retained.append(cast(dict[str, object], artifact))
+    raw_receipt = evidence.get("receipt")
+    receipt = status.get("receipt")
+    result = evidence.get("result")
+    control = evidence.get("control")
+    terminal_at_ns = evidence.get("terminal_at_ns")
+    if (
+        not isinstance(raw_receipt, dict)
+        or not isinstance(receipt, dict)
+        or not isinstance(result, dict)
+        or not isinstance(control, dict)
+        or isinstance(terminal_at_ns, bool)
+        or not isinstance(terminal_at_ns, int)
+    ):
+        raise PublicError("terminal cleanup evidence is incomplete")
+    order_id = result.get("order_id")
+    return {
+        "schema_version": 1,
+        "pruned": True,
+        "request_id": registered.request_id,
+        "order_id": order_id,
+        "payload_sha256": registered.record["payload_sha256"],
+        "offering_snapshot": registered.record.get("offering_snapshot"),
+        "terminal_state": evidence["terminal_state"],
+        "terminal_verdict": evidence["terminal_verdict"],
+        "terminal_at_ns": terminal_at_ns,
+        "cleanup_at_ns": cleanup_at_ns,
+        "cancelled": raw_receipt.get("cancelled", False),
+        "submission": status["submission"],
+        "receipt": receipt,
+        "result": result,
+        "artifacts": retained,
+        "control": control,
+    }
+
+
+def _cleanup_one(
+    store: PublicRequestStore,
+    request_id: str,
+    *,
+    older_than_seconds: int,
+    apply: bool,
+    now_ns: int,
+) -> dict[str, object]:
+    with store.request_lock(request_id):
+        registered = store.load(request_id)
+        payload_sha256 = _payload_hash(registered.record, request_id)
+        if registered.pruned:
+            terminal_at_ns = registered.record.get("terminal_at_ns")
+            if isinstance(terminal_at_ns, bool) or not isinstance(terminal_at_ns, int):
+                raise PublicError(
+                    f"pruned request {request_id} has no terminal timestamp"
+                )
+            age_ns = max(0, now_ns - terminal_at_ns)
+            eligible = age_ns >= older_than_seconds * 1_000_000_000
+            if eligible and apply:
+                ledger = recruiter.JobLedger()
+                ledger.prune_terminal(
+                    ledger.key(request_id),
+                    request_id,
+                    payload_sha256,
+                    registered.record,
+                    verify_absence=recruiter._verify_terminal_cleanup_absence,
+                )
+                store.prune(registered, registered.record)
+            return {
+                "request_id": request_id,
+                "status": "already-pruned" if eligible else "skipped",
+                "eligible": eligible,
+                "age_seconds": age_ns // 1_000_000_000,
+                **(
+                    {"reason": "terminal age is below the inclusive threshold"}
+                    if not eligible
+                    else {}
+                ),
+            }
+        try:
+            order = recruiter.load_order(registered.order_path)
+        except recruiter.ContractError as error:
+            raise PublicError(
+                f"request {request_id} has a malformed order: {error}"
+            ) from error
+        ledger = recruiter.JobLedger()
+        key = ledger.key_for_order(order)
+        evidence = ledger.terminal_cleanup_evidence(
+            key,
+            request_id,
+            payload_sha256,
+        )
+        terminal_at_ns = evidence.get("terminal_at_ns")
+        if isinstance(terminal_at_ns, bool) or not isinstance(terminal_at_ns, int):
+            raise PublicError(f"request {request_id} has no terminal timestamp")
+        age_ns = max(0, now_ns - terminal_at_ns)
+        if age_ns < older_than_seconds * 1_000_000_000:
+            return {
+                "request_id": request_id,
+                "status": "skipped",
+                "eligible": False,
+                "age_seconds": age_ns // 1_000_000_000,
+                "reason": "terminal age is below the inclusive threshold",
+            }
+        status = _public_status(store, registered)
+        tombstone = (
+            {key: value for key, value in evidence.items() if key != "already_pruned"}
+            if evidence.get("already_pruned") is True
+            else _cleanup_tombstone(registered, status, evidence, now_ns)
+        )
+        if not apply:
+            return {
+                "request_id": request_id,
+                "status": "planned",
+                "eligible": True,
+                "age_seconds": age_ns // 1_000_000_000,
+                "would_prune": [
+                    str(registered.request_dir),
+                    str(ledger.request_dir(key)),
+                ],
+                "caller_artifacts_retained": [
+                    artifact
+                    for artifact in cast(
+                        list[dict[str, object]], tombstone["artifacts"]
+                    )
+                    if artifact.get("pruned") is not True
+                ],
+            }
+        ledger.prune_terminal(
+            key,
+            request_id,
+            payload_sha256,
+            tombstone,
+            verify_absence=recruiter._verify_terminal_cleanup_absence,
+        )
+        store.prune(registered, tombstone)
+        return {
+            "request_id": request_id,
+            "status": "cleaned",
+            "eligible": True,
+            "age_seconds": age_ns // 1_000_000_000,
+            "tombstone": str(registered.request_dir / "tombstone.json"),
+        }
+
+
+def _cancel(args: Any, store: PublicRequestStore) -> int:
+    control_token = _private_control_token_file(args.control_token_file)
+    with store.request_lock(args.request):
+        registered = store.load(args.request)
+        if registered.pruned:
+            control = registered.record.get("control")
+            if not isinstance(control, dict) or not isinstance(
+                control.get("requester_control_token_sha256"), str
+            ):
+                raise PublicError("pruned request has no retained control-token proof")
+            supplied = hashlib.sha256(control_token.encode()).hexdigest()
+            if not hmac.compare_digest(
+                cast(str, control["requester_control_token_sha256"]), supplied
+            ):
+                raise PublicError(
+                    "requester control token does not match the current request generation"
+                )
+            outcome: dict[str, object] = {
+                "cancelled": registered.record.get("cancelled", False),
+                "terminal": True,
+                "already_pruned": True,
+            }
+        else:
+            raw_outcome = recruiter.cmd_cancel(
+                str(registered.order_path), control_token
+            )
+            outcome = {
+                "cancelled": raw_outcome.get("cancelled", False),
+                "terminal": raw_outcome.get("terminal", False),
+            }
+        status = _public_status(store, store.load(args.request))
+        status["cancellation"] = outcome
+    _emit(
+        status,
+        args.json,
+        f"request {args.request}: "
+        + ("cancelled" if outcome.get("cancelled") is True else "already terminal"),
+    )
+    return 0
+
+
+def _cleanup(args: Any, store: PublicRequestStore) -> int:
+    now_ns = time.time_ns()
+    if args.request:
+        try:
+            rows = [
+                _cleanup_one(
+                    store,
+                    args.request,
+                    older_than_seconds=args.older_than_seconds,
+                    apply=args.apply,
+                    now_ns=now_ns,
+                )
+            ]
+        except (OSError, recruiter.RecruiterError) as error:
+            raise PublicError(
+                f"cleanup refused request {args.request}: {error}"
+            ) from error
+    else:
+        rows = []
+        for request_id in store.request_ids():
+            try:
+                rows.append(
+                    _cleanup_one(
+                        store,
+                        request_id,
+                        older_than_seconds=args.older_than_seconds,
+                        apply=args.apply,
+                        now_ns=now_ns,
+                    )
+                )
+            except (OSError, PublicError, recruiter.RecruiterError) as error:
+                rows.append(
+                    {
+                        "request_id": request_id,
+                        "status": "skipped",
+                        "eligible": False,
+                        "reason": str(error),
+                    }
+                )
+    action = "apply" if args.apply else "dry-run"
+    _emit(
+        rows,
+        args.json,
+        f"cleanup {action}: "
+        + ", ".join(f"{row['request_id']}={row['status']}" for row in rows),
+    )
+    return 0
+
+
 def _submit_registered(
     store: PublicRequestStore, registered: RegisteredRequest, *, wait: bool
 ) -> tuple[int, bool]:
     """Fence the public-to-Recruiter seam and resume interrupted submissions safely."""
     with store.request_lock(registered.request_id):
+        registered = store.load(registered.request_id)
+        if registered.pruned:
+            result = registered.record.get("result")
+            verdict = result.get("verdict") if isinstance(result, dict) else None
+            return (0 if verdict == "passed" else 1), False
+        order = recruiter.load_order(registered.order_path)
+        ledger = recruiter.JobLedger()
+        ledger_tombstone = _read_json_optional(
+            ledger.request_dir(ledger.key_for_order(order)) / "tombstone.json",
+            "Recruiter tombstone",
+        )
+        if ledger_tombstone is not None:
+            verdict = ledger_tombstone.get("terminal_verdict")
+            return (0 if verdict == "passed" else 1), False
         submission = store.submission(registered)
         if submission["state"] == "submitted":
             if wait:
@@ -711,7 +1233,11 @@ def _request(args: Any, cwd: Path) -> int:
     store = PublicRequestStore()
     registered = store.register(validated, _cockpit_pane())
     code, submitted_now = _submit_registered(store, registered, wait=args.wait)
-    status = _public_status(store, registered)
+    status = _public_status(
+        store,
+        registered,
+        include_requester_control_token=registered.created and submitted_now,
+    )
     status["attached"] = not registered.created or not submitted_now
     _emit(
         status,
@@ -732,8 +1258,8 @@ def execute(args: Any, cwd: Path) -> int:
             separate_workspaces=args.separate_workspaces,
         )
     store = PublicRequestStore()
-    if args.command == "status":
-        if args.request:
+    if args.command in ("status", "get"):
+        if args.command == "get" or args.request:
             status = _public_status(store, store.load(args.request))
             _emit(
                 status,
@@ -775,6 +1301,10 @@ def execute(args: Any, cwd: Path) -> int:
         return _request(args, cwd)
     if args.command == "await":
         registered = store.load(args.request)
+        if registered.pruned:
+            status = _public_status(store, registered)
+            _emit(status, args.json, f"request {args.request}: pruned")
+            return 0
         code, _ = _capture(
             recruiter.cmd_await, str(registered.order_path), args.notify_after_ms
         )
@@ -787,6 +1317,10 @@ def execute(args: Any, cwd: Path) -> int:
         return code
     if args.command == "await-any":
         registered = [store.load(request_id) for request_id in args.request]
+        if any(item.pruned for item in registered):
+            raise PublicError(
+                "await-any cannot watch pruned terminal requests; use get"
+            )
         code, output = _capture(
             recruiter.cmd_await_any,
             [str(item.order_path) for item in registered],
@@ -799,6 +1333,8 @@ def execute(args: Any, cwd: Path) -> int:
         return code
     if args.command == "verify":
         registered = store.load(args.request)
+        if registered.pruned:
+            raise PublicError("cannot verify a pruned terminal request")
         roster = offerings.load_roster()
         try:
             snapshot = roster.resolve(args.offering, args.effort)
@@ -827,6 +1363,8 @@ def execute(args: Any, cwd: Path) -> int:
         return code
     if args.command == "respond":
         registered = store.load(args.request)
+        if registered.pruned:
+            raise PublicError("cannot respond to a pruned terminal request")
         extension = args.extension_ms if args.action == "extend" else None
         code, output = _capture(
             recruiter.cmd_respond,
@@ -840,6 +1378,10 @@ def execute(args: Any, cwd: Path) -> int:
         value = json.loads(output)
         _emit(value, args.json, f"response accepted: {args.action}")
         return code
+    if args.command == "cancel":
+        return _cancel(args, store)
+    if args.command == "cleanup":
+        return _cleanup(args, store)
     if args.command == "reconcile":
         code, output = _capture(recruiter.cmd_reconcile, force=False)
         value = json.loads(output)

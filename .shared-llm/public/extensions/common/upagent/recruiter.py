@@ -204,6 +204,17 @@ HUB_SOCKET_ENV = "UPAGENT_SOCKET"
 _BOUND_HUB_LEDGER_ROOT: Path | None = None
 _BOUND_HUB_AUTHORITY: dict[str, object] | None = None
 _BOUND_HUB_LOCK_FD: int | None = None
+_REQUEST_RUNTIME_LOCKS: dict[str, threading.Lock] = {}
+_REQUEST_RUNTIME_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _request_runtime_lock(key: str) -> Iterator[None]:
+    """Serialize one request's pane creation against anytime cancellation."""
+    with _REQUEST_RUNTIME_LOCKS_GUARD:
+        lock = _REQUEST_RUNTIME_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        yield
 
 
 def _bind_hub_runtime(
@@ -547,6 +558,62 @@ class JobLedger:
             raise RecruiterError(f"job state {key} is not an object")
         return snapshot.get("state") in ("finished", "cleanup-failed")
 
+    def control_path(self, key: str) -> Path:
+        return self.request_dir(key) / "control.json"
+
+    def _write_control(self, key: str, token: str, generation: int) -> None:
+        self._write_json(
+            self.control_path(key),
+            {
+                "generation": generation,
+                "requester_control_token_sha256": hashlib.sha256(
+                    token.encode()
+                ).hexdigest(),
+                "schema_version": 1,
+            },
+        )
+
+    def control_record(self, key: str) -> dict[str, object]:
+        path = self.control_path(key)
+        tombstone_path = self.request_dir(key) / "tombstone.json"
+        try:
+            value = json.loads((path if path.is_file() else tombstone_path).read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(
+                f"request control record {key} is unreadable: {error}"
+            ) from error
+        if not isinstance(value, dict):
+            raise RecruiterError(f"request control record {key} is not an object")
+        control = (
+            value.get("control")
+            if tombstone_path.is_file() and not path.is_file()
+            else value
+        )
+        if not isinstance(control, dict):
+            raise RecruiterError(f"request control record {key} is invalid")
+        digest = control.get("requester_control_token_sha256")
+        generation = control.get("generation")
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation <= 0
+        ):
+            raise RecruiterError(f"request control record {key} has invalid fields")
+        return cast(dict[str, object], control)
+
+    def verify_control_token(self, key: str, token: str) -> dict[str, object]:
+        control = self.control_record(key)
+        supplied = hashlib.sha256(token.encode()).hexdigest()
+        if not hmac.compare_digest(
+            cast(str, control["requester_control_token_sha256"]), supplied
+        ):
+            raise RecruiterError(
+                "requester control token does not match the current request generation"
+            )
+        return control
+
     def published_result_path(self, key: str) -> Path:
         """Return the hub's own durable copy of the result it published for one order.
 
@@ -772,13 +839,18 @@ class JobLedger:
                 return None
             token = uuid.uuid4().hex
             expiry_epoch = int(time.time() + timeout_ms / 1000) + 60
+            requester_control_token = uuid.uuid4().hex
             lease = {
                 "order_id": order_id,
                 "token": token,
-                "requester_control_token": uuid.uuid4().hex,
+                "requester_control_token": requester_control_token,
                 "expires_at": expiry_epoch,
                 **(owner or {}),
             }
+            generation = lease.get("generation", 1)
+            if isinstance(generation, bool) or not isinstance(generation, int):
+                raise RecruiterError("request lease generation must be an integer")
+            self._write_control(key, requester_control_token, generation)
             temporary = claim_dir.with_name(f".{key}.{token}.tmp")
             temporary.mkdir(parents=True)
             self._write_json(temporary / "lease.json", lease)
@@ -1095,9 +1167,12 @@ class JobLedger:
         launch_id: str,
         pane: str | None,
         cleanup: dict[str, object],
-    ) -> None:
-        """Close one journal only when its recorded exact pane still matches."""
+        *,
+        expected_lease_token: str | None = None,
+    ) -> bool:
+        """Close one journal only when its exact pane and optional owner fence match."""
         path = self.launch_journal_path(key, launch_id)
+        claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
             try:
                 journal = json.loads(path.read_text())
@@ -1107,6 +1182,21 @@ class JobLedger:
                 ) from error
             if not isinstance(journal, dict):
                 raise RecruiterError(f"launch journal {path} is not an object")
+            if expected_lease_token is not None:
+                if journal.get("lease_token") != expected_lease_token:
+                    return False
+                if not claim_dir.is_dir():
+                    return False
+                lease = self._lease(claim_dir / "lease.json")
+                if lease["token"] != expected_lease_token:
+                    return False
+            existing_cleanup = journal.get("cleanup")
+            if (
+                journal.get("state") == "closed"
+                and isinstance(existing_cleanup, dict)
+                and existing_cleanup.get("verified_absent") is True
+            ):
+                return True
             recorded = journal.get("pane")
             if recorded is not None and pane is not None and recorded != pane:
                 raise RecruiterError(
@@ -1136,6 +1226,7 @@ class JobLedger:
                 launch_id=launch_id,
                 cleanup=cleanup,
             )
+            return True
 
     def launch_journals(self) -> list[tuple[str, dict]]:
         journals: list[tuple[str, dict]] = []
@@ -1247,6 +1338,229 @@ class JobLedger:
             )
             return path
 
+    def begin_cancel(self, key: str, control_token: str) -> dict[str, object]:
+        """Fence the current runner or return terminal evidence when publication won."""
+        claim_dir = self.active / "requests" / key
+        with self._claim_lock(key):
+            tombstone_path = self.request_dir(key) / "tombstone.json"
+            if tombstone_path.is_file():
+                self.verify_control_token(key, control_token)
+                tombstone = json.loads(tombstone_path.read_text())
+                if not isinstance(tombstone, dict):
+                    raise RecruiterError(f"request tombstone {key} is not an object")
+                return {"terminal": True, "tombstone": tombstone}
+            if self._is_finished(key):
+                self.verify_control_token(key, control_token)
+                order = self.order(key)
+                return {
+                    "terminal": True,
+                    "receipt": self.completed_receipt(key, order),
+                    "result": self.completed_result(key, order),
+                }
+            if not claim_dir.is_dir():
+                raise RecruiterError(
+                    f"request {lifecycle.request_identity(self.order(key))} is not active"
+                )
+            lease = self._lease(claim_dir / "lease.json")
+            expected_control = lease.get("requester_control_token")
+            if not isinstance(expected_control, str) or not hmac.compare_digest(
+                expected_control, control_token
+            ):
+                raise RecruiterError(
+                    "requester control token does not match the current request generation"
+                )
+            existing_cancellation = lease.get("cancel_requested_at_ns")
+            if isinstance(existing_cancellation, int) and not isinstance(
+                existing_cancellation, bool
+            ):
+                return {
+                    "terminal": False,
+                    "lease": lease,
+                    "token": cast(str, lease["token"]),
+                }
+            cancellation_token = uuid.uuid4().hex
+            lease.update(
+                {
+                    "cancel_requested_at_ns": time.time_ns(),
+                    "expires_at": max(lease["expires_at"], int(time.time()) + 300),
+                    "token": cancellation_token,
+                }
+            )
+            self._write_json(claim_dir / "lease.json", lease)
+            self._write_json(
+                self.active
+                / "by-expiry"
+                / str(lease["expires_at"])
+                / f"{key}-{cancellation_token}.json",
+                lease,
+            )
+            self._event(key, "cancel-requested", generation=lease.get("generation", 1))
+            self._snapshot(key, "cancelling", **lease)
+            return {"terminal": False, "lease": lease, "token": cancellation_token}
+
+    def _terminal_cleanup_evidence_locked(
+        self, key: str, request_id: str, payload_sha256: str
+    ) -> dict[str, object]:
+        request = self.request_dir(key)
+        tombstone_path = request / "tombstone.json"
+        if tombstone_path.is_file():
+            try:
+                tombstone = json.loads(tombstone_path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"request tombstone {tombstone_path} is unreadable: {error}"
+                ) from error
+            if (
+                not isinstance(tombstone, dict)
+                or tombstone.get("request_id") != request_id
+                or tombstone.get("payload_sha256") != payload_sha256
+            ):
+                raise RecruiterError(
+                    f"request tombstone {tombstone_path} has conflicting identity"
+                )
+            return {**tombstone, "already_pruned": True}
+        if not request.is_dir():
+            raise RecruiterError(f"request {request_id} has no Recruiter ledger record")
+        if (self.active / "requests" / key).exists():
+            state = self.state(key).get("state")
+            raise RecruiterError(f"request {request_id} is active ({state})")
+        order = self.order(key)
+        if lifecycle.request_identity(order) != request_id:
+            raise RecruiterError(
+                f"request {request_id} has conflicting ledger identity"
+            )
+        public_request = order.get("public_request")
+        if (
+            not isinstance(public_request, dict)
+            or public_request.get("payload_sha256") != payload_sha256
+        ):
+            raise RecruiterError(f"request {request_id} has conflicting payload hash")
+        state = self.state(key)
+        state_name = state.get("state")
+        if state_name == "cleanup-failed":
+            raise RecruiterError(f"request {request_id} is cleanup-failed")
+        if state_name != "finished":
+            raise RecruiterError(
+                f"request {request_id} is not successfully terminal ({state_name})"
+            )
+        receipt = self.completed_receipt(key, order)
+        cleanup = receipt.get("cleanup")
+        if not isinstance(cleanup, dict) or cleanup.get("verified_absent") is not True:
+            raise RecruiterError(
+                f"request {request_id} has no verified-absent terminal cleanup"
+            )
+        terminal_at_ns = receipt.get(
+            "terminal_at_ns", state.get("terminal_at_ns", state.get("at_ns"))
+        )
+        if (
+            isinstance(terminal_at_ns, bool)
+            or not isinstance(terminal_at_ns, int)
+            or terminal_at_ns <= 0
+        ):
+            raise RecruiterError(
+                f"request {request_id} has no valid terminal timestamp"
+            )
+        launches: list[dict[str, object]] = []
+        launches_dir = request / "launches"
+        for path in (
+            sorted(launches_dir.glob("*.json")) if launches_dir.is_dir() else []
+        ):
+            try:
+                journal = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"launch journal {path} is unreadable: {error}"
+                ) from error
+            journal_cleanup = (
+                journal.get("cleanup") if isinstance(journal, dict) else None
+            )
+            if (
+                not isinstance(journal, dict)
+                or journal.get("launch_id") != path.stem
+                or journal.get("state") != "closed"
+                or not isinstance(journal_cleanup, dict)
+                or journal_cleanup.get("verified_absent") is not True
+            ):
+                raise RecruiterError(
+                    f"request {request_id} retains unresolved launch {path.name}"
+                )
+            launches.append(cast(dict[str, object], journal))
+        result_path = self.published_result_path(key)
+        try:
+            result = load_result(result_path, expected_order_id=order["order_id"])
+        except (ContractError, OSError) as error:
+            raise RecruiterError(
+                f"request {request_id} has no valid retained terminal result: {error}"
+            ) from error
+        return {
+            "already_pruned": False,
+            "control": self.control_record(key),
+            "launches": launches,
+            "order": order,
+            "payload_sha256": payload_sha256,
+            "receipt": receipt,
+            "request_id": request_id,
+            "result": result,
+            "terminal_at_ns": terminal_at_ns,
+            "terminal_state": "finished",
+            "terminal_verdict": result["verdict"],
+        }
+
+    def terminal_cleanup_evidence(
+        self, key: str, request_id: str, payload_sha256: str
+    ) -> dict[str, object]:
+        with self._claim_lock(key):
+            return self._terminal_cleanup_evidence_locked(
+                key, request_id, payload_sha256
+            )
+
+    def prune_terminal(
+        self,
+        key: str,
+        request_id: str,
+        payload_sha256: str,
+        tombstone: dict[str, object],
+        *,
+        verify_absence: Callable[[dict[str, object]], None],
+    ) -> dict[str, object]:
+        """Commit one atomic tombstone, then prune only its Hub-owned siblings."""
+        with self._claim_lock(key):
+            evidence = self._terminal_cleanup_evidence_locked(
+                key, request_id, payload_sha256
+            )
+            request = self.request_dir(key)
+            already_pruned = evidence.get("already_pruned") is True
+            if not already_pruned:
+                verify_absence(evidence)
+                if (
+                    tombstone.get("request_id") != request_id
+                    or tombstone.get("payload_sha256") != payload_sha256
+                    or tombstone.get("terminal_verdict") != evidence["terminal_verdict"]
+                ):
+                    raise RecruiterError(
+                        "cleanup tombstone does not match terminal evidence"
+                    )
+                self._write_json(request / "tombstone.json", tombstone)
+            for child in request.iterdir():
+                if child.name == "tombstone.json":
+                    continue
+                if child.is_symlink() or child.is_file():
+                    child.unlink()
+                else:
+                    shutil.rmtree(child)
+            directory_fd = os.open(request, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            garbage = self.requests / f".{key}.cleanup-old"
+            if garbage.exists():
+                shutil.rmtree(garbage)
+            return {
+                **(evidence if already_pruned else tombstone),
+                "already_pruned": already_pruned,
+            }
+
     def finalize(
         self,
         key: str,
@@ -1323,6 +1637,7 @@ class JobLedger:
                 raise RecruiterError(
                     f"cleanup-failed order {order['order_id']} must publish a blocked result"
                 )
+            terminal_at_ns = time.time_ns()
             receipt = {
                 "cleanup": cleanup,
                 "generation": lease.get("generation", 1),
@@ -1333,6 +1648,7 @@ class JobLedger:
                 ),
                 "result_path": order["result_path"],
                 "state": terminal_state,
+                "terminal_at_ns": terminal_at_ns,
                 "verdict": parsed["verdict"],
                 # A worker's `consults` list is its own account of its own diligence. Resolve it
                 # against the Hub's record of what it actually brokered, so the Stage 2 auditor
@@ -1341,6 +1657,14 @@ class JobLedger:
                 **resolve_consult_claims(order, parsed),
                 "artifact_manifest_path": str(manifest_path),
                 "artifacts": [item.as_dict() for item in manifest.artifacts],
+                **(
+                    {
+                        "cancelled": True,
+                        "cancellation_reason": detail.get("cancellation_reason"),
+                    }
+                    if detail.get("cancelled") is True
+                    else {}
+                ),
             }
             # receipt.json is the commit marker. Durable terminal evidence is forbidden before
             # this write, so await can wake only after all public artifacts validate.
@@ -1350,6 +1674,7 @@ class JobLedger:
                 terminal_state,
                 verdict=parsed["verdict"],
                 cleanup=cleanup,
+                terminal_at_ns=terminal_at_ns,
                 **detail,
             )
             self._snapshot(
@@ -1357,6 +1682,7 @@ class JobLedger:
                 terminal_state,
                 verdict=parsed["verdict"],
                 cleanup=cleanup,
+                terminal_at_ns=terminal_at_ns,
                 **detail,
             )
             if verified_absent:
@@ -2362,6 +2688,7 @@ def _reconcile_exact_launch(
     herdr_session: str,
     allow_not_found_absent: bool,
     attempts: int = 3,
+    trusted_created_identity: bool = False,
 ) -> dict[str, object]:
     """Boundedly resolve one journaled agent and prove its exact pane absent."""
 
@@ -2370,6 +2697,7 @@ def _reconcile_exact_launch(
     pane = known_pane
     agent_name: str | None = None
     for attempt in range(1, attempts + 1):
+        agent_verified = trusted_created_identity and pane is not None
         try:
             journal = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as error:
@@ -2414,23 +2742,43 @@ def _reconcile_exact_launch(
                     f"launch {launch_id} records pane {pane}, resolved {resolved_pane}"
                 )
             pane = resolved_pane
+            agent_verified = True
         if pane is not None:
-            try:
-                cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
-            except RecruiterError as error:
-                errors.append(str(error))
-            else:
-                evidence = {
-                    **cleanup,
-                    "agent_name": agent_name,
-                    "launch_id": launch_id,
-                    "reconciliation_attempt": attempt,
-                    "worker_pane": pane,
-                }
-                ledger.mark_launch_closed(key, launch_id, pane, evidence)
-                if evidence.get("verified_absent") is True:
+            if not agent_verified:
+                live_panes = _live_pane_ids(herdr_session=herdr_session)
+                if pane not in live_panes:
+                    evidence = {
+                        "agent_name": agent_name,
+                        "launch_id": launch_id,
+                        "reconciliation_attempt": attempt,
+                        "status": "already-absent",
+                        "verified_absent": True,
+                        "worker_pane": pane,
+                    }
+                    ledger.mark_launch_closed(key, launch_id, pane, evidence)
                     return evidence
-                errors.append(str(evidence.get("reason", "cleanup was not verified")))
+                errors.append(
+                    f"pane {pane} is live but agent {agent_name!r} could not be identity-verified"
+                )
+            else:
+                try:
+                    cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
+                except RecruiterError as error:
+                    errors.append(str(error))
+                else:
+                    evidence = {
+                        **cleanup,
+                        "agent_name": agent_name,
+                        "launch_id": launch_id,
+                        "reconciliation_attempt": attempt,
+                        "worker_pane": pane,
+                    }
+                    ledger.mark_launch_closed(key, launch_id, pane, evidence)
+                    if evidence.get("verified_absent") is True:
+                        return evidence
+                    errors.append(
+                        str(evidence.get("reason", "cleanup was not verified"))
+                    )
         elif allow_not_found_absent and not_found and attempt == attempts:
             evidence = {
                 "agent_name": agent_name,
@@ -2474,46 +2822,50 @@ def _start_fenced_ledger_agent(
 ) -> tuple[str, str | None, str, str]:
     """Journal before create; failed commit returns only truthful cleanup evidence."""
 
-    launch_id = ledger.begin_launch(
-        key,
-        token,
-        role,
-        name,
-        herdr_session,
-        order["cwd"],
-        metadata=metadata,
-    )
-    pane: str | None = None
-    try:
-        pane, workspace_id, address = _start_herdr_agent(
+    with _request_runtime_lock(key):
+        launch_id = ledger.begin_launch(
+            key,
+            token,
+            role,
             name,
-            order,
-            launch,
-            split_direction=split_direction,
-            tab_role=tab_role,
+            herdr_session,
+            order["cwd"],
+            metadata=metadata,
+        )
+        pane: str | None = None
+        try:
+            pane, workspace_id, address = _start_herdr_agent(
+                name,
+                order,
+                launch,
+                split_direction=split_direction,
+                tab_role=tab_role,
+                herdr_session=herdr_session,
+            )
+            ledger.record_launch_created(
+                key, token, launch_id, pane, workspace_id, address
+            )
+            if ledger.mark_launch_started(
+                key, token, launch_id, pane, workspace_id, address
+            ):
+                return pane, workspace_id, address, launch_id
+            failure = RecruiterError(
+                f"lease ownership changed before {role} pane {pane} was committed"
+            )
+        except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
+            failure = error
+        cleanup = _reconcile_exact_launch(
+            ledger,
+            key,
+            launch_id,
+            known_pane=pane,
             herdr_session=herdr_session,
+            allow_not_found_absent=pane is None,
+            trusted_created_identity=pane is not None,
         )
-        ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
-        if ledger.mark_launch_started(
-            key, token, launch_id, pane, workspace_id, address
-        ):
-            return pane, workspace_id, address, launch_id
-        failure = RecruiterError(
-            f"lease ownership changed before {role} pane {pane} was committed"
-        )
-    except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
-        failure = error
-    cleanup = _reconcile_exact_launch(
-        ledger,
-        key,
-        launch_id,
-        known_pane=pane,
-        herdr_session=herdr_session,
-        allow_not_found_absent=pane is None,
-    )
-    raise FencedLaunchError(
-        f"{role} fenced launch {launch_id} failed: {failure}", cleanup
-    ) from failure
+        raise FencedLaunchError(
+            f"{role} fenced launch {launch_id} failed: {failure}", cleanup
+        ) from failure
 
 
 def _layout_warning(role: str, pane_id: str, reason: str) -> None:
@@ -3438,11 +3790,23 @@ def _start_account_manager(
         )
     except (RecruiterError, OSError):
         cleanup = _close_worker_pane(manager_pane, herdr_session=session)
-        ledger.mark_launch_closed(key, launch_id, manager_pane, cleanup)
+        ledger.mark_launch_closed(
+            key,
+            launch_id,
+            manager_pane,
+            cleanup,
+            expected_lease_token=token,
+        )
         raise
     if not ledger.mark_manager_ready(key, token, decision):
         cleanup = _close_worker_pane(manager_pane, herdr_session=session)
-        ledger.mark_launch_closed(key, launch_id, manager_pane, cleanup)
+        ledger.mark_launch_closed(
+            key,
+            launch_id,
+            manager_pane,
+            cleanup,
+            expected_lease_token=token,
+        )
         raise RecruiterError(
             f"lease ownership changed before manager {manager_address} became ready"
         )
@@ -3620,7 +3984,13 @@ def _run_one_shot_checker(
         )
     finally:
         checker_cleanup = _close_worker_pane(checker_pane, herdr_session=herdr_session)
-        ledger.mark_launch_closed(key, launch_id, checker_pane, checker_cleanup)
+        ledger.mark_launch_closed(
+            key,
+            launch_id,
+            checker_pane,
+            checker_cleanup,
+            expected_lease_token=cast(str, manager["lease_token"]),
+        )
     ledger._event(
         key,
         "worker-checked",
@@ -3850,7 +4220,13 @@ def _startup_rescue_advice(
             rescue_cleanup = _close_worker_pane(
                 rescue_pane, herdr_session=herdr_session
             )
-            ledger.mark_launch_closed(key, launch_id, rescue_pane, rescue_cleanup)
+            ledger.mark_launch_closed(
+                key,
+                launch_id,
+                rescue_pane,
+                rescue_cleanup,
+                expected_lease_token=cast(str, manager["lease_token"]),
+            )
     except (RecruiterError, LifecycleError, ContractError, OSError) as error:
         # The event is telemetry; the advice is the contract. A broken ledger write must
         # not turn "broker unavailable" into a raised exception.
@@ -5767,6 +6143,122 @@ def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
     }
 
 
+def _verify_terminal_cleanup_absence(
+    evidence: dict[str, object], *, require_runner_absent: bool = True
+) -> None:
+    """Read-only proof that terminal request panes remain absent before pruning."""
+    order = evidence.get("order")
+    if not isinstance(order, dict):
+        raise RecruiterError("terminal cleanup evidence has no order")
+    key = JobLedger.key_for_order(order)
+    if require_runner_absent and _runner_alive(os.getpid(), key):
+        raise RecruiterError(
+            f"request {lifecycle.request_identity(order)} still has a live job runner"
+        )
+    launches = evidence.get("launches")
+    if not isinstance(launches, list):
+        raise RecruiterError("terminal cleanup evidence has invalid launches")
+    by_session: dict[str, set[str]] = {}
+    for journal in launches:
+        if not isinstance(journal, dict):
+            raise RecruiterError("terminal cleanup evidence has a malformed launch")
+        pane = journal.get("pane")
+        session = journal.get("herdr_session")
+        if pane is None:
+            continue
+        if (
+            not isinstance(pane, str)
+            or not pane
+            or not isinstance(session, str)
+            or not session
+        ):
+            raise RecruiterError("terminal cleanup launch has invalid pane ownership")
+        by_session.setdefault(session, set()).add(pane)
+    for session, panes in by_session.items():
+        remaining = panes & _live_pane_ids(herdr_session=session)
+        if remaining:
+            raise RecruiterError(
+                "terminal cleanup refuses live owned pane(s): "
+                + ", ".join(sorted(remaining))
+            )
+
+
+def _cancel_owned_request(
+    ledger: JobLedger, key: str, lease: dict[str, object]
+) -> dict[str, object]:
+    """Close only journal-verified panes after the old lease token is fenced."""
+    herdr_session = _recorded_herdr_session(
+        lease.get("herdr_session"), "request cancellation"
+    )
+    journals = [
+        journal
+        for candidate_key, journal in ledger.launch_journals()
+        if candidate_key == key
+    ]
+    journal_panes = {
+        journal.get("pane")
+        for journal in journals
+        if isinstance(journal.get("pane"), str) and journal.get("pane")
+    }
+    for field in ("worker_pane", "manager_pane"):
+        pane = lease.get(field)
+        if isinstance(pane, str) and pane and pane not in journal_panes:
+            raise RecruiterError(
+                f"cancellation refuses unjournaled owned pane {pane} from {field}"
+            )
+    for journal in journals:
+        cleanup = journal.get("cleanup")
+        if (
+            journal.get("state") == "closed"
+            and isinstance(cleanup, dict)
+            and cleanup.get("verified_absent") is True
+        ):
+            continue
+        launch_id = journal.get("launch_id")
+        if not isinstance(launch_id, str) or not launch_id:
+            raise RecruiterError("cancellation found a launch without identity")
+        current_session = _recorded_herdr_session(
+            journal.get("herdr_session", herdr_session),
+            "request cancellation launch",
+        )
+        outcome = _reconcile_exact_launch(
+            ledger,
+            key,
+            launch_id,
+            known_pane=cast(str | None, journal.get("pane")),
+            herdr_session=current_session,
+            allow_not_found_absent=True,
+        )
+        if outcome.get("verified_absent") is not True:
+            reason = outcome.get("reason", "cleanup was not verified")
+            raise RecruiterError(
+                f"cancellation could not verify launch {launch_id} absent: {reason}"
+            )
+    refreshed = [
+        journal
+        for candidate_key, journal in ledger.launch_journals()
+        if candidate_key == key
+    ]
+    if any(
+        not isinstance(journal.get("cleanup"), dict)
+        or cast(dict[str, object], journal["cleanup"]).get("verified_absent")
+        is not True
+        for journal in refreshed
+    ):
+        raise RecruiterError("cancellation did not close every owned launch")
+    _verify_terminal_cleanup_absence(
+        {"order": ledger.order(key), "launches": refreshed},
+        require_runner_absent=False,
+    )
+    return {
+        "status": "closed",
+        "verified_absent": True,
+        "herdr_session": herdr_session,
+        "launches": _launch_receipt_evidence(ledger, key),
+        "worker_pane": lease.get("worker_pane"),
+    }
+
+
 def _write_required_blocked_bundle(order: dict, manifest: Any, reason: str) -> dict:
     """Regenerate every required staged artifact with one consistent blocked reason."""
     return cast(
@@ -6222,7 +6714,7 @@ def _dispatch_order(order: dict, roster_path: str) -> int:
         )
     receipt = ledger.completed_receipt(key, order)
     print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
-    return 0
+    return 0 if result["verdict"] == "passed" else 1
 
 
 def cmd_request(order_path: str, roster_path: str) -> int:
@@ -6662,6 +7154,70 @@ def cmd_respond(
     return 0
 
 
+def cmd_cancel(order_path: str, control_token: str) -> dict[str, object]:
+    """Authenticate, fence, clean, and terminalize one requester cancellation."""
+    try:
+        order = load_order(order_path)
+    except ContractError as error:
+        raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    ledger = JobLedger()
+    key = ledger.key_for_order(order)
+    outcome = ledger.begin_cancel(key, control_token)
+    if outcome.get("terminal") is True:
+        tombstone = outcome.get("tombstone")
+        if isinstance(tombstone, dict):
+            return {
+                "cancelled": tombstone.get("cancelled", False),
+                "receipt": tombstone.get("receipt"),
+                "result": tombstone.get("result"),
+                "terminal": True,
+            }
+        receipt = outcome.get("receipt")
+        return {
+            "cancelled": receipt.get("cancelled", False)
+            if isinstance(receipt, dict)
+            else False,
+            "receipt": receipt,
+            "result": outcome.get("result"),
+            "terminal": True,
+        }
+    lease = outcome.get("lease")
+    token = outcome.get("token")
+    if not isinstance(lease, dict) or not isinstance(token, str):
+        raise RecruiterError("cancellation fence returned invalid ownership")
+    with _request_runtime_lock(key):
+        cleanup = _cancel_owned_request(ledger, key, lease)
+        manifest = completion.build_manifest(
+            order,
+            ledger.request_dir(key),
+            token,
+            lifecycle.request_identity(order),
+        )
+        completion.write_manifest(
+            ledger.request_dir(key) / "artifact-manifest.json", manifest
+        )
+        reason = "requester cancelled this request using its control token"
+        result = _write_required_blocked_bundle(order, manifest, reason)
+        finalized = ledger.finalize(
+            key,
+            token,
+            order,
+            result,
+            cleanup=cleanup,
+            cancelled=True,
+            cancellation_reason=reason,
+            completion_source="requester-cancel",
+        )
+    receipt = ledger.completed_receipt(key, order)
+    result = ledger.completed_result(key, order)
+    return {
+        "cancelled": True if finalized else receipt.get("cancelled", False),
+        "receipt": receipt,
+        "result": result,
+        "terminal": True,
+    }
+
+
 def cmd_run_job(key: str, roster_path: str) -> int:
     """Claim one persisted request, then run its existing exclusive worker lifecycle."""
     ledger = JobLedger()
@@ -6779,6 +7335,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 manager_launch_id,
                 cast(str | None, manager["pane"]),
                 manager_cleanup,
+                expected_lease_token=token,
             )
         cleanup = {
             "manager": manager_cleanup,
@@ -7007,7 +7564,13 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         )
         if len(worker_launches) > before:
             launch_id, pane = worker_launches[-1]
-            ledger.mark_launch_closed(key, launch_id, pane, outcome[2])
+            ledger.mark_launch_closed(
+                key,
+                launch_id,
+                pane,
+                outcome[2],
+                expected_lease_token=token,
+            )
         return outcome
 
     result_code, result, cleanup = run_order_once(1)
@@ -7067,7 +7630,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     manager_launch_id = manager.get("launch_id")
     if isinstance(manager_launch_id, str):
         ledger.mark_launch_closed(
-            key, manager_launch_id, cast(str | None, manager["pane"]), manager_cleanup
+            key,
+            manager_launch_id,
+            cast(str | None, manager["pane"]),
+            manager_cleanup,
+            expected_lease_token=token,
         )
     cleanup["manager"] = manager_cleanup
     cleanup["verified_absent"] = (

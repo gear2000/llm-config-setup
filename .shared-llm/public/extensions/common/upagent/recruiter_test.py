@@ -2131,6 +2131,36 @@ def test_dispatch_blocks_on_job_process_and_returns_durable_receipt(
     assert waits
 
 
+def test_dispatch_returns_nonzero_for_a_terminal_blocked_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert isinstance(token, str)
+    blocked = {
+        **_result(order["order_id"], "blocked"),
+        "reason": "bounded task could not complete",
+    }
+    assert _finalize(ledger, key, token, order, blocked, cleanup=_cleanup())
+    monkeypatch.setattr(
+        recruiter,
+        "_spawn_job",
+        lambda key, roster: pytest.fail("re-ran an already terminal order"),
+    )
+
+    assert recruiter.cmd_dispatch(str(order_path), "roster.yaml") == 1
+
+
 def _finished_order(tmp_path: Path, monkeypatch) -> tuple[dict, Path, object, str]:
     """Submit and finish one Stage 1 order, leaving a terminal ledger record behind."""
     order = _order(
@@ -7086,3 +7116,176 @@ def test_a_wellformed_consults_list_still_passes_the_result_contract(
     )
 
     assert parsed["consults"] == [_claim()]
+
+
+def test_requester_control_proof_is_persisted_hashed_and_fences_the_old_lease(
+    tmp_path: Path,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id="request-1")
+    key, _ = ledger.submit(order)
+    old_token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": "request-1",
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(old_token, str)
+    control_token = ledger.state(key)["requester_control_token"]
+    assert isinstance(control_token, str)
+    control_text = ledger.control_path(key).read_text()
+    assert control_token not in control_text
+    assert ledger.verify_control_token(key, control_token)["generation"] == 1
+    with pytest.raises(RecruiterError, match="control token"):
+        ledger.begin_cancel(key, "wrong")
+
+    cancellation = ledger.begin_cancel(key, control_token)
+
+    assert cancellation["terminal"] is False
+    assert cancellation["token"] != old_token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    assert active_lease["token"] == cancellation["token"]
+    assert active_lease["token"] != old_token
+    assert (
+        ledger.active
+        / "by-expiry"
+        / str(active_lease["expires_at"])
+        / f"{key}-{active_lease['token']}.json"
+    ).is_file()
+    assert ledger.state(key)["state"] == "cancelling"
+
+
+def test_fenced_runner_cannot_overwrite_cancellation_launch_cleanup(
+    tmp_path: Path,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id="request-fenced-cleanup")
+    key, _ = ledger.submit(order)
+    old_token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": "request-fenced-cleanup",
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(old_token, str)
+    launch_id = ledger.begin_launch(
+        key,
+        old_token,
+        "worker",
+        "owned-agent",
+        "test-session",
+        order["cwd"],
+    )
+    ledger.record_launch_created(
+        key, old_token, launch_id, "owned-pane", "workspace", "address"
+    )
+    assert ledger.mark_launch_started(
+        key, old_token, launch_id, "owned-pane", "workspace", "address"
+    )
+    control_token = ledger.state(key)["requester_control_token"]
+    cancellation = ledger.begin_cancel(key, control_token)
+    assert cancellation["token"] != old_token
+    assert ledger.mark_launch_closed(
+        key,
+        launch_id,
+        "owned-pane",
+        {"status": "closed", "verified_absent": True},
+    )
+
+    assert not ledger.mark_launch_closed(
+        key,
+        launch_id,
+        "owned-pane",
+        {
+            "status": "cleanup-pending",
+            "verified_absent": False,
+            "reason": "stale runner write",
+        },
+        expected_lease_token=old_token,
+    )
+
+    assert ledger.mark_launch_closed(
+        key,
+        launch_id,
+        "owned-pane",
+        {
+            "status": "cleanup-pending",
+            "verified_absent": False,
+            "reason": "late reconciliation downgrade",
+        },
+    )
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] == "closed"
+    assert journal["cleanup"]["verified_absent"] is True
+    assert "stale runner write" not in json.dumps(journal)
+
+
+def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id="request-2")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": "request-2",
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    launch_id = ledger.begin_launch(
+        key,
+        token,
+        "worker",
+        "owned-agent",
+        "test-session",
+        order["cwd"],
+    )
+    ledger.record_launch_created(
+        key, token, launch_id, "foreign-pane", "workspace", "address"
+    )
+    closed: list[str] = []
+
+    def missing_agent(*_args: object, **_kwargs: object) -> dict:
+        raise RecruiterError("not found")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", missing_agent)
+    monkeypatch.setattr(
+        recruiter,
+        "_live_pane_ids",
+        lambda **_kwargs: {"foreign-pane"},
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_close_worker_pane",
+        lambda pane, **_kwargs: closed.append(pane) or {"verified_absent": True},
+    )
+
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="foreign-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+        attempts=1,
+    )
+
+    assert cleanup["verified_absent"] is False
+    assert "identity-verified" in cleanup["reason"]
+    assert closed == []

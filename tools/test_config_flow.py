@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
@@ -626,6 +627,53 @@ def test_do_star_is_pi_only_cc_star_is_claude_only(tmp_path: Path) -> None:
     assert (codex / "demo").is_symlink()
     assert not (codex / "do-plan-and-grill").exists()
     assert not (codex / "cc-plan-and-grill").exists()
+
+
+def test_generic_upagent_slash_skills_compose_and_link_to_every_harness(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    kit = TOOLS.parent / ".shared-llm/public"
+    shared = dest / ".shared-llm/public"
+    names = (
+        "upagent-run",
+        "upagent-ls",
+        "upagent-get",
+        "upagent-cancel",
+        "upagent-cleanup",
+    )
+    for name in names:
+        shutil.copytree(
+            kit / f"layers/slash-commands/common/common/{name}",
+            shared / f"layers/slash-commands/common/common/{name}",
+        )
+        recipe = shared / f"compose/slash-commands/common/common/{name}.yaml"
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            kit / f"compose/slash-commands/common/common/{name}.yaml", recipe
+        )
+    cfg = _cfg(m, dest, ["cc", "pi", "codex"])
+
+    m.do_compose(cfg, _quiet(m))
+    m.do_link(cfg, _quiet(m))
+
+    commands = {
+        "upagent-run": "request",
+        "upagent-ls": "lists",
+        "upagent-get": "get",
+        "upagent-cancel": "cancel",
+        "upagent-cleanup": "cleanup",
+    }
+    for name in names:
+        skill = dest / f".claude/skills/{name}/SKILL.md"
+        assert skill.is_file()
+        assert f"just upagent {commands[name]}" in skill.read_text()
+        assert (home / f".pi/agent/skills/{name}").is_symlink()
+        assert (home / f".agents/skills/{name}").is_symlink()
 
 
 def test_repo_pi_front_door_overrides_portable_do_recipe(tmp_path: Path) -> None:

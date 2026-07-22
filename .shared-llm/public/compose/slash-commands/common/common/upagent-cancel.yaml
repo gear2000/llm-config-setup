@@ -1,0 +1,6 @@
+type: skill
+name: upagent-cancel
+description: .shared-llm/public/layers/slash-commands/common/common/upagent-cancel/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/upagent-cancel/command.md
+output: .claude/skills/upagent-cancel/SKILL.md

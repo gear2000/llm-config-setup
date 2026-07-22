@@ -1,0 +1,6 @@
+type: skill
+name: upagent-get
+description: .shared-llm/public/layers/slash-commands/common/common/upagent-get/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/upagent-get/command.md
+output: .claude/skills/upagent-get/SKILL.md
