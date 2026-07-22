@@ -672,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
         "--separate-workspaces",
         action="store_true",
         help="create a per-run <slug> workspace instead of joining the unified `herdr` "
-        "workspace (the mode chosen at `just herdr-up` is inherited by default)",
+        "workspace (the mode chosen at `just upagent-up` is inherited by default)",
     )
     args = parser.parse_args(argv)
     repo = args.repo.expanduser().resolve()

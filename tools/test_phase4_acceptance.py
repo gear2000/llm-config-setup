@@ -70,7 +70,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 # Flip to True in the commit that lands the Phase 4 demolition. See the module docstring:
@@ -81,8 +80,8 @@ PHASE_4_DEMOLITION_LANDED = True
 SECOND_HUB = "specialist"
 # The module that must be the one request door.
 REQUEST_DOOR = "upagent"
-# Bring-up, health and teardown of the always-up shared services.
-SERVICE_RECIPES = ("herdr-up", "herdr-status", "herdr-down")
+# Bring-up, health and teardown of the always-up UpAgent services.
+SERVICE_RECIPES = ("upagent-up", "upagent-status", "upagent-down")
 # The command Phase 4 names for removal.
 SECOND_HUB_COMMAND = "specialist-hub"
 
@@ -324,30 +323,30 @@ def _c1_single_service_bring_up(root: Path) -> Finding:
     """No second-hub startup dependency: bring-up, health and teardown run ONE engine module.
 
     Read from the expanded recipe bodies, so this is the service topology that actually
-    executes. It is the criterion a half-demolition trips: deleting the hub while `herdr-up`
-    still launches it, or leaving `herdr-status` reading a second runtime directory.
+    executes. It is the criterion a half-demolition trips: deleting the hub while `upagent-up`
+    still launches it, or leaving `upagent-status` reading a second runtime directory.
     """
     started: dict[str, set[str]] = {}
     missing: list[str] = []
     for recipe in SERVICE_RECIPES:
-        engines = _engines_in(root, "herdr", recipe)
+        engines = _engines_in(root, REQUEST_DOOR, recipe)
         if engines is None:
             missing.append(recipe)
             continue
         started[recipe] = {module for module, _ in engines}
 
     if missing:
-        return Finding("single-service-bring-up", False, f"herdr/justfile defines no {missing}")
+        return Finding("single-service-bring-up", False, f"upagent/justfile defines no {missing}")
 
     detail = "; ".join(f"{r}: {sorted(started[r]) or 'no engine'}" for r in SERVICE_RECIPES)
     extra = sorted(set().union(*started.values()) - {REQUEST_DOOR})
     problems = []
     if extra:
         problems.append(f"a second service survives in {sorted(started)}: {extra}")
-    # Bring-up must still bring the door UP. Without this, gutting `herdr-up` entirely would
+    # Bring-up must still bring the door UP. Without this, gutting `upagent-up` entirely would
     # satisfy "one service" by starting none — the check would be passable by deletion.
-    if REQUEST_DOOR not in started["herdr-up"]:
-        problems.append(f"`herdr-up` must start `{REQUEST_DOOR}`, starts {sorted(started['herdr-up'])}")
+    if REQUEST_DOOR not in started["upagent-up"]:
+        problems.append(f"`upagent-up` must start `{REQUEST_DOOR}`, starts {sorted(started['upagent-up'])}")
 
     if problems:
         return Finding("single-service-bring-up", False, f"{'; '.join(problems)} — {detail}")
@@ -560,31 +559,33 @@ def demolished(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     ext = root / _EXTENSIONS
 
-    # As in the real kit: the owning module spells its engine path out inline, and only
-    # `herdr/justfile` binds it to a variable — `just` rejects a name defined twice across
-    # imports, so the fixture must not invent a second `_UPAGENT`.
     _engine = "{{justfile_directory()}}/.shared-llm/public/extensions/common/upagent/recruiter.py"
     _write(ext / "common/upagent/recruiter.py", _ENGINE_STUB)
     _write(
         ext / "common/upagent/justfile",
-        f"upagent-request *A:\n    python3 {_engine} request {{{{A}}}}\n"
-        f"\n"
-        f"upagent-consult *A:\n    python3 {_engine} consult {{{{A}}}}\n",
+        f"_UPAGENT := \"{_engine}\"\n"
+        "\n"
+        "upagent-up *F:\n"
+        "    python3 {{_UPAGENT}} up {{F}}\n"
+        "\n"
+        "upagent-status:\n"
+        "    python3 {{_UPAGENT}} status\n"
+        "\n"
+        "upagent-down:\n"
+        "    python3 {{_UPAGENT}} down || true\n"
+        "\n"
+        "upagent-request *A:\n"
+        "    python3 {{_UPAGENT}} request {{A}}\n"
+        "\n"
+        "upagent-consult *A:\n"
+        "    python3 {{_UPAGENT}} consult {{A}}\n",
     )
     _write(ext / "common/herdr/plan_controller.py", _ENGINE_STUB)
     _write(
         ext / "common/herdr/justfile",
-        "_UPAGENT := justfile_directory() + "
-        '"/.shared-llm/public/extensions/common/upagent/recruiter.py"\n'
-        "\n"
-        "herdr-up *F:\n"
-        "    python3 {{_UPAGENT}} up {{F}}\n"
-        "\n"
-        "herdr-status:\n"
-        "    python3 {{_UPAGENT}} status\n"
-        "\n"
-        "herdr-down:\n"
-        "    python3 {{_UPAGENT}} down || true\n",
+        "herdr-start D:\n"
+        "    python3 {{justfile_directory()}}/.shared-llm/public/extensions/"
+        "common/herdr/plan_controller.py {{D}}\n",
     )
     _write(
         root / "justfile",
@@ -600,7 +601,7 @@ def demolished(tmp_path: Path) -> Path:
         "Place the order with `just upagent-request <order.json>`.\n"
         "Ask a specialist with `just upagent-consult <consult.json>`.\n",
     )
-    _write(root / PROTOCOL_DOCS[1], "Bring the service up with `just herdr-up`.\n")
+    _write(root / PROTOCOL_DOCS[1], "Bring the service up with `just upagent-up`.\n")
     _write(root / PROTOCOL_DOCS[2], "The phone book names `just upagent-consult`.\n")
 
     for gate in MIGRATION_GATES:
@@ -616,12 +617,12 @@ def test_a_complete_demolition_is_accepted(demolished: Path) -> None:
 
 
 def test_c1_catches_a_hub_deleted_while_bring_up_still_starts_it(demolished: Path) -> None:
-    """The named scenario: the module is gone but `herdr-up` did not hear about it."""
-    justfile = demolished / _EXTENSIONS / "common/herdr/justfile"
+    """The named scenario: the module is gone but `upagent-up` did not hear about it."""
+    justfile = demolished / _EXTENSIONS / "common/upagent/justfile"
     justfile.write_text(
         justfile.read_text().replace(
-            "herdr-up *F:\n    python3 {{_UPAGENT}} up {{F}}\n",
-            "herdr-up *F:\n"
+            "upagent-up *F:\n    python3 {{_UPAGENT}} up {{F}}\n",
+            "upagent-up *F:\n"
             "    python3 {{_UPAGENT}} up {{F}}\n"
             "    python3 {{justfile_directory()}}"
             "/.shared-llm/public/extensions/common/specialist/hub.py up || true\n",
@@ -636,11 +637,11 @@ def test_c1_catches_a_hub_deleted_while_bring_up_still_starts_it(demolished: Pat
 
 def test_c1_catches_a_second_runtime_left_in_the_status_recipe(demolished: Path) -> None:
     """Teardown and health are checked too — a hub can survive in either alone."""
-    justfile = demolished / _EXTENSIONS / "common/herdr/justfile"
+    justfile = demolished / _EXTENSIONS / "common/upagent/justfile"
     justfile.write_text(
         justfile.read_text().replace(
-            "herdr-status:\n    python3 {{_UPAGENT}} status\n",
-            "herdr-status:\n"
+            "upagent-status:\n    python3 {{_UPAGENT}} status\n",
+            "upagent-status:\n"
             "    python3 {{_UPAGENT}} status\n"
             "    runtime=$(python3 {{justfile_directory()}}"
             "/.shared-llm/public/extensions/common/specialist/hub.py runtime-dir)\n",
@@ -649,7 +650,7 @@ def test_c1_catches_a_second_runtime_left_in_the_status_recipe(demolished: Path)
     report = phase_4_report(demolished)
 
     assert not report.of("single-service-bring-up").passed
-    assert "herdr-status" in report.of("single-service-bring-up").evidence
+    assert "upagent-status" in report.of("single-service-bring-up").evidence
 
 
 def test_c2_catches_an_engine_directory_left_on_disk(demolished: Path) -> None:
@@ -750,8 +751,8 @@ def test_c4_catches_the_token_passed_as_a_call_keyword(demolished: Path) -> None
 
 
 def test_c1_is_not_satisfied_by_a_bring_up_that_starts_nothing(demolished: Path) -> None:
-    """"One service" must mean one, not none — otherwise emptying `herdr-up` passes C1."""
-    justfile = demolished / _EXTENSIONS / "common/herdr/justfile"
+    """"One service" must mean one, not none — otherwise emptying `upagent-up` passes C1."""
+    justfile = demolished / _EXTENSIONS / "common/upagent/justfile"
     justfile.write_text(
         justfile.read_text().replace("    python3 {{_UPAGENT}} up {{F}}\n", "    @true\n")
     )

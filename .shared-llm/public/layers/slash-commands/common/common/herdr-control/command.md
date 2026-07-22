@@ -30,7 +30,7 @@ Run a checked `plan.md + route.yaml` pair end to end through the Herdr-native me
 ## Cockpit + services setup
 
 The default runtime topology is ONE unified workspace — services and the run share it as role
-tabs (`just herdr-up --separate-workspaces` restores the two-workspace layout):
+tabs (`just upagent-up --separate-workspaces` restores the two-workspace layout):
 
 ```text
 ws: herdr                      ← everything, as tabs (single-workspace default)
@@ -53,7 +53,7 @@ ws: shared-services            ← recruiter, peripheral
 
 Concurrent runs in the single-workspace default share the role tabs (each adds its own
 tui-agent/leader panes); start heavy parallel runs with `--separate-workspaces` when you want
-per-run isolation. The mode is chosen once at `just herdr-up` and inherited by `just herdr-start`.
+per-run isolation. The mode is chosen once at `just upagent-up` and inherited by `just herdr-start`.
 
 1. The cockpit is the workspace holding this (tui-agent) pane. `just herdr-start` has already created and health-checked this TUI. Read `<run-tree>/control/plan-start.json` and acknowledge `ready` (its `watchdog` block says `not-configured` by design — there is no standing plan-lifecycle-watchdog in coordination v2; a legacy run may still show `ready-degraded`, which is equally continuable). Liveness does not come from an observer agent: this TUI hears every phase condition — completion, blocked, crash, stall, quiet — as the typed return value of its own blocking `upagent-phase-await` call, and urgent unacknowledged events additionally escalate to the human through `herdr notification`. **The TUI has no authority to create, launch, prompt, adopt, or replace a watchdog agent or a phase leader.** Its sole phase-start authority is the controller command in the phase loop below; never attempt an ad-hoc monitoring repair.
 2. Bring up the **UpAgent Recruiter** with `just upagent-up`. It ensures the visible Recruiter services pane, validates the roster, persists its state, and starts a small deterministic Python supervisor for dead/expired leases. The pane is status/observability only; requesters use `just upagent-request` / `upagent-await`, never its shell. The roster still owns all pre-hardened harness launch templates. There is one service and one door: specialist consultation is an ordinary UpAgent order placed with `just upagent-consult`, and the phone book every stage brief embeds comes from `just upagent-specialists`. A Recruiter that is not up therefore stops mandated consults as well as stage work, so confirm `just upagent-status` now rather than discovering it mid-phase.

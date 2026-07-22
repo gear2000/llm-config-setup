@@ -7721,7 +7721,7 @@ def _ensure_role_pane(
     role pane in the services workspace, claiming ONLY a pane labeled `role_label` — never an arbitrary
     pane. Claiming by role label keeps bring-up idempotent and lets the service coexist with a
     run's own panes in the unified workspace without fighting over them:
-      - if services are already up under the OTHER mode's label, fail loud (run `just herdr-down`
+      - if services are already up under the OTHER mode's label, fail loud (run `just upagent-down`
         first) rather than splitting the services across two workspaces;
       - create the services workspace if it is absent, and label its root pane for my role;
       - if it exists, reuse my role-labeled pane if present, else split a fresh pane off an
@@ -7754,7 +7754,7 @@ def _ensure_role_pane(
         ):
             raise RecruiterError(
                 f"services are already up in workspace {other_label!r}; "
-                "run `just herdr-down` first to switch workspace modes"
+                "run `just upagent-down` first to switch workspace modes"
             )
     existing = _find_workspace(
         _herdr_json("workspace", "list", herdr_session=herdr_session), workspace_label
@@ -8498,7 +8498,7 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
         if not cockpit_pane:
             raise RecruiterError(
                 f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
-                "run `just herdr-up` first"
+                "run `just upagent-up` first"
             )
         cwd = _resolve_consult_cwd(roster, consult, consult_id)
         receipt["cwd"] = cwd

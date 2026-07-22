@@ -4188,7 +4188,7 @@ def test_ensure_role_pane_rejects_switching_workspace_modes(
 
     monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
 
-    with pytest.raises(RecruiterError, match="herdr-down"):
+    with pytest.raises(RecruiterError, match="upagent-down"):
         recruiter._ensure_role_pane(
             recruiter.RECRUITER_PANE_LABEL,
             recruiter.UNIFIED_WORKSPACE_LABEL,
