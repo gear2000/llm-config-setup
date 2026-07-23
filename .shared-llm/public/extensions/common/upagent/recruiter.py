@@ -6721,18 +6721,62 @@ def _strict_order(order_path: str) -> dict:
     return order
 
 
+_CURRENT_LOG_ORDER_PATH: str | None = None
+
+
+@contextmanager
+def _request_log_order_path(order_path: str) -> Iterator[None]:
+    global _CURRENT_LOG_ORDER_PATH
+    previous = _CURRENT_LOG_ORDER_PATH
+    _CURRENT_LOG_ORDER_PATH = order_path
+    try:
+        yield
+    finally:
+        _CURRENT_LOG_ORDER_PATH = previous
+
+
 def cmd_dispatch(order_path: str, roster_path: str) -> int:
     """Strict legacy/controller socket shim; no intake LLM or form repair."""
-    return _dispatch_order(_strict_order(order_path), roster_path)
+    with _request_log_order_path(order_path):
+        return _dispatch_order(_strict_order(order_path), roster_path)
 
 
 def cmd_dispatch_strict(order_path: str, roster_path: str) -> int:
     """Strict public-path dispatch entry used only after closed-schema validation."""
-    return _dispatch_order(_strict_order(order_path), roster_path)
+    with _request_log_order_path(order_path):
+        return _dispatch_order(_strict_order(order_path), roster_path)
+
+
+def _log_request_event(event: str, payload: dict[str, object]) -> None:
+    """Emit human-visible lifecycle progress without changing stdout receipt grammar."""
+    command_runtime.write_stderr(
+        f"UPAGENT_{event} {json.dumps(payload, sort_keys=True)}\n"
+    )
+
+
+def _order_log_payload(
+    order: dict, *, order_path: str | None = None
+) -> dict[str, object]:
+    order_path = order_path or _CURRENT_LOG_ORDER_PATH
+    payload: dict[str, object] = {
+        "agent": order.get("agent"),
+        "harness": order.get("harness"),
+        "order_id": order.get("order_id"),
+        "request_id": lifecycle.request_identity(order),
+        "stage_id": order.get("stage_id"),
+        "timeout_ms": order.get("timeout_ms", _default_timeout_ms(order["stage_id"])),
+    }
+    if order_path is not None:
+        payload["order_path"] = order_path
+    result_path = order.get("result_path")
+    if result_path:
+        payload["result_path"] = result_path
+    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _dispatch_order(order: dict, roster_path: str) -> int:
     """Submit one already-valid order and block for its durable terminal receipt."""
+    _log_request_event("DISPATCH_START", _order_log_payload(order))
     ledger = JobLedger()
     key, _created = ledger.submit(order)
     warning, announce = _record_phase_receipt_warning(ledger, key, order)
@@ -6745,6 +6789,10 @@ def _dispatch_order(order: dict, roster_path: str) -> int:
         owner: dict[str, object] = {"runner_pid": os.getpid()}
         try:
             owner.update(_herdr_owner_record())
+            _log_request_event(
+                "DISPATCH_SPAWN",
+                {**_order_log_payload(order), "ledger_key": key},
+            )
             process = _spawn_job(key, roster_path)
         except (OSError, RuntimeError, RecruiterError) as error:
             if not _terminalize_start_failure(ledger, key, order, owner, error):
@@ -6784,22 +6832,33 @@ def _dispatch_order(order: dict, roster_path: str) -> int:
             f"job runner for {order['order_id']} exited without a completion receipt"
         )
     receipt = ledger.completed_receipt(key, order)
+    _log_request_event(
+        "DISPATCH_DONE",
+        {
+            **_order_log_payload(order),
+            "receipt_state": receipt.get("state"),
+            "verdict": result.get("verdict"),
+        },
+    )
     print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
     return 0 if result["verdict"] == "passed" else 1
 
 
 def cmd_request(order_path: str, roster_path: str) -> int:
     """Strict legacy socket shim; arbitrary or malformed intake is rejected in Python."""
-    return _request_order(_strict_order(order_path), roster_path)
+    with _request_log_order_path(order_path):
+        return _request_order(_strict_order(order_path), roster_path)
 
 
 def cmd_request_strict(order_path: str, roster_path: str) -> int:
     """Strict public-path request entry used only after closed-schema validation."""
-    return _request_order(_strict_order(order_path), roster_path)
+    with _request_log_order_path(order_path):
+        return _request_order(_strict_order(order_path), roster_path)
 
 
 def _request_order(order: dict, roster_path: str) -> int:
     """Submit one already-valid order and return after worker health or rejection."""
+    _log_request_event("REQUEST_START", _order_log_payload(order))
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
@@ -6808,11 +6867,23 @@ def _request_order(order: dict, roster_path: str) -> int:
     existing = ledger.completed_result(key, order)
     if existing is not None:
         receipt = ledger.completed_receipt(key, order)
+        _log_request_event(
+            "REQUEST_ALREADY_TERMINAL",
+            {
+                **_order_log_payload(order),
+                "receipt_state": receipt.get("state"),
+                "verdict": existing.get("verdict"),
+            },
+        )
         print(f"REQUEST_TERMINAL {json.dumps(receipt, sort_keys=True)}")
         return 0 if existing["verdict"] == "passed" else 1
     owner: dict[str, object] = {"runner_pid": os.getpid()}
     try:
         owner.update(_herdr_owner_record())
+        _log_request_event(
+            "REQUEST_SPAWN",
+            {**_order_log_payload(order), "ledger_key": key},
+        )
         process = _spawn_job(key, roster_path)
     except (OSError, RuntimeError, RecruiterError) as error:
         if not _terminalize_start_failure(ledger, key, order, owner, error):
@@ -6841,12 +6912,29 @@ def _request_order(order: dict, roster_path: str) -> int:
             if warning is not None:
                 response["degraded"] = True
                 response["warning"] = warning
+            _log_request_event(
+                "REQUEST_ACCEPTED",
+                {
+                    **_order_log_payload(order),
+                    "manager_pane": response.get("manager_pane"),
+                    "state": "running",
+                    "worker_pane": response.get("worker_pane"),
+                },
+            )
             print(
                 f"REQUEST_ACCEPTED {json.dumps(response, sort_keys=True)}", flush=True
             )
             return 0
         if state.get("state") in ("finished", "cleanup-failed"):
             receipt = ledger.completed_receipt(key, order)
+            _log_request_event(
+                "REQUEST_TERMINAL",
+                {
+                    **_order_log_payload(order),
+                    "receipt_state": receipt.get("state"),
+                    "verdict": receipt.get("verdict"),
+                },
+            )
             print(f"REQUEST_TERMINAL {json.dumps(receipt, sort_keys=True)}", flush=True)
             return 0 if receipt["verdict"] == "passed" else 1
         if (
@@ -8583,6 +8671,17 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
     consult_id = consult["consult_id"]
     answer_path = consult["answer_path"]
     request_id = consult_request_id(consult_id)
+    _log_request_event(
+        "CONSULT_START",
+        {
+            "answer_path": answer_path,
+            "consult_id": consult_id,
+            "consult_path": consult_path,
+            "requested_by": consult.get("requested_by"),
+            "request_id": request_id,
+            "specialist": consult["specialist"],
+        },
+    )
     receipt: dict[str, object] = {
         "answer_path": answer_path,
         "consult_id": consult_id,
@@ -8638,11 +8737,33 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
             artifacts["order"],
             (json.dumps(order, indent=2, sort_keys=True) + "\n").encode(),
         )
+        _log_request_event(
+            "CONSULT_ORDER_WRITTEN",
+            {
+                "answer_path": answer_path,
+                "consult_id": consult_id,
+                "order_id": order["order_id"],
+                "order_path": str(artifacts["order"]),
+                "requested_by": consult.get("requested_by"),
+                "result_path": str(artifacts["result"]),
+                "specialist": resolved,
+            },
+        )
 
         # In-process, no subprocess hop: the door is a caller of the ordinary lifecycle, not a
         # second one. This blocks until the durable ORDER_RECEIPT exists.
         cmd_dispatch(str(artifacts["order"]), roster_path)
         receipt["order_receipt_state"] = "finished"
+        _log_request_event(
+            "CONSULT_WORKER_DONE",
+            {
+                "answer_path": answer_path,
+                "consult_id": consult_id,
+                "order_id": order["order_id"],
+                "requested_by": consult.get("requested_by"),
+                "specialist": resolved,
+            },
+        )
 
         # THE CITATION GATE. `parse_result` already said the worker ran and delivered; this says
         # the answer is backed by evidence. Two questions, two artifacts, both required.
@@ -8672,6 +8793,17 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
     # finalization then resolves a worker's claimed `consults` against. Additive — no field
     # below changes, and the door already carries `requested_by` and `request_id`.
     _publish_consult_receipt(receipt, artifacts["receipt"])
+    _log_request_event(
+        "CONSULT_RECEIPT",
+        {
+            "answer_path": answer_path,
+            "answer_verdict": receipt.get("answer_verdict"),
+            "consult_id": consult_id,
+            "receipt_path": str(artifacts["receipt"]),
+            "requested_by": consult.get("requested_by"),
+            "specialist": receipt.get("resolved_specialist", consult.get("specialist")),
+        },
+    )
     return 0
 
 

@@ -1,0 +1,1990 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Firstmate × Herdr — a conflict-free operating model</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+      :where(
+          [style*="display: grid"],
+          [style*="display:grid"],
+          [style*="display: flex"],
+          [style*="display:flex"]
+        )
+        > * {
+        min-width: 0;
+      }
+      :where(
+        p,
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
+        li,
+        dd,
+        blockquote,
+        figcaption,
+        td,
+        th,
+        .badge,
+        .label,
+        code
+      ) {
+        overflow-wrap: anywhere;
+      }
+      :where(img, svg, video, canvas, iframe) {
+        max-width: 100%;
+        height: auto;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            circle at 10% 0%,
+            color-mix(in oklab, var(--color-primary) 15%, transparent),
+            transparent 32rem
+          ),
+          radial-gradient(
+            circle at 90% 15%,
+            color-mix(in oklab, var(--color-accent) 10%, transparent),
+            transparent 28rem
+          ),
+          var(--color-base-300);
+      }
+      .mono {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      .eyebrow {
+        letter-spacing: 0.17em;
+        text-transform: uppercase;
+        font-size: 0.72rem;
+        font-weight: 900;
+        opacity: 0.72;
+      }
+      .section-anchor {
+        scroll-margin-top: 5.5rem;
+      }
+      .sticky-nav {
+        position: sticky;
+        top: 0.75rem;
+        z-index: 30;
+        backdrop-filter: blur(14px);
+      }
+      .lane {
+        border-left: 0.34rem solid var(--lane);
+      }
+      .callout-rule {
+        border-left: 0.34rem solid var(--color-warning);
+      }
+      .mermaid {
+        overflow-x: auto;
+        padding: 1rem;
+      }
+      .metric {
+        display: grid;
+        grid-template-columns: minmax(9rem, 1fr) minmax(7rem, 1.1fr);
+        gap: 0.75rem;
+        align-items: center;
+      }
+      .score-dots {
+        display: inline-flex;
+        gap: 0.22rem;
+        white-space: nowrap;
+      }
+      .score-dots i {
+        width: 0.62rem;
+        height: 0.62rem;
+        border-radius: 999px;
+        background: color-mix(in oklab, currentColor 18%, transparent);
+      }
+      .score-dots i.on {
+        background: currentColor;
+        box-shadow: 0 0 0.7rem
+          color-mix(in oklab, currentColor 55%, transparent);
+      }
+      .step-num {
+        width: 2.1rem;
+        height: 2.1rem;
+        display: inline-grid;
+        place-items: center;
+        border-radius: 999px;
+        font-weight: 900;
+        flex: 0 0 auto;
+      }
+      .evidence code {
+        white-space: normal;
+        font-size: 0.76rem;
+      }
+      .risk-row td:first-child {
+        width: 24%;
+      }
+      @media (max-width: 700px) {
+        .metric {
+          grid-template-columns: 1fr;
+          gap: 0.25rem;
+        }
+        .sticky-nav {
+          top: 0.25rem;
+        }
+      }
+      @media print {
+        .sticky-nav {
+          position: static;
+        }
+        body {
+          background: white;
+        }
+      }
+    </style>
+  </head>
+  <body class="text-base-content">
+    <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
+      <nav
+        class="sticky-nav mb-6 rounded-box border border-base-content/10 bg-base-100/90 p-2 shadow-xl"
+      >
+        <ul class="menu menu-horizontal w-full gap-1 overflow-x-auto text-sm">
+          <li><a href="#verdict">Verdict</a></li>
+          <li><a href="#compare">Side by side</a></li>
+          <li><a href="#depth">Execution depth</a></li>
+          <li><a href="#phases">Phase execution</a></li>
+          <li><a href="#hub-ux">Hub UX</a></li>
+          <li><a href="#onboarding">Onboarding example</a></li>
+          <li><a href="#boundaries">Boundaries</a></li>
+          <li><a href="#policy">Policy</a></li>
+          <li><a href="#evidence">Evidence</a></li>
+        </ul>
+      </nav>
+
+      <header
+        id="verdict"
+        class="section-anchor hero min-h-[27rem] rounded-box border border-base-content/10 bg-base-200 shadow-2xl"
+      >
+        <div class="hero-content max-w-5xl py-14 text-center">
+          <div>
+            <div class="eyebrow text-primary">
+              Architecture comparison · 21 July 2026
+            </div>
+            <h1 class="mt-4 text-4xl font-black leading-tight sm:text-6xl">
+              Firstmate is the better
+              <span class="text-accent">exploration task desk.</span><br />
+              Your TUI is the stronger
+              <span class="text-primary">context-bearing front door.</span>
+            </h1>
+            <p class="mx-auto mt-6 max-w-4xl text-lg opacity-80 sm:text-xl">
+              Firstmate preserves a scout’s findings through reports, status,
+              decisions, and backlog records—not by sharing the worker’s full
+              conversational context. That is a good fleet design, but it is
+              only a partial match when the front TUI itself must understand the
+              codebase and carry the onboarding journey forward. For your exact
+              requirement, keep exploration in the current TUI with its native
+              subagents. Reserve UpAgent for bounded ad-hoc jobs where choosing
+              a different provider or model is the main benefit.
+            </p>
+            <div class="mt-8 flex flex-wrap justify-center gap-3">
+              <span class="badge badge-lg badge-success"
+                >Artifact-level complement: 4.5 / 5</span
+              >
+              <span class="badge badge-lg badge-warning"
+                >Your context-bearing TUI fit: conditional</span
+              >
+              <span class="badge badge-lg badge-accent"
+                >Firstmate before formal planning</span
+              >
+              <span class="badge badge-lg badge-primary"
+                >Herdr after approval</span
+              >
+              <span class="badge badge-lg badge-warning"
+                >Never nest orchestrators</span
+              >
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="mt-6 grid gap-4 lg:grid-cols-3">
+        <article
+          class="card card-border bg-base-100 lane"
+          style="--lane: var(--color-accent)"
+        >
+          <div class="card-body">
+            <div class="eyebrow text-accent">Unknown path</div>
+            <h2 class="card-title text-2xl">Explore with Firstmate</h2>
+            <p>
+              Chat intake becomes a bounded scout brief, an isolated worker,
+              supervised execution, a self-contained report, and durable
+              unresolved decisions.
+            </p>
+          </div>
+        </article>
+        <article
+          class="card card-border bg-base-100 lane"
+          style="--lane: var(--color-primary)"
+        >
+          <div class="card-body">
+            <div class="eyebrow text-primary">Known path</div>
+            <h2 class="card-title text-2xl">Build with Herdr</h2>
+            <p>
+              A checked plan and route become phases, independent audit, seam
+              checks, deterministic finalization, receipts, retries, and an
+              authoritative run result.
+            </p>
+          </div>
+        </article>
+        <article
+          class="card card-border bg-base-100 lane"
+          style="--lane: var(--color-success)"
+        >
+          <div class="card-body">
+            <div class="eyebrow text-success">Repeatable path</div>
+            <h2 class="card-title text-2xl">Run without either</h2>
+            <p>
+              The finished smoke test should be a deterministic Taskfile/CI
+              command with structured pass/fail evidence. Agents diagnose or
+              evolve it; they should not be its truth source.
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <div class="alert alert-warning alert-soft callout-rule mt-6">
+        <div>
+          <div class="font-black">The important correction</div>
+          <p class="mt-1">
+            “No plan” in Firstmate does not mean “no scope.” Firstmate still
+            writes a task-specific brief and classifies the work as a scout or
+            ship task. What it removes is the requirement for a pre-approved,
+            phase-decomposed
+            <span class="mono">plan.md + route.yaml</span> before learning can
+            begin.
+          </p>
+        </div>
+      </div>
+      <div class="alert alert-info alert-soft mt-3">
+        <div>
+          <div class="font-black">The name collision is real</div>
+          <p class="mt-1">
+            There are currently two different meanings of “Herdr”: the upstream
+            terminal/runtime product, and your plan/phase orchestration layer
+            built on top of it. Firstmate’s “Herdr backend” means only the
+            upstream pane transport. Renaming your orchestration layer—or
+            consistently calling it the <strong>plan runner</strong> until you
+            choose a name—would make the boundary easier to explain and reduce
+            trademark ambiguity.
+          </p>
+        </div>
+      </div>
+
+      <section id="compare" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-primary">Side by side</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Same human experience at the top; different contract underneath
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            Both give you one conversational pane. Firstmate translates
+            conversation into fleet tasks. Herdr translates an approved
+            execution artifact into governed phases and stages.
+          </p>
+        </div>
+
+        <div class="mt-6 grid gap-5 lg:grid-cols-2">
+          <article
+            class="card card-border bg-base-100 shadow-xl lane"
+            style="--lane: var(--color-accent)"
+          >
+            <div class="card-body gap-5">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div class="eyebrow text-accent">
+                    Captain → first mate → workers
+                  </div>
+                  <h3 class="card-title mt-1 text-3xl">Firstmate</h3>
+                </div>
+                <span class="badge badge-accent badge-lg"
+                  >Best for discovery</span
+                >
+              </div>
+              <div class="rounded-box bg-base-200 p-4">
+                <strong>Mental model:</strong> a durable, supervised task desk.
+                It accepts natural-language work, chooses a worker profile,
+                creates an isolated work area, watches the task, and returns the
+                outcome through one liaison.
+              </div>
+              <dl class="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <dt class="font-bold opacity-60">Required input</dt>
+                  <dd>Clear request and project. No formal plan required.</dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Hidden structure</dt>
+                  <dd>
+                    Task-specific brief, backlog record, task metadata, status
+                    events.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Knowledge task</dt>
+                  <dd>
+                    <span class="badge badge-outline badge-accent">Scout</span>
+                    report, no PR.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Change task</dt>
+                  <dd>
+                    <span class="badge badge-outline badge-accent">Ship</span>
+                    branch through selected delivery path.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Human decisions</dt>
+                  <dd>
+                    Firstmate escalates and records them; direct pane
+                    intervention is reconcilable.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Strongest property</dt>
+                  <dd>
+                    Long-lived, restartable supervision around uncertain work.
+                  </dd>
+                </div>
+              </dl>
+              <div class="alert alert-info alert-soft">
+                <span
+                  ><strong>Not a plan engine.</strong> It has no generic
+                  phase/stage semantics, required independent Stage 2 audit, or
+                  canonical run result equivalent to Herdr.</span
+                >
+              </div>
+            </div>
+          </article>
+
+          <article
+            class="card card-border bg-base-100 shadow-xl lane"
+            style="--lane: var(--color-primary)"
+          >
+            <div class="card-body gap-5">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div class="eyebrow text-primary">
+                    Human → TUI → phase leaders → Hub workers
+                  </div>
+                  <h3 class="card-title mt-1 text-3xl">Herdr</h3>
+                </div>
+                <span class="badge badge-primary badge-lg"
+                  >Best for execution</span
+                >
+              </div>
+              <div class="rounded-box bg-base-200 p-4">
+                <strong>Mental model:</strong> a governed implementation run. It
+                validates a frozen plan and route, sequences phases, enforces
+                stage gates, delegates each LLM job through UpAgent, and reduces
+                evidence into durable phase and run outcomes.
+              </div>
+              <dl class="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <dt class="font-bold opacity-60">Required input</dt>
+                  <dd>
+                    Full mode requires checked
+                    <span class="mono">plan.md + route.yaml</span>.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Execution structure</dt>
+                  <dd>
+                    Phase leader, Stage 1 implementation, Stage 2 audit, Stage 3
+                    seams, Stage 5 finalization.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Knowledge task</dt>
+                  <dd>
+                    Research normally happens upstream; high accuracy adds
+                    bounded mini-research/alignment.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Change task</dt>
+                  <dd>
+                    Temporary branch/worktree with route-owned merge point and
+                    green checks.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Human decisions</dt>
+                  <dd>
+                    Typed events; blocking questions usually end the pass and
+                    replay with the answer.
+                  </dd>
+                </div>
+                <div>
+                  <dt class="font-bold opacity-60">Strongest property</dt>
+                  <dd>
+                    Auditable, repeatable multi-phase execution with explicit
+                    authority.
+                  </dd>
+                </div>
+              </dl>
+              <div class="alert alert-info alert-soft">
+                <span
+                  ><strong>Not an exploratory notebook.</strong> Full Herdr
+                  intentionally refuses to invent missing design while
+                  executing.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div
+          class="mt-6 overflow-x-auto rounded-box border border-base-content/10 bg-base-100 shadow-xl"
+        >
+          <table class="table table-zebra">
+            <thead>
+              <tr>
+                <th>Criterion</th>
+                <th>Firstmate</th>
+                <th>Herdr full</th>
+                <th>Interpretation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>Human-guided exploration</th>
+                <td class="text-accent">
+                  <span class="score-dots" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score-dots" aria-label="1 of 5"
+                    ><i class="on"></i><i></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  Firstmate starts from intent; Herdr expects design to be
+                  settled.
+                </td>
+              </tr>
+              <tr>
+                <th>Formal execution discipline</th>
+                <td>
+                  <span class="score-dots" aria-label="3 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i></i><i></i
+                  ></span>
+                </td>
+                <td class="text-primary">
+                  <span class="score-dots" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td>Herdr has canonical gates and authority boundaries.</td>
+              </tr>
+              <tr>
+                <th>Long unattended duration</th>
+                <td class="text-accent">
+                  <span class="score-dots" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td class="text-primary">
+                  <span class="score-dots" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td>
+                  Both are strong, but supervise different shapes of work.
+                </td>
+              </tr>
+              <tr>
+                <th>Durable learning artifact</th>
+                <td class="text-accent">
+                  <span class="score-dots" aria-label="4 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score-dots" aria-label="3 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  Firstmate’s scout report is naturally shaped for discovery;
+                  Herdr evidence is shaped for implementation.
+                </td>
+              </tr>
+              <tr>
+                <th>Cross-phase auditability</th>
+                <td>
+                  <span class="score-dots" aria-label="2 of 5"
+                    ><i class="on"></i><i class="on"></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td class="text-primary">
+                  <span class="score-dots" aria-label="5 of 5"
+                    ><i class="on"></i><i class="on"></i><i class="on"></i
+                    ><i class="on"></i><i class="on"></i
+                  ></span>
+                </td>
+                <td>
+                  Herdr’s result hierarchy and independent audit are the
+                  differentiator.
+                </td>
+              </tr>
+              <tr>
+                <th>Routine smoke-test runner</th>
+                <td>
+                  <span class="score-dots" aria-label="1 of 5"
+                    ><i class="on"></i><i></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>
+                  <span class="score-dots" aria-label="2 of 5"
+                    ><i class="on"></i><i class="on"></i><i></i><i></i><i></i
+                  ></span>
+                </td>
+                <td>Neither should replace a deterministic test command.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-sm opacity-60">
+          Scores reflect fit for the described workflow, not overall product
+          quality.
+        </p>
+      </section>
+
+      <section id="depth" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-primary">Execution depth is a dial</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Do not compare Firstmate only with “maximum Herdr”
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            Your current stack already has lighter dispatch paths. They solve
+            different parts of the “small job” problem.
+          </p>
+        </div>
+
+        <div class="mt-6 grid gap-4 lg:grid-cols-3">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <div class="flex items-center justify-between gap-2">
+                <span class="badge badge-success">Truly one-shot</span
+                ><span class="mono text-xs opacity-50"
+                  >UpAgent public request</span
+                >
+              </div>
+              <h3 class="card-title text-2xl">Prompt → one worker</h3>
+              <p>
+                A generic worker request needs an explicit prompt file,
+                offering, effort, persona, and optional working directory. It
+                does not require a plan or route.
+              </p>
+              <ul class="list-disc space-y-1 pl-5 opacity-80">
+                <li>Durable request identity and artifacts</li>
+                <li>Verified worker lifecycle</li>
+                <li>Optional independent verification</li>
+                <li>No intake LLM and no sequencing policy</li>
+              </ul>
+              <div class="alert alert-warning alert-soft mt-2">
+                <span
+                  ><strong>Caller owns judgment.</strong> UpAgent is a lifecycle
+                  service, not the human liaison or plan controller.</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <div class="flex items-center justify-between gap-2">
+                <span class="badge badge-warning">Light route</span
+                ><span class="mono text-xs opacity-50">direct-controller</span>
+              </div>
+              <h3 class="card-title text-2xl">Steps → Hub workers</h3>
+              <p>
+                No phase leader; the caller sequences dependency-ready steps and
+                human approvals from a
+                <span class="mono">mode: direct</span> route.
+              </p>
+              <ul class="list-disc space-y-1 pl-5 opacity-80">
+                <li>Still requires a route with profiles and steps</li>
+                <li>Useful for bounded direct work</li>
+                <li>Current implementation is IaC-shaped</li>
+                <li>Not today’s generic smoke-test runner</li>
+              </ul>
+              <div class="alert alert-error alert-soft mt-2">
+                <span
+                  >The generated implementation brief currently says “Direct IaC
+                  plan” and restricts work to init/validate/plan. Do not present
+                  this as a generic small-plan path without changing it.</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <div class="flex items-center justify-between gap-2">
+                <span class="badge badge-primary">Governed run</span
+                ><span class="mono text-xs opacity-50">/herdr-control</span>
+              </div>
+              <h3 class="card-title text-2xl">Plan → phases → stages</h3>
+              <p>
+                A checked plan and route create one phase leader per phase,
+                independent audit, deterministic seams/finalization, typed
+                events, retries, and run authority.
+              </p>
+              <ul class="list-disc space-y-1 pl-5 opacity-80">
+                <li>Best for multi-service implementation</li>
+                <li>Best for long, risk-bearing changes</li>
+                <li>High setup cost is intentional</li>
+                <li>Wrong starting point while behavior is unknown</li>
+              </ul>
+            </div>
+          </article>
+        </div>
+
+        <div
+          class="mt-6 rounded-box border border-base-content/10 bg-base-100 p-5 shadow-xl"
+        >
+          <div class="eyebrow">Choice rule</div>
+          <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div class="rounded-box bg-base-200 p-4">
+              <strong>Unknown + shared TUI context?</strong><br /><span
+                class="text-primary"
+                >Current TUI + native subagents.</span
+              >
+            </div>
+            <div class="rounded-box bg-base-200 p-4">
+              <strong>Unknown + asynchronous fleet?</strong><br /><span
+                class="text-accent"
+                >Firstmate scout.</span
+              >
+            </div>
+            <div class="rounded-box bg-base-200 p-4">
+              <strong>Bounded alternate-provider job?</strong><br /><span
+                class="text-success"
+                ><span class="mono">/upagent-run</span>.</span
+              >
+            </div>
+            <div class="rounded-box bg-base-200 p-4">
+              <strong>Known, multi-phase or high-risk?</strong><br /><span
+                class="text-primary"
+                >Full plan runner.</span
+              >
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="phases" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-warning">Can Firstmate run the phases?</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Technically possible; strategically weaker than keeping your plan
+            runner
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            Firstmate can supervise a sequence of project tasks, but its current
+            unit is a ship/scout task—not a parsed phase with required
+            implementation, independent review, seam validation, and
+            finalization stages.
+          </p>
+        </div>
+
+        <div class="mt-6 grid gap-5 lg:grid-cols-3">
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-success)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-success">What works today</div>
+              <h3 class="card-title text-2xl">
+                Target-repository context is preserved
+              </h3>
+              <p>
+                You operate Firstmate from its own home, but each ship or scout
+                launches inside an isolated worktree of the selected target
+                project. The harness therefore starts with that target
+                repository as its working directory.
+              </p>
+              <ul class="list-disc space-y-2 pl-5 opacity-80">
+                <li>
+                  The target project is registered or cloned beneath Firstmate’s
+                  <span class="mono">projects/</span> area.
+                </li>
+                <li>
+                  Treehouse or Orca creates a disposable worktree from that
+                  project.
+                </li>
+                <li>
+                  The worker sees the target project’s committed
+                  <span class="mono">AGENTS.md</span>/<span class="mono"
+                    >CLAUDE.md</span
+                  >.
+                </li>
+                <li>
+                  Harness-native global and target-project skills remain
+                  available according to that harness’s normal discovery rules.
+                </li>
+              </ul>
+              <div class="alert alert-success alert-soft">
+                <span
+                  >So no: workers do <strong>not</strong> execute “inside the
+                  Firstmate repository” when changing another project.</span
+                >
+              </div>
+            </div>
+          </article>
+
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-error)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-error">What does not work today</div>
+              <h3 class="card-title text-2xl">
+                UpAgent personas are not Firstmate dispatch profiles
+              </h3>
+              <p>
+                Firstmate’s dispatch profile selects only a harness, model, and
+                effort. It has no current field for an UpAgent offering/persona,
+                no request submission to your one Hub, and no receipt
+                translation.
+              </p>
+              <ul class="list-disc space-y-2 pl-5 opacity-80">
+                <li>
+                  A project-local specialist <em>skill</em> may load normally.
+                </li>
+                <li>
+                  A Hub-selected specialist <em>persona</em> is a different
+                  mechanism and is not automatically selected.
+                </li>
+                <li>
+                  Using a raw launch command is an escape hatch, not a designed
+                  UpAgent integration.
+                </li>
+                <li>
+                  Letting both Firstmate and UpAgent own the same worktree,
+                  worker, retries, or teardown would violate the one-owner rule.
+                </li>
+              </ul>
+              <div class="alert alert-error alert-soft">
+                <span
+                  >Your existing decision still stands:
+                  <strong>one UpAgent Hub only</strong>, with specialists as
+                  ordinary persona-selected orders.</span
+                >
+              </div>
+            </div>
+          </article>
+
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-primary)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-primary">Recommendation</div>
+              <h3 class="card-title text-2xl">
+                Keep phase authority in the plan runner
+              </h3>
+              <p>
+                Replacing each plan phase with Firstmate tasks would duplicate
+                supervision and no-mistakes delivery while losing your strongest
+                assets: typed stage gates, specialist Hub personas, independent
+                audit, deterministic receipts, and phase-level replay.
+              </p>
+              <div class="rounded-box bg-base-200 p-4">
+                <strong>Better direction:</strong> borrow Firstmate’s
+                captain-facing experience—durable status, decision holds,
+                restart recovery, concise reports, and optional AFK
+                supervision—without replacing the plan runner’s execution
+                engine.
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="mt-6 card card-border bg-base-100 shadow-xl">
+          <div class="card-body">
+            <div class="eyebrow text-accent">A clean future integration</div>
+            <h3 class="card-title text-2xl">
+              Firstmate can front the run without owning its workers
+            </h3>
+            <div class="mermaid">
+              flowchart LR C["Captain talks to Firstmate"] --> X["External
+              plan-run record\nnew adapter / task kind"] X --> R["Plan runner
+              owns\nphases + branches + retries"] R --> H["One UpAgent
+              Hub\npersona-selected orders"] H --> W["Specialist workers"] R -->
+              E["Typed run events\ndecisions + phase results"] E --> X X --> C R
+              --> N["Finalized branch handoff"] N --> M["no-mistakes owns
+              delivery"]
+            </div>
+            <div class="alert alert-info alert-soft">
+              <span
+                >This would require a new
+                <strong>external-run</strong> integration: Firstmate stores a
+                run pointer and surfaces events, but allocates no project
+                worktree, launches no phase worker, performs no retries, and
+                starts no delivery gate. It is a UX/supervision shell, not a
+                nested orchestrator.</span
+              >
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="mt-6 overflow-x-auto rounded-box border border-base-content/10 bg-base-100 shadow-xl"
+        >
+          <table class="table table-zebra">
+            <thead>
+              <tr>
+                <th>Option</th>
+                <th>Specialist Hub</th>
+                <th>Context</th>
+                <th>Rigor</th>
+                <th>Verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>Firstmate replaces phase runner</th>
+                <td>No native persona selection</td>
+                <td>Target repo: yes</td>
+                <td>Must be rebuilt in briefs/scripts</td>
+                <td><span class="badge badge-error">Do not recommend</span></td>
+              </tr>
+              <tr>
+                <th>Firstmate task starts a nested plan run</th>
+                <td>Yes, indirectly</td>
+                <td>Both layers involved</td>
+                <td>Ambiguous ownership</td>
+                <td><span class="badge badge-error">Forbid</span></td>
+              </tr>
+              <tr>
+                <th>Plan runner remains primary</th>
+                <td>Yes—one Hub</td>
+                <td>Explicit stage context</td>
+                <td>Current strongest path</td>
+                <td><span class="badge badge-primary">Use now</span></td>
+              </tr>
+              <tr>
+                <th>Firstmate external-run front end</th>
+                <td>Yes—owned by plan runner</td>
+                <td>Artifact/event handoff</td>
+                <td>Preserved if adapter is strict</td>
+                <td>
+                  <span class="badge badge-warning">Good future design</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="hub-ux" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-primary">Ad-hoc provider offload</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            This is the strongest reason to add a small UpAgent command surface
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            The target repository already imports the shared UpAgent and
+            plan-runner justfiles. The missing piece is ergonomic delegation:
+            send one bounded task to Codex, Claude, or a Pi offering, wait
+            without burning the front TUI’s tokens, then bring the typed result
+            back into the current conversation.
+          </p>
+        </div>
+
+        <div class="mt-6 grid gap-5 lg:grid-cols-2">
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-success)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-success">Already available</div>
+              <h3 class="card-title text-2xl">
+                The Hub already has the machine primitives
+              </h3>
+              <p>
+                No request JSON is required: the public facade accepts named
+                flags and the target justfile exposes them now.
+              </p>
+              <div class="mockup-code text-xs">
+                <pre
+                  data-prefix="$"
+                ><code>just upagent lists --type offerings</code></pre>
+                <pre
+                  data-prefix="$"
+                ><code>just upagent request --type worker \</code></pre>
+                <pre
+                  data-prefix=">"
+                ><code>  --offering &lt;id&gt; --effort &lt;level&gt; \</code></pre>
+                <pre
+                  data-prefix=">"
+                ><code>  --agent &lt;persona&gt; --prompt-file &lt;absolute.md&gt; \</code></pre>
+                <pre
+                  data-prefix=">"
+                ><code>  --cwd &lt;target-repo&gt; --wait --json</code></pre>
+              </div>
+              <ul class="list-disc space-y-2 pl-5 opacity-80">
+                <li>
+                  <span class="mono">status --request</span> retrieves typed
+                  request state.
+                </li>
+                <li>
+                  <span class="mono">lists --type workers</span> lists active or
+                  terminal workers.
+                </li>
+                <li>
+                  <span class="mono">await</span> blocks in Python rather than
+                  spending LLM turns.
+                </li>
+                <li>
+                  <span class="mono">reconcile</span> repairs expired or
+                  orphaned owned runtime state.
+                </li>
+              </ul>
+            </div>
+          </article>
+
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-warning)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-warning">
+                Important lifecycle distinction
+              </div>
+              <h3 class="card-title text-2xl">
+                Get, cancel, and cleanup are three different operations
+              </h3>
+              <ul class="list-disc space-y-2 pl-5 opacity-80">
+                <li>
+                  <strong>Get</strong> is read-only: request state, verdict,
+                  summary, handoff, receipt, and log pointer.
+                </li>
+                <li>
+                  <strong>Cancel</strong> stops a live owned request. Today,
+                  public cancel exists only as a fenced response when the Hub
+                  reaches a requester decision point—not as an arbitrary anytime
+                  command.
+                </li>
+                <li>
+                  <strong>Cleanup</strong> must mean pruning terminal
+                  history/artifacts. Worker and manager panes are already
+                  identity-checked and closed automatically before a terminal
+                  receipt.
+                </li>
+                <li>
+                  <strong>Reconcile</strong> is the existing runtime repair
+                  command; it is not history deletion.
+                </li>
+              </ul>
+              <div class="alert alert-error alert-soft">
+                <span
+                  >Do not call one ambiguous command
+                  <span class="mono">delete</span> or
+                  <span class="mono">destroy</span>. It would be unclear whether
+                  it kills a live worker, removes evidence, or both.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div
+          class="mt-6 card card-border bg-primary/10 border-primary/30 shadow-xl"
+        >
+          <div class="card-body">
+            <div class="eyebrow text-primary">Recommended common commands</div>
+            <h3 class="card-title text-2xl">
+              Use a thin skill layer; keep the Hub protocol authoritative
+            </h3>
+            <div class="overflow-x-auto">
+              <table class="table table-zebra">
+                <thead>
+                  <tr>
+                    <th>Human command</th>
+                    <th>Purpose</th>
+                    <th>Current support</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <th class="mono">/upagent-run [options] &lt;task&gt;</th>
+                    <td>
+                      Choose offering/persona, write brief, submit, await, and
+                      summarize into this TUI
+                    </td>
+                    <td>
+                      <span class="badge badge-success">Wrapper only</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th class="mono">/upagent-ls [active|terminal|all]</th>
+                    <td>List provider/model, state, age, and request id</td>
+                    <td>
+                      <span class="badge badge-warning"
+                        >Workers exist; request listing needs polish</span
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <th class="mono">/upagent-get &lt;request-id&gt;</th>
+                    <td>
+                      Render status and read the published result, compacted
+                      context, handoff, receipt, and log pointer
+                    </td>
+                    <td>
+                      <span class="badge badge-success"
+                        >Wrapper over status/artifacts</span
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <th class="mono">/upagent-cancel &lt;request-id&gt;</th>
+                    <td>Stop a currently running owned request</td>
+                    <td>
+                      <span class="badge badge-error"
+                        >New Hub protocol/API needed</span
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <th class="mono">/upagent-cleanup --request &lt;id&gt;</th>
+                    <td>
+                      Prune one terminal request’s disposable Hub-owned
+                      artifacts
+                    </td>
+                    <td>
+                      <span class="badge badge-error"
+                        >New retention API needed</span
+                      >
+                    </td>
+                  </tr>
+                  <tr>
+                    <th class="mono">
+                      /upagent-cleanup --all-terminal --older-than 7d
+                    </th>
+                    <td>
+                      Batch-prune old terminal data; never touch active requests
+                    </td>
+                    <td>
+                      <span class="badge badge-error"
+                        >New retention API needed</span
+                      >
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="grid gap-3 md:grid-cols-2">
+              <div class="rounded-box bg-base-100 p-4">
+                <strong>Explicit provider control.</strong> “Use Codex” or an
+                offering id wins. An optional quota view can inform the choice,
+                but should not silently reroute it.
+              </div>
+              <div class="rounded-box bg-base-100 p-4">
+                <strong>Current repo by default.</strong> The skill passes the
+                current project path as <span class="mono">cwd</span> and asks
+                before using a separate worktree for edits.
+              </div>
+              <div class="rounded-box bg-base-100 p-4">
+                <strong>Return to this conversation.</strong> The front TUI
+                reads the typed result and gives you a concise answer plus
+                request id and evidence paths.
+              </div>
+              <div class="rounded-box bg-base-100 p-4">
+                <strong>No second orchestrator.</strong> This is one caller
+                placing one ordinary order with the existing one Hub.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="alert alert-warning alert-soft mt-6">
+          <span
+            ><strong>Safe cleanup contract:</strong> default to dry-run; refuse
+            active, awaiting-requester, or cleanup-failed requests; verify every
+            owned pane is absent and no lease is live; preserve a small
+            tombstone containing request id, payload hash, terminal verdict, and
+            receipt pointer so idempotency and audit history do not disappear.
+            “All” must mean <strong>all eligible terminal requests</strong>,
+            never every request.</span
+          >
+        </div>
+
+        <div class="alert alert-success alert-soft mt-3">
+          <span
+            ><strong>Revised answer:</strong> do not build an exploration
+            session around UpAgent. Build
+            <span class="mono">/upagent-run</span> plus read-only
+            <span class="mono">ls/get</span> first. Add anytime cancel and
+            terminal cleanup only as explicit Hub protocol features, because a
+            slash-command wrapper cannot safely invent those semantics.</span
+          >
+        </div>
+      </section>
+
+      <section id="onboarding" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-accent">Your onboarding example</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            Use the TUI to discover the test; use code to repeat it
+          </h2>
+          <p class="mt-3 text-lg opacity-75">
+            The clean workflow is a graduation path, not a permanent choice
+            between two agent supervisors.
+          </p>
+        </div>
+
+        <div class="mt-6 card card-border bg-base-100 shadow-xl">
+          <div class="card-body">
+            <h3 class="card-title">
+              What should happen from the first walkthrough to every future run?
+            </h3>
+            <div class="mermaid">
+              flowchart TD A["Human-guided onboarding story\nbehavior not fully
+              known"] --> B["Firstmate scout\none liaison + isolated worker"] B
+              --> C["Durable user-story ledger\nsteps · expected · actual ·
+              evidence · cleanup"] C --> D{"Behavior stable and\nautomation
+              boundary clear?"} D -- "No" --> E["Resolve decisions / repeat\na
+              focused scout"] E --> C D -- "Yes" --> F{"Implementation size"} F
+              -- "One bounded slice" --> G["Direct implementation\nor one-shot
+              UpAgent"] F -- "Multiple services / phases / risk" --> H["Approved
+              plan + route\nFull Herdr execution"] G --> I["no-mistakes\nsingle
+              branch custody"] H --> I I --> J["Deterministic smoke
+              target\nTaskfile / test runner / CI"] J --> K{"Future run
+              passes?"} K -- "Yes" --> L["Structured result only\nno LLM
+              judgment needed"] K -- "No, unclear" --> M["Firstmate scout
+              diagnosis"] K -- "No, systemic fix planned" --> H
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-6 grid gap-4 lg:grid-cols-5">
+          <article class="card card-border bg-base-100 lg:col-span-2">
+            <div class="card-body">
+              <div class="flex items-center gap-3">
+                <span class="step-num bg-accent text-accent-content">1</span>
+                <h3 class="card-title">Run the story as a scout</h3>
+              </div>
+              <p>
+                Give the scout the user outcome, starting state, safety limits,
+                evidence policy, and cleanup requirement—not a guessed
+                click-by-click script.
+              </p>
+              <div class="alert alert-info alert-soft">
+                <span
+                  >You remain the human in the loop through Firstmate. If you
+                  type directly into the worker pane, Firstmate’s contract
+                  treats that intervention as authoritative and reconciles it
+                  later.</span
+                >
+              </div>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100 lg:col-span-3">
+            <div class="card-body">
+              <div class="flex items-center gap-3">
+                <span class="step-num bg-accent text-accent-content">2</span>
+                <h3 class="card-title">Capture a ledger, not a transcript</h3>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="table table-sm table-zebra">
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Purpose</th>
+                      <th>Example shape</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <th>step_id</th>
+                      <td>Stable identity</td>
+                      <td class="mono">create-user</td>
+                    </tr>
+                    <tr>
+                      <th>intent</th>
+                      <td>Why the step exists</td>
+                      <td>User becomes eligible to onboard</td>
+                    </tr>
+                    <tr>
+                      <th>action</th>
+                      <td>Command/UI/API action</td>
+                      <td>Redacted, replayable instruction</td>
+                    </tr>
+                    <tr>
+                      <th>expected</th>
+                      <td>Deterministic assertion</td>
+                      <td>State reaches the accepted vocabulary</td>
+                    </tr>
+                    <tr>
+                      <th>actual</th>
+                      <td>Observed result</td>
+                      <td>Value + timestamp + correlation id</td>
+                    </tr>
+                    <tr>
+                      <th>evidence</th>
+                      <td>Inspectable proof</td>
+                      <td>Log, screenshot, response, resource query</td>
+                    </tr>
+                    <tr>
+                      <th>cleanup</th>
+                      <td>Return to known baseline</td>
+                      <td>Command + assertion of absence</td>
+                    </tr>
+                    <tr>
+                      <th>automation</th>
+                      <td>Graduation status</td>
+                      <td>manual / scriptable / blocked-by-decision</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="mt-4 grid gap-4 lg:grid-cols-3">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <div class="flex items-center gap-3">
+                <span class="step-num bg-primary text-primary-content">3</span>
+                <h3 class="card-title">Approve the automation contract</h3>
+              </div>
+              <p>
+                Turn stable ledger rows into assertions, setup, timeout policy,
+                redaction rules, and cleanup. The scout report becomes research
+                input; it does not silently authorize code changes.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <div class="flex items-center gap-3">
+                <span class="step-num bg-primary text-primary-content">4</span>
+                <h3 class="card-title">Implement at the right depth</h3>
+              </div>
+              <p>
+                Use the smallest execution mode that preserves the required
+                rigor. Use full Herdr only when the smoke test crosses real
+                phase boundaries or needs independent audited construction.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <div class="flex items-center gap-3">
+                <span class="step-num bg-success text-success-content">5</span>
+                <h3 class="card-title">Make the command authoritative</h3>
+              </div>
+              <p>
+                The future runner emits machine-readable pass/fail plus evidence
+                paths. An agent may launch or diagnose it, but cannot turn a
+                failing assertion into a narrative pass.
+              </p>
+            </div>
+          </article>
+        </div>
+
+        <div class="mt-6 grid gap-5 lg:grid-cols-2">
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-accent)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-accent">Is Firstmate “AFK a lot”?</div>
+              <h3 class="card-title text-2xl">
+                It is asynchronous by default, but AFK mode is optional
+              </h3>
+              <p>
+                Normal Firstmate supervision stays live while work is under way
+                and wakes on actionable events. The explicit
+                <span class="mono">/afk</span> mode is a separate,
+                presence-gated sub-supervisor for when you actually leave.
+              </p>
+              <ul class="list-disc space-y-2 pl-5 opacity-80">
+                <li>
+                  Workers are autonomous and are told not to wait for a human.
+                </li>
+                <li>
+                  The normal rhythm is checkpoint-based: brief, work, decision,
+                  outcome.
+                </li>
+                <li>
+                  Firstmate does not continuously pair-drive the worker or read
+                  its chat.
+                </li>
+                <li>
+                  You may type directly into a worker pane; Firstmate treats
+                  that as authoritative and reconciles it later.
+                </li>
+              </ul>
+            </div>
+          </article>
+          <article
+            class="card card-border bg-base-100 lane"
+            style="--lane: var(--color-warning)"
+          >
+            <div class="card-body">
+              <div class="eyebrow text-warning">Experience tradeoff</div>
+              <h3 class="card-title text-2xl">
+                For continuous pair-driving, a direct TUI can still be better
+              </h3>
+              <p>
+                If you expect to comment on every screen and choose every next
+                action in real time, Firstmate’s liaison layer can feel
+                indirect. Use one direct interactive QA agent with the same
+                ledger template, or explicitly brief a Firstmate scout to pause
+                at named checkpoints.
+              </p>
+              <div class="alert alert-warning alert-soft">
+                <span
+                  ><strong>Firstmate wins</strong> when the walkthrough lasts
+                  hours, survives interruptions, branches into investigations,
+                  or must leave a durable report and decision inventory.
+                  <strong>Direct TUI wins</strong> for a short, tightly coupled
+                  pair session.</span
+                >
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="mt-6 card card-border bg-base-100 shadow-xl">
+          <div class="card-body">
+            <div class="eyebrow text-primary">
+              Does the crewmate’s context disappear?
+            </div>
+            <h3 class="card-title text-2xl">
+              The evidence persists; the shared working mind does not
+            </h3>
+            <div class="grid gap-4 lg:grid-cols-3">
+              <div class="rounded-box bg-success/10 p-4">
+                <strong class="text-success"
+                  >What the Firstmate liaison keeps</strong
+                >
+                <ul class="mt-2 list-disc space-y-1 pl-5">
+                  <li>The original brief and task metadata</li>
+                  <li>Status and decision-hold records</li>
+                  <li>A required self-contained scout report</li>
+                  <li>The journey ledger if the brief requires it</li>
+                  <li>Backlog pointers and durable project knowledge</li>
+                </ul>
+              </div>
+              <div class="rounded-box bg-error/10 p-4">
+                <strong class="text-error"
+                  >What it deliberately does not keep</strong
+                >
+                <ul class="mt-2 list-disc space-y-1 pl-5">
+                  <li>The worker’s whole chat or implicit reasoning</li>
+                  <li>Every screen-level observation unless recorded</li>
+                  <li>Scratch edits after scout teardown</li>
+                  <li>A continuously shared code-reading context window</li>
+                </ul>
+              </div>
+              <div class="rounded-box bg-warning/10 p-4">
+                <strong class="text-warning"
+                  >What the liaison can still do</strong
+                >
+                <ul class="mt-2 list-disc space-y-1 pl-5">
+                  <li>
+                    Read the target project clone and README/code when routing
+                  </li>
+                  <li>Read and relay the completed scout report</li>
+                  <li>Reference that report in the next task brief</li>
+                  <li>
+                    Promote stable knowledge into the project’s
+                    <span class="mono">AGENTS.md</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <div class="alert alert-warning alert-soft mt-2">
+              <span
+                >A persistent <strong>secondmate</strong> can retain a domain
+                home and supervise later crews, but it still communicates upward
+                through status/documents rather than shared chat. It reduces
+                restart loss; it does not turn the fleet into one continuous
+                context window.</span
+              >
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="mt-6 card card-border bg-primary/10 border-primary/30 shadow-xl"
+        >
+          <div class="card-body">
+            <div class="eyebrow text-primary">
+              Closer match for your requirement
+            </div>
+            <h3 class="card-title text-2xl">
+              Separate interactive exploration from provider offload
+            </h3>
+            <div class="mermaid">
+              flowchart LR U["You + context-bearing TUI\nreads target repo"] -->
+              S["Native harness subagents\ninteractive exploration support"] S
+              --> L["Journey ledger\nissues + evidence + decisions"] L --> U U
+              --> A["/upagent-run\nbounded alternate-provider job"] A --> U U
+              --> P["Normal research / planning"] P --> R["Plan runner
+              implements phases\nthrough the same one Hub"]
+            </div>
+            <ul class="grid gap-3 md:grid-cols-2">
+              <li class="rounded-box bg-base-100 p-4">
+                <strong>Front TUI owns onboarding continuity:</strong> it talks
+                with you, drives the UI, reads code, and maintains the journey
+                ledger.
+              </li>
+              <li class="rounded-box bg-base-100 p-4">
+                <strong>Native subagents support exploration:</strong> use the
+                current harness’s interactive delegation when shared
+                conversational context matters.
+              </li>
+              <li class="rounded-box bg-base-100 p-4">
+                <strong>UpAgent spreads provider usage:</strong> send bounded
+                commands, tests, audits, or investigations to a chosen Codex,
+                Claude, or Pi offering.
+              </li>
+              <li class="rounded-box bg-base-100 p-4">
+                <strong>Planning remains separate:</strong> empirical findings
+                become research input; fixes begin only after the normal plan is
+                approved.
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="alert alert-success alert-soft mt-6">
+          <span
+            ><strong>Revised practical answer:</strong> keep onboarding in the
+            context-bearing TUI and its native subagents. Use Firstmate only for
+            asynchronous fleet work, and use the new thin UpAgent commands for
+            bounded alternate-provider offload. These are three different jobs;
+            forcing one tool to own all three would make each experience
+            worse.</span
+          >
+        </div>
+      </section>
+
+      <section id="boundaries" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-warning">Conflict analysis</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            They work well together only with one owner per layer
+          </h2>
+        </div>
+
+        <div
+          class="mt-6 overflow-x-auto rounded-box border border-base-content/10 bg-base-100 shadow-xl"
+        >
+          <table class="table table-zebra">
+            <thead>
+              <tr>
+                <th>Boundary</th>
+                <th>Recommended owner</th>
+                <th>Good handoff</th>
+                <th>Conflict to forbid</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="risk-row">
+                <td><strong>Exploratory task lifecycle</strong></td>
+                <td><span class="badge badge-accent">Firstmate</span></td>
+                <td>Scout report + decision inventory</td>
+                <td>Herdr phase and Firstmate both steering the same worker</td>
+              </tr>
+              <tr class="risk-row">
+                <td><strong>Planned phase/stage execution</strong></td>
+                <td>
+                  <span class="badge badge-primary">Herdr / UpAgent</span>
+                </td>
+                <td>Approved plan/route + frozen run tree</td>
+                <td>
+                  A Firstmate worker acting as phase leader or launching nested
+                  workers
+                </td>
+              </tr>
+              <tr class="risk-row">
+                <td><strong>Worker lifecycle</strong></td>
+                <td>Exactly one: Firstmate scripts <em>or</em> UpAgent Hub</td>
+                <td>Artifact boundary between runs</td>
+                <td>
+                  Wrapping UpAgent workers in Firstmate task ownership without a
+                  designed adapter
+                </td>
+              </tr>
+              <tr class="risk-row">
+                <td><strong>Branch/worktree custody</strong></td>
+                <td>Current orchestrator, then explicit release</td>
+                <td>Clean commit/terminal marker before transfer</td>
+                <td>
+                  Two systems editing, rebasing, validating, or cleaning the
+                  same branch
+                </td>
+              </tr>
+              <tr class="risk-row">
+                <td><strong>no-mistakes</strong></td>
+                <td>
+                  <span class="badge badge-success">no-mistakes alone</span>
+                </td>
+                <td>Candidate-ready branch + original intent</td>
+                <td>
+                  Starting validation while Herdr or Firstmate still mutates
+                  that branch
+                </td>
+              </tr>
+              <tr class="risk-row">
+                <td><strong>Terminal UI backend</strong></td>
+                <td>Keep concepts separate</td>
+                <td>Use tmux for the initial Firstmate pilot</td>
+                <td>
+                  Calling “Firstmate on Herdr backend” the same thing as “Herdr
+                  orchestration”
+                </td>
+              </tr>
+              <tr class="risk-row">
+                <td><strong>Routine smoke verdict</strong></td>
+                <td>Test runner / CI</td>
+                <td>Structured exit code + evidence</td>
+                <td>LLM prose as pass/fail authority</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="mt-6 grid gap-5 lg:grid-cols-2">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <h3 class="card-title text-success">Clean complement</h3>
+              <ol class="list-decimal space-y-2 pl-5">
+                <li>Firstmate scout discovers and records the behavior.</li>
+                <li>Human resolves product/test decisions.</li>
+                <li>
+                  Planning converts the stable report into an approved plan.
+                </li>
+                <li>
+                  Herdr implements the plan and publishes terminal evidence.
+                </li>
+                <li>no-mistakes takes exclusive delivery custody.</li>
+                <li>
+                  The resulting deterministic smoke command runs routinely.
+                </li>
+              </ol>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <h3 class="card-title text-error">Bad nesting</h3>
+              <ul class="list-disc space-y-2 pl-5">
+                <li>
+                  Firstmate spawns a worker that starts a Herdr run and both
+                  watchers supervise it.
+                </li>
+                <li>
+                  A Herdr stage worker starts Firstmate or delegates further
+                  work.
+                </li>
+                <li>
+                  Firstmate’s no-mistakes mode starts before Herdr finalization
+                  releases branch custody.
+                </li>
+                <li>
+                  Both systems believe they may close the same pane or remove
+                  the same work area.
+                </li>
+                <li>
+                  A routine smoke test passes because an agent “interpreted” a
+                  failed assertion.
+                </li>
+              </ul>
+            </div>
+          </article>
+        </div>
+
+        <div class="alert alert-warning mt-6">
+          <span
+            ><strong>Herdr naming hazard:</strong> Firstmate can use Herdr as an
+            experimental terminal/session backend. That is only pane transport.
+            It is not your Herdr plan controller. For a pilot, use Firstmate’s
+            reference tmux backend so the operational boundary is obvious; add
+            the Herdr backend later only if its native pane state is worth the
+            extra ambiguity.</span
+          >
+        </div>
+      </section>
+
+      <section id="policy" class="section-anchor mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow text-success">Recommended operating policy</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            A small set of rules keeps the systems coherent
+          </h2>
+        </div>
+        <div class="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-accent">Rule 1</span>
+              <h3 class="card-title">Discover before planning when needed</h3>
+              <p>
+                Use a Firstmate scout only when the behavior, failure, or test
+                boundary is genuinely unknown.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-primary">Rule 2</span>
+              <h3 class="card-title">Plan before changing</h3>
+              <p>
+                A scout report is evidence. Code changes still require explicit
+                implementation authorization and, for meaningful work, the
+                normal plan path.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-warning">Rule 3</span>
+              <h3 class="card-title">One orchestrator at a time</h3>
+              <p>
+                Never let Firstmate and Herdr co-own workers, work areas,
+                branches, decisions, or cleanup.
+              </p>
+            </div>
+          </article>
+          <article class="card card-border bg-base-100">
+            <div class="card-body">
+              <span class="badge badge-success">Rule 4</span>
+              <h3 class="card-title">Automate agents out of the happy path</h3>
+              <p>
+                When a user story stabilizes, convert it to a command. Keep
+                agents for diagnosis, adaptation, and planned repair.
+              </p>
+            </div>
+          </article>
+        </div>
+
+        <div
+          class="mt-6 rounded-box border border-success/30 bg-success/10 p-6 shadow-xl"
+        >
+          <div class="eyebrow text-success">Pilot recommendation</div>
+          <h3 class="mt-2 text-2xl font-black">
+            Prototype the context-bearing exploration loop before adopting
+            Firstmate
+          </h3>
+          <ol class="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+            <li class="rounded-box bg-base-100 p-4">
+              <strong>1.</strong> Keep the interactive TUI rooted in the actual
+              target repository so it can read code and talk with you directly.
+            </li>
+            <li class="rounded-box bg-base-100 p-4">
+              <strong>2.</strong> Create one run directory with a compact
+              current summary, journey ledger, issue inventory, decisions, and
+              evidence.
+            </li>
+            <li class="rounded-box bg-base-100 p-4">
+              <strong>3.</strong> Dispatch one ordinary UpAgent scout order with
+              the best specialist persona and explicit target working directory.
+            </li>
+            <li class="rounded-box bg-base-100 p-4">
+              <strong>4.</strong> Require the scout to update the ledger/report;
+              then have the TUI read it before the next conversation or order.
+            </li>
+            <li class="rounded-box bg-base-100 p-4">
+              <strong>5.</strong> Once findings stabilize, hand the artifact to
+              the normal research/planning front door—do not fix
+              opportunistically.
+            </li>
+            <li class="rounded-box bg-base-100 p-4">
+              <strong>6.</strong> Use the plan runner and the same one Hub for
+              approved phases; keep no-mistakes downstream for delivery.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="evidence" class="section-anchor evidence mt-14">
+        <div class="max-w-4xl">
+          <div class="eyebrow">Evidence and caveats</div>
+          <h2 class="mt-2 text-3xl font-black sm:text-4xl">
+            What this assessment is based on
+          </h2>
+          <p class="mt-3 opacity-70">
+            Static source/document review of Firstmate commit
+            <span class="mono">c12bdea</span> and this repository at
+            <span class="mono">9788b26</span>. No live Firstmate, Herdr, or
+            onboarding run was performed for this comparison.
+          </p>
+        </div>
+
+        <div class="mt-6 grid gap-4 lg:grid-cols-2">
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-bold">Firstmate evidence</div>
+            <div class="collapse-content">
+              <ul class="space-y-2">
+                <li>
+                  <code>../firstmate/AGENTS.md:214–247</code> — natural-language
+                  intake, scout/ship classification, task brief, isolated spawn,
+                  steering.
+                </li>
+                <li>
+                  <code>../firstmate/AGENTS.md:249–283</code> — exclusive
+                  delivery-path authority and no-mistakes ownership.
+                </li>
+                <li>
+                  <code>../firstmate/AGENTS.md:301–309</code> — report required,
+                  report is not implementation authority, decision gate,
+                  promotion, reproduced bug becomes regression test.
+                </li>
+                <li>
+                  <code>../firstmate/AGENTS.md:311–324</code> — exactly one
+                  supervision cycle; durable wake/current-state distinction.
+                </li>
+                <li>
+                  <code>../firstmate/docs/architecture.md:9–35</code> — normal
+                  zero-token watcher, queue-before-advance, structured fleet
+                  snapshots.
+                </li>
+                <li>
+                  <code>../firstmate/docs/architecture.md:65–75</code> —
+                  <span class="mono">/afk</span> is a separate presence-gated
+                  sub-supervisor, not the only operating mode.
+                </li>
+                <li>
+                  <code>../firstmate/docs/architecture.md:78–103</code> — Herdr
+                  is an experimental session backend; work areas remain
+                  separately owned; project tasks use isolated target worktrees.
+                </li>
+                <li>
+                  <code>../firstmate/docs/architecture.md:125–136</code> — task
+                  kinds and dispatch profiles; profiles resolve only harness,
+                  model, and effort axes.
+                </li>
+                <li>
+                  <code>../firstmate/docs/architecture.md:212–223</code> —
+                  project-intrinsic context belongs in each target project’s
+                  committed <span class="mono">AGENTS.md</span>.
+                </li>
+                <li>
+                  <code
+                    >../firstmate/bin/fm-spawn.sh:327–340, 640, 836–859</code
+                  >
+                  — harness launch templates, target-project resolution, and
+                  worktree entry before the worker starts.
+                </li>
+                <li>
+                  <code>../firstmate/AGENTS.md:196–222, 303–304</code> — durable
+                  knowledge routing, project-code-aware intake, the no-chat-read
+                  boundary, and the requirement that Firstmate read and relay a
+                  self-contained scout report before teardown.
+                </li>
+                <li>
+                  <code>../firstmate/docs/decision-hold-lifecycle.md:8–38</code>
+                  — durable keyed human decisions and structured read surfaces.
+                </li>
+              </ul>
+            </div>
+          </div>
+          <div
+            class="collapse collapse-arrow bg-base-100 border border-base-content/10"
+          >
+            <input type="checkbox" />
+            <div class="collapse-title font-bold">Herdr / UpAgent evidence</div>
+            <div class="collapse-content">
+              <ul class="space-y-2">
+                <li>
+                  <code
+                    >.shared-llm/public/layers/slash-commands/common/common/herdr-control/command.md:3–28</code
+                  >
+                  — checked plan/route requirement and runnable gate.
+                </li>
+                <li>
+                  <code>.../herdr-control/command.md:58–84</code> — one human
+                  TUI, deterministic Hub lifecycle, typed phase await, no ad-hoc
+                  phase launch.
+                </li>
+                <li>
+                  <code>.../herdr-phase/command.md:100–120</code> —
+                  blocked/replay decision model, alignment, independent audit,
+                  seam checks, deterministic finalization.
+                </li>
+                <li>
+                  <code>.../herdr-phase/command.md:157–175</code> — durable
+                  phase evidence and one Hub as worker-lifecycle authority.
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/extensions/common/upagent/README.md:67–107</code
+                  >
+                  — generic public one-shot requests, strict explicit prompt
+                  boundary, idempotency.
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/extensions/common/upagent/justfile:57–75</code
+                  >
+                  — direct plans have no phase leader; caller sequences steps;
+                  optional verification is off by default.
+                </li>
+                <li>
+                  <code
+                    >.shared-llm/public/extensions/common/upagent/direct_controller.py:48–130,
+                    258–265</code
+                  >
+                  — direct mode still requires a route and is currently
+                  IaC-shaped.
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="alert alert-info alert-soft mt-6">
+          <span
+            ><strong>Design source:</strong> neither repository exposes a
+            product UI design system for this architecture report, so this
+            artifact uses Lavish’s recommended portable Tailwind browser runtime
+            + DaisyUI fallback, with a theme-aware Mermaid diagram.</span
+          >
+        </div>
+        <div class="alert alert-warning alert-soft mt-3">
+          <span
+            ><strong>Independent review note:</strong> two attempted subagent
+            review rounds could not start because their configured providers had
+            no available API credentials. The findings above were therefore
+            cross-checked directly against the current source and prior
+            repository research artifacts, but not independently re-reviewed in
+            this session.</span
+          >
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+      const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const paint = document.createElement("canvas").getContext("2d");
+      function toRgba(color) {
+        paint.clearRect(0, 0, 1, 1);
+        paint.fillStyle = "#000";
+        paint.fillStyle = color;
+        paint.fillRect(0, 0, 1, 1);
+        return paint.getImageData(0, 0, 1, 1).data;
+      }
+      function compositeRgba(fg, bg) {
+        const fa = fg[3] / 255,
+          ba = bg[3] / 255,
+          a = fa + ba * (1 - fa);
+        if (a === 0) return [0, 0, 0, 0];
+        return [
+          (fg[0] * fa + bg[0] * ba * (1 - fa)) / a,
+          (fg[1] * fa + bg[1] * ba * (1 - fa)) / a,
+          (fg[2] * fa + bg[2] * ba * (1 - fa)) / a,
+          a * 255,
+        ];
+      }
+      function pageIsDark() {
+        const root = document.documentElement;
+        const rb = toRgba(getComputedStyle(root).backgroundColor);
+        const bb = document.body
+          ? toRgba(getComputedStyle(document.body).backgroundColor)
+          : [0, 0, 0, 0];
+        const [r, g, b, a] = compositeRgba(bb, rb);
+        if (a > 0) return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+        const cs = getComputedStyle(root).colorScheme;
+        if (cs.includes("dark") && !cs.includes("light")) return true;
+        if (cs.includes("light") && !cs.includes("dark")) return false;
+        return darkQuery.matches;
+      }
+      const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({
+        el,
+        src: el.textContent,
+      }));
+      let applied,
+        rendering = false,
+        queued = false;
+      function queueRender() {
+        queued = true;
+        if (!rendering) void render();
+      }
+      async function render() {
+        rendering = true;
+        try {
+          while (queued) {
+            queued = false;
+            const theme = pageIsDark() ? "dark" : "default";
+            if (theme === applied) continue;
+            mermaid.initialize({
+              startOnLoad: false,
+              theme,
+              securityLevel: "strict",
+              flowchart: { curve: "basis" },
+            });
+            for (const { el, src } of diagrams) {
+              el.removeAttribute("data-processed");
+              el.textContent = src;
+            }
+            try {
+              await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+            } catch (error) {
+              console.error("Mermaid render failed", error);
+              return;
+            }
+            applied = theme;
+          }
+        } finally {
+          rendering = false;
+          if (queued) queueRender();
+        }
+      }
+      if (document.readyState === "complete") queueRender();
+      else window.addEventListener("load", queueRender, { once: true });
+      const observer = new MutationObserver(queueRender);
+      for (const el of [document.documentElement, document.body])
+        if (el)
+          observer.observe(el, {
+            attributes: true,
+            attributeFilter: ["data-theme", "class", "style"],
+          });
+      document.addEventListener("change", queueRender, true);
+      darkQuery.addEventListener("change", queueRender);
+    </script>
+  </body>
+</html>
