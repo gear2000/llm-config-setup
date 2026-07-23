@@ -1254,7 +1254,7 @@ def test_production_client_start_keeps_supervisor_diagnostics_durable(
                 print(json.dumps({"result": {"workspaces": [{"label": "shared-services", "workspace_id": "workspace-1"}]}}))
                 raise SystemExit(0)
             if args == ["pane", "list", "--workspace", "workspace-1"]:
-                print(json.dumps({"result": {"panes": [{"label": "recruiter", "pane_id": "recruiter-pane"}]}}))
+                print(json.dumps({"result": {"panes": [{"label": "upagent", "pane_id": "recruiter-pane"}]}}))
                 raise SystemExit(0)
             if args[:2] == ["pane", "run"] or args[:2] == ["pane", "report-agent"]:
                 raise SystemExit(0)

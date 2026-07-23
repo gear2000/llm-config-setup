@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """UpAgent Recruiter — the always-up broker that hires a fresh worker per work order.
 
-The Recruiter has a status pane in the services workspace — the unified `herdr` workspace by
-default (services and every run's tabs share it), or a dedicated `shared-services` workspace
+The Recruiter has an `upagent` status pane in the unified `upagent` workspace by default
+(services and every run's tabs share it), or in a dedicated `shared-services` workspace
 with `up --separate-workspaces`. Any requester places an order directly through the durable
 CLI lifecycle:
 
@@ -146,10 +146,14 @@ else:
     sys.modules[_runtime_name] = command_runtime
     _runtime_spec.loader.exec_module(command_runtime)
 
-# Single-workspace default: services (and every run's tabs) share one `herdr` workspace.
-# `up --separate-workspaces` restores the dedicated `shared-services` workspace.
-UNIFIED_WORKSPACE_LABEL = "herdr"
+# Single-workspace default: services (and every run's tabs) share one `upagent` workspace.
+# `up --separate-workspaces` restores the dedicated `shared-services` workspace. Bring-up
+# migrates the two retired presentation labels in place; they are never used for new state.
+UNIFIED_WORKSPACE_LABEL = "upagent"
+LEGACY_UNIFIED_WORKSPACE_LABEL = "herdr"
 SHARED_SERVICES_WORKSPACE = "shared-services"
+UPAGENT_PANE_LABEL = "upagent"
+LEGACY_RECRUITER_PANE_LABEL = "recruiter"
 SERVICES_TAB_LABEL = "services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
 LEASE_GRACE_SECONDS = 60
@@ -3246,7 +3250,7 @@ def _report_state(
     *,
     herdr_session: str | None = None,
 ) -> None:
-    """Surface the Recruiter in Herdr's agents sidebar (`pane report-agent`). BEST-EFFORT:
+    """Surface UpAgent in Herdr's agents sidebar (`pane report-agent`). BEST-EFFORT:
     status display must never break a hire, so herdr faults are swallowed. `pane` may be
     None when the caller cannot know its own pane (then this is a no-op)."""
     if not pane:
@@ -3257,9 +3261,9 @@ def _report_state(
             "report-agent",
             pane,
             "--source",
-            "upagent-recruiter",
+            "upagent",
             "--agent",
-            "recruiter",
+            "upagent",
             "--state",
             state,
             "--message",
@@ -7752,16 +7756,45 @@ def _find_workspace(workspaces_resp: dict, label: str) -> dict | None:
     return None
 
 
-def _find_services_workspace(workspaces_resp: dict) -> dict | None:
-    """The live services workspace under either mode's label, preferring the unified default."""
+def _find_services_workspace(
+    workspaces_resp: dict, *, legacy_workspace_id: str | None = None
+) -> dict | None:
+    """Find current service labels, or an exact legacy workspace recorded by UpAgent."""
     for label in (UNIFIED_WORKSPACE_LABEL, SHARED_SERVICES_WORKSPACE):
         found = _find_workspace(workspaces_resp, label)
         if found is not None:
             return found
+    if legacy_workspace_id is None:
+        return None
+    legacy = _find_workspace(workspaces_resp, LEGACY_UNIFIED_WORKSPACE_LABEL)
+    if legacy is not None and legacy.get("workspace_id") == legacy_workspace_id:
+        return legacy
     return None
 
 
-RECRUITER_PANE_LABEL = "recruiter"
+def _workspace_panes(workspace_id: str, herdr_session: str) -> list[dict]:
+    panes = (
+        _herdr_json(
+            "pane", "list", "--workspace", workspace_id, herdr_session=herdr_session
+        )
+        .get("result", {})
+        .get("panes", [])
+    )
+    return [pane for pane in panes if isinstance(pane, dict)]
+
+
+def _service_role_pane(panes: Sequence[dict], role_label: str) -> dict | None:
+    accepted = {role_label}
+    if role_label == UPAGENT_PANE_LABEL:
+        accepted.add(LEGACY_RECRUITER_PANE_LABEL)
+    matches = [
+        pane for pane in panes if pane.get("label") in accepted and pane.get("pane_id")
+    ]
+    if len(matches) > 1:
+        raise RecruiterError(
+            "workspace has multiple UpAgent service panes; remove the stale pane before bring-up"
+        )
+    return matches[0] if matches else None
 
 
 def _recruit_door_command(roster_path: str) -> str:
@@ -7794,38 +7827,47 @@ def _ensure_role_pane(
       - if it exists, reuse my role-labeled pane if present, else split a fresh pane off an
         existing one and label it for my role.
     """
-    other_label = (
-        SHARED_SERVICES_WORKSPACE
+    workspaces = _herdr_json("workspace", "list", herdr_session=herdr_session)
+    existing = _find_workspace(workspaces, workspace_label)
+
+    # One-time visible-label migration. Only claim the retired generic `herdr` workspace when
+    # it contains this service's known pane; an unrelated human workspace with that label is
+    # left untouched. Rename in place so run tabs and pane identities survive the upgrade.
+    if workspace_label == UNIFIED_WORKSPACE_LABEL:
+        legacy = _find_workspace(workspaces, LEGACY_UNIFIED_WORKSPACE_LABEL)
+        if legacy is not None and isinstance(legacy.get("workspace_id"), str):
+            legacy_panes = _workspace_panes(legacy["workspace_id"], herdr_session)
+            if _service_role_pane(legacy_panes, role_label) is not None:
+                if existing is not None:
+                    raise RecruiterError(
+                        "services exist in both the current and retired unified workspaces; "
+                        "remove the stale service pane before bring-up"
+                    )
+                _herdr(
+                    "workspace",
+                    "rename",
+                    legacy["workspace_id"],
+                    UNIFIED_WORKSPACE_LABEL,
+                    herdr_session=herdr_session,
+                )
+                existing = {**legacy, "label": UNIFIED_WORKSPACE_LABEL}
+
+    other_labels = (
+        (SHARED_SERVICES_WORKSPACE,)
         if workspace_label == UNIFIED_WORKSPACE_LABEL
-        else UNIFIED_WORKSPACE_LABEL
+        else (UNIFIED_WORKSPACE_LABEL, LEGACY_UNIFIED_WORKSPACE_LABEL)
     )
-    other = _find_workspace(
-        _herdr_json("workspace", "list", herdr_session=herdr_session), other_label
-    )
-    if other is not None and isinstance(other.get("workspace_id"), str):
-        other_panes = (
-            _herdr_json(
-                "pane",
-                "list",
-                "--workspace",
-                other["workspace_id"],
-                herdr_session=herdr_session,
-            )
-            .get("result", {})
-            .get("panes", [])
-        )
-        if any(
-            p.get("label") == RECRUITER_PANE_LABEL
-            for p in other_panes
-            if isinstance(p, dict)
-        ):
+    for other_label in other_labels:
+        other = _find_workspace(workspaces, other_label)
+        if other is None or not isinstance(other.get("workspace_id"), str):
+            continue
+        other_panes = _workspace_panes(other["workspace_id"], herdr_session)
+        if _service_role_pane(other_panes, role_label) is not None:
             raise RecruiterError(
                 f"services are already up in workspace {other_label!r}; "
                 "run `just upagent-down` first to switch workspace modes"
             )
-    existing = _find_workspace(
-        _herdr_json("workspace", "list", herdr_session=herdr_session), workspace_label
-    )
+
     if existing is None:
         created = _herdr_json(
             "workspace",
@@ -7841,18 +7883,13 @@ def _ensure_role_pane(
         return workspace_id, pane_id, True, True
 
     workspace_id = existing["workspace_id"]
-    panes = (
-        _herdr_json(
-            "pane", "list", "--workspace", workspace_id, herdr_session=herdr_session
-        )
-        .get("result", {})
-        .get("panes", [])
-    )
-    mine = next(
-        (p for p in panes if p.get("label") == role_label and p.get("pane_id")), None
-    )
+    panes = _workspace_panes(workspace_id, herdr_session)
+    mine = _service_role_pane(panes, role_label)
     if mine is not None:
-        return workspace_id, mine["pane_id"], False, False
+        pane_id = mine["pane_id"]
+        if mine.get("label") != role_label:
+            _herdr("pane", "rename", pane_id, role_label, herdr_session=herdr_session)
+        return workspace_id, pane_id, False, False
     # Split my role pane off an existing pane so the service stays in this tab even when the
     # unified workspace already holds a run's own panes.
     anchor = next((p["pane_id"] for p in panes if p.get("pane_id")), None)
@@ -7876,7 +7913,7 @@ def _ensure_role_pane(
 def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     """Ensure the services workspace + an armed Recruiter pane. Idempotent.
 
-    Default is the unified `herdr` workspace (services and every run's tabs share it);
+    Default is the unified `upagent` workspace (services and every run's tabs share it);
     `--separate-workspaces` restores the dedicated `shared-services` workspace. The pane is a
     visible status surface ONLY; requesters submit through the CLI and durable ledger. The
     pane's `recruit()` function is armed as a sealed stub that refuses and names the real
@@ -7891,7 +7928,7 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     )
     herdr_session = _resolve_current_herdr_session_name()
     workspace_id, recruiter_pane, workspace_created, pane_created = _ensure_role_pane(
-        RECRUITER_PANE_LABEL, workspace_label, herdr_session
+        UPAGENT_PANE_LABEL, workspace_label, herdr_session
     )
     if not separate_workspaces:
         # Presentation-only: keep the Recruiter in the `services` role tab (joined when present,
@@ -8050,8 +8087,17 @@ def cmd_status() -> int:
     else:
         state = None
         herdr_session = None
+    legacy_workspace_id = None
+    if (
+        state is not None
+        and state.get("workspace_label") == LEGACY_UNIFIED_WORKSPACE_LABEL
+    ):
+        recorded_workspace_id = state.get("workspace_id")
+        if isinstance(recorded_workspace_id, str):
+            legacy_workspace_id = recorded_workspace_id
     services = _find_services_workspace(
-        _herdr_json("workspace", "list", herdr_session=herdr_session)
+        _herdr_json("workspace", "list", herdr_session=herdr_session),
+        legacy_workspace_id=legacy_workspace_id,
     )
     label = services.get("label") if services else None
     print(f"services: {'up (' + str(label) + ')' if services else 'down'}")
@@ -8698,7 +8744,7 @@ def main(argv: list[str] | None = None) -> int:
     p_up.add_argument(
         "--separate-workspaces",
         action="store_true",
-        help="keep services in their own `shared-services` workspace instead of the unified `herdr` one",
+        help="keep services in their own `shared-services` workspace instead of the unified `upagent` one",
     )
     sub.add_parser("down", help="stop the Recruiter and reconcile every owned worker")
     p_reconcile = sub.add_parser(

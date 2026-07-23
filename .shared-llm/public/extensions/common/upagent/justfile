@@ -16,7 +16,7 @@ _UPAGENT_CLIENT := justfile_directory() + "/.shared-llm/public/extensions/common
 upagent *args:
     @${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" {{args}}
 
-# Ensure the services workspace + an armed Recruiter pane (unified `herdr` workspace by
+# Ensure the services workspace + an armed UpAgent status pane (unified `upagent` workspace by
 # default; pass --separate-workspaces for the dedicated `shared-services` workspace), then
 # print the status table so the active service is visible.
 upagent-up *FLAGS:

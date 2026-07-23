@@ -4210,19 +4210,44 @@ def test_await_any_rejects_duplicates_bad_cursor_and_unsubmitted(
         recruiter.cmd_await_any([], timeout_ms=50)
 
 
-def test_ensure_role_pane_defaults_to_the_unified_workspace(
+def test_report_state_surfaces_upagent_identity_in_herdr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh bring-up creates the `herdr` workspace and claims its root pane for the role."""
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(recruiter, "_herdr", lambda *args, **_: calls.append(args))
+
+    recruiter._report_state("pane-1", "idle", "armed", herdr_session="llm-lab-test")
+
+    assert calls == [
+        (
+            "pane",
+            "report-agent",
+            "pane-1",
+            "--source",
+            "upagent",
+            "--agent",
+            "upagent",
+            "--state",
+            "idle",
+            "--message",
+            "armed",
+        )
+    ]
+
+
+def test_ensure_role_pane_defaults_to_the_upagent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh bring-up creates an `upagent` workspace and matching visible role pane."""
 
     def fake_herdr_json(*args: str, **_: object) -> dict:
         if args[:2] == ("workspace", "list"):
             return {"result": {"workspaces": []}}
         if args[:2] == ("workspace", "create"):
-            assert args[args.index("--label") + 1] == recruiter.UNIFIED_WORKSPACE_LABEL
+            assert args[args.index("--label") + 1] == "upagent"
             return {
                 "result": {
-                    "workspace": {"workspace_id": "ws-herdr"},
+                    "workspace": {"workspace_id": "ws-upagent"},
                     "root_pane": {"pane_id": "pane-1"},
                 }
             }
@@ -4233,18 +4258,86 @@ def test_ensure_role_pane_defaults_to_the_unified_workspace(
     monkeypatch.setattr(recruiter, "_herdr", lambda *a, **_: renames.append(a))
 
     workspace, pane, workspace_created, pane_created = recruiter._ensure_role_pane(
-        recruiter.RECRUITER_PANE_LABEL,
+        recruiter.UPAGENT_PANE_LABEL,
         recruiter.UNIFIED_WORKSPACE_LABEL,
         "llm-lab-test",
     )
 
+    assert recruiter.UNIFIED_WORKSPACE_LABEL == "upagent"
+    assert recruiter.UPAGENT_PANE_LABEL == "upagent"
     assert (workspace, pane, workspace_created, pane_created) == (
-        "ws-herdr",
+        "ws-upagent",
         "pane-1",
         True,
         True,
     )
-    assert ("pane", "rename", "pane-1", "recruiter") in renames
+    assert ("pane", "rename", "pane-1", "upagent") in renames
+
+
+def test_ensure_role_pane_migrates_legacy_visible_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bring-up renames retired labels in place instead of creating another workspace."""
+
+    def fake_herdr_json(*args: str, **_: object) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {
+                "result": {
+                    "workspaces": [{"label": "herdr", "workspace_id": "ws-existing"}]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {
+                "result": {
+                    "panes": [{"pane_id": "pane-existing", "label": "recruiter"}]
+                }
+            }
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    renames: list[tuple[str, ...]] = []
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+    monkeypatch.setattr(recruiter, "_herdr", lambda *a, **_: renames.append(a))
+
+    resolved = recruiter._ensure_role_pane(
+        recruiter.UPAGENT_PANE_LABEL,
+        recruiter.UNIFIED_WORKSPACE_LABEL,
+        "llm-lab-test",
+    )
+
+    assert resolved == ("ws-existing", "pane-existing", False, False)
+    assert ("workspace", "rename", "ws-existing", "upagent") in renames
+    assert ("pane", "rename", "pane-existing", "upagent") in renames
+
+
+def test_ensure_role_pane_rejects_duplicate_service_panes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_herdr_json(*args: str, **_: object) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {
+                "result": {
+                    "workspaces": [{"label": "upagent", "workspace_id": "ws-existing"}]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {
+                "result": {
+                    "panes": [
+                        {"pane_id": "pane-current", "label": "upagent"},
+                        {"pane_id": "pane-legacy", "label": "recruiter"},
+                    ]
+                }
+            }
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+
+    with pytest.raises(RecruiterError, match="multiple UpAgent service panes"):
+        recruiter._ensure_role_pane(
+            recruiter.UPAGENT_PANE_LABEL,
+            recruiter.UNIFIED_WORKSPACE_LABEL,
+            "llm-lab-test",
+        )
 
 
 def test_ensure_role_pane_rejects_switching_workspace_modes(
@@ -4262,14 +4355,14 @@ def test_ensure_role_pane_rejects_switching_workspace_modes(
                 }
             }
         if args[:2] == ("pane", "list"):
-            return {"result": {"panes": [{"pane_id": "p1", "label": "recruiter"}]}}
+            return {"result": {"panes": [{"pane_id": "p1", "label": "upagent"}]}}
         raise AssertionError(f"unexpected herdr call: {args}")
 
     monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
 
     with pytest.raises(RecruiterError, match="upagent-down"):
         recruiter._ensure_role_pane(
-            recruiter.RECRUITER_PANE_LABEL,
+            recruiter.UPAGENT_PANE_LABEL,
             recruiter.UNIFIED_WORKSPACE_LABEL,
             "llm-lab-test",
         )
@@ -4290,13 +4383,13 @@ def test_ensure_role_pane_separate_mode_reuses_shared_services(
                 }
             }
         if args[:2] == ("pane", "list"):
-            return {"result": {"panes": [{"pane_id": "p1", "label": "recruiter"}]}}
+            return {"result": {"panes": [{"pane_id": "p1", "label": "upagent"}]}}
         raise AssertionError(f"unexpected herdr call: {args}")
 
     monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
 
     workspace, pane, workspace_created, pane_created = recruiter._ensure_role_pane(
-        recruiter.RECRUITER_PANE_LABEL,
+        recruiter.UPAGENT_PANE_LABEL,
         recruiter.SHARED_SERVICES_WORKSPACE,
         "llm-lab-test",
     )
@@ -4472,6 +4565,52 @@ def test_cmd_status_uses_recorded_state_session(
     assert recruiter.cmd_status() == 0
 
     assert calls == [{"herdr_session": "llm-lab-test"}]
+    assert "services: up (upagent)" in capsys.readouterr().out
+
+
+def test_cmd_status_does_not_claim_unrelated_legacy_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "missing-state.json")
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {
+            "result": {
+                "workspaces": [{"label": "herdr", "workspace_id": "human-workspace"}]
+            }
+        },
+    )
+
+    assert recruiter.cmd_status() == 0
+    assert capsys.readouterr().out == "services: down\n"
+
+
+def test_cmd_status_recognizes_recorded_legacy_workspace_during_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    state_path = tmp_path / "legacy-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "herdr_session": "llm-lab-test",
+                "workspace_id": "legacy-services",
+                "workspace_label": "herdr",
+            }
+        )
+    )
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_path)
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {
+            "result": {
+                "workspaces": [{"label": "herdr", "workspace_id": "legacy-services"}]
+            }
+        },
+    )
+
+    assert recruiter.cmd_status() == 0
     assert "services: up (herdr)" in capsys.readouterr().out
 
 

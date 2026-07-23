@@ -59,17 +59,19 @@ publication therefore cannot leave an unowned agent or a false `verified_absent`
 
 ```
 Herdr session (default: single workspace)
-└── ws: herdr                  services AND runs share one workspace as role tabs
-    ├── tab: services          └── recruiter (deterministic Python Hub)
+└── ws: upagent                services AND runs share one workspace as role tabs
+    ├── tab: services          └── upagent (deterministic Python Hub status)
     └── tabs: control / workers / oversight   per-run panes
 
 Herdr session (with `up --separate-workspaces`)
 ├── ws: <slug>                 TUI + leader + workers (+ opt-in managers / one-shot checkers)
 └── ws: shared-services        always up, plan-agnostic
-    └── recruiter               deterministic Python Hub
+    └── upagent                 deterministic Python Hub status
 ```
 
-The Recruiter pane is a visible status surface, not a free-form command queue. Requests go through
+The visible `upagent` pane is the Recruiter's status surface, not a free-form command queue. On
+first bring-up after this naming change, UpAgent renames its former `herdr` workspace and
+`recruiter` pane in place; unrelated human-created workspaces are never claimed. Requests go through
 one variadic façade and the canonical socket:
 
 ```text
