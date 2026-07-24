@@ -1,6 +1,6 @@
 # UpAgent lifecycle fundamental
 
-The **UpAgent Recruiter Hub** is a universal lifecycle owner for an LLM worker. Its caller may
+The **UpAgent Recruiter** is a universal durable lifecycle owner for an LLM worker. Its caller may
 be a TUI, phase leader, another agent, or an unrelated framework. Callers use one
 request contract and do not need to understand Claude, Codex, Pi, Cursor, Herdr process details,
 or cleanup mechanics.
@@ -11,7 +11,7 @@ The fundamental separation is:
 Requester                  owns intent and consequential decisions
 Strict Python boundary     validates one closed schema; never repairs or guesses intent
 Dedicated Account Manager  observes and advises on one request; never owns authority
-Python Recruiter Hub       owns facts, leases, validation, execution, publication, and terminality
+Python Recruiter           owns facts, leases, validation, execution, publication, and terminality
 UpAgent worker             owns the requested work and its result
 One-shot check agent       advises on ambiguous evidence only
 ```
@@ -25,7 +25,7 @@ REQUESTER
 └─ submits the request with a durable reply address
    │
    ▼
-PYTHON RECRUITER HUB
+PYTHON RECRUITER
 │
 ├─ accepts only one closed `schema_version: 1` JSON object or the equivalent named flags
 ├─ rejects unknown keys, wrong types, invalid combinations, unapproved offerings, and bad paths
@@ -43,11 +43,11 @@ DEDICATED ACCOUNT MANAGER (LLM)
 │
 ├─ observes bounded lifecycle evidence for one request
 ├─ explains ambiguity and may recommend one artifact repair
-├─ proposes structured advisory actions to the Hub
+├─ proposes structured advisory actions to the Recruiter
 └─ never approves/rejects Python-valid startup, mutates leases, publishes, or terminalizes
    │
    ▼
-PYTHON RECRUITER HUB
+PYTHON RECRUITER
 │
 ├─ validates any proposed manager action against the request and ownership token
 ├─ continues under direct Python supervision when the manager is unavailable
@@ -77,7 +77,7 @@ DEDICATED ACCOUNT MANAGER (WHEN AVAILABLE)
 └─ asks the Requester to continue, extend, inspect, or cancel when a decision is required
    │
    ▼
-PYTHON RECRUITER HUB
+PYTHON RECRUITER
 │
 ├─ executes the authorized action
 ├─ performs staged termination after an unanswered hard deadline
@@ -90,7 +90,7 @@ PYTHON RECRUITER HUB
 
 ## Reliability invariants
 
-1. Every request has a globally unique Hub identity; a caller's human-readable order id is not
+1. Every request has a globally unique durable identity; a caller's human-readable order id is not
    used as a global namespace.
 2. Every state change is an atomic durable event with a request id and generation.
 3. Every wait is bounded by a monotonic deadline. Retries are bounded and idempotent.
@@ -107,10 +107,10 @@ PYTHON RECRUITER HUB
    terminal bundle. After Python proves worker process, harness, and cwd health, no manager
    classification may veto startup. An advisory bookkeeping fault may not destroy a proven healthy
    worker, publish success, or leave the request non-terminal.
-8. The Requester owns continue/extend/cancel decisions. The Hub may act without a response only
+8. The Requester owns continue/extend/cancel decisions. The Recruiter may act without a response only
    for valid terminal completion, proven orphan recovery, or a declared hard deadline after its
    grace period.
-9. The Hub mechanically supervises Dedicated Account Managers. Managers do not recursively hire
+9. The Recruiter mechanically supervises Dedicated Account Managers. Managers do not recursively hire
    managers to watch managers.
 10. No manager failure may leave an unowned worker. No cleanup receipt may claim success until
     the owned pane is verified absent. Every launched lifecycle role is journaled before launch
@@ -118,6 +118,8 @@ PYTHON RECRUITER HUB
     resolves that name and verifies agent, process, cwd, and lease identity; a stale pane id alone
     is never enough to close a pane. If an owner dies during an in-flight start, one not-found
     lookup keeps the journal `launch-uncertain` and open for later reconciliation sweeps.
+    Cancellation cannot publish verified absence while a live owner holds a `launching` journal;
+    it waits without `flock` until the owner commits its pane identity or dies.
 11. A Dedicated Account Manager defaults to the requester's cockpit workspace, beside its worker.
     Shared-services placement is explicit rather than an invisible default.
 12. Cockpit placement is role-separated without weakening startup atomicity. The `control` tab
@@ -131,19 +133,22 @@ PYTHON RECRUITER HUB
     ownership, or lifecycle state.
 13. (Legacy runs only.) A watchdog's own `result.json` is not completion authority. Its order names a durable terminal
     record owned by the plan or phase controller. If the watchdog writes a result before that
-    record is terminal, the Hub archives the premature result, keeps the lifecycle open, and tells
+    record is terminal, the Recruiter archives the premature result, keeps the lifecycle open, and tells
     the same watchdog to resume. Only the matching durable terminal record permits cleanup.
-14. There are no detached mutating job-runner or supervisor processes. Canonical commands,
-    reconciliation, and job runners execute inside the one lock-owning Hub process; background
-    daemon threads die with that process before its lifetime lock is released. Authority requires
-    the live published PID/identity and held lock descriptor, not forgeable environment strings.
-    A caller receives `REQUEST_ACCEPTED` when startup finishes without a captured command pipe.
+14. Every command imports current canonical source and exits; no resident Python process can cache
+    stale code. Fire-and-forget work uses a detached `run-job` supervisor whose PID is durable lease
+    evidence. One machine-local `flock` serializes individual token-fenced ledger mutations;
+    reconciliation performs process/Herdr work outside it and acquires it only for each CAS commit.
+    It is never held across Herdr waits or a worker lifetime. Reads remain
+    lock-free. A caller receives `REQUEST_ACCEPTED` when verified startup finishes.
 15. A terminal record always answers with exactly one structured outcome. Typed completion
     validates lease-private staging, projects every public artifact, revalidates public paths,
     writes the receipt, and only then writes terminal state/event/requester evidence. Await cannot
     wake from pre-receipt `result-ready` evidence. Publication writes the validated result, the
-    Hub's own durable copy of it, and the receipt naming that copy together.
-    When the caller's `result_path` is later absent or unreadable, the Hub republishes from that
+    Recruiter's own durable copy of it, and the receipt naming that copy together. History pruning
+    additionally requires matching `runner-completed.json`, written only after the detached
+    supervisor's final notification; crash reconciliation may write it only after proving that
+    supervisor dead. When the caller's `result_path` is later absent or unreadable, the Recruiter republishes from that
     copy; when no trustworthy copy survives, it refuses visibly with the order id, the loader's
     reason, the receipt path, and the recorded verdict. A terminal record never crashes the result
     loader and never silently reopens finished work.
@@ -154,7 +159,7 @@ PYTHON RECRUITER HUB
     regenerates one Python-authored schema-valid blocked three-file bundle; specialists also
     receive a valid failure answer. Success prose is never retained beside a blocked result.
 17. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
-    can pass only with matching Hub-verified receipts whose answers are cited successes. Absent,
+    can pass only with matching Recruiter-verified receipts whose answers are cited successes. Absent,
     rejected, failed, borrowed, or forged claims block finalization; direct source reading is not
     consult evidence.
 
@@ -246,9 +251,9 @@ Recovery is deliberate. A second launcher that finds a fresh live owner becomes 
 stale owner still requires `just run-session-snapshot <run-dir>` and
 `just run-session-reconcile <run-dir>` before takeover. Mutating commands read the owner
 token from `RUNNER_OWNER_TOKEN_FILE` or an explicit `--token-file`; `--token-stdin` is
-supported only by the `guard` and `cleanup` lifecycle operations for one-off recovery. The thin
-client reads it into bounded request-local transport input, and the Hub target never reads process
-stdin. Avoid passing raw owner tokens in process command lines.
+supported only by the `guard` and `cleanup` lifecycle operations for one-off recovery. Those
+runner commands read the bounded token directly from their own process stdin; UpAgent has no
+socket transport or resident target. Avoid passing raw owner tokens in process command lines.
 
 ## Use case: start one phase
 

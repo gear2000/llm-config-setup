@@ -2,7 +2,7 @@
 
 This is the shared execution contract for the run controllers: `/tui-control` (the TUI) and `/phase-leader` (the phase leader). It is deliberately generic and public: examples use placeholder model and agent names only.
 
-The defining rule of this protocol: **LLM implementation, audit, verifier, advisor, and consult work is always a work ORDER placed to the UpAgent Recruiter, which hires a fresh worker for it — never a native or nested subagent of the leader.** The ordinary deterministic stages are controller actions with durable result receipts, not native subagents. The phase leader does not call the harness's own agent/task tool to run stage work. It writes durable order/result files, drives the Recruiter over the Herdr socket when a worker is needed, and reads typed worker `result.json`, controller `controller-result.json`, and `phase-result.json` files as the authoritative outcomes. Everything else — the two-file input, the five-stage worktree lifecycle, the Stage 2 audit gate, the adversarial-evaluator persona — is transport-agnostic substrate that survives unchanged.
+The defining rule of this protocol: **LLM implementation, audit, verifier, advisor, and consult work is always a work ORDER placed to the UpAgent Recruiter, which hires a fresh worker for it — never a native or nested subagent of the leader.** The ordinary deterministic stages are controller actions with durable result receipts, not native subagents. The phase leader does not call the harness's own agent/task tool to run stage work. It writes durable order/result files, invokes the per-command Recruiter when a worker is needed, and reads typed worker `result.json`, controller `controller-result.json`, and `phase-result.json` files as the authoritative outcomes; the Recruiter alone drives Herdr IPC. Everything else — the two-file input, the five-stage worktree lifecycle, the Stage 2 audit gate, the adversarial-evaluator persona — is transport-agnostic substrate that survives unchanged.
 
 ## Runnable input is two files
 
@@ -120,7 +120,7 @@ Rules:
 
 ## The run tree — the durable record
 
-Every run writes a filesystem tree that is the source of truth for what happened. The Herdr socket carries only the go/done signal; the tree is what the leader, the TUI, and a human read. It is rooted at `<run-root>/<date>/<slug>/`, where `<run-root>` is the runner-supplied work-log root and `<slug>` names the run.
+Every run writes a filesystem tree that is the source of truth for what happened. Herdr IPC carries only live process/pane signals; the tree is what the leader, the TUI, and a human read. It is rooted at `<run-root>/<date>/<slug>/`, where `<run-root>` is the runner-supplied work-log root and `<slug>` names the run.
 
 ```text
 <date>/<slug>/
@@ -152,7 +152,7 @@ Every run writes a filesystem tree that is the source of truth for what happened
 
 ## Execution model — worker orders and deterministic controller stages
 
-The phase leader runs all LLM work by placing a **work order** to the always-up UpAgent Recruiter, which hires exactly one fresh worker for that order and releases it when the order is done. This includes Stage 1 implementation, Stage 2 audit, `stage-0-alignment` workers, anomaly verifiers, advisors, and consults. The leader never spawns a native subagent, team, or nested harness session to do LLM work.
+The phase leader runs all LLM work by placing a **work order** through the per-command UpAgent Recruiter, which hires exactly one fresh worker for that order and releases it when the order is done. This includes Stage 1 implementation, Stage 2 audit, `stage-0-alignment` workers, anomaly verifiers, advisors, and consults. The leader never spawns a native subagent, team, or nested harness session to do LLM work.
 
 Ordinary Stage 3 seam checks, ordinary Stage 4 deferral/merge records, and Stage 5 finalization are deterministic controller actions. They still write typed stage evidence to `controller-result.json` and participate in `phase-status.md` / `phase-result.json`, but they are not worker orders. Do not invent a synthetic `order_id`, `instructions.md`, `compacted.md`, worker `result.json`, or worker `full_log` for a deterministic controller stage.
 
@@ -162,9 +162,9 @@ A deterministic controller stage writes `controller-result.json` with this shape
 
 `cockpit_pane` is the id of an existing pane in the cockpit workspace to split the worker from — Herdr's `pane split` takes a source pane, not a workspace label, so the runner threads a live cockpit pane id (the phase leader's own pane) down into every order.
 
-The Recruiter is brought up once per run by `just upagent-up`. Its services pane is a visible status surface, while a deterministic Python supervisor reconciles dead/expired durable leases. Each request uses direct Python-owned lifecycle by default; optional dedicated Account Managers remain available by roster opt-in. Python owns facts, state transitions, pane operations, durable requester mailboxes, and lease fencing. The leader submits with `just upagent-request`, then waits with `just upagent-await` or `just upagent-await-any`; shell pane input is never used as a queue.
+`just upagent-up` optionally ensures the Recruiter's visible services/status pane; it starts no daemon and is not a request prerequisite. Each command imports current canonical source, and mutating lifecycle commands opportunistically reconcile dead/expired durable leases. Each request uses direct Python-owned lifecycle by default; optional dedicated Account Managers remain available by roster opt-in. Python owns facts, state transitions, pane operations, durable requester mailboxes, and lease fencing. The leader submits with `just upagent-request`, then waits with `just upagent-await` or `just upagent-await-any`; shell pane input is never used as a queue.
 
-The worker-order round-trip, all over the Herdr socket:
+The worker-order round-trip uses per-command UpAgent processes and Herdr's own IPC:
 
 ```text
 leader:    write pass-<p>/stages/<stage>/try-<m>/order.json  +  instructions.md  (order.cockpit_pane = the leader's cockpit pane)
@@ -179,9 +179,9 @@ Recruiter: validate → close + verify owned worker absent → publish public re
 leader:    receive ORDER_RECEIPT → read + validate public result.json
 ```
 
-At a declared work cap, the Hub changes state to `awaiting-requester` and `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The recorded requester uses the per-generation control token from `REQUEST_ACCEPTED` to authorize `extend` or `cancel`. No response during the configured grace period permits the Hub's hard stop. A manager or checker may recommend an action, but cannot execute it.
+At a declared work cap, the Recruiter changes state to `awaiting-requester` and `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The recorded requester uses the per-generation control token from `REQUEST_ACCEPTED` to authorize `extend` or `cancel`. No response during the configured grace period permits the Recruiter's hard stop. A manager or checker may recommend an action, but cannot execute it.
 
-Validate the installed Herdr command surface before launch (the documented baseline is `herdr agent start/get/wait`, `herdr pane get/process-info/run/read/close`, and `herdr wait agent-status`). The Hub uses one `agent start` request with direct argv; it does not split a shell and inject a launch command afterward. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
+Validate the installed Herdr command surface before launch (the documented baseline is `herdr agent start/get/wait`, `herdr pane get/process-info/run/read/close`, and `herdr wait agent-status`). The Recruiter uses one `agent start` request with direct argv; it does not split a shell and inject a launch command afterward. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
 
 **Notification follows ownership boundaries.** The worker has no Recruiter/leader/TUI addresses and sends no terminal text. Its one private result wakes the owning Recruiter job; the durable receipt wakes the phase leader through its blocking `upagent-await`/`upagent-await-any`; `phase-result.json` wakes the TUI through its blocking `upagent-phase-await`. Pane text and human toasts are observational only.
 

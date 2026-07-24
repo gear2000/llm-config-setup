@@ -1,99 +1,228 @@
 #!/usr/bin/env bash
-# UpAgent Hub live smoke test — exercises the REAL lifecycle end to end:
-#
-#   1. hub up (canonical socket, identity handshake)
-#   2. specialist roster listing over the socket
-#   3. one real consultation  (specialist worker in a Herdr pane; answer must be `cited`)
-#   4. one real worker request (public offering + Account Manager; verdict must be `passed`)
-#
-# This costs real model calls and needs a running Herdr server. Run from the repo
-# that owns the hub checkout:
-#
-#   HERDR_SESSION=default bash .shared-llm/public/extensions/common/upagent/smoke_test.sh
-#
-# Exit 0 only when every step passes. Artifacts land in a fresh temp dir printed at start.
+# Cohesive local UpAgent integration smoke. One request crosses the real client CLI, a real
+# detached recruiter.py run-job subprocess, fake local Herdr IPC, typed publication/receipt,
+# oversight cleanup, runner-completed proof, and reconciliation. No model/network/AWS calls.
 set -euo pipefail
 
-HERDR_SESSION="${HERDR_SESSION:-default}"
-export HERDR_SESSION
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-SPECIALIST="${UPAGENT_SMOKE_SPECIALIST:-backend}"
-OFFERING="${UPAGENT_SMOKE_OFFERING:-claude-sonnet-5}"
-RUN_ID="$(date +%s)"
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/upagent-smoke.XXXXXX")"
-FAILURES=0
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/upagent-smoke.XXXXXX")"
+BIN="$WORK/bin"
+STATE="$WORK/fake-herdr"
+mkdir -p "$BIN" "$STATE"
 
-say() { printf '\n=== %s\n' "$*"; }
-pass() { printf 'PASS  %s\n' "$*"; }
-fail() {
-	printf 'FAIL  %s\n' "$*"
-	FAILURES=$((FAILURES + 1))
-}
+cat >"$BIN/herdr" <<'PY'
+#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-say "UpAgent smoke test — repo: $REPO_ROOT, session: $HERDR_SESSION, artifacts: $WORK_DIR"
-cd "$REPO_ROOT"
+root = Path(os.environ["UPAGENT_SMOKE_STATE"])
+state_path = root / "state.json"
+lock_path = root / "state.lock"
+args = sys.argv[1:]
+if args[:1] == ["--session"]:
+    args = args[2:]
 
-# 1. Hub up + identity ------------------------------------------------------
-say "1/4 hub up"
-just upagent up >/dev/null
-STATUS="$(just upagent status 2>/dev/null)"
-if grep -q '^services_ready: True' <<<"$STATUS" && grep -q '^process_start_time: [0-9]' <<<"$STATUS"; then
-	pass "hub is up with live process identity"
-else
-	fail "hub status missing services_ready/process_start_time"
-	printf '%s\n' "$STATUS"
-fi
 
-# 2. Specialist roster ------------------------------------------------------
-say "2/4 specialist roster"
-ROSTER="$(just upagent lists --type specialists 2>/dev/null | grep -c . || true)"
-if [ "$ROSTER" -ge 1 ] && just upagent lists --type specialists 2>/dev/null | grep -q "^${SPECIALIST} "; then
-	pass "roster lists $ROSTER specialists (includes '$SPECIALIST')"
-else
-	fail "roster missing or lacks '$SPECIALIST'"
-fi
+def locked_state():
+    lock = lock_path.open("a+")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    state = json.loads(state_path.read_text()) if state_path.is_file() else {"panes": {}}
+    return lock, state
 
-# 3. Consultation -----------------------------------------------------------
-say "3/4 consultation (specialist: $SPECIALIST — launches a real worker pane)"
-cat >"$WORK_DIR/consult.json" <<EOF
+
+def save(lock, state):
+    state_path.write_text(json.dumps(state))
+    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    lock.close()
+
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+if args == ["session", "list", "--json"]:
+    emit({"sessions": [{"name": os.environ["HERDR_SESSION"], "running": True,
+                         "socket_path": os.environ["HERDR_SOCKET_PATH"]}]})
+    raise SystemExit(0)
+if args[:2] == ["wait", "agent-status"]:
+    signal.signal(signal.SIGTERM, lambda *_: raise_exit())
+    while True:
+        time.sleep(1)
+
+def raise_exit():
+    raise SystemExit(143)
+
+lock, state = locked_state()
+try:
+    if args[:2] == ["pane", "get"]:
+        pane_id = args[2]
+        pane = state["panes"].get(pane_id)
+        if pane is None and pane_id == "cockpit-pane":
+            pane = {"pane_id": pane_id, "tab_id": "control-tab", "cwd": os.getcwd()}
+        if pane is None:
+            print("pane_not_found", file=sys.stderr)
+            raise SystemExit(1)
+        emit({"result": {"pane": pane}})
+    elif args[:2] == ["pane", "process-info"]:
+        pane_id = args[args.index("--pane") + 1]
+        pane = state["panes"][pane_id]
+        emit({"result": {"process_info": {"foreground_processes": [{
+            "pid": pane["pid"], "name": "claude", "cmdline": "claude local-smoke"
+        }]}}})
+    elif args[:2] == ["agent", "start"]:
+        name = args[2]
+        cwd = args[args.index("--cwd") + 1]
+        command = args[args.index("--") + 1:]
+        process = subprocess.Popen(command, cwd=cwd, env=os.environ.copy(), start_new_session=True)
+        pane_id = "pane-" + name[-16:]
+        state["panes"][pane_id] = {
+            "agent": "claude", "agent_name": name, "agent_status": "working",
+            "cwd": cwd, "foreground_cwd": cwd, "pane_id": pane_id,
+            "pid": process.pid, "tab_id": "worker-tab"
+        }
+        emit({"result": {"agent": {"name": name, "pane_id": pane_id}}})
+    elif args[:2] == ["pane", "list"]:
+        emit({"result": {"panes": list(state["panes"].values())}})
+    elif args[:2] == ["pane", "close"]:
+        state["panes"].pop(args[2], None)
+        emit({"result": {"closed": True}})
+    elif args[:2] == ["pane", "report-agent"]:
+        emit({"result": {"reported": True}})
+    elif args[:2] == ["agent", "get"]:
+        name = args[2]
+        pane = next((item for item in state["panes"].values()
+                     if item.get("agent_name") == name), None)
+        if pane is None:
+            print("agent_not_found", file=sys.stderr)
+            raise SystemExit(1)
+        emit({"result": {"agent": {"name": name, "pane_id": pane["pane_id"]}}})
+    else:
+        print("unsupported fake herdr command: " + " ".join(args), file=sys.stderr)
+        raise SystemExit(2)
+finally:
+    save(lock, state)
+PY
+chmod +x "$BIN/herdr"
+
+cat >"$WORK/fake_worker.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+def value(label):
+    match = re.search(rf"^- {label}: (.+)$", text, re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"missing {label} path")
+    return Path(match.group(1))
+order = re.search(r'`order_id`: exactly "([^"]+)"', text).group(1)
+time.sleep(0.2)
+for path in (value("result.json"), value("compacted.md"), value("handoff.md")):
+    path.parent.mkdir(parents=True, exist_ok=True)
+value("result.json").write_text(json.dumps({
+    "order_id": order, "verdict": "passed", "full_log": "local-smoke"
+}) + "\n")
+value("compacted.md").write_text("# Local smoke result\n")
+value("handoff.md").write_text("Local smoke completed.\n")
+PY
+chmod +x "$WORK/fake_worker.py"
+
+cat >"$WORK/roster.yaml" <<EOF
+management:
+  mode: direct
+  rescue_on_startup_failure: false
+  startup_timeout_ms: 5000
+  inactivity_check_ms: 60000
+  requester_grace_ms: 1000
+  account_manager:
+    command: "unused {brief_path} {output_path}"
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 1000
+  checker:
+    command: "unused {brief_path} {output_path}"
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 1000
+health:
+  claude:
+    expected_agent: claude
+    expected_process: claude
+harnesses:
+  claude: "python3 $WORK/fake_worker.py {instructions_path}"
+EOF
+
+cat >"$WORK/instructions.md" <<'EOF'
+# Local smoke worker
+Produce the typed artifacts required by the appended Recruiter delivery contract.
+EOF
+cat >"$WORK/order.json" <<EOF
 {
-  "consult_id": "smoke-consult-$RUN_ID",
-  "specialist": "$SPECIALIST",
-  "question": "In this repository, which YAML file defines the UpAgent specialist roster, and what is the name of its first specialist entry? Cite exact file:line locations.",
-  "answer_path": "$WORK_DIR/answer.json",
-  "cwd": "$REPO_ROOT"
+  "order_id": "local-smoke.stage-1.try-1",
+  "phase_id": "phase-0",
+  "stage_id": "stage-1-implementation",
+  "harness": "claude",
+  "model": "local-fake",
+  "agent": "backend",
+  "cwd": "$WORK",
+  "instructions_path": "$WORK/instructions.md",
+  "result_path": "$WORK/result.json",
+  "cockpit_pane": "cockpit-pane",
+  "timeout_ms": 10000
 }
 EOF
-if just upagent-consult "$WORK_DIR/consult.json" >"$WORK_DIR/consult.out" 2>&1 &&
-	grep -q '"answer_verdict": "cited"' "$WORK_DIR/consult.out"; then
-	pass "consult answered with cited evidence ($WORK_DIR/answer.json)"
-else
-	fail "consult did not produce a cited answer — see $WORK_DIR/consult.out"
-fi
 
-# 4. Worker request ---------------------------------------------------------
-say "4/4 worker request (offering: $OFFERING — launches manager + worker panes)"
-cat >"$WORK_DIR/worker-brief.md" <<EOF
-# Task
-In the repository at $REPO_ROOT, count how many specialists are defined in
-.shared-llm/public/extensions/common/upagent/specialists.yaml and list their names in compacted.md.
-Write a one-line handoff.md. This is a read-only task: change no files.
-Report verdict "passed" if you could read the roster, otherwise "blocked".
-EOF
-if just upagent request --type worker --offering "$OFFERING" --effort low --agent backend \
-	--prompt-file "$WORK_DIR/worker-brief.md" --cwd "$REPO_ROOT" --wait --json \
-	>"$WORK_DIR/worker-out.json" 2>"$WORK_DIR/worker-err.txt" &&
-	grep -q '"verdict": "passed"' "$WORK_DIR/worker-out.json"; then
-	pass "worker ran to a passed terminal verdict"
-else
-	fail "worker request did not pass — see $WORK_DIR/worker-out.json / worker-err.txt"
-fi
+export PATH="$BIN:$PATH"
+export UPAGENT_SMOKE_STATE="$STATE"
+export HERDR_SESSION="local-smoke"
+export HERDR_SOCKET_PATH="$STATE/herdr.sock"
+export UPAGENT_RUNTIME_DIR="$WORK/runtime"
+export UPAGENT_HUB_DIR="$WORK/ledger"
+export UPAGENT_STATE="$WORK/services.json"
 
-# Summary --------------------------------------------------------------------
-say "summary"
-if [ "$FAILURES" -eq 0 ]; then
-	printf 'SMOKE OK — all 4 stages passed. Artifacts: %s\n' "$WORK_DIR"
-else
-	printf 'SMOKE FAILED — %d stage(s) failed. Artifacts: %s\n' "$FAILURES" "$WORK_DIR"
-	exit 1
-fi
+python3 "$HERE/client.py" --target recruiter --roster "$WORK/roster.yaml" \
+	request "$WORK/order.json" >"$WORK/request.out"
+python3 "$HERE/client.py" --target recruiter await "$WORK/order.json" \
+	--notify-after-ms 0 >"$WORK/await.out"
+python3 "$HERE/client.py" --target recruiter reconcile >"$WORK/reconcile.out"
+
+python3 - "$WORK" <<'PY'
+import json
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+requests = [path for path in (root / "ledger/requests").iterdir() if path.is_dir()]
+assert len(requests) == 1, requests
+request = requests[0]
+runner = json.loads((request / "runner.json").read_text())
+completed = json.loads((request / "runner-completed.json").read_text())
+receipt = json.loads((request / "receipt.json").read_text())
+result = json.loads((root / "result.json").read_text())
+launches = [json.loads(path.read_text()) for path in (request / "launches").glob("*.json")]
+assert result["verdict"] == "passed"
+assert receipt["cleanup"]["verified_absent"] is True
+assert receipt["cleanup"]["manager"]["verified_absent"] is True
+assert receipt["cleanup"]["manager"]["status"] == "not-created"
+assert completed["source"] == "supervisor"
+assert runner["runner_pid"] > 1
+assert runner["runner_session_id"] == runner["runner_pid"]
+assert "recruiter.py" in " ".join(runner["runner_argv"])
+assert runner["runner_argv"][-2] == "run-job"
+assert runner["runner_argv"][-1] == request.name
+assert launches and all(item["state"] == "closed" for item in launches)
+assert all(item["cleanup"]["verified_absent"] is True for item in launches)
+active = root / "ledger/active/requests"
+assert not active.exists() or not any(active.iterdir())
+state_path = root / "fake-herdr/state.json"
+state = json.loads(state_path.read_text()) if state_path.is_file() else {"panes": {}}
+assert state["panes"] == {}, state
+print("SMOKE OK — real client -> detached run-job -> hire -> result/receipt -> oversight cleanup -> reconcile")
+PY

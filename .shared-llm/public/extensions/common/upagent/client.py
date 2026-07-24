@@ -1,566 +1,196 @@
 #!/usr/bin/env python3
-"""Thin client for the one canonical machine-local UpAgent Hub.
+"""Per-command UpAgent entry point.
 
-The client performs repository/socket discovery and the protocol handshake only.  It contains no
-Recruiter import, ledger access, reconciliation implementation, lifecycle dispatch, or worker
-runner launch path.
+Every invocation imports the current canonical source and executes exactly one command.  There is
+no resident Hub, socket handshake, module cache, or restart step.  Mutating command entry points
+share one machine-local advisory lock; read-only commands never acquire it.
 """
 
 from __future__ import annotations
 
-import fcntl
 import importlib.util
-import json
 import os
-import stat
 import subprocess
 import sys
-import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location(
-    "upagent_hub_transport", HERE / "hub_transport.py"
-)
-if _spec is None or _spec.loader is None:
-    raise RuntimeError("could not load UpAgent Hub transport")
-transport = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(transport)
 
-_public_spec = importlib.util.spec_from_file_location(
-    "upagent_public_contract_client", HERE / "public_contract.py"
-)
-if _public_spec is None or _public_spec.loader is None:
-    raise RuntimeError("could not load UpAgent public command contract")
-public_contract = importlib.util.module_from_spec(_public_spec)
-_public_spec.loader.exec_module(public_contract)
 
-STARTUP_TIMEOUT_SECONDS = 8.0
-MIGRATION_TIMEOUT_SECONDS = 8.0
-HUB_LOG_SUFFIX = ".log"
+def _canonical_client_bootstrap() -> None:
+    """Re-exec the main-checkout client before importing any UpAgent runtime module."""
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=HERE,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"cannot resolve canonical UpAgent client from {HERE}: {error}"
+        ) from error
+    common_path = Path(common).resolve()
+    repo_root = common_path.parent if common_path.name == ".git" else common_path
+    canonical = (
+        repo_root / ".shared-llm/public/extensions/common/upagent/client.py"
+    ).resolve()
+    current = Path(__file__).resolve()
+    if canonical != current:
+        if not canonical.is_file():
+            raise RuntimeError(f"canonical UpAgent client is missing: {canonical}")
+        os.execv(sys.executable, [sys.executable, str(canonical), *sys.argv[1:]])
+
+
+_canonical_client_bootstrap()
+
+
+def _load(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ClientError(f"could not load UpAgent target {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+transport = _load("upagent_hub_transport", HERE / "hub_transport.py")
+public_contract = _load("upagent_public_contract_client", HERE / "public_contract.py")
+command_runtime = _load("upagent_command_runtime", HERE / "command_runtime.py")
+
+TARGETS = {
+    "public": "public_api.py",
+    "recruiter": "recruiter.py",
+    "phase-controller": "phase_controller.py",
+    "phase-await": "phase_await.py",
+    "direct-controller": "direct_controller.py",
+}
+RUNNER_TARGETS = {
+    "tui-controller": "tui_controller.py",
+    "run-lifecycle": "run_lifecycle.py",
+}
+RECRUITER_TARGETS = frozenset(
+    ("public", "recruiter", "phase-controller", "direct-controller")
+)
+READ_ONLY_PUBLIC = frozenset(("help", "status", "get", "lists", "await", "await-any"))
+READ_ONLY_RECRUITER = frozenset(("status", "specialists", "await", "await-any"))
 
 
 class ClientError(RuntimeError):
-    """A Hub discovery, startup, or protocol fault."""
+    """A per-command discovery or dispatch fault."""
 
 
-def _expected_protocol_fingerprint(cwd: Path) -> str:
-    try:
-        return transport.canonical_protocol_fingerprint(cwd)
-    except transport.ProtocolError:
-        # Explicit socket users may operate outside a git checkout; in that case both client and
-        # Hub come from this one installed runtime directory.
-        return transport.PROTOCOL_FINGERPRINT
+def _recruiter_command(argv: list[str]) -> str | None:
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item == "--roster":
+            if index + 1 >= len(argv):
+                return None
+            index += 2
+        elif item.startswith("--roster="):
+            index += 1
+        else:
+            return item
+    return None
 
 
-def _round_trip(
-    socket_path: Path,
-    target: str,
-    argv: list[str],
-    *,
-    cwd: Path,
-    protocol_version: int = transport.PROTOCOL_VERSION,
-    protocol_fingerprint: str | None = None,
-    caller_context: dict[str, str] | None = None,
-    request_stdin: str | None = None,
-) -> dict[str, Any]:
-    request_context = transport.validate_caller_context(
-        transport.caller_context() if caller_context is None else caller_context
+def _is_mutating(target: str, argv: list[str]) -> bool:
+    """Classify command entry points; unknown commands fail closed as mutations."""
+    command = argv[0] if argv else None
+    if target == "public":
+        return command not in READ_ONLY_PUBLIC
+    if target == "recruiter":
+        return _recruiter_command(argv) not in READ_ONLY_RECRUITER
+    if target == "phase-await":
+        return command != "wait"
+    if target == "direct-controller":
+        return command != "steps"
+    return target not in ("tui-controller", "run-lifecycle")
+
+
+def _canonical_target_path(target: str, _cwd: Path) -> Path:
+    if target in TARGETS:
+        return transport.canonical_module_path(TARGETS[target], HERE)
+    if target in RUNNER_TARGETS:
+        return (
+            transport.canonical_repo_root(HERE)
+            / ".shared-llm/public/extensions/common/runner"
+            / RUNNER_TARGETS[target]
+        ).resolve()
+    raise ClientError(f"unknown command target: {target}")
+
+
+def _load_command_modules(target: str, cwd: Path) -> tuple[Any, Any]:
+    recruiter_path = transport.canonical_module_path("recruiter.py", HERE)
+    recruiter = _load("upagent_recruiter_command", recruiter_path)
+    ledger = transport.ledger_path(HERE)
+    state = transport.state_path(HERE)
+    recruiter._bind_command_runtime(ledger, state)
+    if target == "recruiter":
+        return recruiter, recruiter
+    module = _load(
+        f"upagent_target_{target.replace('-', '_')}",
+        _canonical_target_path(target, cwd),
     )
-    fingerprint = protocol_fingerprint or _expected_protocol_fingerprint(cwd)
+    if target in RECRUITER_TARGETS:
+        binder = getattr(module, "_bind_recruiter_runtime", None)
+        if binder is None:
+            raise ClientError(f"target {target} cannot bind the Recruiter runtime")
+        binder(recruiter)
+    return recruiter, module
+
+
+def _reconciliation_needed(recruiter: Any) -> bool:
+    ledger = recruiter.JobLedger()
+    active = ledger.active / "requests"
     try:
-        connection = transport.connect(socket_path)
-    except OSError as error:
-        raise ClientError(
-            f"UpAgent Hub is unavailable at {socket_path}: {error}"
-        ) from error
-    with connection:
-        connection.settimeout(None)
-        stream = connection.makefile("rwb", buffering=0)
-        transport.write_frame(
-            stream,
-            {
-                "protocol_fingerprint": fingerprint,
-                "protocol_version": protocol_version,
-                "type": "hello",
-            },
-        )
-        hello = transport.read_frame(stream)
-        if hello.get("type") == "error":
-            raise ClientError(str(hello.get("error", "Hub rejected the handshake")))
-        if (
-            hello.get("type") != "hello"
-            or hello.get("protocol_version") != protocol_version
-            or hello.get("protocol_fingerprint") != fingerprint
-            or not isinstance(hello.get("identity"), dict)
-        ):
-            raise ClientError(f"invalid Hub handshake response: {hello}")
-        transport.write_frame(
-            stream,
-            {
-                "argv": argv,
-                "caller_context": request_context,
-                "cwd": str(cwd),
-                "protocol_fingerprint": fingerprint,
-                "protocol_version": protocol_version,
-                "stdin": transport.validate_request_stdin(target, argv, request_stdin),
-                "target": target,
-                "type": "request",
-            },
-        )
-        response = transport.read_frame(stream)
-    if response.get("type") == "error":
-        raise ClientError(str(response.get("error", "Hub rejected the request")))
-    if response.get("type") != "response":
-        raise ClientError(f"invalid Hub response: {response}")
-    if not isinstance(response.get("exit_code"), int):
-        raise ClientError("Hub response has no integer exit_code")
-    for field in ("stdout", "stderr"):
-        if not isinstance(response.get(field), str):
-            raise ClientError(f"Hub response has no string {field}")
-    return response
-
-
-def _probe_protocol_ready(socket_path: Path, cwd: Path) -> dict[str, Any] | None:
-    """Return a status response only after the socket completes the Hub protocol."""
-    try:
-        response = _round_trip(socket_path, "hub", ["status"], cwd=cwd)
-    except (ClientError, OSError, transport.ProtocolError):
-        return None
-    identity = response.get("identity")
-    if (
-        response["exit_code"] != 0
-        or not isinstance(identity, dict)
-        or identity.get("protocol_version") != transport.PROTOCOL_VERSION
-        or identity.get("protocol_fingerprint") != _expected_protocol_fingerprint(cwd)
-        or identity.get("socket_path") != str(socket_path.resolve())
-    ):
-        return None
-    return response
-
-
-def _legacy_status(
-    socket_path: Path, protocol_version: int, cwd: Path
-) -> dict[str, Any]:
-    """Read an older Hub's status using the pre-fingerprint handshake only for migration."""
-
-    try:
-        connection = transport.connect(socket_path)
-    except OSError as error:
-        raise ClientError(
-            f"resident UpAgent Hub is unavailable at {socket_path}: {error}"
-        ) from error
-    with connection:
-        connection.settimeout(5)
-        stream = connection.makefile("rwb", buffering=0)
-        transport.write_frame(
-            stream, {"protocol_version": protocol_version, "type": "hello"}
-        )
-        hello = transport.read_frame(stream)
-        if (
-            hello.get("type") != "hello"
-            or hello.get("protocol_version") != protocol_version
-            or not isinstance(hello.get("identity"), dict)
-        ):
-            raise ClientError(f"resident Hub rejected legacy status probe: {hello}")
-        transport.write_frame(
-            stream,
-            {
-                "argv": ["status"],
-                "caller_context": {},
-                "cwd": str(cwd),
-                "protocol_version": protocol_version,
-                "target": "hub",
-                "type": "request",
-            },
-        )
-        response = transport.read_frame(stream)
-    if response.get("type") != "response" or response.get("exit_code") != 0:
-        raise ClientError(f"resident Hub returned invalid legacy status: {response}")
-    return response
-
-
-def _resident_identity(socket_path: Path) -> dict[str, Any] | None:
-    identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
-    try:
-        metadata = identity_path.lstat()
+        has_active = any(entry.is_dir() for entry in active.iterdir())
     except FileNotFoundError:
-        return None
+        has_active = False
     except OSError as error:
-        raise ClientError(f"cannot inspect resident Hub identity: {error}") from error
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-        raise ClientError(
-            f"resident Hub identity is not a same-user regular file: {identity_path}"
-        )
-    try:
-        value = json.loads(identity_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise ClientError(f"resident Hub identity is unreadable: {error}") from error
-    if not isinstance(value, dict):
-        raise ClientError("resident Hub identity must be an object")
-    return value
+        raise ClientError(f"cannot inspect active UpAgent claims: {error}") from error
+    return has_active or bool(ledger.incomplete_terminal_runners())
 
 
-def _process_cmdline(pid: int) -> list[str]:
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError as error:
-        raise ClientError(
-            f"cannot inspect resident Hub command line: {error}"
-        ) from error
-    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
-
-
-def _migration_guidance(socket_path: Path, reason: str) -> ClientError:
-    return ClientError(
-        f"resident UpAgent Hub at {socket_path} is incompatible and cannot be "
-        f"restarted automatically: {reason}. Confirm that it has zero active workers, "
-        "stop its exact published PID, remove only its stale socket/identity after that "
-        "process exits, then rerun `just upagent-up`"
-    )
-
-
-def _status_for_incompatible_hub(
-    socket_path: Path, identity: dict[str, Any], cwd: Path
-) -> dict[str, Any]:
-    """Read status using the resident's own handshake before deciding it is safe to replace."""
-    version = identity["protocol_version"]
-    fingerprint = identity.get("protocol_fingerprint")
-    if isinstance(fingerprint, str):
-        return _round_trip(
-            socket_path,
-            "hub",
-            ["status"],
-            cwd=cwd,
-            protocol_version=version,
-            protocol_fingerprint=fingerprint,
-        )
-    return _legacy_status(socket_path, version, cwd)
-
-
-def _active_worker_ids(active_root: Path, socket_path: Path) -> list[str]:
-    try:
-        return [
-            entry.name
-            for entry in active_root.iterdir()
-            if entry.is_dir() and not entry.name.startswith(".")
-        ]
-    except FileNotFoundError:
-        return []
-    except OSError as error:
-        raise _migration_guidance(
-            socket_path, f"its active-worker ledger cannot be inspected: {error}"
-        ) from error
-
-
-def _request_idle_stop(
-    socket_path: Path, identity: dict[str, Any], cwd: Path, start_time: str
-) -> dict[str, Any]:
-    fingerprint = identity.get("protocol_fingerprint")
-    instance_id = identity.get("hub_instance_id")
-    if not isinstance(fingerprint, str) or not isinstance(instance_id, str):
-        raise _migration_guidance(
-            socket_path, "its protocol cannot perform a fenced idle-stop transaction"
-        )
-    response = _round_trip(
-        socket_path,
-        "hub",
-        ["stop-if-idle", instance_id, start_time],
-        cwd=cwd,
-        protocol_version=identity["protocol_version"],
-        protocol_fingerprint=fingerprint,
-    )
-    try:
-        decision = json.loads(response["stdout"])
-    except (KeyError, TypeError, json.JSONDecodeError) as error:
-        raise _migration_guidance(
-            socket_path, f"its idle-stop response is invalid: {error}"
-        ) from error
-    if (
-        not isinstance(decision, dict)
-        or not isinstance(decision.get("stopping"), bool)
-        or not isinstance(decision.get("activity"), dict)
-    ):
-        raise _migration_guidance(socket_path, "its idle-stop decision is malformed")
-    return decision
-
-
-def _migrate_incompatible_hub(socket_path: Path, cwd: Path) -> bool:
-    """Stop an old canonical zero-worker Hub only after exact live-process verification."""
-
-    identity = _resident_identity(socket_path)
-    if identity is None:
-        return False
-    version = identity.get("protocol_version")
-    if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
-        raise _migration_guidance(
-            socket_path, "its identity has no valid protocol version"
-        )
-    if version == transport.PROTOCOL_VERSION and identity.get(
-        "protocol_fingerprint"
-    ) == _expected_protocol_fingerprint(cwd):
-        return False
-    canonical_hub = transport.canonical_module_path("hub.py", cwd)
-    canonical_engine = transport.canonical_module_path("recruiter.py", cwd)
-    if identity.get("hub_path") != str(canonical_hub) or identity.get(
-        "canonical_engine_path"
-    ) != str(canonical_engine):
-        raise _migration_guidance(
-            socket_path,
-            "its published canonical executable paths do not match this checkout",
-        )
-    pid = identity.get("pid")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
-        raise _migration_guidance(socket_path, "its published PID is invalid")
-    start_time = transport.process_start_time(pid)
-    if start_time is None:
-        raise _migration_guidance(socket_path, "its published process is not live")
-    cmdline = _process_cmdline(pid)
-    if len(cmdline) < 2 or Path(cmdline[1]).resolve() != canonical_hub:
-        raise _migration_guidance(
-            socket_path, "the published PID is not running the canonical Hub script"
-        )
-    try:
-        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
-    except OSError as error:
-        raise _migration_guidance(
-            socket_path, f"its interpreter executable cannot be verified: {error}"
-        ) from error
-    if executable != Path(sys.executable).resolve():
-        raise _migration_guidance(
-            socket_path, "the published PID uses a different Python executable"
-        )
-    response = _status_for_incompatible_hub(socket_path, identity, cwd)
-    live_identity = response.get("identity")
-    identity_keys = (
-        "canonical_engine_path",
-        "hub_instance_id",
-        "hub_path",
-        "ledger_path",
-        "pid",
-        "protocol_fingerprint",
-        "protocol_version",
-        "socket_path",
-        "started_at_ns",
-    )
-    if not isinstance(live_identity, dict) or any(
-        live_identity.get(key) != identity.get(key) for key in identity_keys
-    ):
-        raise _migration_guidance(
-            socket_path,
-            "its live handshake does not match its published PID/start identity",
-        )
-    ledger_path = identity.get("ledger_path")
-    expected_ledger = socket_path.with_name(f"{socket_path.name}.ledger").resolve()
-    if (
-        not isinstance(ledger_path, str)
-        or Path(ledger_path).resolve() != expected_ledger
-    ):
-        raise _migration_guidance(
-            socket_path,
-            "its active-worker ledger is not the canonical socket-local ledger",
-        )
-    active_root = expected_ledger / "active" / "requests"
-    active_workers = _active_worker_ids(active_root, socket_path)
-    if active_workers:
-        raise _migration_guidance(
-            socket_path,
-            f"its ledger records {len(active_workers)} active worker(s)",
-        )
-    if version < 5:
-        raise _migration_guidance(
-            socket_path,
-            "its protocol predates the atomic idle-stop transaction",
-        )
-
-    decision = _request_idle_stop(socket_path, identity, cwd, start_time)
-    if decision["stopping"] is not True:
-        activity = decision["activity"]
-        active_count = len(activity.get("active_requests", []))
-        runner_count = len(activity.get("live_runners", []))
-        raise _migration_guidance(
-            socket_path,
-            f"its atomic idle check found {active_count} active request(s) and "
-            f"{runner_count} live runner(s); admission was resumed",
-        )
-    identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
-    deadline = time.monotonic() + MIGRATION_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if transport.process_start_time(pid) != start_time:
-            return True
-        # A parent-owned zombie retains /proc birth ticks but cannot execute or hold the socket.
-        # Canonical Hub shutdown removes both owned artifacts in its finally block.
-        if not socket_path.exists() and not identity_path.exists():
-            return True
-        time.sleep(0.05)
-    raise _migration_guidance(
-        socket_path, f"PID {pid} did not exit after its atomic idle-stop decision"
-    )
-
-
-@contextmanager
-def _startup_lock(socket_path: Path) -> Iterator[None]:
-    lock_path = socket_path.with_name(f"{socket_path.name}.client-start.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+def _invoke_module(module: Any, argv: list[str], cwd: Path) -> int:
+    environment = dict(os.environ)
+    environment["UPAGENT_HUB_DIR"] = str(transport.ledger_path(HERE))
+    environment["UPAGENT_STATE"] = str(transport.state_path(HERE))
+    with command_runtime.activate(cwd, environment):
         try:
-            yield
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-
-
-def _hub_log_path(socket_path: Path) -> Path:
-    return socket_path.with_name(f"{socket_path.name}{HUB_LOG_SUFFIX}")
-
-
-def _open_hub_log(socket_path: Path) -> tuple[Any, Path, int]:
-    """Open the Hub's durable process log without following a forged runtime symlink."""
-
-    log_path = _hub_log_path(socket_path)
-    flags = os.O_APPEND | os.O_CLOEXEC | os.O_CREAT | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(log_path, flags, 0o600)
-    except OSError as error:
-        raise ClientError(
-            f"could not open canonical UpAgent Hub log {log_path}: {error}"
-        ) from error
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-            raise ClientError(
-                f"canonical UpAgent Hub log is not a same-user regular file: {log_path}"
-            )
-        os.fchmod(descriptor, 0o600)
-        offset = os.lseek(descriptor, 0, os.SEEK_END)
-        return os.fdopen(descriptor, "a", encoding="utf-8"), log_path, offset
-    except (ClientError, OSError):
-        os.close(descriptor)
-        raise
-
-
-def _startup_diagnostics(log_path: Path, offset: int) -> str:
-    try:
-        with log_path.open("rb") as stream:
-            stream.seek(offset)
-            diagnostic = stream.read().decode(errors="replace").strip()
-    except OSError as error:
-        return f"could not read startup diagnostics from {log_path}: {error}"
-    return diagnostic or f"no startup diagnostics were written to {log_path}"
-
-
-def _stop_failed_start(process: subprocess.Popen[Any]) -> None:
-    process.terminate()
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-
-
-def _start_canonical_hub(socket_path: Path, cwd: Path) -> None:
-    hub_path = transport.canonical_module_path("hub.py", cwd)
-    engine_path = transport.canonical_module_path("recruiter.py", cwd)
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in transport.CALLER_CONTEXT_KEYS
-        and key != transport.RAW_OWNER_TOKEN_ENV
-    }
-    environment[transport.SOCKET_ENV] = str(socket_path)
-    hub_log, log_path, log_offset = _open_hub_log(socket_path)
-    try:
-        try:
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(hub_path),
-                    "serve",
-                    "--socket",
-                    str(socket_path),
-                    "--engine",
-                    str(engine_path),
-                ],
-                cwd=str(transport.canonical_repo_root(cwd)),
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=hub_log,
-                stderr=hub_log,
-                start_new_session=True,
-                text=True,
-            )
-        except OSError as error:
-            raise ClientError(
-                f"could not start canonical UpAgent Hub {hub_path}: {error}"
-            ) from error
-        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            if _probe_protocol_ready(socket_path, cwd) is not None:
-                return
-            if process.poll() is not None:
-                diagnostic = _startup_diagnostics(log_path, log_offset)
-                raise ClientError(
-                    f"canonical UpAgent Hub exited during startup ({process.returncode}); "
-                    f"log {log_path}: {diagnostic}"
-                )
-            time.sleep(0.05)
-        _stop_failed_start(process)
-        diagnostic = _startup_diagnostics(log_path, log_offset)
-        raise ClientError(
-            f"canonical UpAgent Hub did not become ready at {socket_path} within "
-            f"{STARTUP_TIMEOUT_SECONDS} seconds; log {log_path}: {diagnostic}"
-        )
-    finally:
-        hub_log.close()
-
-
-def _ensure_current_hub_for_up(socket_path: Path, cwd: Path) -> None:
-    with _startup_lock(socket_path):
-        if _probe_protocol_ready(socket_path, cwd) is not None:
-            return
-        _migrate_incompatible_hub(socket_path, cwd)
-        if _probe_protocol_ready(socket_path, cwd) is None:
-            _start_canonical_hub(socket_path, cwd)
-
-
-def _read_requested_stdin(target: str, argv: list[str]) -> str | None:
-    if not transport.request_accepts_stdin(target, argv):
-        transport.validate_request_stdin(target, argv, None)
-        return None
-    stream = getattr(sys.stdin, "buffer", sys.stdin)
-    value = stream.read(transport.MAX_REQUEST_STDIN_BYTES + 1)
-    if isinstance(value, bytes):
-        if len(value) > transport.MAX_REQUEST_STDIN_BYTES:
-            raise ClientError(
-                f"request stdin exceeds {transport.MAX_REQUEST_STDIN_BYTES} bytes"
-            )
-        try:
-            decoded = value.decode()
-        except UnicodeDecodeError as error:
-            raise ClientError("request stdin must be valid UTF-8") from error
-    else:
-        decoded = value
-    return transport.validate_request_stdin(target, argv, decoded)
+            returned = module.main(argv)
+        except SystemExit as error:
+            if error.code is None:
+                return 0
+            if isinstance(error.code, int):
+                return error.code
+            command_runtime.write_stderr(f"{error.code}\n")
+            return 1
+    return int(returned or 0)
 
 
 def invoke(target: str, argv: list[str], cwd: Path) -> int:
-    socket_path = transport.socket_path(cwd)
-    if target in ("public", "recruiter") and argv and argv[0] == "up":
-        _ensure_current_hub_for_up(socket_path, cwd)
-    request_stdin = _read_requested_stdin(target, argv)
-    response = _round_trip(
-        socket_path, target, argv, cwd=cwd, request_stdin=request_stdin
-    )
-    sys.stdout.write(response["stdout"])
-    sys.stdout.flush()
-    sys.stderr.write(response["stderr"])
-    sys.stderr.flush()
-    return int(response["exit_code"])
+    """Import current source, opportunistically reconcile, and execute one command."""
+    recruiter, module = _load_command_modules(target, cwd)
+    mutating = _is_mutating(target, argv)
+    if mutating:
+        recruiter._set_command_authorized(True)
+        try:
+            # Reconciliation performs process and Herdr work without an outer lock. Its
+            # token-fenced JobLedger CAS methods acquire the one coarse lock only while each
+            # durable mutation commits.
+            if _reconciliation_needed(recruiter) and not (
+                target == "recruiter" and _recruiter_command(argv) == "run-job"
+            ):
+                recruiter.cmd_reconcile(force=False, emit=False)
+            return _invoke_module(module, argv, cwd)
+        finally:
+            recruiter._set_command_authorized(False)
+    return _invoke_module(module, argv, cwd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -569,22 +199,11 @@ def main(argv: list[str] | None = None) -> int:
     if command[:1] == ["--target"]:
         if len(command) < 2:
             raise ClientError("--target requires a value")
-        target = command[1]
-        command = command[2:]
-    allowed = {
-        "public",
-        "recruiter",
-        "phase-controller",
-        "phase-await",
-        "direct-controller",
-        "tui-controller",
-        "run-lifecycle",
-        "hub",
-    }
-    if target not in allowed:
-        raise ClientError(f"unknown Hub target: {target}")
-    if target == "hub" and not command:
-        command = ["status"]
+        target, command = command[1], command[2:]
+    if target == "hub":
+        raise ClientError("the singleton Hub target was removed; use `upagent status`")
+    if target not in {*TARGETS, *RUNNER_TARGETS}:
+        raise ClientError(f"unknown command target: {target}")
     if target == "public":
         if not command or command in (["--help"], ["help"]):
             sys.stdout.write(public_contract.help_text())
@@ -593,19 +212,13 @@ def main(argv: list[str] | None = None) -> int:
             public_contract.parse_argv(command)
         except public_contract.PublicCommandError as error:
             raise ClientError(str(error)) from error
-    if target == "recruiter" and command == ["status"]:
-        target = "hub"
     if not command:
-        raise ClientError("a Hub command is required")
+        raise ClientError("an UpAgent command is required")
     return invoke(target, command, Path.cwd().resolve())
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (
-        ClientError,
-        transport.ProtocolError,
-        public_contract.PublicCommandError,
-    ) as error:
+    except (ClientError, RuntimeError) as error:
         raise SystemExit(f"upagent-client: {error}") from error

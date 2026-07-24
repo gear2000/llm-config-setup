@@ -1,58 +1,50 @@
-# UpAgent Hub — the Recruiter
+# UpAgent — the Recruiter
 
-The UpAgent Hub is a universal lifecycle service for LLM workers. Its caller may be a phase
-leader, TUI, or another framework. The always-up Python **Recruiter** persists the
-request, uses Python-owned direct lifecycle by default, atomically launches and verifies the worker,
-collects the result, and reports to the recorded requester. See [FUNDAMENTALS.md](FUNDAMENTALS.md)
-for the authority model and use-case tree.
+UpAgent coordinates durable LLM worker lifecycles for a phase leader, TUI, or another framework.
+The Python **Recruiter** persists each request, launches and verifies the worker, validates its
+result, closes owned panes, publishes a receipt, and releases the lease. See
+[FUNDAMENTALS.md](FUNDAMENTALS.md) for the authority model and use-case tree.
 
-## Canonical machine-local Hub
+## Per-command execution
 
-Every imported recipe invokes `client.py`, a transport-only client. From a main checkout or any
-linked git worktree it resolves git's common directory, then connects to the same repository socket
-at `/tmp/.upagent/hubs/<repo-id>/hub.sock`; `UPAGENT_SOCKET` is the absolute-path override. Only
-`up` may start the canonical `hub.py`, and it starts the copy from the main checkout rather than the
-caller's worktree. The Hub holds `hub.lock` for its full lifetime, publishes `identity.json`, and
-performs a version-and-runtime-fingerprint handshake before accepting a command. The fingerprint
-covers both the wire schema and the Python modules cached by the resident Hub, so `up` safely
-replaces an idle Hub after deployment instead of continuing to run stale imports. Protocol v5
-carries only the strictly validated Herdr caller fields required by controller operations
-(`HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SOCKET_PATH`, `HERDR_SESSION`, and the private absolute
-`RUNNER_OWNER_TOKEN_FILE` path when set); arbitrary environment variables and raw secrets never
-cross the wire. Request-local stdin is bounded and accepted only for run-lifecycle `guard` or
-`cleanup` with exactly one `--token-stdin`; it never enters Hub identity, status, logs, or the
-process stdin. An incompatible v5 resident is restarted by `up` only after its live handshake and
-canonical executable/PID identity verify. The resident then performs one server-side idle-stop
-transaction: it closes launch admission, waits for already-admitted commands, checks both active
-ledger claims and registered runner threads, and stops itself only when both are empty. Otherwise it
-resumes admission and reports the activity; no client-side signal or separate resume command can
-race the decision. Pre-v5 residents require a one-time explicit restart because they cannot provide
-that atomic handoff. The Hub removes its own Herdr fields before creating the request context.
-It imports canonical controllers under a narrow module-registration lock, then runs commands
-concurrently with request-local cwd, immutable environment views, argument parsing, and structured
-output sinks. Blocking awaits therefore do not stall status, response, reconciliation, or
-controller operations; usage/errors stay with the requesting client; and background-runner output
-cannot enter another request's response. Job runners and the reconciler are Hub-owned daemon threads, not
-detached mutating subprocesses. A Hub exit therefore ends every writer before the OS releases
-the lifetime lock. Status includes
-`hub_instance_id`, exact PID/start identity, protocol version and runtime fingerprint, canonical
-Recruiter path, socket, ledger, and Herdr session.
+Every recipe invokes `client.py`. Before importing any UpAgent runtime module or classifying the
+command, a linked-worktree client resolves git's common directory and re-execs the canonical
+main-checkout client. That process imports current canonical source, uses repository-scoped
+machine-local state, runs one command, and exits. There is no resident Python Hub, Unix command socket, protocol handshake,
+module cache, or restart step; a re-sync is visible to the next post-cutover command by
+construction. The hard cutover cannot retrofit an arbitrarily old pre-cutover binary that never
+implemented canonical re-exec; such legacy processes must be retired explicitly.
 
-The client imports no Recruiter code and has no ledger, reconciliation, lifecycle-dispatch, or
-worker-runner implementation. Public, controller, and compatibility recipes all cross the socket.
-Direct `recruiter.py` and `public_api.py` execution fails loud. Authority is not an environment
-marker: the running PID, canonical paths, published identity, lock-file inode, and already-held lock
-descriptor must all prove the live Hub process. `tui_controller.py` and `run_lifecycle.py` are also
-canonical socket targets and never import a checkout-local Recruiter or inspect its ledger. The
-socket is deliberately open to machine-local callers (mode `0666`):
-there is no registration, API key, JWT, TLS, allowlist, or worktree approval layer.
+Mutations use one coarse machine-local `flock`. Individual token-fenced ledger writes/CAS methods
+hold it only while committing durable transitions; reconciliation never wraps its process or Herdr
+work in an outer lock, and the lock is never held during Herdr waits or a worker lifetime.
+Read-only status, get, list, and await operations remain lock-free. Fire-and-forget requests start a
+standalone `recruiter.py run-job` supervisor with `start_new_session=True`; its PID and ownership
+are written into the durable lease. Concurrent duplicate submissions may briefly start competing
+children; the child that loses the atomic claim exits, while its caller attaches to the proven live
+winner instead of reporting a false startup failure. Blocking dispatch polls its child and
+immediately attaches, reconciles a dead claim, or terminalizes a child that exits without ownership.
+Each mutating lifecycle command checks for orphaned active claims before its requested operation.
+Reconciliation uses a bounded launch/claim fixpoint so killing an in-flight owner and closing its
+newly-dead launch happen in one invocation. If a crash occurs after the winning active lease is
+published but before `runner.json`, the terminal receipt retains that lease's exact PID/birth pair;
+crash reconciliation reconstructs only from that immutable identity before publishing
+`runner-completed.json`. A losing claimant can never overwrite it. Pure reads remain lock-free. `$UPAGENT_RUNTIME_DIR`, `$UPAGENT_HUB_DIR`, and `$UPAGENT_STATE` may override the shared
+runtime, ledger, and service-state paths.
+
+`up` and `down` are thin, idempotent presentation verbs. `up` ensures the services pane and writes
+its state file; it starts no daemon. `down` terminalizes owned active work, closes only a verified
+owned services pane, and removes the state. Public requests recreate missing service state on
+demand, so `up` is a convenience rather than a prerequisite.
 
 Every worker, manager, checker, and rescue helper persists a token-fenced
 `launching` journal before `herdr agent start`, records the exact returned pane as `created`, then
-compare-and-swaps it to `started`. A lost fence routes through bounded exact-agent cleanup. If
-cleanup cannot be proved immediately, the job thread publishes no terminal receipt: the standing
-supervisor retains the active lease, reconciles the journaled unique agent name and exact pane, and
-only then terminalizes with that cleanup evidence. A crash between pane creation and ledger
+compare-and-swaps it to `started`. Cancellation rotates the lease fence, then waits without holding
+`flock` while any live owner remains in `launching`; verified absence is forbidden until that owner
+commits the pane identity or dies. A lost fence routes through bounded exact-agent cleanup. If
+cleanup cannot be proved immediately, the detached supervisor publishes no terminal receipt. The
+next command reconciles the active lease, journaled unique agent name, and exact pane, and only then
+terminalizes with that cleanup evidence. A crash between pane creation and ledger
 publication therefore cannot leave an unowned agent or a false `verified_absent` receipt.
 
 ## Topology
@@ -60,19 +52,19 @@ publication therefore cannot leave an unowned agent or a false `verified_absent`
 ```
 Herdr session (default: single workspace)
 └── ws: upagent                services AND runs share one workspace as role tabs
-    ├── tab: services          └── upagent (deterministic Python Hub status)
+    ├── tab: services          └── upagent (optional deterministic status surface)
     └── tabs: control / workers / oversight   per-run panes
 
 Herdr session (with `up --separate-workspaces`)
 ├── ws: <slug>                 TUI + leader + workers (+ opt-in managers / one-shot checkers)
-└── ws: shared-services        always up, plan-agnostic
-    └── upagent                 deterministic Python Hub status
+└── ws: shared-services        optional status surface, plan-agnostic
+    └── upagent                 optional deterministic status surface
 ```
 
 The visible `upagent` pane is the Recruiter's status surface, not a free-form command queue. On
 first bring-up after this naming change, UpAgent renames its former `herdr` workspace and
 `recruiter` pane in place; unrelated human-created workspaces are never claimed. Requests go through
-one variadic façade and the canonical socket:
+one variadic per-command façade:
 
 ```text
 just upagent --help
@@ -109,7 +101,7 @@ flags fail before the ledger, manager, pane, or worker. There is no intake LLM, 
 arbitrary argument materialization, or empty-request acceptance on this path.
 
 A caller may supply one canonical lowercase hyphenated UUID or uppercase Crockford ULID; otherwise
-Python generates a UUID. The Hub hashes the canonical immutable payload, including the resolved
+Python generates a UUID. UpAgent hashes the canonical immutable payload, including the resolved
 offering snapshot and SHA-256 of the exact prompt bytes. It atomically snapshots those bytes before
 submission. The public bridge durably transitions `registered` → `submitting` → `submitted`
 under a per-request lock. An identical retry resumes a registration interrupted before submission;
@@ -121,10 +113,10 @@ attaches and a changed payload still conflicts without launching.
 
 ### Read, cancel, and terminal cleanup
 
-`status` without a request describes the Hub; `get --request ID` is the read-only request view. It
+`status` without a request describes the per-command runtime; `get --request ID` is the read-only request view. It
 returns submission and lifecycle state, retained result and receipt values, and typed
 result/compacted/handoff/receipt/log pointers. After pruning it reports `state: pruned`, the prior
-terminal state/verdict/timestamp, and which Hub-owned pointers were pruned. It never reconstructs,
+terminal state/verdict/timestamp, and which runtime-owned pointers were pruned. It never reconstructs,
 republishes, or mutates an artifact. Mutation credentials are redacted from `status`, `get`,
 `await`, listing, cancellation output, and tombstones; the requester control token appears only in
 the originating asynchronous `request` response after healthy startup, whose caller must store it
@@ -142,22 +134,23 @@ wins the race, cancellation authenticates and returns that already-published res
 
 `cleanup` prunes history; it never cancels or terminates runtime. It is a dry-run unless `--apply`
 is explicit. A request is eligible only after successful terminal `finished` state, a terminal
-receipt whose `cleanup.verified_absent` is true, no active lease or Hub runner, no unresolved launch,
-and a fresh read-only proof that every recorded pane remains absent. Active,
+receipt whose `cleanup.verified_absent` is true, a matching durable `runner-completed.json` written
+after the supervisor's final requester notification, no active lease, no unresolved launch, and a
+fresh read-only proof that every recorded pane remains absent. Active,
 `awaiting-requester`, malformed, and `cleanup-failed` requests are refused for `--request` and
 reported as skipped by `--all-terminal`. `--older-than-seconds N` uses the authoritative terminal
 receipt/state timestamp and includes equality (`age >= N`).
 
 Apply commits two individually atomic tombstones in recoverable order—private Recruiter request
-first, then the Hub-owned public snapshot—and prunes only each tombstone's Hub-owned siblings.
+first, then the runtime-owned public snapshot—and prunes only each tombstone's runtime-owned siblings.
 An interruption between stores is completed idempotently by the next cleanup. It does not follow or
 delete caller paths: the original caller prompt/run tree and
-any artifact outside those two Hub directories remain untouched. The tombstone retains request id,
+any artifact outside those two runtime directories remain untouched. The tombstone retains request id,
 immutable payload hash, terminal verdict/timestamp, compact receipt/result values, typed pointer
 status, requester-control proof, and cleanup timestamp. That is enough for `get`, listing,
 authenticated terminal cancellation, audit, identical reattachment, and changed-hash conflict
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
-no-op that also retries removal of a previously swapped Hub-owned residual.
+no-op that also retries removal of a previously swapped runtime-owned residual.
 
 `offerings.yaml` contains exactly nine validated stable ids: three Claude, one Codex, and five Pi.
 The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,
@@ -165,8 +158,8 @@ and the immutable order snapshot. YAML selects only harness, model, and allowed 
 supply a public worker or Account Manager shell command. `offerings.py` renders child tokens:
 Claude uses `--effort`,
 Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit
-`--thinking`. Legacy and controller recipes remain socket shims; their strict order files bypass no
-Hub authority.
+`--thinking`. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass
+no lifecycle validation.
 
 A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
 atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
@@ -196,8 +189,8 @@ stored in the durable request ledger and modern startup responses.
 Run-level ownership uses a private token only for mutating lifecycle operations. New starts write
 the token to a per-run hashed 0600 file under `$RUNNER_TOKEN_DIR` or the default same-user
 0700 runtime token directory, then pass only `RUNNER_OWNER_TOKEN_FILE` to the TUI and heartbeat
-process. The Hub protocol whitelists that absolute, same-user private regular-file path and never
-transports the raw `RUNNER_OWNER_TOKEN`; the raw variable remains only a non-protocol
+process. The runner accepts only that absolute, same-user private regular-file path and never needs the raw
+`RUNNER_OWNER_TOKEN` in a cross-process command protocol; the raw variable remains only a non-protocol
 compatibility fallback. Recovery is explicit: use `just run-session-snapshot <run-dir>`,
 then `just run-session-reconcile <run-dir>`, and only then start with stale takeover when
 the reconciliation receipt proves the recorded owner is stale.
@@ -213,8 +206,8 @@ Durable files are the source of truth; terminal text is display-only.
   failure is reported as degraded supervision and never prevents mechanically valid work from
   reaching `running`.
 - The Recruiter validates and persists a copy-on-write request under
-  `$UPAGENT_HUB_DIR` (default `<socket-path>.ledger`, shared by the main checkout and its
-  worktrees). One runner atomically claims
+  `$UPAGENT_HUB_DIR` (default repository-scoped machine-local state shared by the main checkout and
+  its worktrees). One runner atomically claims
   `active/requests/<scoped-request-id>/`, writes an authoritative generation lease, attempts the
   advisory manager, then launches the requested harness. Worker health means the expected
   foreground process, detected harness, and cwd—not merely pane creation. Manager health and its
@@ -240,7 +233,7 @@ Durable files are the source of truth; terminal text is display-only.
   and process snapshot, reports to the manager/requester, and exits.
 - At a work cap, `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The requester may run
   `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`.
-  Without an answer during `management.requester_grace_ms`, the Hub performs the declared hard
+  Without an answer during `management.requester_grace_ms`, the Recruiter performs the declared hard
   stop. Managers/checkers can recommend actions but cannot execute them.
 - The deterministic completion reactor validates the whole staged bundle. Missing or malformed
   required artifacts cause exactly one repair prompt to the same worker address—never a second
@@ -251,12 +244,13 @@ Durable files are the source of truth; terminal text is display-only.
   event/state and requester notification. `upagent-await` wakes only from that post-receipt
   evidence; there is no pre-publication `result-ready` notification. If anything goes wrong it
   fails loud without a terminal receipt. Publication also keeps
-  the hub's own `published-result.json` and names it in the receipt, so a terminal record survives
+  the ledger's own `published-result.json` and names it in the receipt, so a terminal record survives
   the pruning of the run tree that owns `result_path`: a later dispatch republishes that copy
   instead of failing in the strict result loader, and refuses with the evidence paths when no copy
   survives. The lease records the
-  requester, manager, runner, Recruiter, worker, workspace, token, generation, and expiry; a
-  Hub-owned Python supervisor thread safely reconciles dead/expired owners. Crash recovery uses the
+  requester, manager, detached supervisor, Recruiter, worker, workspace, token, generation, and
+  expiry. Opportunistic per-command reconciliation safely drains dead/expired owners. Crash
+  recovery uses the
   manifest's typed staging paths and replaces an unvalidated or incomplete bundle with one
   deterministic blocked bundle. A request's immutable `request.json` and events are durable; its
   `state/latest.json` is the copy-on-write current view. The lease is authoritative; retained
@@ -306,7 +300,7 @@ conflicts instead of reusing stale work.
 
 Orders may declare `artifact_publication.mandatory_consults` as a list of
 `{consult_id, specialist}` requirements. An otherwise-passing result is changed to a blocked
-bundle unless every requirement resolves to a matching Hub-indexed receipt whose answer verdict is
+bundle unless every requirement resolves to a matching Recruiter-indexed receipt whose answer verdict is
 `cited`. Missing, rejected, failed, borrowed, or forged claims fail the gate. Reading source files
 directly is not consultation evidence.
 
@@ -370,9 +364,6 @@ UUID/ULID idempotency and conflict behavior, the exact nine-entry text/JSON rost
 Codex / Pi child tokens, specialist offering resolution, request mailboxes, identity/lease fencing,
 startup health, timeout authority, typed manifests, every missing/malformed artifact, one bounded
 same-worker repair, manager degradation, specialist projection, mandatory-consult enforcement,
-publication fault ordering, and cleanup. Focused Hub tests also cover non-serializing blocked
-awaits, concurrent request-local parser/output isolation, caller-context whitelisting and pane
-identity propagation, duplicate attachment to one live runner, typed thread-start-failure
-terminalization, protocol mismatch, lifetime locking, socket override,
-main/worktree discovery identity, forbidden direct bypasses, canonical child engine selection,
-and launch fault compensation/reconciliation.
+publication fault ordering, and cleanup. Focused per-command tests also cover mutation exclusion, lock-free reads, fresh module imports,
+detached-supervisor launch failure, duplicate attachment to one live runner, main/worktree shared
+state, thin service verbs, and launch fault compensation/reconciliation.

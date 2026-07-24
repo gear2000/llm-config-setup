@@ -43,7 +43,7 @@ recruiter: Any = None
 
 
 def _bind_recruiter_runtime(runtime: Any) -> None:
-    """Accept the Hub's one canonical Recruiter module; never load a target-local copy."""
+    """Accept the per-command client's canonical Recruiter module."""
     global recruiter
     if recruiter is not None and recruiter is not runtime:
         raise RuntimeError("public API Recruiter runtime is already bound")
@@ -635,7 +635,7 @@ class PublicRequestStore:
     def prune(
         self, registered: RegisteredRequest, tombstone: dict[str, object]
     ) -> RegisteredRequest:
-        """Commit one atomic tombstone, then prune only its Hub-owned siblings."""
+        """Commit one atomic tombstone, then prune only its runtime-owned siblings."""
         request_dir = registered.request_dir
         if not registered.pruned:
             _write_json_atomic(request_dir / "tombstone.json", tombstone)
@@ -663,9 +663,14 @@ def _public_lifecycle_roster_path() -> str:
 
 
 def _cockpit_pane() -> str:
+    """Return the service pane, creating it on demand when state is absent."""
+    pane = recruiter._recruiter_pane_from_state()
+    if pane:
+        return pane
+    recruiter.cmd_up(_public_lifecycle_roster_path())
     pane = recruiter._recruiter_pane_from_state()
     if not pane:
-        raise PublicError("UpAgent services are not ready; run `just upagent up` first")
+        raise PublicError("UpAgent could not create its services pane")
     return pane
 
 
@@ -845,17 +850,13 @@ def _emit(
 
 
 def _identity() -> dict[str, object]:
-    socket_path = Path(command_runtime.getenv("UPAGENT_SOCKET", "") or "")
-    identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
-    try:
-        identity = json.loads(identity_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise PublicError(f"Hub identity is unreadable: {error}") from error
-    if not isinstance(identity, dict):
-        raise PublicError("Hub identity must be an object")
-    identity["services_state_file"] = str(recruiter.STATE_FILE)
-    identity["services_ready"] = _cockpit_pane_or_none() is not None
-    return identity
+    ledger = recruiter.JobLedger()
+    return {
+        "execution_model": "per-command",
+        "ledger_path": str(ledger.root.resolve()),
+        "services_state_file": str(recruiter.STATE_FILE),
+        "services_ready": _cockpit_pane_or_none() is not None,
+    }
 
 
 def _cockpit_pane_or_none() -> str | None:
@@ -1392,12 +1393,12 @@ def execute(args: Any, cwd: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     if recruiter is None:
         raise SystemExit(
-            "upagent: direct Recruiter execution is forbidden; use the UpAgent Hub"
+            "upagent: Recruiter runtime is unbound; use the UpAgent per-command client"
         )
     command = list(sys.argv[1:] if argv is None else argv)
     try:
         args = contract.parse_argv(command)
-        if args.command != "help":
+        if args.command not in ("help", "status", "get", "lists", "await", "await-any"):
             recruiter._require_hub_authority()
         return execute(args, command_runtime.current_cwd())
     except (
