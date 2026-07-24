@@ -1,14 +1,12 @@
-# UpAgent Hub module (Recruiter over Herdr) — imported by the root justfile:
+# UpAgent per-command Recruiter module (over Herdr) — imported by the root justfile:
 #   import '.shared-llm/public/extensions/common/upagent/justfile'
 #
-# The Recruiter is the always-up broker that hires a fresh worker per work order. It runs
-# inside Herdr (HERDR_ENV=1) and drives the running Herdr over its unix socket. The launch
-# roster lives in upagent.yaml (template: upagent.yaml.example); a split destination points
-# $UPAGENT_CONFIG at its own repo-owned (this_repo) roster.
+# The Recruiter hires one fresh worker per work order and drives the running Herdr over Herdr's
+# own IPC. Each recipe starts a current-source command process; asynchronous requests detach a
+# durable supervisor. The launch roster lives in upagent.yaml (template: upagent.yaml.example).
 #
-# Paths anchor on `{{justfile_directory()}}` only to find the thin client. The client resolves
-# the main checkout through git's common directory and connects every checkout/worktree to the
-# same locked machine-local Hub; it never imports the nearby Recruiter.
+# Paths anchor on `{{justfile_directory()}}` to find the client. It resolves the main checkout
+# through git's common directory so every checkout/worktree shares one machine-local ledger.
 
 _UPAGENT_CLIENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/client.py"
 
@@ -16,15 +14,13 @@ _UPAGENT_CLIENT := justfile_directory() + "/.shared-llm/public/extensions/common
 upagent *args:
     @${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" {{args}}
 
-# Ensure the services workspace + an armed UpAgent status pane (unified `upagent` workspace by
-# default; pass --separate-workspaces for the dedicated `shared-services` workspace), then
-# print the status table so the active service is visible.
+# Ensure the optional services workspace + UpAgent status pane (unified `upagent` workspace by
+# default; pass --separate-workspaces for `shared-services`). No daemon is started.
 upagent-up *FLAGS:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" up {{FLAGS}}
     @{{just_executable()}} --justfile "{{justfile()}}" upagent-status
 
-# Recruiter state comes from the canonical socket, so main checkouts and worktrees display the
-# same Hub identity instead of reading a checkout-local state path.
+# Main checkouts and worktrees resolve the same repository-scoped machine-local state.
 upagent-status:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" status
 

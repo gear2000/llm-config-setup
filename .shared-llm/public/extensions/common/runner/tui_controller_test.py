@@ -104,11 +104,12 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, _ = _inputs(tmp_path)
+    json_calls: list[tuple[str, ...]] = []
     calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        tui_controller.control,
-        "_herdr_json",
-        lambda *args, **kwargs: {
+
+    def herdr_json(*args: str, **kwargs: object) -> dict:
+        json_calls.append(args)
+        return {
             "result": {
                 "root_pane": {
                     "pane_id": "tui-pane",
@@ -116,7 +117,12 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
                     "workspace_id": "workspace-1",
                 }
             }
-        },
+        }
+
+    monkeypatch.setattr(
+        tui_controller.control,
+        "_herdr_json",
+        herdr_json,
     )
     monkeypatch.setattr(
         tui_controller.control,
@@ -140,6 +146,8 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
 
     assert tui["workspace_id"] == "workspace-1"
     assert tui["control_tab_id"] == "control-tab"
+    create = next(call for call in json_calls if call[:2] == ("workspace", "create"))
+    assert create[create.index("--label") + 1] == "upagent"
     assert ("tab", "rename", "control-tab", "control") in calls
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
@@ -202,11 +210,10 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
     assert "--remote-control" not in commands["pi"]
 
 
-def test_unified_mode_joins_the_existing_herdr_workspace(
+def test_unified_mode_joins_the_existing_upagent_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default single-workspace mode splits a pane into the live `herdr` workspace's control
-    tab instead of creating a per-run workspace."""
+    """Default single-workspace mode splits into the same workspace as UpAgent services."""
     run_dir, _ = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     placements: list[tuple[str, ...]] = []
@@ -215,7 +222,7 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
         if args[:2] == ("workspace", "list"):
             return {
                 "result": {
-                    "workspaces": [{"label": "herdr", "workspace_id": "ws-herdr"}]
+                    "workspaces": [{"label": "upagent", "workspace_id": "ws-upagent"}]
                 }
             }
         if args[:2] == ("pane", "list"):
@@ -225,7 +232,7 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
         if args[:2] == ("pane", "get"):
             return {
                 "result": {
-                    "pane": {"tab_id": "control-tab", "workspace_id": "ws-herdr"}
+                    "pane": {"tab_id": "control-tab", "workspace_id": "ws-upagent"}
                 }
             }
         raise AssertionError(args)
@@ -259,12 +266,78 @@ def test_unified_mode_joins_the_existing_herdr_workspace(
         owner_token="tok-test",
     )
 
-    assert tui["workspace_id"] == "ws-herdr"
+    assert tui_controller.control.UNIFIED_WORKSPACE_LABEL == "upagent"
+    assert tui["workspace_id"] == "ws-upagent"
     assert tui["workspace_mode"] == "single"
-    assert placements == [("fresh-pane", "ws-herdr", "control", "right")]
+    assert placements == [("fresh-pane", "ws-upagent", "control", "right")]
     # The reused workspace's tabs are not renamed; only the pane is claimed and armed.
     assert ("tab", "rename", "control-tab", "control") not in calls
     assert ("pane", "rename", "fresh-pane", "tui-agent") in calls
+
+
+def test_unified_mode_reuses_legacy_workspace_with_service_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, _ = _inputs(tmp_path)
+    placements: list[tuple[str, ...]] = []
+
+    def herdr_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("workspace", "list"):
+            return {
+                "result": {
+                    "workspaces": [{"label": "herdr", "workspace_id": "ws-legacy"}]
+                }
+            }
+        if args[:2] == ("pane", "list"):
+            return {
+                "result": {
+                    "panes": [
+                        {
+                            "label": "recruiter",
+                            "pane_id": "recruiter-pane",
+                        }
+                    ]
+                }
+            }
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "fresh-pane"}}}
+        if args[:2] == ("pane", "get"):
+            return {
+                "result": {
+                    "pane": {"tab_id": "control-tab", "workspace_id": "ws-legacy"}
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tui_controller.control, "_herdr_json", herdr_json)
+    monkeypatch.setattr(tui_controller.control, "_herdr", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        tui_controller.control,
+        "_place_started_agent_in_role_tab",
+        lambda pane_id, workspace_id, tab_role, split_direction, **kwargs: (
+            placements.append((pane_id, workspace_id, tab_role, split_direction))
+            or pane_id
+        ),
+    )
+    monkeypatch.setattr(
+        tui_controller.control,
+        "_wait_for_agent_health",
+        lambda *args, **kwargs: {"healthy": True},
+    )
+
+    tui = tui_controller._create_tui(
+        repo=tmp_path,
+        plan_path=run_dir / "plan.md",
+        route_path=run_dir / "route.yaml",
+        slug="sample-run",
+        harness="claude",
+        owner_token="tok-test",
+    )
+
+    assert tui_controller.control.UNIFIED_WORKSPACE_LABEL == "upagent"
+    assert tui["workspace_id"] == "ws-legacy"
+    assert tui["workspace_mode"] == "single"
+    assert placements == [("fresh-pane", "ws-legacy", "control", "right")]
 
 
 def test_separate_workspaces_mode_creates_the_per_run_workspace(

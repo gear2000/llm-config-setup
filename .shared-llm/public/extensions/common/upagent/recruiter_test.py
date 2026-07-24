@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import multiprocessing
 import os
 import stat
 import threading
@@ -1401,9 +1402,11 @@ def test_job_ledger_concurrent_identical_submit_never_reads_partial_request(
     assert first_request_written.wait(timeout=2)
     second = threading.Thread(target=submit)
     second.start()
-    second.join(timeout=2)
+    second.join(timeout=0.1)
+    assert second.is_alive(), "the coarse mutation lock must exclude a second submitter"
     release_first_submitter.set()
     first.join(timeout=2)
+    second.join(timeout=2)
 
     assert not first.is_alive() and not second.is_alive()
     assert errors == []
@@ -2016,30 +2019,34 @@ def test_run_order_keeps_watchdog_alive_after_premature_self_verdict(
     assert len(list((private_result.parent / "premature-results").glob("*.json"))) == 1
 
 
-def test_spawn_job_uses_a_hub_owned_daemon_thread(
+def test_spawn_job_uses_a_detached_supervisor_process(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    created: list[tuple[str, str]] = []
-    started: list[str] = []
+    ledger = recruiter.JobLedger(tmp_path / "ledger")
     key = "request-key"
+    ledger.request_dir(key).mkdir(parents=True)
+    roster = tmp_path / "roster.yaml"
+    roster.write_text("{}\n")
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    handle = object()
 
-    class Handle:
-        thread = SimpleNamespace(is_alive=lambda: True)
+    def popen(argv: list[str], **kwargs: object) -> object:
+        calls.append((argv, kwargs))
+        return handle
 
-        def start(self) -> None:
-            assert recruiter._JOB_THREADS[key] is self
-            started.append(key)
+    monkeypatch.setattr(recruiter, "JobLedger", lambda: ledger)
+    monkeypatch.setattr(recruiter.subprocess, "Popen", popen)
 
-    handle = Handle()
-    monkeypatch.setattr(
-        recruiter,
-        "_JobThread",
-        lambda job_key, roster: created.append((job_key, roster)) or handle,
-    )
-
-    assert recruiter._spawn_job(key, "roster.yaml") is handle
-    assert created == [(key, "roster.yaml")]
-    assert started == [key]
+    assert recruiter._spawn_job(key, str(roster)) is handle
+    argv, kwargs = calls[0]
+    assert argv[-2:] == ["run-job", key]
+    assert argv[1] == str(Path(recruiter.__file__).resolve())
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdin"] is recruiter.subprocess.DEVNULL
+    environment = kwargs["env"]
+    assert isinstance(environment, dict)
+    assert environment["UPAGENT_HUB_DIR"] == str(ledger.root.resolve())
 
 
 def test_recruit_completed_order_emits_done_without_spawning(
@@ -2101,11 +2108,11 @@ def test_dispatch_blocks_on_job_process_and_returns_durable_receipt(
     order_path.write_text(json.dumps(order))
     Path(order["instructions_path"]).write_text("Do the stage.\n")
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
-    waits = []
+    polls = []
 
     class Process:
-        def wait(self, timeout: float) -> int:
-            waits.append(timeout)
+        def poll(self) -> int:
+            polls.append(True)
             ledger = recruiter.JobLedger()
             key = ledger.key_for_order(order)
             token = ledger.claim(key, order["order_id"], 1_000)
@@ -2130,7 +2137,51 @@ def test_dispatch_blocks_on_job_process_and_returns_durable_receipt(
         json.loads(output.removeprefix("ORDER_RECEIPT "))["order_id"]
         == order["order_id"]
     )
-    assert waits
+    assert polls
+
+
+def test_dispatch_reconciles_its_exited_dead_child_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+        timeout_ms=60_000,
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    claimed = False
+
+    class ExitedProcess:
+        def poll(self) -> int:
+            nonlocal claimed
+            if not claimed:
+                ledger = recruiter.JobLedger()
+                key = ledger.key_for_order(order)
+                token = ledger.claim(
+                    key,
+                    order["order_id"],
+                    60_000,
+                    owner={"herdr_session": "test-session", "runner_pid": 999_999},
+                )
+                assert token
+                claimed = True
+            return 9
+
+    monkeypatch.setattr(recruiter, "_spawn_job", lambda _key, _roster: ExitedProcess())
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda _pid, _key: False)
+    started = time.monotonic()
+
+    assert recruiter.cmd_dispatch(str(order_path), "roster.yaml") == 1
+
+    assert time.monotonic() - started < 1
+    ledger = recruiter.JobLedger()
+    key = ledger.key_for_order(order)
+    receipt = ledger.completed_receipt(key, order)
+    assert receipt["verdict"] == "blocked"
+    assert not dict(ledger.active_claims())
 
 
 def test_dispatch_returns_nonzero_for_a_terminal_blocked_result(
@@ -2398,6 +2449,219 @@ def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
         Path(order["artifact_publication"]["handoff_path"]),
     ):
         assert "blocked" in path.read_text().lower()
+
+
+def test_force_reconcile_drains_live_inflight_launch_in_one_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "herdr_session": "test-session",
+            "runner_pid": 999_999,
+            "runner_start_time": "live-start",
+        },
+    )
+    assert token
+    launch_id = ledger.begin_launch(
+        key,
+        token,
+        "worker",
+        "inflight-agent",
+        "test-session",
+        order["cwd"],
+    )
+    alive = True
+    terminated: list[int] = []
+
+    def runner_alive(_pid: object, _key: str) -> bool:
+        return alive
+
+    def terminate(pid: object, _key: str) -> None:
+        nonlocal alive
+        assert isinstance(pid, int)
+        terminated.append(pid)
+        alive = False
+
+    monkeypatch.setattr(recruiter, "_runner_alive", runner_alive)
+    monkeypatch.setattr(recruiter, "_terminate_owned_runner", terminate)
+    monkeypatch.setattr(recruiter, "_same_owner_process", lambda _owner: alive)
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RecruiterError("agent_not_found")
+        ),
+    )
+
+    assert recruiter.cmd_reconcile(force=True) == 0
+
+    assert terminated == [999_999]
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] == "closed"
+    assert journal["cleanup"]["verified_absent"] is True
+    receipt = ledger.completed_receipt(key, order)
+    assert receipt["state"] == "finished"
+    assert receipt["cleanup"]["verified_absent"] is True
+    assert not dict(ledger.active_claims())
+
+
+def test_crash_reconcile_completes_missing_terminal_runner_marker(
+    tmp_path: Path,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        public_request={"payload_sha256": "b" * 64},
+    )
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        1_000,
+        owner={
+            "request_id": recruiter.lifecycle.request_identity(order),
+            "runner_pid": 999_999,
+            "runner_start_time": "dead-start",
+        },
+    )
+    assert token
+    assert _finalize(
+        ledger,
+        key,
+        token,
+        order,
+        _result(order["order_id"]),
+        cleanup=_cleanup(),
+        defer_runner_completion=True,
+    )
+    assert not (ledger.request_dir(key) / "runner-completed.json").exists()
+
+    assert recruiter._reconcile_terminal_runners(ledger) == 1
+    marker = json.loads((ledger.request_dir(key) / "runner-completed.json").read_text())
+    assert marker["source"] == "crash-reconciler"
+
+
+def test_missing_runner_json_is_reconstructed_after_dead_runner_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    payload_sha256 = "c" * 64
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        public_request={"payload_sha256": payload_sha256},
+    )
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        1_000,
+        owner={
+            "herdr_session": "test-session",
+            "request_id": recruiter.lifecycle.request_identity(order),
+            "runner_pid": 999_998,
+            "runner_start_time": "dead-winning-start",
+        },
+    )
+    assert token
+    runner_path = ledger.request_dir(key) / "runner.json"
+    runner_path.unlink()
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+
+    # Simulate a crash after the reconciler's finalize commit but before its immediate marker.
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "mark_runner_completed", lambda *_args, **_kwargs: False)
+        assert recruiter._reconcile_claim(ledger, key, lease, force=True)
+
+    assert not dict(ledger.active_claims())
+    assert (ledger.request_dir(key) / "receipt.json").is_file()
+    assert not runner_path.exists()
+    assert not (ledger.request_dir(key) / "runner-completed.json").exists()
+    incomplete = dict(ledger.incomplete_terminal_runners())
+    assert incomplete[key]["runner_pid"] == 999_998
+    assert incomplete[key]["runner_start_time"] == "dead-winning-start"
+
+    assert recruiter._reconcile_terminal_runners(ledger) == 1
+    reconstructed = json.loads(runner_path.read_text())
+    assert reconstructed["reconstructed_from_receipt"] is True
+    marker = json.loads((ledger.request_dir(key) / "runner-completed.json").read_text())
+    assert marker["source"] == "crash-reconciler"
+    request_id = recruiter.lifecycle.request_identity(order)
+    evidence = ledger.terminal_cleanup_evidence(key, request_id, payload_sha256)
+    assert evidence["runner_completed"]["runner_pid"] == 999_998
+    tombstone = {
+        "request_id": request_id,
+        "payload_sha256": payload_sha256,
+        "terminal_verdict": "blocked",
+    }
+    pruned = ledger.prune_terminal(
+        key,
+        request_id,
+        payload_sha256,
+        tombstone,
+        verify_absence=recruiter._verify_terminal_cleanup_absence,
+    )
+    assert pruned["already_pruned"] is False
+    assert (ledger.request_dir(key) / "tombstone.json").is_file()
+
+
+def test_reconcile_paused_in_herdr_cleanup_does_not_hold_mutation_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "first-result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        1_000,
+        owner={"herdr_session": "test-session", "runner_pid": -1},
+    )
+    assert token
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    errors: list[BaseException] = []
+
+    def paused_cleanup(_lease: dict) -> dict[str, object]:
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=5)
+        return {"status": "closed", "worker_pane": None, "verified_absent": True}
+
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda _pid, _key: False)
+    monkeypatch.setattr(recruiter, "_cleanup_lease_panes", paused_cleanup)
+
+    def reconcile() -> None:
+        try:
+            recruiter._reconcile_claim(ledger, key, lease, force=True)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=reconcile)
+    thread.start()
+    assert cleanup_started.wait(timeout=5)
+    second = _order(
+        order_id="phase-0.stage-2-adversarial-audit.pass-1.try-1",
+        stage_id="stage-2-adversarial-audit",
+        result_path=str(tmp_path / "second-result.json"),
+    )
+    second_key, created = ledger.submit(second)
+    assert created is True
+    assert ledger.request_dir(second_key).is_dir()
+    release_cleanup.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert errors == []
 
 
 def test_reconciler_refuses_recorded_pane_without_recorded_session(
@@ -3336,6 +3600,107 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
     )
 
 
+def test_cleanup_waits_for_post_notification_runner_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result_path = tmp_path / "result.json"
+    payload_sha256 = "a" * 64
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(result_path),
+        instructions_path=str(tmp_path / "instructions.md"),
+        public_request={"payload_sha256": payload_sha256},
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    worker_result_paths: list[Path] = []
+    notification_started = threading.Event()
+    release_notification = threading.Event()
+    outcomes: list[int] = []
+    _patch_approved_manager(monkeypatch)
+
+    def fake_start(
+        name: str, execution_order: dict, launch: str, **kwargs: object
+    ) -> tuple[str, str, str]:
+        worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
+        return "worker-pane", "cockpit", name
+
+    def wait(*args: object, **kwargs: object) -> bool:
+        worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        _write_typed_worker_result(
+            worker_result_paths[0], _result(order["order_id"], verdict="passed")
+        )
+        return True
+
+    def notify(
+        _ledger: object,
+        _key: str,
+        _order: dict,
+        _generation: int,
+        message_type: str,
+        _message: str,
+        _detail: dict | None = None,
+    ) -> None:
+        if message_type == "terminal":
+            notification_started.set()
+            assert release_notification.wait(timeout=5)
+
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
+    )
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait)
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: set())
+    monkeypatch.setattr(recruiter, "_notify_requester", notify)
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
+
+    runner = threading.Thread(
+        target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path)))
+    )
+    runner.start()
+    assert notification_started.wait(timeout=5)
+    assert (ledger.request_dir(key) / "receipt.json").is_file()
+    assert not (ledger.request_dir(key) / "runner-completed.json").exists()
+    request_id = recruiter.lifecycle.request_identity(order)
+    tombstone = {
+        "request_id": request_id,
+        "payload_sha256": payload_sha256,
+        "terminal_verdict": "passed",
+    }
+    with pytest.raises(RecruiterError, match="runner-completed"):
+        ledger.prune_terminal(
+            key,
+            request_id,
+            payload_sha256,
+            tombstone,
+            verify_absence=recruiter._verify_terminal_cleanup_absence,
+        )
+    release_notification.set()
+    runner.join(timeout=5)
+    assert not runner.is_alive()
+    assert outcomes == [0]
+    evidence = ledger.terminal_cleanup_evidence(key, request_id, payload_sha256)
+    assert evidence["runner_completed"]["source"] == "supervisor"
+    pruned = ledger.prune_terminal(
+        key,
+        request_id,
+        payload_sha256,
+        tombstone,
+        verify_absence=recruiter._verify_terminal_cleanup_absence,
+    )
+    assert pruned["already_pruned"] is False
+    assert (ledger.request_dir(key) / "tombstone.json").is_file()
+
+
 def test_expired_owner_cannot_finalize_before_replacement_claims(
     tmp_path: Path,
 ) -> None:
@@ -3698,6 +4063,7 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
         return "retry-startup"
 
     monkeypatch.setattr(recruiter, "_startup_rescue_advice", advise)
+    monkeypatch.setattr(recruiter, "_same_owner_process", lambda _journal: False)
     monkeypatch.setattr(recruiter, "_start_herdr_agent", flaky_start)
     monkeypatch.setattr(
         recruiter,
@@ -3753,6 +4119,7 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
         raise RecruiterError("model flag rejected by the harness")
 
     monkeypatch.setattr(recruiter, "_startup_rescue_advice", lambda *a: "ask-requester")
+    monkeypatch.setattr(recruiter, "_same_owner_process", lambda _journal: False)
     monkeypatch.setattr(recruiter, "_start_herdr_agent", dead_start)
     monkeypatch.setattr(
         recruiter,
@@ -3911,6 +4278,52 @@ def test_await_threads_the_ping_threshold_through(
 
     assert seen == [(123, order["order_id"], "passed")]
     assert "ORDER_RECEIPT" in capsys.readouterr().out
+
+
+def _dead_runner_claim(
+    tmp_path: Path, ledger: Any, suffix: str
+) -> tuple[dict, Path, str]:
+    instructions = tmp_path / f"instructions-{suffix}.md"
+    instructions.write_text("# Worker\n")
+    order = _order(
+        cwd=str(tmp_path),
+        instructions_path=str(instructions),
+        result_path=str(tmp_path / f"result-{suffix}.json"),
+    )
+    order_path = tmp_path / f"order-{suffix}.json"
+    order_path.write_text(json.dumps(order))
+    key, _created = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "request_id": recruiter.lifecycle.request_identity(order),
+            "runner_pid": -1,
+            "runner_start_time": None,
+        },
+    )
+    assert isinstance(token, str)
+    return order, order_path, key
+
+
+def test_await_reconciles_dead_runner_before_timeout(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, order_path, key = _dead_runner_claim(tmp_path, ledger, "await")
+
+    assert recruiter.cmd_await(str(order_path), notify_after_ms=0) == 1
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    receipt = json.loads(lines[0].removeprefix("ORDER_RECEIPT "))
+    assert receipt["request_id"] == recruiter.lifecycle.request_identity(order)
+    assert receipt["verdict"] == "blocked"
+    assert (ledger.request_dir(key) / "runner-completed.json").is_file()
+    assert not (ledger.active / "requests" / key).exists()
 
 
 def test_verify_builds_an_independent_reviewer_order(
@@ -4151,6 +4564,33 @@ def test_await_any_reports_terminal_receipt_tagged_with_request(
     assert event["terminal"] is True
     assert event["request_id"] == recruiter.lifecycle.request_identity(order)
     assert event["receipt"]["verdict"] == "passed"
+
+
+def test_await_any_reconciles_only_watched_dead_runner(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    watched, watched_path, watched_key = _dead_runner_claim(tmp_path, ledger, "watched")
+    _unwatched, _unwatched_path, unwatched_key = _dead_runner_claim(
+        tmp_path, ledger, "unwatched"
+    )
+
+    assert (
+        recruiter.cmd_await_any(
+            [str(watched_path)], timeout_ms=1_000, poll_seconds=0.01
+        )
+        == 0
+    )
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0].removeprefix("AWAIT_EVENT "))
+    assert event["kind"] == "blocked"
+    assert event["request_id"] == recruiter.lifecycle.request_identity(watched)
+    assert (ledger.request_dir(watched_key) / "runner-completed.json").is_file()
+    assert not (ledger.request_dir(unwatched_key) / "receipt.json").exists()
+    assert (ledger.active / "requests" / unwatched_key).is_dir()
 
 
 def test_await_any_delivers_each_mailbox_message_once_via_cursor(
@@ -4424,11 +4864,10 @@ def test_cmd_up_records_only_pane_ownership(
     monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: None)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
-    class FakePopen:
-        pid = 1234
-
     monkeypatch.setattr(
-        recruiter.subprocess, "Popen", lambda *args, **kwargs: FakePopen()
+        recruiter.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("thin up must not start a process"),
     )
 
     assert recruiter.cmd_up("roster.yaml") == 0
@@ -4439,6 +4878,8 @@ def test_cmd_up_records_only_pane_ownership(
         "pane": {"pane_id": "recruiter-pane", "state": "created"}
     }
     assert "workspace" not in state["ownership"]
+    assert "supervisor_pid" not in state
+    assert "supervisor_token" not in state
     assert json.loads(capsys.readouterr().out)["reused"] is False
 
 
@@ -4469,6 +4910,7 @@ def test_cmd_down_closes_only_created_recruiter_pane(
     monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **kwargs: set())
 
     assert recruiter.cmd_down() == 0
+    assert recruiter.cmd_down() == 0
 
     assert closed == [
         (
@@ -4477,9 +4919,10 @@ def test_cmd_down_closes_only_created_recruiter_pane(
         )
     ]
     assert not state_path.exists()
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["cleanup"]["status"] == "closed"
-    assert payload["cleanup"]["herdr_session"] == "llm-lab-test"
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert payloads[0]["cleanup"]["status"] == "closed"
+    assert payloads[0]["cleanup"]["herdr_session"] == "llm-lab-test"
+    assert payloads[1]["cleanup"]["status"] == "not-created"
 
 
 def test_cmd_down_skips_adopted_recruiter_pane(
@@ -5031,8 +5474,92 @@ def test_strict_executable_requests_reach_request_accepted(
     assert not (tmp_path / "order.json.interpreted.json").exists()
 
 
+def test_simultaneous_async_spawn_loser_attaches_to_active_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = _order(cwd=str(tmp_path), result_path=str(tmp_path / "result.json"))
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
+    barrier = threading.Barrier(2)
+    sequence_lock = threading.Lock()
+    sequence = 0
+    winner_pid = 424_242
+    winner_claimed = threading.Event()
+
+    class Handle:
+        def __init__(self, loser: bool):
+            self.loser = loser
+
+        def poll(self) -> int | None:
+            if not self.loser:
+                return None
+            ledger = recruiter.JobLedger()
+            key = ledger.key_for_order(order)
+            if not winner_claimed.is_set():
+                token = ledger.claim(
+                    key,
+                    order["order_id"],
+                    60_000,
+                    owner={
+                        "herdr_session": "test-session",
+                        "runner_pid": winner_pid,
+                        "runner_start_time": "winner-start",
+                    },
+                )
+                assert token
+                winner_claimed.set()
+            return 0
+
+    def spawn(_key: str, _roster: str) -> Handle:
+        nonlocal sequence
+        with sequence_lock:
+            index = sequence
+            sequence += 1
+        barrier.wait(timeout=5)
+        return Handle(loser=index == 0)
+
+    def runner_alive(pid: object, key: str) -> bool:
+        if pid != winner_pid:
+            return False
+        recruiter.JobLedger()._snapshot(
+            key,
+            "running",
+            worker_address="winner-agent",
+            worker_pane="winner-pane",
+        )
+        return True
+
+    monkeypatch.setattr(recruiter, "_spawn_job", spawn)
+    monkeypatch.setattr(recruiter, "_runner_alive", runner_alive)
+    outcomes: list[int] = []
+    errors: list[BaseException] = []
+
+    def request() -> None:
+        try:
+            outcomes.append(recruiter._request_order(order, "roster.yaml"))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=request) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert outcomes == [0, 0]
+    assert sequence == 2
+    ledger = recruiter.JobLedger()
+    key = ledger.key_for_order(order)
+    claims = dict(ledger.active_claims())
+    assert list(claims) == [key]
+    assert claims[key]["runner_pid"] == winner_pid
+    assert ledger.state(key)["state"] == "running"
+
+
 @pytest.mark.parametrize("failure_type", [RuntimeError, OSError])
-def test_async_thread_start_failure_publishes_blocked_bundle_receipt_and_event(
+def test_detached_supervisor_start_failure_publishes_blocked_bundle_receipt_and_event(
     failure_type: type[OSError] | type[RuntimeError],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5055,14 +5582,10 @@ def test_async_thread_start_failure_publishes_blocked_bundle_receipt_and_event(
         lambda: {"herdr_session": "test-session"},
     )
 
-    class FailingThread:
-        def __init__(self, **_kwargs: object):
-            pass
+    def failing_popen(*_args: object, **_kwargs: object) -> None:
+        raise failure_type("injected detached supervisor start failure")
 
-        def start(self) -> None:
-            raise failure_type("injected async thread start failure")
-
-    monkeypatch.setattr(recruiter.threading, "Thread", FailingThread)
+    monkeypatch.setattr(recruiter.subprocess, "Popen", failing_popen)
 
     assert recruiter.cmd_request(str(order_path), "roster.yaml") == 1
 
@@ -5076,7 +5599,7 @@ def test_async_thread_start_failure_publishes_blocked_bundle_receipt_and_event(
         for path in sorted((request_dir / "events").glob("*.json"))
     ]
     assert result["verdict"] == "blocked"
-    assert "injected async thread start failure" in result["reason"]
+    assert "injected detached supervisor start failure" in result["reason"]
     assert receipt["verdict"] == "blocked"
     assert events[-1]["event"] == "finished"
     assert events[-1]["completion_source"] == "runner-start-failure"
@@ -5087,7 +5610,6 @@ def test_async_thread_start_failure_publishes_blocked_bundle_receipt_and_event(
         == 1
     )
     assert "REQUEST_TERMINAL" in capsys.readouterr().out
-    assert key not in recruiter._JOB_THREADS
 
 
 def test_non_executable_requests_are_rejected_by_python_without_a_clerk(
@@ -5160,7 +5682,7 @@ def test_correction_is_bounded_and_ends_as_an_intake_clerk_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A clerk that never corrects itself exhausts a bounded budget; it never loops forever and
-    its failure is the Hub's to report, not the clerk's words."""
+    its failure is the Recruiter's to report, not the clerk's words."""
     order_path = tmp_path / "order.json"
     order_path.write_text(
         json.dumps(
@@ -5543,7 +6065,7 @@ def test_intake_clerk_unavailable_becomes_refusal_without_target_launch(
     assert "agent" in str(refusal.value) and "instructions_path" in str(refusal.value)
     recorded = json.loads((tmp_path / "order.json.refusal.json").read_text())
     assert "agent" in recorded["missing"]
-    # An unavailable clerk is the Hub's failure to report, never the clerk's own words.
+    # An unavailable clerk is the Recruiter's failure to report, never the clerk's own words.
     assert recorded["authored_by"] == "recruiter"
     assert refusal.value.outcome == "intake-clerk-failure"
     assert refusal.value.exit_code == 4
@@ -6928,7 +7450,7 @@ def _worker_result(claims: list[dict], order: dict) -> dict:
 def _broker_a_real_consult(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: dict, **over: object
 ) -> None:
-    """Run one consult end to end so the Hub's own index records it, exactly as production
+    """Run one consult end to end so the Recruiter's own index records it, exactly as production
     does — through `cmd_consult`, never by writing the index entry directly. A test that forged
     the index would prove only that the reader reads."""
     _specialist_world(tmp_path, monkeypatch)
@@ -7074,7 +7596,7 @@ def test_a_consult_that_failed_before_any_specialist_ran_is_not_verifiable(
 
     An unknown specialist is rejected BEFORE dispatch, so no worker ran and no durable
     ORDER_RECEIPT was ever produced. The rejected receipt still carries `requested_by`, and that
-    alone used to put it in the Hub's index — laundering a `consults` claim for a consultation
+    alone used to put it in the Recruiter's index — laundering a `consults` claim for a consultation
     that never happened. Only a consult whose order reached `order_receipt_state == "finished"`
     may enter the verified index.
     """
@@ -7446,6 +7968,101 @@ def test_fenced_runner_cannot_overwrite_cancellation_launch_cleanup(
     assert journal["state"] == "closed"
     assert journal["cleanup"]["verified_absent"] is True
     assert "stale runner write" not in json.dumps(journal)
+
+
+def test_cross_process_cancel_waits_for_live_launch_owner(
+    tmp_path: Path,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id="request-cross-process")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": "request-cross-process",
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    release = context.Event()
+    launch_queue = context.Queue()
+
+    def launch_owner() -> None:
+        child_ledger = recruiter.JobLedger(tmp_path / "hub")
+        launch_id = child_ledger.begin_launch(
+            key,
+            token,
+            "worker",
+            "owned-agent",
+            "test-session",
+            order["cwd"],
+        )
+        launch_queue.put(launch_id)
+        ready.set()
+        assert release.wait(timeout=5)
+        child_ledger.record_launch_created(
+            key, token, launch_id, "owned-pane", "workspace", "address"
+        )
+        assert not child_ledger.mark_launch_started(
+            key, token, launch_id, "owned-pane", "workspace", "address"
+        )
+        assert child_ledger.mark_launch_closed(
+            key,
+            launch_id,
+            "owned-pane",
+            {"status": "closed", "verified_absent": True},
+        )
+
+    process = context.Process(target=launch_owner)
+    process.start()
+    assert ready.wait(timeout=5)
+    launch_id = launch_queue.get(timeout=2)
+    control_token = ledger.state(key)["requester_control_token"]
+    ledger.begin_cancel(key, control_token)
+    waiter_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def wait_for_launch() -> None:
+        try:
+            recruiter._await_inflight_launches(ledger, key, timeout_seconds=5)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            waiter_done.set()
+
+    waiter = threading.Thread(target=wait_for_launch)
+    waiter.start()
+    assert not waiter_done.wait(timeout=0.15)
+    assert not (ledger.request_dir(key) / "receipt.json").exists()
+    pending = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane=None,
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert pending["status"] == "launch-in-flight"
+    assert pending["verified_absent"] is False
+    assert (
+        json.loads(ledger.launch_journal_path(key, launch_id).read_text())["state"]
+        == "launching"
+    )
+    release.set()
+    process.join(timeout=5)
+    waiter.join(timeout=5)
+    assert process.exitcode == 0
+    assert errors == []
+    assert (
+        json.loads(ledger.launch_journal_path(key, launch_id).read_text())["state"]
+        == "closed"
+    )
 
 
 def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(

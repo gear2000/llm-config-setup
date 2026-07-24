@@ -135,21 +135,52 @@ def _safe_name(value: str) -> str:
     )[:80]
 
 
+def _workspace_with_label(workspaces: list[object], label: str) -> dict | None:
+    for workspace in workspaces:
+        if (
+            isinstance(workspace, dict)
+            and workspace.get("label") == label
+            and isinstance(workspace.get("workspace_id"), str)
+            and workspace.get("workspace_id")
+        ):
+            return workspace
+    return None
+
+
+def _workspace_has_upagent_service(workspace_id: str, herdr_session: str) -> bool:
+    panes = (
+        control._herdr_json(
+            "pane", "list", "--workspace", workspace_id, herdr_session=herdr_session
+        )
+        .get("result", {})
+        .get("panes", [])
+    )
+    return any(
+        isinstance(pane, dict)
+        and pane.get("label") in ("upagent", "recruiter")
+        and isinstance(pane.get("pane_id"), str)
+        and pane.get("pane_id")
+        for pane in panes
+    )
+
+
 def _find_unified_workspace(herdr_session: str) -> dict | None:
-    """The unified `herdr` workspace from a live `workspace list`, or None if absent."""
+    """The unified workspace from a live `workspace list`, or None if absent."""
     workspaces = (
         control._herdr_json("workspace", "list", herdr_session=herdr_session)
         .get("result", {})
         .get("workspaces", [])
     )
-    for workspace in workspaces:
-        if (
-            isinstance(workspace, dict)
-            and workspace.get("label") == control.UNIFIED_WORKSPACE_LABEL
-            and isinstance(workspace.get("workspace_id"), str)
-            and workspace.get("workspace_id")
+    current = _workspace_with_label(workspaces, control.UNIFIED_WORKSPACE_LABEL)
+    if current is not None:
+        return current
+    legacy_label = getattr(control, "LEGACY_UNIFIED_WORKSPACE_LABEL", None)
+    if isinstance(legacy_label, str):
+        legacy = _workspace_with_label(workspaces, legacy_label)
+        if legacy is not None and _workspace_has_upagent_service(
+            cast(str, legacy["workspace_id"]), herdr_session
         ):
-            return workspace
+            return legacy
     return None
 
 
@@ -223,7 +254,7 @@ def _create_tui(
     created_workspace = unified is None
     if created_workspace:
         # Separate mode gets a per-run `<slug>` workspace; the unified default creates the
-        # one `herdr` workspace only when nothing (services included) has created it yet.
+        # one shared workspace only when nothing (services included) has created it yet.
         label = slug if separate_workspaces else control.UNIFIED_WORKSPACE_LABEL
         response = control._herdr_json(
             "workspace",
@@ -671,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--separate-workspaces",
         action="store_true",
-        help="create a per-run <slug> workspace instead of joining the unified `herdr` "
+        help="create a per-run <slug> workspace instead of joining the unified `upagent` "
         "workspace (the mode chosen at `just upagent-up` is inherited by default)",
     )
     args = parser.parse_args(argv)

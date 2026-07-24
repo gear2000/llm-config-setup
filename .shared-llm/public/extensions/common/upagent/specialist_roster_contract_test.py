@@ -1,12 +1,8 @@
-"""Contract tests for the merged specialist roster — who a worker can consult, and the block
-that tells it so. Both must outlive whichever module owns the roster.
+"""Contract tests for the merged specialist roster.
 
-MIGRATION GATE. The roster lives in the Specialist Hub's `agents.yaml` today and moves into the
-Recruiter's `upagent.yaml` when the hub folds in. That move crosses two loaders with DIFFERENT
-semantics — the hub merges base under overlay, the Recruiter resolves its launch templates
-first-match-wins — so the tests below pin the REQUIRED post-migration behavior rather than the
-current address. The move is the SEAM block below and nothing else; every test is written
-against behavior and should pass unchanged. Do not delete this file with the hub.
+The roster defines who a worker can consult and the phone-book block that tells it so. Both must
+outlive whichever module owns the roster. The Recruiter owns the current seam; these tests pin the
+required merged-roster behavior rather than the implementation address.
 """
 
 from __future__ import annotations
@@ -26,9 +22,8 @@ MODULES = Path(__file__).resolve().parent.parent
 REPO_ROOT = MODULES.parents[3]
 
 # ═══ THE SEAM ════════════════════════════════════════════════════════════════════════════
-# Everything this file knows about WHERE the roster lives is in this block. When the roster
-# moves under the Recruiter, change these values — here, only here. The arrow on each line is
-# what it becomes; confirm each against the implementation rather than pasting it blind.
+# Everything this file knows about WHERE the roster lives is in this block. If the roster moves
+# again, change these values — here, only here — and confirm each against the implementation.
 #
 IMPLEMENTATION = "upagent/recruiter.py"  # the Recruiter owns the roster since Phase 3
 ENGINE_DIR_ATTR = "HERE"  # the module attribute holding the engine dir
@@ -46,7 +41,7 @@ OVERLAY_PATH = ".shared-llm/this_repo/extensions/common/upagent/specialists.yaml
 SINGLE_FILE_ENV = "UPAGENT_CONFIG"  # cleared, not used: the specialist loader reads no
 #                                             # env var, so nothing can drop the kit base
 PHONE_BOOK_ARGV = ["specialists"]  # the subcommand that prints the phone book
-OVERLAY_EXTRA = ""  # runtime_dir was Specialist Hub state; there is none
+OVERLAY_EXTRA = ""  # legacy runtime_dir overlay state is gone
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 
@@ -57,13 +52,12 @@ SPECIALIST ROSTER CONTRACT — the implementation moved and this seam did not fo
     resolves to {path}
     which does not exist.
 
-This file is a MIGRATION GATE, not a test of the Specialist Hub. It pins two things nothing
-else in the repository checks: that a destination's roster is the kit base UNION its own
-overlay (the Recruiter's first-match-wins loader would silently shrink it instead), and that
-the phone book a leader pastes into every stage brief actually lists what the merge produced.
+This file pins two things nothing else in the repository checks: that a destination's roster is
+the kit base UNION its own overlay, and that the phone book a leader pastes into every stage
+brief actually lists what the merge produced.
 
-TO FIX: work down the SEAM block above — every line has an arrow saying what it becomes — then
-run this file again. All tests below are written against behavior and should pass untouched.
+TO FIX: work down the SEAM block above, then run this file again. All tests below are written
+against behavior and should pass untouched.
 
 DO NOT delete this file to clear the error. The silent-roster-loss failure looks like a worker
 simply never having a specialist to ask, and `tools/test_phase4_acceptance.py` fails its

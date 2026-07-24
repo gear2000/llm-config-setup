@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UpAgent Recruiter — the always-up broker that hires a fresh worker per work order.
+"""UpAgent Recruiter — durable per-command worker lifecycle coordination.
 
 The Recruiter has an `upagent` status pane in the unified `upagent` workspace by default
 (services and every run's tabs share it), or in a dedicated `shared-services` workspace
@@ -9,12 +9,12 @@ CLI lifecycle:
     just upagent-request <path/to/order.json>
     just upagent-await <path/to/order.json>
 
-These commands cross the canonical machine-local Hub socket instead of importing a nearby
-worktree copy or injecting command text into the Recruiter's shell pane. The compatibility
-``dispatch`` command remains behind that transport for non-interactive callers. Only a
-Hub-authorized canonical job runner atomically claims an order, then:
+Each CLI invocation imports current canonical source instead of crossing a resident Hub socket.
+The compatibility ``dispatch`` command remains for non-interactive callers. A detached canonical
+job runner atomically claims an order, then:
   1. resolves the per-harness launch template from the roster (upagent.yaml);
-  2. creates and verifies a Dedicated Account Manager;
+  2. uses direct Python supervision by default, or creates and verifies a Dedicated Account
+     Manager when the order/config opts in;
   3. atomically starts a worker beside the order's cockpit pane with its cwd and env;
   4. writes a lease-specific worker brief with one literal result path and order id, runs the
      worker, and races Herdr's event-driven agent-status wait against that private result;
@@ -199,117 +199,32 @@ COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
 HERDR_SESSION_ENV = "HERDR_SESSION"
 HERDR_SESSION_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-HUB_INSTANCE_ENV = "UPAGENT_HUB_INSTANCE_ID"
-HUB_ENGINE_ENV = "UPAGENT_HUB_ENGINE_PATH"
-HUB_LOCK_FD_ENV = "UPAGENT_HUB_LOCK_FD"
-HUB_PATH_ENV = "UPAGENT_HUB_PATH"
-HUB_PID_ENV = "UPAGENT_HUB_PID"
-HUB_SOCKET_ENV = "UPAGENT_SOCKET"
-_BOUND_HUB_LEDGER_ROOT: Path | None = None
-_BOUND_HUB_AUTHORITY: dict[str, object] | None = None
-_BOUND_HUB_LOCK_FD: int | None = None
-_REQUEST_RUNTIME_LOCKS: dict[str, threading.Lock] = {}
-_REQUEST_RUNTIME_LOCKS_GUARD = threading.Lock()
+_BOUND_LEDGER_ROOT: Path | None = None
+_COMMAND_AUTHORIZED = False
 
 
-@contextmanager
-def _request_runtime_lock(key: str) -> Iterator[None]:
-    """Serialize one request's pane creation against anytime cancellation."""
-    with _REQUEST_RUNTIME_LOCKS_GUARD:
-        lock = _REQUEST_RUNTIME_LOCKS.setdefault(key, threading.Lock())
-    with lock:
-        yield
-
-
-def _bind_hub_runtime(
-    ledger_root: str | Path,
-    state_file: str | Path | None = None,
-    identity: dict[str, object] | None = None,
-    lock_fd: int | None = None,
+def _bind_command_runtime(
+    ledger_root: str | Path, state_file: str | Path | None = None
 ) -> None:
-    """Bind the canonical Hub runtime without process-global cwd or environment mutation."""
-    global _BOUND_HUB_AUTHORITY, _BOUND_HUB_LEDGER_ROOT, _BOUND_HUB_LOCK_FD, STATE_FILE
-    _BOUND_HUB_LEDGER_ROOT = Path(ledger_root).expanduser().resolve()
+    """Bind machine-local durable paths for this one command process."""
+    global _BOUND_LEDGER_ROOT, STATE_FILE
+    _BOUND_LEDGER_ROOT = Path(ledger_root).expanduser().resolve()
     if state_file is not None:
         STATE_FILE = Path(state_file).expanduser().resolve()
-    _BOUND_HUB_AUTHORITY = dict(identity) if identity is not None else None
-    _BOUND_HUB_LOCK_FD = lock_fd
 
 
-def _canonical_engine_path() -> Path:
-    """Return the Hub-published engine, rejecting a mixed-version process tree."""
-    configured = os.environ.get(HUB_ENGINE_ENV)
-    engine = (
-        Path(configured).expanduser().resolve()
-        if configured
-        else (HERE / "recruiter.py").resolve()
-    )
-    if engine != (HERE / "recruiter.py").resolve():
-        raise RecruiterError(
-            f"canonical engine mismatch: Hub published {engine}, running copy is {HERE / 'recruiter.py'}"
-        )
-    return engine
+def _set_command_authorized(value: bool) -> None:
+    """Record that canonical per-command dispatch admitted this module invocation."""
+    global _COMMAND_AUTHORIZED
+    _COMMAND_AUTHORIZED = value
 
 
 def _require_hub_authority() -> None:
-    """Prove this module is bound to the live Hub and its lifetime lock descriptor."""
-    authority = _BOUND_HUB_AUTHORITY
-    descriptor = _BOUND_HUB_LOCK_FD
-    if authority is None or descriptor is None:
+    """Compatibility name for canonical per-command dispatch authority."""
+    if not _COMMAND_AUTHORIZED:
         raise RecruiterError(
-            "Hub authority is unbound; direct Recruiter execution is forbidden; use the UpAgent thin client / imported just recipes"
+            "command authority is unbound; use the UpAgent per-command client"
         )
-    try:
-        hub_pid = int(cast(int, authority["pid"]))
-        instance_id = cast(str, authority["hub_instance_id"])
-        socket_value = cast(str, authority["socket_path"])
-        descriptor_stat = os.fstat(descriptor)
-    except (KeyError, OSError, TypeError, ValueError) as error:
-        raise RecruiterError(
-            "Hub authority has an invalid process or lock descriptor"
-        ) from error
-    if hub_pid != os.getpid():
-        raise RecruiterError(
-            "Hub authority belongs to a different process; mutating subprocesses are forbidden"
-        )
-    socket_path = Path(socket_value).expanduser().resolve()
-    lock_path = socket_path.with_name(f"{socket_path.name}.lock")
-    identity_path = socket_path.with_name(f"{socket_path.name}.identity.json")
-    try:
-        lock_stat = lock_path.stat()
-        identity = json.loads(identity_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise RecruiterError(
-            "Hub authority has no live published lock identity"
-        ) from error
-    if not isinstance(identity, dict):
-        raise RecruiterError("Hub authority identity must be an object")
-    if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
-        lock_stat.st_dev,
-        lock_stat.st_ino,
-    ):
-        raise RecruiterError(
-            "Hub authority lock descriptor does not name the published lock"
-        )
-    expected = {
-        "hub_instance_id": instance_id,
-        "pid": hub_pid,
-        "canonical_engine_path": str(_canonical_engine_path()),
-        "hub_path": authority.get("hub_path"),
-        "socket_path": str(socket_path),
-    }
-    if any(identity.get(key) != value for key, value in expected.items()):
-        raise RecruiterError(
-            "Hub authority does not match the live published Hub identity"
-        )
-    try:
-        # Re-locking the Hub's own open file description succeeds and leaves the lifetime lock
-        # held. A forged descriptor opened by another process cannot acquire while the Hub lives.
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as error:
-        raise RecruiterError(
-            "Hub authority does not hold the published lifetime lock"
-        ) from error
 
 
 def default_roster_path() -> str:
@@ -380,7 +295,7 @@ class JobLedger:
     def __init__(self, root: str | Path | None = None):
         self.root = Path(
             root
-            or _BOUND_HUB_LEDGER_ROOT
+            or _BOUND_LEDGER_ROOT
             or os.environ.get("UPAGENT_HUB_DIR", "~/.local/state/herdr/upagent-hub")
         ).expanduser()
         self.requests = self.root / "requests"
@@ -414,8 +329,9 @@ class JobLedger:
             os.close(directory_fd)
 
     @contextmanager
-    def _claim_lock(self, key: str) -> Iterator[None]:
-        lock_path = self.active / "locks" / f"{key}.lock"
+    def _claim_lock(self, _key: str) -> Iterator[None]:
+        """Serialize ledger mutations on one machine-local lock, never worker waits."""
+        lock_path = self.root.parent / "mutation.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -471,6 +387,10 @@ class JobLedger:
 
     def submit(self, order: dict) -> tuple[str, bool]:
         """Atomically persist one request. Duplicate identical order ids are idempotent."""
+        with self._claim_lock(self.key_for_order(order)):
+            return self._submit_unlocked(order)
+
+    def _submit_unlocked(self, order: dict) -> tuple[str, bool]:
         try:
             completion.ensure_publication_contract(order)
             contracts.parse_order(json.dumps(order))
@@ -828,6 +748,67 @@ class JobLedger:
                 claims.append((claim_dir.name, self._lease(claim_dir / "lease.json")))
         return claims
 
+    @staticmethod
+    def _runner_identity_from_receipt(
+        receipt: dict, context: Path
+    ) -> dict[str, object]:
+        """Recover only the exact PID/birth identity committed by the winning lease."""
+        pid = receipt.get("runner_pid")
+        start = receipt.get("runner_start_time")
+        if (
+            isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or pid <= 1
+            or not isinstance(start, str)
+            or not start
+        ):
+            raise RecruiterError(
+                f"terminal receipt {context} has no exact runner PID/start identity"
+            )
+        return {
+            "generation": receipt.get("generation"),
+            "reconstructed_from_receipt": True,
+            "request_id": receipt.get("request_id"),
+            "runner_argv": None,
+            "runner_pid": pid,
+            "runner_session_id": None,
+            "runner_start_time": start,
+            "schema_version": 1,
+        }
+
+    def incomplete_terminal_runners(self) -> list[tuple[str, dict]]:
+        """Return terminal requests whose detached runner has not published completion."""
+        if not self.requests.is_dir():
+            return []
+        incomplete: list[tuple[str, dict]] = []
+        for request in self.requests.iterdir():
+            receipt_path = request / "receipt.json"
+            runner_path = request / "runner.json"
+            if (
+                not request.is_dir()
+                or not receipt_path.is_file()
+                or (request / "runner-completed.json").is_file()
+            ):
+                continue
+            try:
+                if runner_path.is_file():
+                    runner = json.loads(runner_path.read_text())
+                else:
+                    receipt = json.loads(receipt_path.read_text())
+                    if not isinstance(receipt, dict):
+                        raise RecruiterError(
+                            f"terminal receipt {receipt_path} is invalid"
+                        )
+                    runner = self._runner_identity_from_receipt(receipt, receipt_path)
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"runner identity for {request.name} is unreadable: {error}"
+                ) from error
+            if not isinstance(runner, dict):
+                raise RecruiterError(f"runner identity for {request.name} is invalid")
+            incomplete.append((request.name, runner))
+        return incomplete
+
     def claim(
         self,
         key: str,
@@ -844,12 +825,17 @@ class JobLedger:
             token = uuid.uuid4().hex
             expiry_epoch = int(time.time() + timeout_ms / 1000) + 60
             requester_control_token = uuid.uuid4().hex
+            owner_record = dict(owner or {})
+            owner_record.setdefault("runner_pid", os.getpid())
+            owner_record.setdefault(
+                "runner_start_time", _process_start_time(owner_record["runner_pid"])
+            )
             lease = {
                 "order_id": order_id,
                 "token": token,
                 "requester_control_token": requester_control_token,
                 "expires_at": expiry_epoch,
-                **(owner or {}),
+                **owner_record,
             }
             generation = lease.get("generation", 1)
             if isinstance(generation, bool) or not isinstance(generation, int):
@@ -869,6 +855,18 @@ class JobLedger:
                     raise
                 shutil.rmtree(temporary)
                 return None
+            self._write_json(
+                self.request_dir(key) / "runner.json",
+                {
+                    "generation": generation,
+                    "request_id": lease.get("request_id"),
+                    "runner_argv": lease.get("runner_argv"),
+                    "runner_pid": lease.get("runner_pid"),
+                    "runner_session_id": lease.get("runner_session_id"),
+                    "runner_start_time": lease.get("runner_start_time"),
+                    "schema_version": 1,
+                },
+            )
             manifest = completion.build_manifest(
                 self.order(key),
                 self.request_dir(key),
@@ -897,6 +895,70 @@ class JobLedger:
 
     def worker_instructions_path(self, key: str, token: str) -> Path:
         return self.request_dir(key) / "workers" / f"{token}-instructions.md"
+
+    def mark_runner_completed(
+        self, key: str, *, source: str, require_dead: bool = False
+    ) -> bool:
+        """Publish proof that the detached runner can perform no further ledger mutation."""
+        with self._claim_lock(key):
+            receipt_path = self.request_dir(key) / "receipt.json"
+            runner_path = self.request_dir(key) / "runner.json"
+            if not receipt_path.is_file():
+                return False
+            try:
+                receipt = json.loads(receipt_path.read_text())
+                if not isinstance(receipt, dict):
+                    raise RecruiterError(f"terminal receipt {receipt_path} is invalid")
+                runner_missing = not runner_path.is_file()
+                runner = (
+                    self._runner_identity_from_receipt(receipt, receipt_path)
+                    if runner_missing
+                    else json.loads(runner_path.read_text())
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"runner completion evidence for {key} is unreadable: {error}"
+                ) from error
+            if not isinstance(runner, dict):
+                raise RecruiterError(f"runner completion evidence for {key} is invalid")
+            pid = runner.get("runner_pid")
+            start = runner.get("runner_start_time")
+            if pid != receipt.get("runner_pid") or start != receipt.get(
+                "runner_start_time"
+            ):
+                raise RecruiterError(
+                    f"runner identity for {key} conflicts with its terminal receipt"
+                )
+            if source == "supervisor" and (
+                pid != os.getpid() or _process_start_time(pid) != start
+            ):
+                raise RecruiterError(
+                    f"runner completion for {key} does not match this supervisor"
+                )
+            if (
+                require_dead
+                and isinstance(start, str)
+                and _process_start_time(pid) == start
+            ):
+                raise RecruiterError(f"runner for {key} is still alive")
+            if runner_missing:
+                # The winning lease is already committed into receipt.json. Reconstructing from
+                # that immutable PID/birth pair cannot let a losing claimant overwrite identity.
+                self._write_json(runner_path, runner)
+            marker = {
+                "completed_at_ns": time.time_ns(),
+                "receipt_terminal_at_ns": receipt.get("terminal_at_ns"),
+                "request_id": receipt.get("request_id"),
+                "runner_pid": pid,
+                "runner_start_time": start,
+                "schema_version": 1,
+                "source": source,
+            }
+            self._event(key, "runner-completing", source=source)
+            # This marker is deliberately the runner's final ledger mutation. Pruning may begin
+            # as soon as it appears, so no notification/event/write may follow it.
+            self._write_json(self.request_dir(key) / "runner-completed.json", marker)
+            return True
 
     def manager_dir(self, key: str, generation: int = 1) -> Path:
         return self.request_dir(key) / "manager" / f"generation-{generation}"
@@ -1448,6 +1510,25 @@ class JobLedger:
                 f"request {request_id} is not successfully terminal ({state_name})"
             )
         receipt = self.completed_receipt(key, order)
+        runner_completed_path = request / "runner-completed.json"
+        try:
+            runner_completed = json.loads(runner_completed_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(
+                f"request {request_id} has no durable runner-completed evidence: {error}"
+            ) from error
+        if (
+            not isinstance(runner_completed, dict)
+            or runner_completed.get("request_id") != request_id
+            or runner_completed.get("receipt_terminal_at_ns")
+            != receipt.get("terminal_at_ns")
+            or runner_completed.get("runner_pid") != receipt.get("runner_pid")
+            or runner_completed.get("runner_start_time")
+            != receipt.get("runner_start_time")
+        ):
+            raise RecruiterError(
+                f"request {request_id} has conflicting runner-completed evidence"
+            )
         cleanup = receipt.get("cleanup")
         if not isinstance(cleanup, dict) or cleanup.get("verified_absent") is not True:
             raise RecruiterError(
@@ -1505,6 +1586,7 @@ class JobLedger:
             "receipt": receipt,
             "request_id": request_id,
             "result": result,
+            "runner_completed": runner_completed,
             "terminal_at_ns": terminal_at_ns,
             "terminal_state": "finished",
             "terminal_verdict": result["verdict"],
@@ -1527,19 +1609,22 @@ class JobLedger:
         *,
         verify_absence: Callable[[dict[str, object]], None],
     ) -> dict[str, object]:
-        """Commit one atomic tombstone, then prune only its Hub-owned siblings."""
+        """Verify pane absence lock-free, then CAS the tombstone and prune runtime state."""
+        evidence = self.terminal_cleanup_evidence(key, request_id, payload_sha256)
+        if evidence.get("already_pruned") is not True:
+            # This may query Herdr. Never hold the machine mutation lock across external IPC.
+            verify_absence(evidence)
         with self._claim_lock(key):
-            evidence = self._terminal_cleanup_evidence_locked(
+            current = self._terminal_cleanup_evidence_locked(
                 key, request_id, payload_sha256
             )
             request = self.request_dir(key)
-            already_pruned = evidence.get("already_pruned") is True
+            already_pruned = current.get("already_pruned") is True
             if not already_pruned:
-                verify_absence(evidence)
                 if (
                     tombstone.get("request_id") != request_id
                     or tombstone.get("payload_sha256") != payload_sha256
-                    or tombstone.get("terminal_verdict") != evidence["terminal_verdict"]
+                    or tombstone.get("terminal_verdict") != current["terminal_verdict"]
                 ):
                     raise RecruiterError(
                         "cleanup tombstone does not match terminal evidence"
@@ -1561,7 +1646,7 @@ class JobLedger:
             if garbage.exists():
                 shutil.rmtree(garbage)
             return {
-                **(evidence if already_pruned else tombstone),
+                **(current if already_pruned else tombstone),
                 "already_pruned": already_pruned,
             }
 
@@ -1574,6 +1659,7 @@ class JobLedger:
         *,
         cleanup: dict[str, object],
         allow_expired: bool = False,
+        defer_runner_completion: bool = False,
         **detail: object,
     ) -> bool:
         """Atomically publish a valid result and terminal state iff ``token`` still owns ``key``.
@@ -1651,11 +1737,13 @@ class JobLedger:
                     "request_id", lifecycle.request_identity(order)
                 ),
                 "result_path": order["result_path"],
+                "runner_pid": lease.get("runner_pid"),
+                "runner_start_time": lease.get("runner_start_time"),
                 "state": terminal_state,
                 "terminal_at_ns": terminal_at_ns,
                 "verdict": parsed["verdict"],
                 # A worker's `consults` list is its own account of its own diligence. Resolve it
-                # against the Hub's record of what it actually brokered, so the Stage 2 auditor
+                # against the Recruiter's record of what it actually brokered, so the Stage 2 auditor
                 # reads a Python-checked fact instead of the worker's prose. Present only when
                 # the worker made claims; absent means it recorded no `consults` key at all.
                 **resolve_consult_claims(order, parsed),
@@ -1691,6 +1779,19 @@ class JobLedger:
             )
             if verified_absent:
                 shutil.rmtree(claim_dir)
+            if not defer_runner_completion:
+                self._write_json(
+                    self.request_dir(key) / "runner-completed.json",
+                    {
+                        "completed_at_ns": time.time_ns(),
+                        "receipt_terminal_at_ns": terminal_at_ns,
+                        "request_id": receipt["request_id"],
+                        "runner_pid": receipt["runner_pid"],
+                        "runner_start_time": receipt["runner_start_time"],
+                        "schema_version": 1,
+                        "source": "finalize",
+                    },
+                )
             return True
 
 
@@ -2714,6 +2815,18 @@ def _reconcile_exact_launch(
         if not isinstance(journal_agent, str) or not journal_agent:
             raise RecruiterError(f"launch journal {launch_id} has no exact agent name")
         agent_name = journal_agent
+        if journal.get("state") == "launching" and _same_owner_process(journal):
+            # A live owner may be inside `herdr agent start` after journaling but before the
+            # returned pane identity is durable. Absence cannot be proved until it commits the
+            # pane or dies; never convert this state to verified-absent.
+            return {
+                "agent_name": agent_name,
+                "launch_id": launch_id,
+                "reason": "launch owner is alive and pane creation is still in flight",
+                "status": "launch-in-flight",
+                "verified_absent": False,
+                "worker_pane": pane,
+            }
         recorded_pane = journal.get("pane")
         if isinstance(recorded_pane, str) and recorded_pane:
             if pane is not None and pane != recorded_pane:
@@ -2826,50 +2939,47 @@ def _start_fenced_ledger_agent(
 ) -> tuple[str, str | None, str, str]:
     """Journal before create; failed commit returns only truthful cleanup evidence."""
 
-    with _request_runtime_lock(key):
-        launch_id = ledger.begin_launch(
-            key,
-            token,
-            role,
+    launch_id = ledger.begin_launch(
+        key,
+        token,
+        role,
+        name,
+        herdr_session,
+        order["cwd"],
+        metadata=metadata,
+    )
+    pane: str | None = None
+    try:
+        pane, workspace_id, address = _start_herdr_agent(
             name,
-            herdr_session,
-            order["cwd"],
-            metadata=metadata,
-        )
-        pane: str | None = None
-        try:
-            pane, workspace_id, address = _start_herdr_agent(
-                name,
-                order,
-                launch,
-                split_direction=split_direction,
-                tab_role=tab_role,
-                herdr_session=herdr_session,
-            )
-            ledger.record_launch_created(
-                key, token, launch_id, pane, workspace_id, address
-            )
-            if ledger.mark_launch_started(
-                key, token, launch_id, pane, workspace_id, address
-            ):
-                return pane, workspace_id, address, launch_id
-            failure = RecruiterError(
-                f"lease ownership changed before {role} pane {pane} was committed"
-            )
-        except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
-            failure = error
-        cleanup = _reconcile_exact_launch(
-            ledger,
-            key,
-            launch_id,
-            known_pane=pane,
+            order,
+            launch,
+            split_direction=split_direction,
+            tab_role=tab_role,
             herdr_session=herdr_session,
-            allow_not_found_absent=pane is None,
-            trusted_created_identity=pane is not None,
         )
-        raise FencedLaunchError(
-            f"{role} fenced launch {launch_id} failed: {failure}", cleanup
-        ) from failure
+        ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
+        if ledger.mark_launch_started(
+            key, token, launch_id, pane, workspace_id, address
+        ):
+            return pane, workspace_id, address, launch_id
+        failure = RecruiterError(
+            f"lease ownership changed before {role} pane {pane} was committed"
+        )
+    except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
+        failure = error
+    cleanup = _reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane=pane,
+        herdr_session=herdr_session,
+        allow_not_found_absent=pane is None,
+        trusted_created_identity=pane is not None,
+    )
+    raise FencedLaunchError(
+        f"{role} fenced launch {launch_id} failed: {failure}", cleanup
+    ) from failure
 
 
 def _layout_warning(role: str, pane_id: str, reason: str) -> None:
@@ -3614,7 +3724,7 @@ def _submit_agent_prompt(
 ) -> None:
     """Submit one prompt only after Herdr proves the dedicated target is idle.
 
-    ``herdr agent send`` intentionally pastes without Enter. The Hub resolves the target to its
+    ``herdr agent send`` intentionally pastes without Enter. The Recruiter resolves the target to its
     current pane and uses one serialized ``pane run`` socket action, which includes Enter. This is
     safe for a dedicated manager; requester delivery remains best-effort and is skipped while busy.
     """
@@ -4166,7 +4276,7 @@ def _await_requester_timeout_decision(
         order,
         generation,
         "hard-timeout",
-        "Requester grace expired without a decision; the Hub will close the owned worker.",
+        "Requester grace expired without a decision; the Recruiter will close the owned worker.",
         {"timeout_number": timeout_number, "worker_pane": worker_pane},
     )
     return None
@@ -4443,8 +4553,8 @@ def _run_order(
         if isinstance(e, FencedLaunchError):
             cleanup = dict(e.cleanup)
             if cleanup.get("verified_absent") is not True:
-                # No result or receipt may claim absence. The standing supervisor keeps the
-                # active lease and exact launch journal until reconciliation proves cleanup.
+                # No result or receipt may claim absence. The active lease and exact launch
+                # journal remain until opportunistic reconciliation proves cleanup.
                 launch_recovery_pending = True
                 raise
         # A dedicated manager's explicit refusal is a ruling, not a launch flake — callers
@@ -4621,7 +4731,7 @@ class IntakeOutcomeError(RecruiterError):
     """One non-accepted request outcome, its durable evidence, and its exit code.
 
     Only three things may end a received request: the intake clerk authored a block, the intake
-    clerk could not answer, or the Hub's own machinery failed. A request's schema, wording, order
+    clerk could not answer, or the Recruiter's own machinery failed. A request's schema, wording, order
     id, agent name, or intent never ends it here.
     """
 
@@ -5258,7 +5368,10 @@ def _process_start_time(pid: object) -> str | None:
     if close < 0:
         return None
     fields = text[close + 2 :].split()
-    # The suffix begins at field 3 (state); starttime is field 22.
+    # The suffix begins at field 3 (state); zombies can no longer mutate or create panes.
+    if not fields or fields[0] == "Z":
+        return None
+    # starttime is field 22.
     return fields[19] if len(fields) > 19 else None
 
 
@@ -5601,8 +5714,11 @@ def _run_order_intake_clerk(
     byte-identical resubmission (same `intake_key`); malformed caller data never controls its launch."""
     recruiter_pane = _recruiter_pane_from_state()
     if recruiter_pane is None:
+        cmd_up(roster_path)
+        recruiter_pane = _recruiter_pane_from_state()
+    if recruiter_pane is None:
         raise RecruiterError(
-            f"no live Recruiter state at {STATE_FILE}; run the Hub's up command first"
+            f"could not create Recruiter service state at {STATE_FILE}"
         )
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
@@ -5914,7 +6030,7 @@ def _intake_order(order_path: str, roster_path: str) -> dict:
     A byte-identical resubmission of the same file with a clean prior attempt is idempotent: it
     reuses that attempt's already-validated response instead of launching again (the reuse seam
     lives in `_run_order_intake_clerk`). Only three things end a request: a clerk-authored block, a
-    clerk that could not answer within its bounded correction rounds, or a failure of the Hub's own
+    clerk that could not answer within its bounded correction rounds, or a failure of the Recruiter's own
     machinery.
     """
     path = Path(order_path)
@@ -5925,7 +6041,7 @@ def _intake_order(order_path: str, roster_path: str) -> dict:
             return _interpret_submission(order_path, path, paths, roster_path)
     except IntakeOutcomeError:
         raise
-    except RecruiterError as error:  # the Hub's own workspace, never the submission
+    except RecruiterError as error:  # the Recruiter's own workspace, never the submission
         raise IntakeOutcomeError(
             "infrastructure-failure",
             order_path,
@@ -6090,7 +6206,7 @@ def cmd_recruit(order_path: str, roster_path: str) -> int:
         print(f"ORDER {order['order_id']} DONE", flush=True)
         return 0
     # Duplicate submissions atomically attach to the one registered live runner. A missing
-    # handle for this Hub's durable claim is reconciled instead of launching a contender.
+    # owner for this durable claim is reconciled instead of launching a contender.
     owner: dict[str, object] = {"runner_pid": os.getpid()}
     try:
         # Resolve session ownership before launch so a correlated launch/session failure still
@@ -6123,21 +6239,45 @@ def _process_cmdline(pid: int) -> list[str]:
 
 
 def _runner_alive(pid: object, key: str) -> bool:
-    if pid != os.getpid():
+    """Prove a PID is this request's detached canonical ``run-job`` process."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
         return False
-    with _JOB_THREADS_LOCK:
-        handle = _JOB_THREADS.get(key)
-    return handle is not None and handle.thread.is_alive()
+    cmdline = _process_cmdline(pid)
+    if len(cmdline) < 5:
+        return False
+    try:
+        script_index = cmdline.index(str((HERE / "recruiter.py").resolve()))
+        run_index = cmdline.index("run-job", script_index + 1)
+    except ValueError:
+        return False
+    if run_index + 1 >= len(cmdline) or cmdline[run_index + 1] != key:
+        return False
+    lease_path = JobLedger().active / "requests" / key / "lease.json"
+    try:
+        lease = JobLedger._lease(lease_path)
+    except RecruiterError:
+        return False
+    recorded_start = lease.get("runner_start_time")
+    return (
+        not isinstance(recorded_start, str)
+        or _process_start_time(pid) == recorded_start
+    )
 
 
 def _terminate_owned_runner(pid: object, key: str) -> None:
-    """Never signal the locked Hub process in an attempt to stop one daemon job thread.
-
-    Reconciliation fences the lease token before publication. The process itself terminates all
-    daemon jobs when the Hub exits, so no runner can retain mutation authority afterward.
-    """
-    if pid != os.getpid() or not _runner_alive(pid, key):
+    """Terminate only a process whose command line proves exact request ownership."""
+    if not _runner_alive(pid, key):
         return
+    assert isinstance(pid, int)
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and _runner_alive(pid, key):
+        time.sleep(0.05)
+    if _runner_alive(pid, key):
+        os.kill(pid, 9)
 
 
 def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
@@ -6199,10 +6339,10 @@ def _verify_terminal_cleanup_absence(
     order = evidence.get("order")
     if not isinstance(order, dict):
         raise RecruiterError("terminal cleanup evidence has no order")
-    key = JobLedger.key_for_order(order)
-    if require_runner_absent and _runner_alive(os.getpid(), key):
+    runner_completed = evidence.get("runner_completed")
+    if require_runner_absent and not isinstance(runner_completed, dict):
         raise RecruiterError(
-            f"request {lifecycle.request_identity(order)} still has a live job runner"
+            f"request {lifecycle.request_identity(order)} has no runner-completed evidence"
         )
     launches = evidence.get("launches")
     if not isinstance(launches, list):
@@ -6396,7 +6536,9 @@ def _launch_receipt_evidence(ledger: JobLedger, key: str) -> list[dict[str, obje
     ]
 
 
-def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -> bool:
+def _reconcile_claim(
+    ledger: JobLedger, key: str, lease: dict, *, force: bool, emit: bool = True
+) -> bool:
     """Close and terminalize one dead/expired owned job. Never touches an unrecorded pane."""
     expired = lease["expires_at"] <= int(time.time())
     runner_alive = _runner_alive(lease.get("runner_pid"), key)
@@ -6457,21 +6599,28 @@ def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -
         result,
         cleanup=cleanup,
         allow_expired=True,
+        defer_runner_completion=True,
         exit_code=1,
         completion_source="reconciler",
     )
     if finalized:
+        ledger.mark_runner_completed(key, source="reconciler", require_dead=True)
         marker = "DONE" if cleanup["verified_absent"] else "CLEANUP_FAILED"
-        print(f"ORDER {order['order_id']} {marker}", flush=True)
+        if emit:
+            print(f"ORDER {order['order_id']} {marker}", flush=True)
     return finalized
 
 
-def _reconcile_launch_journals(ledger: JobLedger, *, force: bool) -> int:
-    """Boundedly compensate every nonterminal exact-agent launch journal."""
+def _reconcile_launch_journals(
+    ledger: JobLedger, *, force: bool, only_key: str | None = None
+) -> int:
+    """Boundedly compensate matching nonterminal exact-agent launch journals."""
 
     reconciled = 0
     active_claims = dict(ledger.active_claims())
     for key, journal in ledger.launch_journals():
+        if only_key is not None and key != only_key:
+            continue
         if journal.get("state") == "closed":
             continue
         expires_at = journal.get("expires_at")
@@ -6572,13 +6721,39 @@ def _reconcile_intake_clerks(*, force: bool) -> int:
     return reconciled
 
 
+def _reconcile_terminal_runners(ledger: JobLedger) -> int:
+    """Complete terminal runner evidence only after the recorded process is dead."""
+    completed = 0
+    for key, runner in ledger.incomplete_terminal_runners():
+        pid = runner.get("runner_pid")
+        start = runner.get("runner_start_time")
+        if isinstance(start, str) and _process_start_time(pid) == start:
+            continue
+        if ledger.mark_runner_completed(
+            key, source="crash-reconciler", require_dead=True
+        ):
+            completed += 1
+    return completed
+
+
 def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
     ledger = JobLedger()
-    launches_reconciled = _reconcile_launch_journals(ledger, force=force)
+    launches_reconciled = 0
     reconciled = 0
-    for key, lease in ledger.active_claims():
-        if _reconcile_claim(ledger, key, lease, force=force):
-            reconciled += 1
+    # A force/expiry sweep may first kill a runner whose live `launching` journal could not
+    # truthfully be closed. Resweep journals and claims so this one invocation reaches the
+    # post-termination fixpoint instead of requiring a second command.
+    for _sweep in range(3):
+        launches_reconciled += _reconcile_launch_journals(ledger, force=force)
+        for key, lease in ledger.active_claims():
+            if _reconcile_claim(ledger, key, lease, force=force, emit=emit):
+                reconciled += 1
+        if not ledger.active_claims() and not any(
+            journal.get("state") != "closed"
+            for _key, journal in ledger.launch_journals()
+        ):
+            break
+    terminal_runners_reconciled = _reconcile_terminal_runners(ledger)
     intake_reconciled = _reconcile_intake_clerks(force=force)
     if emit:
         print(
@@ -6587,6 +6762,7 @@ def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
                     "reconciled": reconciled,
                     "intake_clerks_reconciled": intake_reconciled,
                     "launches_reconciled": launches_reconciled,
+                    "terminal_runners_reconciled": terminal_runners_reconciled,
                     "force": force,
                 },
                 sort_keys=True,
@@ -6595,117 +6771,95 @@ def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
     return 0
 
 
-def cmd_supervise(token: str) -> int:
-    """Reconcile dead/expired runners while this exact Recruiter generation remains active."""
-    while True:
-        try:
-            state = json.loads(STATE_FILE.read_text())
-        except (OSError, json.JSONDecodeError):
-            return 0
-        if not isinstance(state, dict) or state.get("supervisor_token") != token:
-            return 0
-        try:
-            cmd_reconcile(force=False, emit=False)
-        except RecruiterError as error:
-            command_runtime.write_stderr(
-                f"recruiter: supervisor reconciliation remains pending: {error}\n"
-            )
-        time.sleep(2)
+def _spawn_job(key: str, roster_path: str) -> subprocess.Popen[bytes] | None:
+    """Start one detached supervisor, or attach when the durable lease already has one."""
+    ledger = JobLedger()
+    existing = next(
+        (lease for candidate, lease in ledger.active_claims() if candidate == key),
+        None,
+    )
+    if existing is not None:
+        if _runner_alive(existing.get("runner_pid"), key):
+            return None
+        _reconcile_claim(ledger, key, existing, force=True)
+        return None
 
-
-class _JobThread:
-    """Popen-shaped handle for one Hub-owned daemon runner thread."""
-
-    def __init__(self, key: str, roster_path: str):
-        self.key = key
-        self.cwd = command_runtime.current_cwd()
-        self.environ = command_runtime.current_environ()
-        self.roster_path = roster_path
-        self.thread = threading.Thread(
-            target=self._run,
-            name=f"upagent-job-{key[:12]}",
-            daemon=True,
+    log_path = ledger.request_dir(key) / "supervisor.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    environment = dict(command_runtime.current_environ())
+    environment["UPAGENT_HUB_DIR"] = str(ledger.root.resolve())
+    environment["UPAGENT_STATE"] = str(STATE_FILE.resolve())
+    argv = [
+        sys.executable,
+        str((HERE / "recruiter.py").resolve()),
+        "--roster",
+        str(Path(roster_path).expanduser().resolve()),
+        "run-job",
+        key,
+    ]
+    with log_path.open("ab", buffering=0) as log:
+        return subprocess.Popen(
+            argv,
+            cwd=str(command_runtime.current_cwd()),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
         )
 
-    def _run(self) -> None:
-        # Only cwd/environment follow the submission. Output deliberately has no request sink,
-        # so a background runner can never write into the response that happened to launch it.
-        with command_runtime.activate(self.cwd, self.environ):
-            cmd_run_job(self.key, self.roster_path)
 
-    def start(self) -> None:
-        self.thread.start()
-
-    def poll(self) -> int | None:
-        return None if self.thread.is_alive() else 0
-
-    def wait(self, timeout: float | None = None) -> int:
-        self.thread.join(timeout)
-        if self.thread.is_alive():
-            raise subprocess.TimeoutExpired(
-                f"Hub-owned runner {self.key}", timeout if timeout is not None else 0
-            )
-        return 0
+def _active_claim_for(ledger: JobLedger, key: str) -> dict | None:
+    return next(
+        (lease for candidate, lease in ledger.active_claims() if candidate == key),
+        None,
+    )
 
 
-_JOB_THREADS: dict[str, _JobThread] = {}
-_JOB_THREADS_LOCK = threading.Lock()
+def _reconcile_dead_claim_fixpoint(
+    ledger: JobLedger, key: str, lease: dict, *, emit: bool = True
+) -> bool:
+    """Kill/fence, close newly-dead launches, and terminalize in one bounded call."""
+    current: dict | None = lease
+    for _sweep in range(3):
+        if current is not None and _reconcile_claim(
+            ledger, key, current, force=True, emit=emit
+        ):
+            return True
+        _reconcile_launch_journals(ledger, force=True, only_key=key)
+        current = _active_claim_for(ledger, key)
+        if current is None:
+            return (ledger.request_dir(key) / "receipt.json").is_file()
+    return False
 
 
-def migration_activity() -> dict[str, list[str]]:
-    """Return every request that makes runtime replacement unsafe.
-
-    A newly spawned runner is visible in the thread registry before it can claim the ledger, so
-    the Hub's atomic stop transaction cannot miss the submit-to-claim window.
-    """
-    _require_hub_authority()
-    # Snapshot runners before claims. A registered live runner may transition into a durable
-    # claim after this first read; seeing it live is already sufficient to refuse replacement.
-    # A runner that is no longer alive cannot create a future claim, so the following ledger read
-    # closes the opposite side of the transition without a missed-empty window.
-    with _JOB_THREADS_LOCK:
-        live_runners = sorted(
-            key for key, handle in _JOB_THREADS.items() if handle.thread.is_alive()
+def _settle_exited_spawn(
+    ledger: JobLedger,
+    key: str,
+    order: dict,
+    owner: dict[str, object],
+    *,
+    returncode: int | None,
+    operation: str,
+) -> str:
+    """Attach to a proven winner or recover one exited child without false failure/hang."""
+    if ledger.completed_result(key, order) is not None:
+        return "terminal"
+    lease = _active_claim_for(ledger, key)
+    if lease is not None and _runner_alive(lease.get("runner_pid"), key):
+        return "attached"
+    if lease is not None:
+        if _reconcile_dead_claim_fixpoint(ledger, key, lease):
+            return "terminal"
+        raise RecruiterError(
+            f"{operation} child exited but dead claim {key} could not be reconciled"
         )
-    active_requests = sorted(key for key, _lease in JobLedger().active_claims())
-    return {
-        "active_requests": active_requests,
-        "live_runners": live_runners,
-    }
-
-
-def _spawn_job(key: str, roster_path: str) -> _JobThread | None:
-    """Atomically get-or-attach one runner, reconciling an orphaned owned claim."""
-    _require_hub_authority()
-    orphaned_claim: dict | None = None
-    with _JOB_THREADS_LOCK:
-        existing = _JOB_THREADS.get(key)
-        if existing is not None and existing.thread.is_alive():
-            return existing
-        if existing is not None:
-            del _JOB_THREADS[key]
-        orphaned_claim = next(
-            (
-                lease
-                for candidate, lease in JobLedger().active_claims()
-                if candidate == key and lease.get("runner_pid") == os.getpid()
-            ),
-            None,
-        )
-        if orphaned_claim is None:
-            handle = _JobThread(key, roster_path)
-            _JOB_THREADS[key] = handle
-            try:
-                handle.start()
-            except (OSError, RuntimeError):
-                if _JOB_THREADS.get(key) is handle:
-                    del _JOB_THREADS[key]
-                raise
-            return handle
-    # Never hold the registry lock while reconciliation calls back through _runner_alive().
-    assert orphaned_claim is not None
-    _reconcile_claim(JobLedger(), key, orphaned_claim, force=True)
-    return None
+    error = RecruiterError(
+        f"{operation} child exited with code {returncode} without a terminal result or active winner"
+    )
+    if _terminalize_start_failure(ledger, key, order, owner, error):
+        return "terminal"
+    raise error
 
 
 def _strict_order(order_path: str) -> dict:
@@ -6736,7 +6890,7 @@ def _request_log_order_path(order_path: str) -> Iterator[None]:
 
 
 def cmd_dispatch(order_path: str, roster_path: str) -> int:
-    """Strict legacy/controller socket shim; no intake LLM or form repair."""
+    """Strict legacy/controller dispatch; no intake LLM or form repair."""
     with _request_log_order_path(order_path):
         return _dispatch_order(_strict_order(order_path), roster_path)
 
@@ -6802,30 +6956,41 @@ def _dispatch_order(order: dict, roster_path: str) -> int:
             process = None
         timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
         deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
-        if process is not None:
-            try:
-                process.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired as error:
-                matching = next(
-                    (
-                        lease
-                        for candidate, lease in ledger.active_claims()
-                        if candidate == key
-                    ),
-                    None,
-                )
-                if matching is None or not _reconcile_claim(
-                    ledger, key, matching, force=True
-                ):
-                    raise RecruiterError(
-                        f"job runner for {order['order_id']} exceeded its lease window"
-                    ) from error
-        # Normal jobs publish before exiting. A killed/crashed runner may need the standing
-        # reconciler to publish a blocked receipt; this short bounded wait is anomaly-only.
         while (
             ledger.completed_result(key, order) is None and time.monotonic() < deadline
         ):
-            time.sleep(0.1)
+            if process is not None:
+                returncode = cast(Any, process).poll()
+                if returncode is not None:
+                    _settle_exited_spawn(
+                        ledger,
+                        key,
+                        order,
+                        owner,
+                        returncode=returncode,
+                        operation="dispatch",
+                    )
+                    process = None
+            else:
+                lease = _active_claim_for(ledger, key)
+                if lease is None or not _runner_alive(lease.get("runner_pid"), key):
+                    _settle_exited_spawn(
+                        ledger,
+                        key,
+                        order,
+                        owner,
+                        returncode=None,
+                        operation="dispatch",
+                    )
+            time.sleep(HEALTH_PROBE_SECONDS)
+        if ledger.completed_result(key, order) is None:
+            matching = _active_claim_for(ledger, key)
+            if matching is None or not _reconcile_dead_claim_fixpoint(
+                ledger, key, matching
+            ):
+                raise RecruiterError(
+                    f"job runner for {order['order_id']} exceeded its lease window"
+                )
     result = ledger.completed_result(key, order)
     if result is None:
         raise RecruiterError(
@@ -6845,7 +7010,7 @@ def _dispatch_order(order: dict, roster_path: str) -> int:
 
 
 def cmd_request(order_path: str, roster_path: str) -> int:
-    """Strict legacy socket shim; arbitrary or malformed intake is rejected in Python."""
+    """Strict asynchronous dispatch; malformed intake is rejected in Python."""
     with _request_log_order_path(order_path):
         return _request_order(_strict_order(order_path), roster_path)
 
@@ -6937,19 +7102,29 @@ def _request_order(order: dict, roster_path: str) -> int:
             )
             print(f"REQUEST_TERMINAL {json.dumps(receipt, sort_keys=True)}", flush=True)
             return 0 if receipt["verdict"] == "passed" else 1
-        if (
-            process is not None
-            and cast(Any, process).poll() is not None
-            and state.get("state")
-            not in (
-                "running",
-                "finished",
-                "cleanup-failed",
-            )
-        ):
-            raise RecruiterError(
-                f"request owner for {order['order_id']} exited before worker health: state={state.get('state')}"
-            )
+        if process is not None:
+            returncode = cast(Any, process).poll()
+            if returncode is not None:
+                _settle_exited_spawn(
+                    ledger,
+                    key,
+                    order,
+                    owner,
+                    returncode=returncode,
+                    operation="request",
+                )
+                process = None
+        else:
+            lease = _active_claim_for(ledger, key)
+            if lease is None or not _runner_alive(lease.get("runner_pid"), key):
+                _settle_exited_spawn(
+                    ledger,
+                    key,
+                    order,
+                    owner,
+                    returncode=None,
+                    operation="request",
+                )
         time.sleep(HEALTH_PROBE_SECONDS)
     raise RecruiterError(
         f"request {order['order_id']} did not reach worker-healthy before its startup deadline"
@@ -6986,6 +7161,49 @@ def _maybe_notify_completion(
     return True
 
 
+def _terminal_runner_identity(ledger: JobLedger, key: str) -> dict[str, object] | None:
+    request = ledger.request_dir(key)
+    if (request / "runner-completed.json").is_file():
+        return None
+    receipt_path = request / "receipt.json"
+    if not receipt_path.is_file():
+        return None
+    runner_path = request / "runner.json"
+    try:
+        if runner_path.is_file():
+            runner = json.loads(runner_path.read_text())
+        else:
+            receipt = json.loads(receipt_path.read_text())
+            if not isinstance(receipt, dict):
+                raise RecruiterError(f"terminal receipt {receipt_path} is invalid")
+            runner = ledger._runner_identity_from_receipt(receipt, receipt_path)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"runner identity for {key} is unreadable: {error}"
+        ) from error
+    if not isinstance(runner, dict):
+        raise RecruiterError(f"runner identity for {key} is invalid")
+    return cast(dict[str, object], runner)
+
+
+def _reconcile_exact_request_runner(ledger: JobLedger, key: str) -> bool:
+    lease = _active_claim_for(ledger, key)
+    if lease is not None:
+        if _runner_alive(lease.get("runner_pid"), key):
+            return False
+        return _reconcile_dead_claim_fixpoint(ledger, key, lease, emit=False)
+    runner = _terminal_runner_identity(ledger, key)
+    if runner is None:
+        return False
+    pid = runner.get("runner_pid")
+    start = runner.get("runner_start_time")
+    if isinstance(start, str) and _process_start_time(pid) == start:
+        return False
+    return ledger.mark_runner_completed(
+        key, source="await-reconciler", require_dead=True
+    )
+
+
 def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
     """Block in Python until a request is terminal or needs an owner decision.
 
@@ -7008,7 +7226,12 @@ def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
         order.get("timeout_ms", _default_timeout_ms(order["stage_id"])) / 1000
         + LEASE_GRACE_SECONDS
     )
+    next_reconcile = 0.0
     while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_reconcile:
+            next_reconcile = now + HEALTH_PROBE_SECONDS
+            _reconcile_exact_request_runner(ledger, key)
         state = ledger.state(key)
         if state.get("state") == "awaiting-requester":
             response = {
@@ -7194,9 +7417,16 @@ def cmd_await_any(
         seen.add(request_id)
         watched.append((path, order, key, request_id))
     deadline = time.monotonic() + timeout_ms / 1000
+    next_reconcile = 0.0
     while True:
+        now = time.monotonic()
+        should_reconcile = now >= next_reconcile
+        if should_reconcile:
+            next_reconcile = now + max(poll_seconds, HEALTH_PROBE_SECONDS)
         states: dict[str, str] = {}
         for path, order, key, request_id in watched:
+            if should_reconcile:
+                _reconcile_exact_request_runner(ledger, key)
             state = ledger.state(key)
             states[request_id] = str(state.get("state"))
             if state.get("state") == "awaiting-requester":
@@ -7313,6 +7543,29 @@ def cmd_respond(
     return 0
 
 
+def _await_inflight_launches(
+    ledger: JobLedger, key: str, *, timeout_seconds: float = 10.0
+) -> None:
+    """Wait until live launch owners commit a pane identity or die, without holding flock."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        inflight = [
+            journal
+            for candidate, journal in ledger.launch_journals()
+            if candidate == key
+            and journal.get("state") == "launching"
+            and _same_owner_process(journal)
+        ]
+        if not inflight:
+            return
+        if time.monotonic() >= deadline:
+            launch_ids = ", ".join(str(item.get("launch_id")) for item in inflight)
+            raise RecruiterError(
+                "cancellation is waiting for live in-flight launch(es): " + launch_ids
+            )
+        time.sleep(0.05)
+
+
 def cmd_cancel(order_path: str, control_token: str) -> dict[str, object]:
     """Authenticate, fence, clean, and terminalize one requester cancellation."""
     try:
@@ -7344,29 +7597,33 @@ def cmd_cancel(order_path: str, control_token: str) -> dict[str, object]:
     token = outcome.get("token")
     if not isinstance(lease, dict) or not isinstance(token, str):
         raise RecruiterError("cancellation fence returned invalid ownership")
-    with _request_runtime_lock(key):
-        cleanup = _cancel_owned_request(ledger, key, lease)
-        manifest = completion.build_manifest(
-            order,
-            ledger.request_dir(key),
-            token,
-            lifecycle.request_identity(order),
-        )
-        completion.write_manifest(
-            ledger.request_dir(key) / "artifact-manifest.json", manifest
-        )
-        reason = "requester cancelled this request using its control token"
-        result = _write_required_blocked_bundle(order, manifest, reason)
-        finalized = ledger.finalize(
-            key,
-            token,
-            order,
-            result,
-            cleanup=cleanup,
-            cancelled=True,
-            cancellation_reason=reason,
-            completion_source="requester-cancel",
-        )
+    _await_inflight_launches(ledger, key)
+    cleanup = _cancel_owned_request(ledger, key, lease)
+    _terminate_owned_runner(lease.get("runner_pid"), key)
+    manifest = completion.build_manifest(
+        order,
+        ledger.request_dir(key),
+        token,
+        lifecycle.request_identity(order),
+    )
+    completion.write_manifest(
+        ledger.request_dir(key) / "artifact-manifest.json", manifest
+    )
+    reason = "requester cancelled this request using its control token"
+    result = _write_required_blocked_bundle(order, manifest, reason)
+    finalized = ledger.finalize(
+        key,
+        token,
+        order,
+        result,
+        cleanup=cleanup,
+        cancelled=True,
+        cancellation_reason=reason,
+        completion_source="requester-cancel",
+        defer_runner_completion=True,
+    )
+    if finalized:
+        ledger.mark_runner_completed(key, source="cancellation", require_dead=True)
     receipt = ledger.completed_receipt(key, order)
     result = ledger.completed_result(key, order)
     return {
@@ -7390,7 +7647,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         **_herdr_owner_record(),
         "generation": generation,
         "request_id": request_id,
+        "runner_argv": _process_cmdline(os.getpid()),
         "runner_pid": os.getpid(),
+        "runner_session_id": os.getsid(0),
+        "runner_start_time": _process_start_time(os.getpid()),
         "phase_leader_pane": order["cockpit_pane"],
         "recruiter_pane": _recruiter_pane_from_state(),
     }
@@ -7508,9 +7768,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             order,
             result,
             cleanup=cleanup,
+            defer_runner_completion=True,
             exit_code=1,
             completion_source="mechanical-validation",
         )
+        ledger.mark_runner_completed(key, source="supervisor")
         return 1
 
     inactivity_lock = threading.Lock()
@@ -7815,6 +8077,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         order,
         result,
         cleanup=cleanup,
+        defer_runner_completion=True,
         exit_code=result_code,
         completion_source="result-or-agent-status",
     )
@@ -7831,6 +8094,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         f"Request finished with verdict {result['verdict']} after artifact publication.",
         {"verdict": result["verdict"]},
     )
+    ledger.mark_runner_completed(key, source="supervisor")
     marker = "DONE" if cleanup["verified_absent"] else "CLEANUP_FAILED"
     print(f"ORDER {order['order_id']} {marker}", flush=True)
     return result_code
@@ -7886,19 +8150,15 @@ def _service_role_pane(panes: Sequence[dict], role_label: str) -> dict | None:
 
 
 def _recruit_door_command(roster_path: str) -> str:
-    """A strict compatibility door for exactly one order file over the Hub socket."""
+    """A strict compatibility door for exactly one order file."""
     python = shlex.quote(sys.executable)
-    script = shlex.quote(str(_canonical_engine_path().with_name("client.py")))
+    script = shlex.quote(str((HERE / "client.py").resolve()))
     roster = shlex.quote(str(Path(roster_path).expanduser().resolve()))
-    socket_override = command_runtime.getenv("UPAGENT_SOCKET")
-    socket_env = (
-        f"UPAGENT_SOCKET={shlex.quote(socket_override)} " if socket_override else ""
-    )
     return (
         'recruit() { if [ "$#" -ne 1 ]; then '
         "echo 'recruit expects exactly one strict order.json path' >&2; return 2; fi; "
-        f'{socket_env}{python} {script} --target recruiter --roster {roster} request -- "$1"; '
-        "} # strict socket request door"
+        f'{python} {script} --target recruiter --roster {roster} request -- "$1"; '
+        "} # strict per-command request door"
     )
 
 
@@ -8005,8 +8265,8 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
     `--separate-workspaces` restores the dedicated `shared-services` workspace. The pane is a
     visible status surface ONLY; requesters submit through the CLI and durable ledger. The
     pane's `recruit()` function is armed as a sealed stub that refuses and names the real
-    doors — pane text is not a message queue. Persists workspace, mode, pane, roster, and
-    supervisor ownership to STATE_FILE.
+    doors — pane text is not a message queue. Persists workspace, mode, pane, and roster to
+    STATE_FILE; it starts no supervisor or daemon.
     """
     # Validate the roster up front so a missing/bad roster fails loudly at bring-up, not
     # silently at the first hire.
@@ -8043,7 +8303,6 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
         herdr_session=herdr_session,
     )
 
-    supervisor_token = uuid.uuid4().hex
     state = {
         "workspace_id": workspace_id,
         "workspace_label": workspace_label,
@@ -8057,19 +8316,8 @@ def cmd_up(roster_path: str, *, separate_workspaces: bool = False) -> int:
         "separate_workspaces": separate_workspaces,
         "recruiter_pane": recruiter_pane,
         "roster": roster_path,
-        "supervisor_token": supervisor_token,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    JobLedger._write_json(STATE_FILE, state)
-    supervisor = threading.Thread(
-        target=command_runtime.run_detached,
-        args=(cmd_supervise, supervisor_token),
-        name="upagent-supervisor",
-        daemon=True,
-    )
-    supervisor.start()
-    # A process id, not a transferable child authority: the supervisor dies with the Hub.
-    state["supervisor_pid"] = os.getpid()
     JobLedger._write_json(STATE_FILE, state)
     # Surface the broker in Herdr's agents sidebar so "up" is visible, not just a shell.
     _report_state(
@@ -8119,7 +8367,7 @@ def _recruiter_pane_cleanup_decision(
 
 
 def cmd_down() -> int:
-    """Terminalize all owned jobs, close the Recruiter pane, and retire its supervisor."""
+    """Terminalize owned jobs, close the owned services pane, and remove its state."""
     cmd_reconcile(force=True)
     try:
         state = json.loads(STATE_FILE.read_text())
@@ -8465,18 +8713,18 @@ def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> Non
 
 
 def consult_index_dir() -> Path:
-    """The Hub's own record of the consults it brokered. Resolved from `STATE_FILE` at call
+    """The Recruiter's own record of the consults it brokered. Resolved from `STATE_FILE` at call
     time, never frozen at import, so it follows the Recruiter's state root."""
     return STATE_FILE.parent / "consults"
 
 
 def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
-    """Where the Hub records that IT brokered this consult for this requester.
+    """Where the Recruiter records that IT brokered this consult for this requester.
 
     Under the Recruiter's own state root, not the caller's tree: the point of the index is that
     the worker's `result.json` is not the only account of what happened. Both path segments are
     digests — `consult_id` is caller-controlled and would otherwise be a traversal into the
-    Hub's state directory, and the request-id digest is the identity being verified anyway.
+    Recruiter's state directory, and the request-id digest is the identity being verified anyway.
     """
     requester_key = hashlib.sha256(requested_by.encode()).hexdigest()[:16]
     return (
@@ -8485,7 +8733,7 @@ def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
 
 
 def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
-    """The Hub's own record of one claimed consult, or None when nothing backs the claim."""
+    """The Recruiter's own record of one claimed consult, or None when nothing backs the claim."""
     consult_id = claim.get("consult_id")
     if not isinstance(requested_by, str) or not requested_by:
         return None
@@ -8515,7 +8763,7 @@ def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
 
 
 def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
-    """Split a worker's claimed consults into the ones the Hub can confirm and the ones it cannot.
+    """Split a worker's claimed consults into the ones the Recruiter can confirm and the ones it cannot.
 
     WHAT THIS CLOSES: forgery. A `consults` entry used to be four keys of prose that nothing
     ever read, so a worker could bank a receipt for a consultation that never happened. Now each
@@ -8533,7 +8781,7 @@ def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
     bank a valid receipt; the cost of a fake rises from one line of JSON to actually hiring a
     specialist, which is a real raise and not a proof of diligence.
 
-    Every field of a verified entry is read from the Hub's record, never echoed from the claim.
+    Every field of a verified entry is read from the Recruiter's record, never echoed from the claim.
     Advisory by construction: this reports, and never raises into publication — a bookkeeping
     fault must not destroy a result that represents real work.
     """
@@ -8606,7 +8854,7 @@ def _record_consult_in_index(receipt: dict) -> Path | None:
 
 def _publish_consult_receipt(receipt: dict, receipt_path: Path) -> None:
     """Publish the consult's own terminal record — beside the consult.json for the caller, and
-    into the Hub's requester-keyed index for the audit.
+    into the Recruiter's requester-keyed index for the audit.
 
     Every field derives from an ordinary UpAgent request id or result path plus the durable
     ORDER_RECEIPT the generic lifecycle already produced — nothing here is invented.
@@ -8870,8 +9118,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_run = sub.add_parser("run-job", help=argparse.SUPPRESS)
     p_run.add_argument("key", help=argparse.SUPPRESS)
-    p_supervise = sub.add_parser("supervise", help=argparse.SUPPRESS)
-    p_supervise.add_argument("token", help=argparse.SUPPRESS)
     p_up = sub.add_parser("up", help="ensure the services workspace")
     p_up.add_argument(
         "--separate-workspaces",
@@ -8900,7 +9146,12 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
-        _require_hub_authority()
+        if args.command not in (
+            "run-job",
+            "status",
+            "specialists",
+        ):
+            _require_hub_authority()
         if args.command == "recruit":
             return cmd_recruit(args.order, args.roster)
         if args.command == "dispatch":
@@ -8934,8 +9185,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "run-job":
             return cmd_run_job(args.key, args.roster)
-        if args.command == "supervise":
-            return cmd_supervise(args.token)
         if args.command == "up":
             return cmd_up(args.roster, separate_workspaces=args.separate_workspaces)
         if args.command == "down":

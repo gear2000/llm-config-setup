@@ -289,8 +289,8 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `upagent-cancel` | Authenticate and cancel one active UpAgent request at any lifecycle point using its existing… |
 | `upagent-cleanup` | Dry-run or explicitly apply terminal-only UpAgent history pruning while retaining auditable,… |
 | `upagent-get` | Read one UpAgent request's state, retained result, receipt, and typed artifact pointers, including… |
-| `upagent-ls` | List active, terminal, or all requests known to the canonical machine-local UpAgent Hub without… |
-| `upagent-run` | Run one bounded ad-hoc task through the canonical machine-local UpAgent Hub with an explicit… |
+| `upagent-ls` | List active, terminal, or all requests known to the canonical machine-local UpAgent Recruiter… |
+| `upagent-run` | Run one bounded ad-hoc task through the canonical machine-local UpAgent Recruiter with an explicit… |
 <!-- END:inventory -->
 
 ## The compose engine

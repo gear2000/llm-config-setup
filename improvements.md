@@ -1,6 +1,10 @@
 # Reliable Herdr Lifecycle Coordination
 
-Status: design proposal; not yet implemented
+Status: historical proposal; current UpAgent runtime contracts live in
+`.shared-llm/public/extensions/common/upagent/README.md` and
+`.shared-llm/public/extensions/common/upagent/FUNDAMENTALS.md`
+
+The body below is preserved as design context and is not authoritative for the current runtime.
 
 This document describes how to make Herdr plan execution reliably return control to the correct
 agent when a phase finishes, blocks, fails, disappears, or needs human input. It also evaluates

@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -163,7 +164,7 @@ def test_stalled_leader_is_confirmed_then_reported_urgent(tmp_path: Path) -> Non
     assert event["severity"] == "urgent"
 
 
-def _old_urgent_event(ctx: "phase_await.PhaseContext") -> dict:
+def _old_urgent_event(ctx: Any) -> dict:
     event = {
         "schema_version": 1,
         "event_id": "evt-old",

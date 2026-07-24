@@ -37,7 +37,7 @@ class _Parser(command_runtime.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="just upagent",
-        description="Submit and observe work through the canonical machine-local UpAgent Hub.",
+        description="Submit and observe work through canonical per-command UpAgent.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   just upagent lists --type offerings
@@ -53,10 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("help", help="print this complete grammar; launches nothing")
-    up = sub.add_parser("up", help="discover or start the canonical Hub and services")
+    up = sub.add_parser("up", help="ensure the optional services status pane")
     up.add_argument("--separate-workspaces", action="store_true")
 
-    status = sub.add_parser("status", help="show Hub or request state")
+    status = sub.add_parser("status", help="show runtime or request state")
     status.add_argument("--request")
     status.add_argument("--json", action="store_true")
 
@@ -141,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("--json", action="store_true")
 
     cleanup = sub.add_parser(
-        "cleanup", help="dry-run or prune successfully terminal Hub history"
+        "cleanup", help="dry-run or prune successfully terminal request history"
     )
     selection = cleanup.add_mutually_exclusive_group(required=True)
     selection.add_argument("--request")

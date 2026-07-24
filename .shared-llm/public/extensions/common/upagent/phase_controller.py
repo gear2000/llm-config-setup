@@ -47,7 +47,7 @@ recruiter: Any = None
 
 
 def _bind_recruiter_runtime(runtime: Any) -> None:
-    """Accept the Hub's one canonical Recruiter module; never load a target-local copy."""
+    """Accept the per-command client's canonical Recruiter module."""
     global recruiter
     if recruiter is not None and recruiter is not runtime:
         raise RuntimeError("phase controller Recruiter runtime is already bound")

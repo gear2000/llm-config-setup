@@ -5,19 +5,20 @@ Run: python3 -m pytest .shared-llm/public/extensions/common/upagent/contracts_co
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
 # Import the sibling module by path so the test runs from the repo root without packaging.
-import importlib.util
-from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location(
     "specialist_contracts_consult", Path(__file__).with_name("contracts_consult.py")
 )
+assert _spec and _spec.loader
 contracts = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(contracts)  # type: ignore[union-attr]
+_spec.loader.exec_module(contracts)
 ConsultError = contracts.ConsultError
 
 
@@ -108,7 +109,9 @@ def test_answer_malformed_citation_fails() -> None:
 
 def test_answer_consult_id_mismatch_fails() -> None:
     with pytest.raises(ConsultError, match="does not match"):
-        contracts.parse_answer(json.dumps(_valid_answer()), expected_consult_id="other-id")
+        contracts.parse_answer(
+            json.dumps(_valid_answer()), expected_consult_id="other-id"
+        )
 
 
 def test_answer_consult_id_match_ok() -> None:
@@ -120,7 +123,10 @@ def test_answer_consult_id_match_ok() -> None:
 
 
 def test_failure_answer_parses_without_citations() -> None:
-    fa = {"consult_id": "phase-0.stage-1.pass-1.consult-1", "error": "specialist crashed"}
+    fa = {
+        "consult_id": "phase-0.stage-1.pass-1.consult-1",
+        "error": "specialist crashed",
+    }
     parsed = contracts.parse_answer(json.dumps(fa))
     assert parsed["error"] == "specialist crashed"
 

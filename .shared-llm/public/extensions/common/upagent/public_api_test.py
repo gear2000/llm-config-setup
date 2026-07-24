@@ -1064,3 +1064,21 @@ def test_cleanup_refuses_active_cleanup_failed_and_batch_skips_malformed(
     assert by_id[REQUEST_ID]["status"] == "skipped"
     assert by_id[second]["status"] == "skipped"
     assert by_id[malformed]["status"] == "skipped"
+
+
+def test_missing_service_state_self_heals_without_prior_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panes = iter((None, "created-service-pane"))
+    starts: list[str] = []
+    monkeypatch.setattr(
+        public_api.recruiter, "_recruiter_pane_from_state", lambda: next(panes)
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_up",
+        lambda roster: starts.append(roster) or 0,
+    )
+
+    assert public_api._cockpit_pane() == "created-service-pane"
+    assert starts == [str(public_api.HERE / "offerings.yaml")]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Request-local command context for concurrent in-process Hub dispatch."""
+"""Command-local context for one per-command UpAgent dispatch."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import Context, ContextVar
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -50,7 +50,7 @@ def getenv(name: str, default: str | None = None) -> str | None:
 
 
 def stdin_stream() -> TextIO:
-    """Return request-local input; Hub targets never consume process stdin."""
+    """Return command-local input."""
 
     context = _CONTEXT.get()
     return context.stdin if context is not None and context.stdin else sys.stdin
@@ -86,11 +86,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def command_print(*args: object, **kwargs: Any) -> None:
-    """``print`` replacement whose default streams are scoped to one Hub request.
-
-    Hub-owned background entry points explicitly install a context with no output sinks, so
-    runner diagnostics use process streams rather than the response that started them.
-    """
+    """``print`` replacement whose default streams are scoped to one command."""
 
     context = _CONTEXT.get()
     requested = kwargs.get("file")
@@ -100,11 +96,6 @@ def command_print(*args: object, **kwargs: Any) -> None:
         elif requested is sys.stderr:
             kwargs["file"] = context.stderr or sys.stderr
     builtins.print(*args, **kwargs)
-
-
-def run_detached(call: Any, *args: object) -> Any:
-    """Run a background entry point in an empty context on every supported Python build."""
-    return Context().run(call, *args)
 
 
 def write_stdout(value: str) -> None:
