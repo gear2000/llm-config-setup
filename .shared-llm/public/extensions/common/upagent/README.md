@@ -8,29 +8,35 @@ result, closes owned panes, publishes a receipt, and releases the lease. See
 ## Per-command execution
 
 Every recipe invokes `client.py`. Before importing any UpAgent runtime module or classifying the
-command, a linked-worktree client resolves git's common directory and re-execs the canonical
-main-checkout client. That process imports current canonical source, uses repository-scoped
-machine-local state, runs one command, and exits. There is no resident Python Hub, Unix command socket, protocol handshake,
-module cache, or restart step; a re-sync is visible to the next post-cutover command by
-construction. The hard cutover cannot retrofit an arbitrarily old pre-cutover binary that never
-implemented canonical re-exec; such legacy processes must be retired explicitly.
+command, a linked-worktree client resolves the source checkout folder from
+`$UPAGENT_CANONICAL_REPO` when set, otherwise from exactly one checked-out `main` worktree. Ambiguity
+fails loudly. That process imports current source from that checkout folder, uses repository-scoped
+machine-local state, runs one command, and exits. There is no resident Python Hub, Unix command
+socket, protocol handshake, module cache, or restart step; a re-sync is visible to the next
+post-cutover command by construction. The hard cutover cannot retrofit an arbitrarily old
+pre-cutover binary that never implemented re-exec from the source checkout folder; such legacy
+processes must be retired explicitly.
 
-Mutations use one coarse machine-local `flock`. Individual token-fenced ledger writes/CAS methods
-hold it only while committing durable transitions; reconciliation never wraps its process or Herdr
-work in an outer lock, and the lock is never held during Herdr waits or a worker lifetime.
-Read-only status, get, list, and await operations remain lock-free. Fire-and-forget requests start a
-standalone `recruiter.py run-job` supervisor with `start_new_session=True`; its PID and ownership
-are written into the durable lease. Concurrent duplicate submissions may briefly start competing
-children; the child that loses the atomic claim exits, while its caller attaches to the proven live
-winner instead of reporting a false startup failure. Blocking dispatch polls its child and
-immediately attaches, reconciles a dead claim, or terminalizes a child that exits without ownership.
-Each mutating lifecycle command checks for orphaned active claims before its requested operation.
-Reconciliation uses a bounded launch/claim fixpoint so killing an in-flight owner and closing its
-newly-dead launch happen in one invocation. If a crash occurs after the winning active lease is
-published but before `runner.json`, the terminal receipt retains that lease's exact PID/birth pair;
-crash reconciliation reconstructs only from that immutable identity before publishing
-`runner-completed.json`. A losing claimant can never overwrite it. Pure reads remain lock-free. `$UPAGENT_RUNTIME_DIR`, `$UPAGENT_HUB_DIR`, and `$UPAGENT_STATE` may override the shared
-runtime, ledger, and service-state paths.
+The distributed lock is one machine-local `flock` shared by commands and detached supervisors.
+Individual token-fenced ledger writes/CAS methods hold it only while committing durable
+transitions; reconciliation never wraps its process or Herdr work in an outer lock, and the lock is
+never held during Herdr waits or a worker lifetime. Status, get, and list are pure reads and remain
+lock-free. `await` and `await-any` do not hold the distributed lock while waiting or polling; if an
+await sweep proves the exact recorded runner process died and must repair shared request state, it
+acquires the distributed lock briefly for that fenced ledger mutation only. Fire-and-forget
+requests start a standalone `recruiter.py run-job` supervisor with `start_new_session=True`; its PID
+and ownership are written into the durable lease. Concurrent duplicate submissions may briefly
+start competing children; the child that loses the atomic claim exits, while its caller attaches to
+the proven live winner instead of reporting a false startup failure. Blocking dispatch polls its
+child and immediately attaches, reconciles a dead claim, or terminalizes a child that exits without
+ownership. Each mutating lifecycle command checks for orphaned active claims before its requested
+operation. Reconciliation uses a bounded launch/claim fixpoint so killing an in-flight owner and
+closing its newly-dead launch happen in one invocation. If a crash occurs after the winning active
+lease is published but before `runner.json`, the terminal receipt retains that lease's exact
+PID/birth pair; crash reconciliation reconstructs only from that immutable identity before
+publishing `runner-completed.json`. A losing claimant can never overwrite it. Pure status/get/list
+reads remain lock-free. `$UPAGENT_RUNTIME_DIR`, `$UPAGENT_HUB_DIR`, and `$UPAGENT_STATE` may
+override the shared runtime, ledger, and service-state paths.
 
 `up` and `down` are thin, idempotent presentation verbs. `up` ensures the services pane and writes
 its state file; it starts no daemon. `down` terminalizes owned active work, closes only a verified
@@ -364,6 +370,6 @@ UUID/ULID idempotency and conflict behavior, the exact nine-entry text/JSON rost
 Codex / Pi child tokens, specialist offering resolution, request mailboxes, identity/lease fencing,
 startup health, timeout authority, typed manifests, every missing/malformed artifact, one bounded
 same-worker repair, manager degradation, specialist projection, mandatory-consult enforcement,
-publication fault ordering, and cleanup. Focused per-command tests also cover mutation exclusion, lock-free reads, fresh module imports,
+publication fault ordering, and cleanup. Focused per-command tests also cover mutation exclusion, lock-free pure reads, fresh module imports,
 detached-supervisor launch failure, duplicate attachment to one live runner, main/worktree shared
 state, thin service verbs, and launch fault compensation/reconciliation.

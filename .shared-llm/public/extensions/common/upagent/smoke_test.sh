@@ -5,6 +5,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_CHECKOUT="$(cd "$HERE/../../../../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/upagent-smoke.XXXXXX")"
 BIN="$WORK/bin"
 STATE="$WORK/fake-herdr"
@@ -184,6 +185,7 @@ export PATH="$BIN:$PATH"
 export UPAGENT_SMOKE_STATE="$STATE"
 export HERDR_SESSION="local-smoke"
 export HERDR_SOCKET_PATH="$STATE/herdr.sock"
+export UPAGENT_CANONICAL_REPO="$SOURCE_CHECKOUT"
 export UPAGENT_RUNTIME_DIR="$WORK/runtime"
 export UPAGENT_HUB_DIR="$WORK/ledger"
 export UPAGENT_STATE="$WORK/services.json"
