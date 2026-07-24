@@ -11,7 +11,7 @@ _UPAGENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagen
 # Start one checked plan through the deterministic TUI-controller transaction.
 # There is no standing plan watchdog. The TUI receives phase conditions through
 # blocking UpAgent awaits, while urgent unacknowledged conditions reach the human
-# through `herdr notification`. The TUI joins Herdr's unified workspace by default.
+# through `herdr notification`. The TUI joins the shared `upagent` workspace by default.
 # Use --separate-workspaces when the shared services use that mode. A Claude TUI
 # also starts Claude Remote Control as --remote-control=<slug>.
 #

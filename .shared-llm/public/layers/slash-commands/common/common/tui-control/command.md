@@ -33,7 +33,7 @@ The default runtime topology is ONE unified workspace — services and the run s
 tabs (`just upagent-up --separate-workspaces` restores the two-workspace layout):
 
 ```text
-ws: herdr                      ← everything, as tabs (single-workspace default)
+ws: upagent                    ← everything, as tabs (single-workspace default)
   tab: services                ← optional status surface · plan-agnostic
     └── recruiter  (UpAgent)        deterministic lifecycle and durable mailboxes;
                                     ordinary work AND specialist consults, one door
@@ -183,7 +183,7 @@ STOPPED — This run did not succeed. See: <absolute run-status.md path>
 ```
 
 "This run's panes" is mode-aware on purpose: in the single-workspace default it means the run's
-tabs only — the `herdr` workspace and its `services` tab stay up for the next run — while in
+tabs only — the `upagent` workspace and its `services` tab stay up for the next run — while in
 `--separate-workspaces` mode the whole `<slug>` workspace is safe to close. Never tell the human
 to close a workspace that still hosts the services.
 

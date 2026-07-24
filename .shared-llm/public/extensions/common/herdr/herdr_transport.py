@@ -14,7 +14,8 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-UNIFIED_WORKSPACE_LABEL = "herdr"
+UNIFIED_WORKSPACE_LABEL = "upagent"
+LEGACY_UNIFIED_WORKSPACE_LABEL = "herdr"
 PHASE_START_RECEIPT_ENV = "UPAGENT_PHASE_START_RECEIPT"
 HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
 HERDR_SESSION_ENV = "HERDR_SESSION"
