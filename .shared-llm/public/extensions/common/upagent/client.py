@@ -16,27 +16,103 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
+CANONICAL_REPO_ENV = "UPAGENT_CANONICAL_REPO"
+MAIN_BRANCH_REF = "refs/heads/main"
+UPAGENT_CLIENT_REL = Path(".shared-llm/public/extensions/common/upagent/client.py")
 
 
-def _canonical_client_bootstrap() -> None:
-    """Re-exec the main-checkout client before importing any UpAgent runtime module."""
+def _git(start: Path, *args: str) -> str:
     try:
-        common = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=HERE,
+        return subprocess.run(
+            ["git", *args],
+            cwd=start,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError(
-            f"cannot resolve canonical UpAgent client from {HERE}: {error}"
+            f"cannot resolve canonical UpAgent client from {start}: {error}"
         ) from error
-    common_path = Path(common).resolve()
-    repo_root = common_path.parent if common_path.name == ".git" else common_path
-    canonical = (
-        repo_root / ".shared-llm/public/extensions/common/upagent/client.py"
+
+
+def _worktree_records(porcelain: str) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in porcelain.splitlines():
+        if not line:
+            if current:
+                records.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value
+    if current:
+        records.append(current)
+    return records
+
+
+def _validated_checkout_root(path: Path, label: str) -> Path:
+    root = Path(
+        _git(path, "rev-parse", "--path-format=absolute", "--show-toplevel")
     ).resolve()
+    if root != path.resolve():
+        raise RuntimeError(f"{label} must be a checkout root, got {path}")
+    if not (root / UPAGENT_CLIENT_REL).is_file():
+        raise RuntimeError(f"{label} does not contain UpAgent source: {root}")
+    return root
+
+
+def _explicit_repo_root() -> Path | None:
+    value = os.environ.get(CANONICAL_REPO_ENV)
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise RuntimeError(f"{CANONICAL_REPO_ENV} must be absolute")
+    return _validated_checkout_root(path.resolve(), CANONICAL_REPO_ENV)
+
+
+def _main_checkout_candidates(start: Path) -> list[Path]:
+    records = _worktree_records(_git(start, "worktree", "list", "--porcelain"))
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for record in records:
+        if "bare" in record or record.get("branch") != MAIN_BRANCH_REF:
+            continue
+        worktree = record.get("worktree")
+        if not worktree:
+            continue
+        path = Path(worktree).resolve()
+        if path in seen or not (path / UPAGENT_CLIENT_REL).is_file():
+            continue
+        candidates.append(_validated_checkout_root(path, "main worktree"))
+        seen.add(path)
+    return candidates
+
+
+def _canonical_repo_root(start: Path) -> Path:
+    explicit = _explicit_repo_root()
+    if explicit is not None:
+        return explicit
+    candidates = _main_checkout_candidates(start)
+    if len(candidates) == 1:
+        return candidates[0]
+    hint = f"set {CANONICAL_REPO_ENV} to an absolute checkout root"
+    if not candidates:
+        raise RuntimeError(
+            f"no checked-out main branch UpAgent source found from {start}; {hint}"
+        )
+    raise RuntimeError(
+        "ambiguous checked-out main branch UpAgent sources: "
+        + ", ".join(str(path) for path in candidates)
+        + f"; {hint}"
+    )
+
+
+def _canonical_client_bootstrap() -> None:
+    """Re-exec the main-checkout client before importing any UpAgent runtime module."""
+    canonical = (_canonical_repo_root(HERE) / UPAGENT_CLIENT_REL).resolve()
     current = Path(__file__).resolve()
     if canonical != current:
         if not canonical.is_file():
@@ -54,6 +130,9 @@ def _load(name: str, path: Path) -> Any:
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
+    runtime = sys.modules.get("upagent_command_runtime")
+    if runtime is not None and name != "upagent_command_runtime":
+        module.print = runtime.command_print
     return module
 
 
@@ -75,8 +154,10 @@ RUNNER_TARGETS = {
 RECRUITER_TARGETS = frozenset(
     ("public", "recruiter", "phase-controller", "direct-controller")
 )
-READ_ONLY_PUBLIC = frozenset(("help", "status", "get", "lists", "await", "await-any"))
-READ_ONLY_RECRUITER = frozenset(("status", "specialists", "await", "await-any"))
+READ_ONLY_PUBLIC = frozenset(("help", "status", "get", "lists"))
+READ_ONLY_RECRUITER = frozenset(("status", "specialists"))
+EXACT_RECONCILE_PUBLIC = frozenset(("await", "await-any"))
+EXACT_RECONCILE_RECRUITER = frozenset(("await", "await-any"))
 
 
 class ClientError(RuntimeError):
@@ -110,6 +191,15 @@ def _is_mutating(target: str, argv: list[str]) -> bool:
     if target == "direct-controller":
         return command != "steps"
     return target not in ("tui-controller", "run-lifecycle")
+
+
+def _uses_exact_reconciliation(target: str, argv: list[str]) -> bool:
+    command = argv[0] if argv else None
+    if target == "public":
+        return command in EXACT_RECONCILE_PUBLIC
+    if target == "recruiter":
+        return _recruiter_command(argv) in EXACT_RECONCILE_RECRUITER
+    return False
 
 
 def _canonical_target_path(target: str, _cwd: Path) -> Path:
@@ -183,8 +273,12 @@ def invoke(target: str, argv: list[str], cwd: Path) -> int:
             # Reconciliation performs process and Herdr work without an outer lock. Its
             # token-fenced JobLedger CAS methods acquire the one coarse lock only while each
             # durable mutation commits.
-            if _reconciliation_needed(recruiter) and not (
-                target == "recruiter" and _recruiter_command(argv) == "run-job"
+            if (
+                _reconciliation_needed(recruiter)
+                and not _uses_exact_reconciliation(target, argv)
+                and not (
+                    target == "recruiter" and _recruiter_command(argv) == "run-job"
+                )
             ):
                 recruiter.cmd_reconcile(force=False, emit=False)
             return _invoke_module(module, argv, cwd)

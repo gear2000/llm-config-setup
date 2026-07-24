@@ -6535,7 +6535,9 @@ def _launch_receipt_evidence(ledger: JobLedger, key: str) -> list[dict[str, obje
     ]
 
 
-def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -> bool:
+def _reconcile_claim(
+    ledger: JobLedger, key: str, lease: dict, *, force: bool, emit: bool = True
+) -> bool:
     """Close and terminalize one dead/expired owned job. Never touches an unrecorded pane."""
     expired = lease["expires_at"] <= int(time.time())
     runner_alive = _runner_alive(lease.get("runner_pid"), key)
@@ -6603,7 +6605,8 @@ def _reconcile_claim(ledger: JobLedger, key: str, lease: dict, *, force: bool) -
     if finalized:
         ledger.mark_runner_completed(key, source="reconciler", require_dead=True)
         marker = "DONE" if cleanup["verified_absent"] else "CLEANUP_FAILED"
-        print(f"ORDER {order['order_id']} {marker}", flush=True)
+        if emit:
+            print(f"ORDER {order['order_id']} {marker}", flush=True)
     return finalized
 
 
@@ -6742,7 +6745,7 @@ def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
     for _sweep in range(3):
         launches_reconciled += _reconcile_launch_journals(ledger, force=force)
         for key, lease in ledger.active_claims():
-            if _reconcile_claim(ledger, key, lease, force=force):
+            if _reconcile_claim(ledger, key, lease, force=force, emit=emit):
                 reconciled += 1
         if not ledger.active_claims() and not any(
             journal.get("state") != "closed"
@@ -6812,11 +6815,15 @@ def _active_claim_for(ledger: JobLedger, key: str) -> dict | None:
     )
 
 
-def _reconcile_dead_claim_fixpoint(ledger: JobLedger, key: str, lease: dict) -> bool:
+def _reconcile_dead_claim_fixpoint(
+    ledger: JobLedger, key: str, lease: dict, *, emit: bool = True
+) -> bool:
     """Kill/fence, close newly-dead launches, and terminalize in one bounded call."""
     current: dict | None = lease
     for _sweep in range(3):
-        if current is not None and _reconcile_claim(ledger, key, current, force=True):
+        if current is not None and _reconcile_claim(
+            ledger, key, current, force=True, emit=emit
+        ):
             return True
         _reconcile_launch_journals(ledger, force=True, only_key=key)
         current = _active_claim_for(ledger, key)
@@ -7153,6 +7160,49 @@ def _maybe_notify_completion(
     return True
 
 
+def _terminal_runner_identity(ledger: JobLedger, key: str) -> dict[str, object] | None:
+    request = ledger.request_dir(key)
+    if (request / "runner-completed.json").is_file():
+        return None
+    receipt_path = request / "receipt.json"
+    if not receipt_path.is_file():
+        return None
+    runner_path = request / "runner.json"
+    try:
+        if runner_path.is_file():
+            runner = json.loads(runner_path.read_text())
+        else:
+            receipt = json.loads(receipt_path.read_text())
+            if not isinstance(receipt, dict):
+                raise RecruiterError(f"terminal receipt {receipt_path} is invalid")
+            runner = ledger._runner_identity_from_receipt(receipt, receipt_path)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"runner identity for {key} is unreadable: {error}"
+        ) from error
+    if not isinstance(runner, dict):
+        raise RecruiterError(f"runner identity for {key} is invalid")
+    return cast(dict[str, object], runner)
+
+
+def _reconcile_exact_request_runner(ledger: JobLedger, key: str) -> bool:
+    lease = _active_claim_for(ledger, key)
+    if lease is not None:
+        if _runner_alive(lease.get("runner_pid"), key):
+            return False
+        return _reconcile_dead_claim_fixpoint(ledger, key, lease, emit=False)
+    runner = _terminal_runner_identity(ledger, key)
+    if runner is None:
+        return False
+    pid = runner.get("runner_pid")
+    start = runner.get("runner_start_time")
+    if isinstance(start, str) and _process_start_time(pid) == start:
+        return False
+    return ledger.mark_runner_completed(
+        key, source="await-reconciler", require_dead=True
+    )
+
+
 def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
     """Block in Python until a request is terminal or needs an owner decision.
 
@@ -7175,7 +7225,12 @@ def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
         order.get("timeout_ms", _default_timeout_ms(order["stage_id"])) / 1000
         + LEASE_GRACE_SECONDS
     )
+    next_reconcile = 0.0
     while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_reconcile:
+            next_reconcile = now + HEALTH_PROBE_SECONDS
+            _reconcile_exact_request_runner(ledger, key)
         state = ledger.state(key)
         if state.get("state") == "awaiting-requester":
             response = {
@@ -7361,9 +7416,16 @@ def cmd_await_any(
         seen.add(request_id)
         watched.append((path, order, key, request_id))
     deadline = time.monotonic() + timeout_ms / 1000
+    next_reconcile = 0.0
     while True:
+        now = time.monotonic()
+        should_reconcile = now >= next_reconcile
+        if should_reconcile:
+            next_reconcile = now + max(poll_seconds, HEALTH_PROBE_SECONDS)
         states: dict[str, str] = {}
         for path, order, key, request_id in watched:
+            if should_reconcile:
+                _reconcile_exact_request_runner(ledger, key)
             state = ledger.state(key)
             states[request_id] = str(state.get("state"))
             if state.get("state") == "awaiting-requester":
@@ -9087,8 +9149,6 @@ def main(argv: list[str] | None = None) -> int:
             "run-job",
             "status",
             "specialists",
-            "await",
-            "await-any",
         ):
             _require_hub_authority()
         if args.command == "recruit":

@@ -4280,6 +4280,52 @@ def test_await_threads_the_ping_threshold_through(
     assert "ORDER_RECEIPT" in capsys.readouterr().out
 
 
+def _dead_runner_claim(
+    tmp_path: Path, ledger: Any, suffix: str
+) -> tuple[dict, Path, str]:
+    instructions = tmp_path / f"instructions-{suffix}.md"
+    instructions.write_text("# Worker\n")
+    order = _order(
+        cwd=str(tmp_path),
+        instructions_path=str(instructions),
+        result_path=str(tmp_path / f"result-{suffix}.json"),
+    )
+    order_path = tmp_path / f"order-{suffix}.json"
+    order_path.write_text(json.dumps(order))
+    key, _created = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "request_id": recruiter.lifecycle.request_identity(order),
+            "runner_pid": -1,
+            "runner_start_time": None,
+        },
+    )
+    assert isinstance(token, str)
+    return order, order_path, key
+
+
+def test_await_reconciles_dead_runner_before_timeout(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, order_path, key = _dead_runner_claim(tmp_path, ledger, "await")
+
+    assert recruiter.cmd_await(str(order_path), notify_after_ms=0) == 1
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    receipt = json.loads(lines[0].removeprefix("ORDER_RECEIPT "))
+    assert receipt["request_id"] == recruiter.lifecycle.request_identity(order)
+    assert receipt["verdict"] == "blocked"
+    assert (ledger.request_dir(key) / "runner-completed.json").is_file()
+    assert not (ledger.active / "requests" / key).exists()
+
+
 def test_verify_builds_an_independent_reviewer_order(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -4518,6 +4564,33 @@ def test_await_any_reports_terminal_receipt_tagged_with_request(
     assert event["terminal"] is True
     assert event["request_id"] == recruiter.lifecycle.request_identity(order)
     assert event["receipt"]["verdict"] == "passed"
+
+
+def test_await_any_reconciles_only_watched_dead_runner(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    watched, watched_path, watched_key = _dead_runner_claim(tmp_path, ledger, "watched")
+    _unwatched, _unwatched_path, unwatched_key = _dead_runner_claim(
+        tmp_path, ledger, "unwatched"
+    )
+
+    assert (
+        recruiter.cmd_await_any(
+            [str(watched_path)], timeout_ms=1_000, poll_seconds=0.01
+        )
+        == 0
+    )
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0].removeprefix("AWAIT_EVENT "))
+    assert event["kind"] == "blocked"
+    assert event["request_id"] == recruiter.lifecycle.request_identity(watched)
+    assert (ledger.request_dir(watched_key) / "runner-completed.json").is_file()
+    assert not (ledger.request_dir(unwatched_key) / "receipt.json").exists()
+    assert (ledger.active / "requests" / unwatched_key).is_dir()
 
 
 def test_await_any_delivers_each_mailbox_message_once_via_cursor(

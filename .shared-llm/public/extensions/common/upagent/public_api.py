@@ -667,17 +667,22 @@ def _cockpit_pane() -> str:
     pane = recruiter._recruiter_pane_from_state()
     if pane:
         return pane
-    recruiter.cmd_up(_public_lifecycle_roster_path())
+    _capture(recruiter.cmd_up, _public_lifecycle_roster_path(), forward_stderr=False)
     pane = recruiter._recruiter_pane_from_state()
     if not pane:
         raise PublicError("UpAgent could not create its services pane")
     return pane
 
 
-def _capture(call: Any, *args: object, **kwargs: object) -> tuple[int, str]:
+def _capture(
+    call: Any,
+    *args: object,
+    forward_stderr: bool = True,
+    **kwargs: object,
+) -> tuple[int, str]:
     with command_runtime.capture_output() as (stdout, stderr):
         code = call(*args, **kwargs)
-    if stderr.getvalue():
+    if forward_stderr and stderr.getvalue():
         command_runtime.write_stderr(stderr.getvalue())
     return int(code), stdout.getvalue()
 
@@ -1398,7 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
     command = list(sys.argv[1:] if argv is None else argv)
     try:
         args = contract.parse_argv(command)
-        if args.command not in ("help", "status", "get", "lists", "await", "await-any"):
+        if args.command not in ("help", "status", "get", "lists"):
             recruiter._require_hub_authority()
         return execute(args, command_runtime.current_cwd())
     except (
