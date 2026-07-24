@@ -11,7 +11,7 @@ Produce one approved human-readable implementation plan. Do not decompose it for
 - `--adversarial-iterations N` defaults to `2`.
 - `N=0` is an explicit opt-out.
 - Cap unattended review at `4` rounds. If the user asks for more, stop after round 4 and ask for a fresh human decision.
-- `--adversary-profile <profile>` selects the UpAgent review profile without prompting, but it must still resolve through the configured Hub roster.
+- `--adversary-profile <profile>` selects the UpAgent review profile without prompting, but it must still resolve through the configured UpAgent roster.
 
 ## Plan directory
 
@@ -31,7 +31,7 @@ Create the directory before grilling. Pass the absolute `plan.html` path inside 
    - Recommend a configured profile from a different model/provider family when one exists.
    - Do not hard-code a provider, model, or effort.
    - If the selected reviewer appears to share the planning model family, warn and ask for explicit confirmation or a different profile.
-8. Run the requested number of fresh full-plan adversarial rounds. The default is exactly two rounds. Each round hires a new read-only `plan-adversary` reviewer through the Hub, reviewing the full current candidate plan rather than only the diff.
+8. Run the requested number of fresh full-plan adversarial rounds. The default is exactly two rounds. Each round hires a new read-only `plan-adversary` reviewer through UpAgent, reviewing the full current candidate plan rather than only the diff.
 9. For every finding, record a typed disposition: `accepted`, `rejected-with-reason`, or `human-decision-required`. Accepted findings must produce a candidate revision plus a durable diff receipt. Rejected findings must cite why the plan remains correct. `human-decision-required` pauses immediately.
 10. After the final adversarial round, regenerate mutable `plan.md` + `plan.html` with the adversarial diff summary, submit it so the final changed pair is frozen as `plan-vN.*`, and ask for final human approval.
 11. Final human approval writes `review/final-approval.json`. The approved `plan.md` remains the mutable-latest pathname that downstream tooling reads; its matching immutable `plan-vN.md` and candidate receipts preserve the approved content and history.

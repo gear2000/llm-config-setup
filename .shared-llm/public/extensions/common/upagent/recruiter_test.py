@@ -5682,7 +5682,7 @@ def test_correction_is_bounded_and_ends_as_an_intake_clerk_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A clerk that never corrects itself exhausts a bounded budget; it never loops forever and
-    its failure is the Hub's to report, not the clerk's words."""
+    its failure is the Recruiter's to report, not the clerk's words."""
     order_path = tmp_path / "order.json"
     order_path.write_text(
         json.dumps(
@@ -6065,7 +6065,7 @@ def test_intake_clerk_unavailable_becomes_refusal_without_target_launch(
     assert "agent" in str(refusal.value) and "instructions_path" in str(refusal.value)
     recorded = json.loads((tmp_path / "order.json.refusal.json").read_text())
     assert "agent" in recorded["missing"]
-    # An unavailable clerk is the Hub's failure to report, never the clerk's own words.
+    # An unavailable clerk is the Recruiter's failure to report, never the clerk's own words.
     assert recorded["authored_by"] == "recruiter"
     assert refusal.value.outcome == "intake-clerk-failure"
     assert refusal.value.exit_code == 4
@@ -7450,7 +7450,7 @@ def _worker_result(claims: list[dict], order: dict) -> dict:
 def _broker_a_real_consult(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: dict, **over: object
 ) -> None:
-    """Run one consult end to end so the Hub's own index records it, exactly as production
+    """Run one consult end to end so the Recruiter's own index records it, exactly as production
     does — through `cmd_consult`, never by writing the index entry directly. A test that forged
     the index would prove only that the reader reads."""
     _specialist_world(tmp_path, monkeypatch)
@@ -7596,7 +7596,7 @@ def test_a_consult_that_failed_before_any_specialist_ran_is_not_verifiable(
 
     An unknown specialist is rejected BEFORE dispatch, so no worker ran and no durable
     ORDER_RECEIPT was ever produced. The rejected receipt still carries `requested_by`, and that
-    alone used to put it in the Hub's index — laundering a `consults` claim for a consultation
+    alone used to put it in the Recruiter's index — laundering a `consults` claim for a consultation
     that never happened. Only a consult whose order reached `order_receipt_state == "finished"`
     may enter the verified index.
     """

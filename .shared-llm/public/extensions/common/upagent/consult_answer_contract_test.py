@@ -1,11 +1,8 @@
-"""Characterization tests for the consult ANSWER contract — the evidence gate on a specialist's
-reply. This is the only mechanical check that a consult answer is backed by real citations rather
-than confident prose, so it must outlive whichever module happens to implement it.
+"""Characterization tests for the consult ANSWER contract.
 
-MIGRATION GATE. The implementation lives in the Specialist Hub today and moves into the Recruiter
-when the hub folds in. The move is three lines, all of them in the SEAM block below; every test
-is written against behavior and should pass unchanged. Do not delete this file with the hub —
-the gate is the point, the hub is just its current address.
+This is the evidence gate on a specialist's reply and the only mechanical check that a consult
+answer is backed by real citations rather than confident prose. The implementation may move, but
+the behavior must stay pinned here. The current seam is deliberately three lines in the block below.
 """
 
 from __future__ import annotations
@@ -21,7 +18,7 @@ MODULES = Path(__file__).resolve().parent.parent
 
 # ═══ THE SEAM ════════════════════════════════════════════════════════════════════════════
 # This file reaches the implementation through these three names and nothing else.
-# When the Specialist Hub folds into the Recruiter, change them — all three, here, only here:
+# If the implementation moves again, change them — all three, here, only here:
 #
 #   IMPLEMENTATION -> "upagent/<the module that validates consult answers>.py"
 #   VALIDATOR      -> its "parse an answer, raise when refusing it" function
@@ -40,9 +37,8 @@ CONSULT ANSWER CONTRACT — the implementation moved and this seam did not follo
     resolves to {path}
     which does not exist.
 
-This file is a MIGRATION GATE, not a test of the Specialist Hub. It pins the only mechanical
-check that a consult answer carries real `file:line` citations instead of confident prose. The
-hub was this contract's address, never its owner.
+This file pins the only mechanical check that a consult answer carries real `file:line` citations
+instead of confident prose. The module path is this contract's address, never its owner.
 
 TO FIX: point the three constants in the SEAM block at the module that validates consult
 answers now — look under {modules}/upagent/ — and run this file again. All {count} tests below

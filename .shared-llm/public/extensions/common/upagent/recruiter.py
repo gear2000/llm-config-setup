@@ -13,7 +13,8 @@ Each CLI invocation imports current canonical source instead of crossing a resid
 The compatibility ``dispatch`` command remains for non-interactive callers. A detached canonical
 job runner atomically claims an order, then:
   1. resolves the per-harness launch template from the roster (upagent.yaml);
-  2. creates and verifies a Dedicated Account Manager;
+  2. uses direct Python supervision by default, or creates and verifies a Dedicated Account
+     Manager when the order/config opts in;
   3. atomically starts a worker beside the order's cockpit pane with its cwd and env;
   4. writes a lease-specific worker brief with one literal result path and order id, runs the
      worker, and races Herdr's event-driven agent-status wait against that private result;
@@ -1742,7 +1743,7 @@ class JobLedger:
                 "terminal_at_ns": terminal_at_ns,
                 "verdict": parsed["verdict"],
                 # A worker's `consults` list is its own account of its own diligence. Resolve it
-                # against the Hub's record of what it actually brokered, so the Stage 2 auditor
+                # against the Recruiter's record of what it actually brokered, so the Stage 2 auditor
                 # reads a Python-checked fact instead of the worker's prose. Present only when
                 # the worker made claims; absent means it recorded no `consults` key at all.
                 **resolve_consult_claims(order, parsed),
@@ -3723,7 +3724,7 @@ def _submit_agent_prompt(
 ) -> None:
     """Submit one prompt only after Herdr proves the dedicated target is idle.
 
-    ``herdr agent send`` intentionally pastes without Enter. The Hub resolves the target to its
+    ``herdr agent send`` intentionally pastes without Enter. The Recruiter resolves the target to its
     current pane and uses one serialized ``pane run`` socket action, which includes Enter. This is
     safe for a dedicated manager; requester delivery remains best-effort and is skipped while busy.
     """
@@ -4730,7 +4731,7 @@ class IntakeOutcomeError(RecruiterError):
     """One non-accepted request outcome, its durable evidence, and its exit code.
 
     Only three things may end a received request: the intake clerk authored a block, the intake
-    clerk could not answer, or the Hub's own machinery failed. A request's schema, wording, order
+    clerk could not answer, or the Recruiter's own machinery failed. A request's schema, wording, order
     id, agent name, or intent never ends it here.
     """
 
@@ -6029,7 +6030,7 @@ def _intake_order(order_path: str, roster_path: str) -> dict:
     A byte-identical resubmission of the same file with a clean prior attempt is idempotent: it
     reuses that attempt's already-validated response instead of launching again (the reuse seam
     lives in `_run_order_intake_clerk`). Only three things end a request: a clerk-authored block, a
-    clerk that could not answer within its bounded correction rounds, or a failure of the Hub's own
+    clerk that could not answer within its bounded correction rounds, or a failure of the Recruiter's own
     machinery.
     """
     path = Path(order_path)
@@ -6040,7 +6041,7 @@ def _intake_order(order_path: str, roster_path: str) -> dict:
             return _interpret_submission(order_path, path, paths, roster_path)
     except IntakeOutcomeError:
         raise
-    except RecruiterError as error:  # the Hub's own workspace, never the submission
+    except RecruiterError as error:  # the Recruiter's own workspace, never the submission
         raise IntakeOutcomeError(
             "infrastructure-failure",
             order_path,
@@ -8712,18 +8713,18 @@ def _write_failure_answer(answer_path: str, consult_id: str, reason: str) -> Non
 
 
 def consult_index_dir() -> Path:
-    """The Hub's own record of the consults it brokered. Resolved from `STATE_FILE` at call
+    """The Recruiter's own record of the consults it brokered. Resolved from `STATE_FILE` at call
     time, never frozen at import, so it follows the Recruiter's state root."""
     return STATE_FILE.parent / "consults"
 
 
 def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
-    """Where the Hub records that IT brokered this consult for this requester.
+    """Where the Recruiter records that IT brokered this consult for this requester.
 
     Under the Recruiter's own state root, not the caller's tree: the point of the index is that
     the worker's `result.json` is not the only account of what happened. Both path segments are
     digests — `consult_id` is caller-controlled and would otherwise be a traversal into the
-    Hub's state directory, and the request-id digest is the identity being verified anyway.
+    Recruiter's state directory, and the request-id digest is the identity being verified anyway.
     """
     requester_key = hashlib.sha256(requested_by.encode()).hexdigest()[:16]
     return (
@@ -8732,7 +8733,7 @@ def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
 
 
 def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
-    """The Hub's own record of one claimed consult, or None when nothing backs the claim."""
+    """The Recruiter's own record of one claimed consult, or None when nothing backs the claim."""
     consult_id = claim.get("consult_id")
     if not isinstance(requested_by, str) or not requested_by:
         return None
@@ -8762,7 +8763,7 @@ def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
 
 
 def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
-    """Split a worker's claimed consults into the ones the Hub can confirm and the ones it cannot.
+    """Split a worker's claimed consults into the ones the Recruiter can confirm and the ones it cannot.
 
     WHAT THIS CLOSES: forgery. A `consults` entry used to be four keys of prose that nothing
     ever read, so a worker could bank a receipt for a consultation that never happened. Now each
@@ -8780,7 +8781,7 @@ def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
     bank a valid receipt; the cost of a fake rises from one line of JSON to actually hiring a
     specialist, which is a real raise and not a proof of diligence.
 
-    Every field of a verified entry is read from the Hub's record, never echoed from the claim.
+    Every field of a verified entry is read from the Recruiter's record, never echoed from the claim.
     Advisory by construction: this reports, and never raises into publication — a bookkeeping
     fault must not destroy a result that represents real work.
     """
@@ -8853,7 +8854,7 @@ def _record_consult_in_index(receipt: dict) -> Path | None:
 
 def _publish_consult_receipt(receipt: dict, receipt_path: Path) -> None:
     """Publish the consult's own terminal record — beside the consult.json for the caller, and
-    into the Hub's requester-keyed index for the audit.
+    into the Recruiter's requester-keyed index for the audit.
 
     Every field derives from an ordinary UpAgent request id or result path plus the durable
     ORDER_RECEIPT the generic lifecycle already produced — nothing here is invented.

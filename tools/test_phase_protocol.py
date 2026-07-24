@@ -150,7 +150,7 @@ def test_tui_final_message_is_short_and_unambiguous() -> None:
     assert "Do not print a stage-by-stage recap" in text
     assert "Those details belong only in `run-status.md`" in text
     # Mode-aware close guidance: never tell the human to close a workspace that still
-    # hosts the services (the single-workspace default shares `herdr` across runs).
+    # hosts the services (the single-workspace default shares `upagent` across runs).
     assert "Never tell the human" in text
     assert "close a workspace that still hosts the services" in text
 
@@ -388,7 +388,7 @@ def test_workspace_mode_defaults_to_single_and_flag_restores_separate() -> None:
     launcher = RUNNER_JUSTFILE.read_text()
     controller = PLAN_CONTROLLER.read_text()
 
-    assert "ws: herdr" in runner
+    assert "ws: upagent" in runner
     assert "--separate-workspaces" in runner
     assert "--separate-workspaces" in launcher
     assert "--separate-workspaces" in controller

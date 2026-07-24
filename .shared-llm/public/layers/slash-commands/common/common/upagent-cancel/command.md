@@ -15,4 +15,4 @@ Require exactly one canonical request id in `$ARGUMENTS`. Never substitute a lea
 
 3. Report whether this invocation published the ordinary schema-valid blocked/cancelled terminal bundle or authenticated and returned an already-published terminal result.
 
-A stale/wrong token or identity-cleanup refusal fails loud. Do not ask the human to paste the token into chat, retry with guessed tokens, kill processes/panes directly, steer the worker, or use cleanup as cancellation. Requests launched outside `/upagent-run` must be cancelled through a trusted caller that already holds a private token file; this skill must not scrape a token from Hub state or transcripts.
+A stale/wrong token or identity-cleanup refusal fails loud. Do not ask the human to paste the token into chat, retry with guessed tokens, kill processes/panes directly, steer the worker, or use cleanup as cancellation. Requests launched outside `/upagent-run` must be cancelled through a trusted caller that already holds a private token file; this skill must not scrape a token from Recruiter state or transcripts.

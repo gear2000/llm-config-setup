@@ -1,6 +1,6 @@
 # List UpAgent requests
 
-Use only the canonical Hub façade. Interpret `$ARGUMENTS` as exactly one optional view: `active`, `terminal`, or `all`; default to `active`. Reject other values instead of guessing.
+Use only the canonical UpAgent façade. Interpret `$ARGUMENTS` as exactly one optional view: `active`, `terminal`, or `all`; default to `active`. Reject other values instead of guessing.
 
 Run:
 
