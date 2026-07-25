@@ -231,9 +231,12 @@ Durable files are the source of truth; terminal text is display-only.
   first ledger mutation. The Recruiter writes a closed-schema typed manifest
   and appends literal lease-private paths for `result.json`, `compacted.md`, and `handoff.md`;
   specialist workers additionally receive `answer.json`. Workers never receive a public answer
-  destination. The result carries `passed|failed|blocked`, `revisit`, and `full_log`; both markdown
-  artifacts must contain text, and specialist answers must pass `contracts_consult`, including
-  consult identity, success/error shape, and real `file:line` citations.
+  destination. Only `result.json` — and `answer.json` for a specialist — is mandatory: the result
+  carries `passed|failed|blocked`, `revisit`, and `full_log`, and specialist answers must pass
+  `contracts_consult`, including consult identity, success/error shape, and real `file:line`
+  citations. `compacted.md` and `handoff.md` are best-effort summaries with no schema; an absent or
+  blank one is skipped at publication rather than failing an otherwise finished job, because a later
+  reader can rebuild both from the result.
 - `just upagent-await <order.json>` waits in Python for a decision point or completion; no LLM
   loops over files. At inactivity checkpoints, a fresh cheap checker interprets one bounded pane
   and process snapshot, reports to the manager/requester, and exits.
@@ -241,10 +244,11 @@ Durable files are the source of truth; terminal text is display-only.
   `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`.
   Without an answer during `management.requester_grace_ms`, the Recruiter performs the declared hard
   stop. Managers/checkers can recommend actions but cannot execute them.
-- The deterministic completion reactor validates the whole staged bundle. Missing or malformed
-  required artifacts cause exactly one repair prompt to the same worker address—never a second
+- The deterministic completion reactor validates the staged bundle. A missing or malformed
+  mandatory artifact causes exactly one repair prompt to the same worker address—never a second
   worker—and one revalidation. If that still fails, Python writes a schema-valid blocked
-  result/compacted/handoff bundle and, for specialists, a valid failure answer.
+  result/compacted/handoff bundle and, for specialists, a valid failure answer. A missing optional
+  summary never triggers a repair and never blocks.
 - Publication is ordered: validate private staging, prepare and atomically replace every public
   artifact, revalidate the public bundle, write `receipt.json`, then append the durable terminal
   event/state and requester notification. `upagent-await` wakes only from that post-receipt
@@ -362,6 +366,16 @@ harness has no phase-leader template.
    `upagent.yaml.example` → the repo-owned `this_repo` path only when legacy route/controller
    profiles still need it.
 3. Add `import '.shared-llm/public/extensions/common/upagent/justfile'` to the root justfile.
+
+### Platform support
+
+Linux and macOS. Liveness fencing needs exact process birth identity and argv:
+Linux reads `/proc/<pid>/stat` and `/proc/<pid>/cmdline`; macOS uses sysctl
+syscalls (`KERN_PROC_PID` for the microsecond birth timestamp, `KERN_PROCARGS2`
+for exact argv — no `ps` subprocess). The shared implementation lives in
+`process_identity.py` (intentionally duplicated in `common/herdr/herdr_transport.py`
+for the runner stack). On any other platform the entrypoints fail loud instead of
+letting liveness checks silently fail open.
 
 ## Tests
 

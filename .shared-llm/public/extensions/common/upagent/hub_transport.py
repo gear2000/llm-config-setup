@@ -154,10 +154,4 @@ def mutation_lock_path(cwd: str | Path | None = None) -> Path:
     return ledger_path(cwd).parent / "mutation.lock"
 
 
-def process_start_time(pid: int) -> str | None:
-    """Return Linux process birth ticks, or None when the process is absent."""
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text().split()
-    except OSError:
-        return None
-    return fields[21] if len(fields) > 21 else None
+

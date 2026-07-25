@@ -551,6 +551,11 @@ def start_phase(
         launch = _resolve_leader_launch(
             roster, phase_id, lead, cwd, leader_instructions
         )
+        # `bash -lc` sources the user's login profile (PATH setup for nvm/pyenv/asdf-style
+        # tool managers), but a profile that also `cd`s (common in shared dev environments)
+        # would silently override the pane's cwd. Re-assert cwd as the last word inside the
+        # login shell's own command so the leader always lands where it was told to.
+        launch_in_cwd = f"cd {shlex.quote(str(cwd))} && {launch}"
         _write_text_atomic(
             script_path,
             "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -558,7 +563,7 @@ def start_phase(
             f"rm -f {shlex.quote(str(gate_path))}\n"
             f'[[ "$phase_release_token" == {shlex.quote(release_token)} ]]\n'
             f"export {recruiter.PHASE_START_RECEIPT_ENV}={shlex.quote(str(receipt_path))}\n"
-            f"exec bash -lc {shlex.quote(launch)}\n",
+            f"exec bash -lc {shlex.quote(launch_in_cwd)}\n",
             executable=True,
         )
         leader_pane: str | None = None

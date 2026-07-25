@@ -1695,7 +1695,9 @@ def test_worker_instructions_have_no_result_only_fallback(tmp_path: Path) -> Non
     )
 
     text = generated.read_text()
-    assert "Write ALL required artifacts" in text
+    # Workers are still asked for every artifact even though publication tolerates a missing
+    # summary — advertising the tolerance would stop the summaries from ever being written.
+    assert "Write ALL of these artifacts" in text
     assert "compacted.md" in text and "handoff.md" in text
     assert '`verdict`: exactly one of "passed", "failed", or "blocked"' in text
     assert "`full_log`: a non-empty transcript path" in text
@@ -1824,21 +1826,22 @@ def test_run_order_creates_private_result_parent_before_worker_launch(
     assert lifecycle_events == ["recorded", "resized"]
 
 
-def test_completion_monitor_never_accepts_a_result_only_artifact(
+def test_completion_monitor_accepts_a_valid_result_without_the_optional_summaries(
     tmp_path: Path,
 ) -> None:
+    """Only result.json gates completion; the summaries are best-effort."""
     order = _order(result_path=str(tmp_path / "public/result.json"))
     private = tmp_path / "private/result.json"
     manifest = _manifest_for_private(order, private)
     private.parent.mkdir(parents=True)
-    private.write_text(json.dumps(_result(order["order_id"])))
 
     stop, ready, thread = recruiter._start_completion_monitor(
         order, private, 1_000, artifact_manifest=manifest
     )
 
+    # Nothing staged yet: the monitor still waits.
     assert not ready.wait(timeout=0.2)
-    _write_typed_worker_result(private, _result(order["order_id"]))
+    private.write_text(json.dumps(_result(order["order_id"])))
     assert ready.wait(timeout=0.5)
     stop.set()
     thread.join(timeout=0.5)
@@ -2439,16 +2442,17 @@ def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
     assert recruiter.cmd_reconcile(force=True) == 0
 
     assert closed == ["owned-worker"]
+    # The worker died after staging a valid result but before writing its summaries. That
+    # result is real work and is published rather than discarded.
     recovered = ledger.completed_result(key, order)
-    assert recovered["verdict"] == "blocked"
-    assert "staged compacted artifact is invalid" in recovered["reason"]
+    assert recovered["verdict"] == "passed"
     receipt = ledger.completed_receipt(key, order)
     assert receipt["cleanup"]["worker_pane"] == "owned-worker"
     for path in (
         Path(order["artifact_publication"]["compacted_path"]),
         Path(order["artifact_publication"]["handoff_path"]),
     ):
-        assert "blocked" in path.read_text().lower()
+        assert not path.exists()
 
 
 def test_force_reconcile_drains_live_inflight_launch_in_one_invocation(
@@ -5099,7 +5103,8 @@ def test_recruit_pane_door_forwards_exactly_one_strict_file_over_the_socket() ->
     assert "expects exactly one strict order.json" in door
     assert "--target recruiter" in door
     assert "eval" not in door
-    assert "'/tmp/roster with spaces.yaml'" in door
+    resolved_roster = str(Path("/tmp/roster with spaces.yaml").expanduser().resolve())
+    assert f"'{resolved_roster}'" in door
 
 
 def test_arbitrary_and_empty_request_materialization_has_been_removed() -> None:
@@ -6764,7 +6769,7 @@ def test_the_phone_book_caps_the_whole_line_not_just_the_description(
                     {
                         "name": "payments-integration-reviewer",
                         "description": "long ownership sentence " * 40,
-                        "offering": "claude-opus-4-8",
+                        "offering": "claude-opus-5",
                         "effort": "high",
                         "agent": "payments-integration-reviewer",
                     }
@@ -6799,7 +6804,7 @@ def test_a_specialist_with_no_description_falls_back_to_its_persona_frontmatter(
                     {
                         "name": "reviewer",
                         "location": ".claude/agents/reviewer.md",
-                        "offering": "claude-opus-4-8",
+                        "offering": "claude-opus-5",
                         "effort": "high",
                         "agent": "reviewer",
                     }
@@ -6846,7 +6851,7 @@ def _two_reviewers_roster() -> str:
                 {
                     "name": "reviewer",
                     "description": "first",
-                    "offering": "claude-opus-4-8",
+                    "offering": "claude-opus-5",
                     "effort": "high",
                     "agent": "reviewer",
                 },
@@ -6971,7 +6976,7 @@ def _specialist_world(
                     {
                         "name": "reviewer",
                         "description": "Independent read-only review.",
-                        "offering": "claude-opus-4-8",
+                        "offering": "claude-opus-5",
                         "effort": "high",
                         "agent": "reviewer",
                         **entry_over,
@@ -7051,7 +7056,7 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     order = seen[0]
     assert set(order) <= set(recruiter.ORDER_INTAKE_ALIASES) | {"offering_snapshot"}
     assert "consult" not in order
-    assert order["offering_snapshot"]["id"] == "claude-opus-4-8"
+    assert order["offering_snapshot"]["id"] == "claude-opus-5"
     recruiter.contracts.parse_order(
         json.dumps(order)
     )  # must satisfy the ordinary contract

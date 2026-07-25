@@ -55,7 +55,10 @@ def test_default_is_outside_repo(
 ) -> None:
     monkeypatch.delenv("PLANISH_DIR", raising=False)
     result = resolver.resolve(tmp_path, "Topic")
-    assert str(result).startswith("/tmp/planish/")
+    # /tmp may itself be a symlink (macOS: /tmp -> /private/tmp), so compare
+    # against the resolved default root rather than the literal string.
+    default_root = str(Path("/tmp/planish").resolve())
+    assert str(result).startswith(default_root + "/")
 
 
 def test_pi_submit_requires_the_canonical_absolute_path() -> None:
