@@ -59,8 +59,9 @@ PYTHON RECRUITER
 UPAGENT WORKER
 │
 ├─ performs only the requested work
-├─ stages lease-private result.json, compacted.md, and handoff.md
-├─ additionally stages answer.json when it is a specialist
+├─ stages lease-private result.json (mandatory — it carries the verdict)
+├─ stages compacted.md and handoff.md when it can (best-effort summaries)
+├─ additionally stages answer.json when it is a specialist (mandatory)
 └─ exits when its work is complete
    │
    ▼

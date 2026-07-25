@@ -1,8 +1,15 @@
 """Typed completion artifact manifests and fail-loud bundle publication.
 
-Workers stage artifacts only in lease-private paths.  Python validates a complete bundle,
-projects it to caller-visible paths, validates the projection, and only then permits the
-Recruiter to publish a receipt or terminal event.
+Workers stage artifacts only in lease-private paths.  Python validates the bundle, projects
+it to caller-visible paths, validates the projection, and only then permits the Recruiter to
+publish a receipt or terminal event.
+
+Only `result.json` carries the verdict, so only it (plus `answer.json`, a consult's actual
+deliverable) is mandatory.  `compacted.md` and `handoff.md` are post-work summaries with no
+schema — any non-empty text passes — and a later reader can reconstruct both from the result.
+Losing an entire successful job because a worker forgot to write a summary is a worse outcome
+than publishing without it, so an absent or blank optional artifact is skipped, not fatal.
+The manifest still declares all of them: the paths stay known whether or not the files land.
 """
 
 from __future__ import annotations
@@ -17,7 +24,11 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+# The lifecycle kinds every manifest declares, in this order.  Declaring a kind is not the
+# same as requiring the file: see MANDATORY_KINDS.
 REQUIRED_KINDS = ("result", "compacted", "handoff")
+# The kinds whose files must actually exist and validate before anything is published.
+MANDATORY_KINDS = frozenset({"result", "answer"})
 MEDIA_TYPES = {
     "result": "application/json",
     "compacted": "text/markdown",
@@ -37,12 +48,17 @@ class Artifact:
     public_path: Path
     media_type: str
 
+    @property
+    def required(self) -> bool:
+        """Derived from the kind so a manifest can never disagree with itself."""
+        return self.kind in MANDATORY_KINDS
+
     def as_dict(self) -> dict[str, object]:
         return {
             "kind": self.kind,
             "media_type": self.media_type,
             "public_path": str(self.public_path),
-            "required": True,
+            "required": self.required,
             "staging_path": str(self.staging_path),
         }
 
@@ -283,8 +299,10 @@ def parse_manifest(text: str, expected: Manifest | None = None) -> dict[str, obj
             raise CompletionError(
                 "artifact manifest entry has an invalid kind or media type"
             )
-        if item.get("required") is not True:
-            raise CompletionError("every completion artifact must be required")
+        if item.get("required") is not (kind in MANDATORY_KINDS):
+            raise CompletionError(
+                f"artifact {kind} required flag must be {kind in MANDATORY_KINDS}"
+            )
         _absolute(item.get("staging_path"), f"artifact {kind} staging_path")
         _absolute(item.get("public_path"), f"artifact {kind} public_path")
         kinds.append(str(kind))
@@ -299,6 +317,23 @@ def parse_manifest(text: str, expected: Manifest | None = None) -> dict[str, obj
     return value
 
 
+def skip_optional(artifact: Artifact, path: Path) -> bool:
+    """True when an optional artifact is absent or blank, so callers pass over it.
+
+    A mandatory artifact is never skipped — a missing result.json is still fatal.  For an
+    optional summary, blank is treated exactly like absent: neither carries information, and
+    neither is worth failing a finished job over.
+    """
+    if artifact.required:
+        return False
+    try:
+        if not path.is_file():
+            return True
+        return not path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return True
+
+
 def validate_bundle(
     manifest: Manifest,
     *,
@@ -309,6 +344,8 @@ def validate_bundle(
     result: dict[str, Any] | None = None
     for artifact in manifest.artifacts:
         path = artifact.public_path if public else artifact.staging_path
+        if skip_optional(artifact, path):
+            continue
         try:
             if artifact.kind == "result":
                 result = load_result(path, manifest.order_id)
@@ -325,7 +362,9 @@ def validate_bundle(
             raise CompletionError(
                 f"{location} {artifact.kind} artifact is invalid: {error}"
             ) from error
-    assert result is not None
+    if result is None:
+        location = "public" if public else "staged"
+        raise CompletionError(f"{location} result artifact is missing")
     return result
 
 
@@ -351,7 +390,7 @@ def mandatory_consult_errors(
                 for item in unverified
             )
             errors.append(
-                f"mandatory consult {requirement['consult_id']} has no Hub-verified receipt"
+                f"mandatory consult {requirement['consult_id']} has no Recruiter-verified receipt"
                 + (" (the worker claim was rejected)" if forged else "")
             )
             continue
@@ -414,6 +453,8 @@ def project_bundle(
     committed: list[Path] = []
     try:
         for artifact in manifest.artifacts:
+            if skip_optional(artifact, artifact.staging_path):
+                continue
             target = artifact.public_path
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(

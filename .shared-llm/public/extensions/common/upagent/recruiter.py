@@ -146,6 +146,17 @@ else:
     sys.modules[_runtime_name] = command_runtime
     _runtime_spec.loader.exec_module(command_runtime)
 
+# Portable process birth/argv identity. Lives inside the upagent directory
+# because this tree is deployed/re-exec'd self-contained, without siblings.
+_identity_spec = importlib.util.spec_from_file_location(
+    "upagent_process_identity", HERE / "process_identity.py"
+)
+if _identity_spec is None or _identity_spec.loader is None:
+    raise RuntimeError("could not load UpAgent process identity")
+_process_identity = cast(Any, importlib.util.module_from_spec(_identity_spec))
+sys.modules[_identity_spec.name] = _process_identity
+_identity_spec.loader.exec_module(_process_identity)
+
 # Single-workspace default: services (and every run's tabs) share one `upagent` workspace.
 # `up --separate-workspaces` restores the dedicated `shared-services` workspace. Bring-up
 # migrates the two retired presentation labels in place; they are never used for new state.
@@ -539,7 +550,7 @@ class JobLedger:
         return control
 
     def published_result_path(self, key: str) -> Path:
-        """Return the hub's own durable copy of the result it published for one order.
+        """Return the ledger's own durable copy of the result it published for one order.
 
         The order's `result_path` belongs to the caller's run tree, which may be pruned long
         before this ledger record is retired.  This copy is what keeps a terminal record
@@ -570,7 +581,7 @@ class JobLedger:
     def _reconcile_terminal_result(
         self, key: str, order: dict, receipt: dict, unusable: ContractError | OSError
     ) -> dict:
-        """Restore a finished order's public result from the hub's own durable copy.
+        """Restore a finished order's public result from the ledger's own durable copy.
 
         A terminal record always answers with exactly one structured outcome: the recovered
         result, or a refusal naming the evidence.  `unusable` is whatever made the public result
@@ -617,9 +628,9 @@ class JobLedger:
     def _durable_terminal_result(
         self, key: str, order: dict, receipt: dict
     ) -> dict | None:
-        """Return the hub-held result for a finished order, or None when it cannot be trusted.
+        """Return the ledger-held result for a finished order, or None when it cannot be trusted.
 
-        A hub copy that is malformed OR unreadable (OSError) is treated the same: untrustworthy,
+        A ledger copy that is malformed OR unreadable (OSError) is treated the same: untrustworthy,
         so the terminal record refuses with evidence rather than crashing in the loader.
         """
         recorded = receipt.get("published_result_path")
@@ -3257,9 +3268,11 @@ def _write_worker_instructions(
     except OSError as e:
         raise RecruiterError(f"worker instructions {source} are unreadable: {e}") from e
     paths = {item.kind: item.staging_path for item in artifact_manifest.artifacts}
+    # Ask for every artifact; the publisher separately tolerates a missing summary rather than
+    # discarding finished work. Do not advertise that tolerance here, or summaries stop arriving.
     destinations = (
-        "Write ALL required artifacts to these literal lease-private paths:\n"
-        f"- result.json: {paths['result']}\n"
+        "Write ALL of these artifacts to these literal lease-private paths:\n"
+        f"- result.json: {paths['result']}  (REQUIRED — your work is not recorded without it)\n"
         f"- compacted.md: {paths['compacted']}\n"
         f"- handoff.md: {paths['handoff']}\n"
         + (f"- answer.json: {paths['answer']}\n" if "answer" in paths else "")
@@ -5357,22 +5370,9 @@ def _validated_attempt_directory(attempts_root: Path, attempt_name: object) -> P
 
 
 def _process_start_time(pid: object) -> str | None:
-    """Linux process birth identity. A PID without the same start tick is a different owner."""
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        return None
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return None
-    close = text.rfind(")")
-    if close < 0:
-        return None
-    fields = text[close + 2 :].split()
-    # The suffix begins at field 3 (state); zombies can no longer mutate or create panes.
-    if not fields or fields[0] == "Z":
-        return None
-    # starttime is field 22.
-    return fields[19] if len(fields) > 19 else None
+    """Portable process birth identity. A PID without the same birth stamp is a
+    different owner (Linux: /proc start ticks; macOS: ps lstart)."""
+    return _process_identity.process_start_time(pid)
 
 
 def _same_owner_process(ownership: dict) -> bool:
@@ -6045,7 +6045,7 @@ def _intake_order(order_path: str, roster_path: str) -> dict:
         raise IntakeOutcomeError(
             "infrastructure-failure",
             order_path,
-            f"the Hub's intake workspace is unusable: {error}",
+            f"the Recruiter's intake workspace is unusable: {error}",
             evidence=_intake_evidence(paths),
         ) from error
 
@@ -6231,11 +6231,8 @@ def _recruiter_pane_from_state() -> str | None:
 
 
 def _process_cmdline(pid: int) -> list[str]:
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except (OSError, ValueError):
-        return []
-    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+    """Portable exact argv (Linux: /proc/<pid>/cmdline; macOS: KERN_PROCARGS2)."""
+    return _process_identity.process_cmdline(pid)
 
 
 def _runner_alive(pid: object, key: str) -> bool:
@@ -8497,7 +8494,7 @@ def cmd_specialists(as_json: bool = False) -> int:
         '   {"consult_id": "<unique-id>", "specialist": "<name above>",',
         '    "question": "<one specific question>", "answer_path": "<absolute path for answer.json>",',
         '    "requested_by": "<YOUR OWN order_id>"}',
-        "   `requested_by` must be your order_id exactly. It is how the Hub files the consult",
+        "   `requested_by` must be your order_id exactly. It is how the Recruiter files the consult",
         "   under you; omit it and your consult still runs, but it can never be credited to you.",
         "2. Run `just upagent-consult <that consult.json>`. It BLOCKS until the consult is",
         "   terminal and prints one CONSULT_RECEIPT line — the command returning IS the signal,",
@@ -9055,6 +9052,27 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
     return 0
 
 
+def _require_supported_platform() -> None:
+    """Fail loud on platforms without a process birth-identity implementation.
+
+    Liveness fencing needs exact process identity (Linux: /proc; macOS: ps
+    lstart + KERN_PROCARGS2). On an unimplemented platform the checks would
+    treat "unknown" as "owner is dead" — cancels would stop waiting for live
+    launch owners and reconcilers could terminalize running requests. Refuse
+    to run rather than fail open.
+    ``UPAGENT_ALLOW_UNSUPPORTED_PLATFORM=1`` is a test-suite-only override.
+    """
+    if sys.platform in ("linux", "darwin"):
+        return
+    if os.environ.get("UPAGENT_ALLOW_UNSUPPORTED_PLATFORM") == "1":
+        return
+    raise RecruiterError(
+        f"unsupported platform {sys.platform!r}: process fencing requires exact "
+        "process identity (supported: Linux, macOS); every liveness check would "
+        "silently fail open here"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = command_runtime.ArgumentParser(
         prog="recruiter",
@@ -9146,6 +9164,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        _require_supported_platform()
         if args.command not in (
             "run-job",
             "status",

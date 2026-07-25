@@ -111,18 +111,17 @@ def test_manifest_and_complete_bundle_project_all_artifacts(tmp_path: Path) -> N
         assert artifact.public_path.read_bytes() == artifact.staging_path.read_bytes()
 
 
-@pytest.mark.parametrize("kind", ["result", "compacted", "handoff", "answer"])
+@pytest.mark.parametrize("kind", ["result", "answer"])
 @pytest.mark.parametrize("failure", ["missing", "malformed"])
-def test_every_required_artifact_is_validated(
+def test_every_mandatory_artifact_is_validated(
     tmp_path: Path, kind: str, failure: str
 ) -> None:
+    """result.json carries the verdict and answer.json is a consult's deliverable."""
     manifest = _manifest(tmp_path, specialist=True)
     _write_valid(manifest)
     artifact = manifest.artifact(kind)
     if failure == "missing":
         artifact.staging_path.unlink()
-    elif kind in ("compacted", "handoff"):
-        artifact.staging_path.write_text(" \n")
     else:
         artifact.staging_path.write_text("not-json")
 
@@ -132,6 +131,40 @@ def test_every_required_artifact_is_validated(
             load_result=contracts.load_result,
             load_answer=consults.load_answer,
         )
+
+
+@pytest.mark.parametrize("kind", ["compacted", "handoff"])
+@pytest.mark.parametrize("failure", ["missing", "blank"])
+def test_optional_summaries_never_fail_a_finished_job(
+    tmp_path: Path, kind: str, failure: str
+) -> None:
+    """A worker that skipped a summary still gets its result published.
+
+    These carry no schema, and a later reader can rebuild both from the result, so losing a
+    whole successful job over one absent summary is the worse outcome.
+    """
+    manifest = _manifest(tmp_path, specialist=True)
+    _write_valid(manifest)
+    artifact = manifest.artifact(kind)
+    if failure == "missing":
+        artifact.staging_path.unlink()
+    else:
+        artifact.staging_path.write_text(" \n")
+
+    validated = completion.validate_bundle(
+        manifest,
+        load_result=contracts.load_result,
+        load_answer=consults.load_answer,
+    )
+    assert validated["verdict"] == "passed"
+
+    projected = completion.project_bundle(
+        manifest, load_result=contracts.load_result, load_answer=consults.load_answer
+    )
+    assert projected["verdict"] == "passed"
+    # The skipped summary is simply never published; nothing else is disturbed.
+    assert not artifact.public_path.exists()
+    assert manifest.artifact("result").public_path.is_file()
 
 
 def test_blocked_bundle_is_schema_valid_including_specialist_failure(
@@ -278,23 +311,23 @@ def test_reactor_sends_exactly_one_repair_to_the_original_worker(
     assert manifest is not None
     result_path = manifest.artifact("result").staging_path
     result_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.write_text(
-        json.dumps(
-            {
-                "order_id": "stage-1",
-                "verdict": "passed",
-                "revisit": [],
-                "full_log": "/tmp/transcript",
-            }
-        )
-    )
+    # Only a mandatory artifact triggers repair now, so stage a malformed result.json.
+    result_path.write_text("not-json")
     calls: list[str] = []
 
     def repair(address: str, prompt: str, **kwargs: object) -> None:
         calls.append(address)
         assert "COMPLETION_REPAIR 1/1" in prompt
-        manifest.artifact("compacted").staging_path.write_text("# Compact\n")
-        manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
+        result_path.write_text(
+            json.dumps(
+                {
+                    "order_id": "stage-1",
+                    "verdict": "passed",
+                    "revisit": [],
+                    "full_log": "/tmp/transcript",
+                }
+            )
+        )
 
     class Ledger:
         def _event(self, *args: object, **kwargs: object) -> None:

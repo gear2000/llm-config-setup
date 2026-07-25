@@ -132,7 +132,7 @@ def _load(name: str, path: Path) -> Any:
     spec.loader.exec_module(module)
     runtime = sys.modules.get("upagent_command_runtime")
     if runtime is not None and name != "upagent_command_runtime":
-        module.print = runtime.command_print
+        setattr(module, "print", runtime.command_print)
     return module
 
 
@@ -288,6 +288,18 @@ def invoke(target: str, argv: list[str], cwd: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Fail loud on platforms without a process birth-identity implementation
+    # (Linux: /proc; macOS: ps lstart + KERN_PROCARGS2). Elsewhere every
+    # liveness fence would silently fail open (cancels stop waiting for live
+    # owners; reconcilers can kill running requests).
+    # UPAGENT_ALLOW_UNSUPPORTED_PLATFORM=1 is a test-suite-only override.
+    if sys.platform not in ("linux", "darwin") and os.environ.get(
+        "UPAGENT_ALLOW_UNSUPPORTED_PLATFORM"
+    ) != "1":
+        raise ClientError(
+            f"unsupported platform {sys.platform!r}: the UpAgent runtime "
+            "requires exact process identity (supported: Linux, macOS)"
+        )
     command = list(sys.argv[1:] if argv is None else argv)
     target = "public"
     if command[:1] == ["--target"]:

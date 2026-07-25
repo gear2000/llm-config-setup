@@ -39,7 +39,7 @@ def test_roster_contains_exactly_the_nine_approved_offerings() -> None:
     ("offering_id", "effort", "persona", "expected"),
     [
         (
-            "claude-opus-4-8",
+            "claude-opus-5",
             "max",
             "reviewer",
             [
@@ -48,7 +48,7 @@ def test_roster_contains_exactly_the_nine_approved_offerings() -> None:
                 "--agent",
                 "reviewer",
                 "--model",
-                "claude-opus-4-8",
+                "claude-opus-5",
                 "--effort",
                 "max",
                 "Read /lease/instructions.md and do exactly that work.",
