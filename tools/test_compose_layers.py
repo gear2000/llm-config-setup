@@ -473,7 +473,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
     for token in ("autoFreezePlan", "newestFrozenVersion", "planish_submit_plan"):
         assert token in planish_ts, f"do-planish.ts must wire auto-freeze via {token!r}"
 
-    # tf-implement's duplicated resolver must stay in sync: same config file.
+    # tf-implement documents the same config surface it delegates resolution of.
     tf_ts = (
         REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/tf-implement.ts"
     ).read_text()
@@ -490,26 +490,35 @@ def test_plan_versioning_downloadable_and_host() -> None:
     assert ".planish.json" not in tf_ts, "drifted .planish.json reference"
     assert "plan-v<k>" in tf_ts
 
-    # An empty `work_log:` block must fail loud in BOTH duplicated resolvers, the
-    # way planish_resolve.py does — parsing it as {} and quietly taking the
-    # default directory is the silent fallback this config contract exists to
-    # prevent. Flow-style `work_log: {dir: …}` is honored, not misreported.
+    # Neither extension parses the config. Both hand-rolled YAML scanners were
+    # deleted — two reviews caught them diverging from PyYAML — so each one now
+    # locates planish_resolve.py and runs it as a subprocess. A scanner growing
+    # back here is the regression to catch, so the ban is asserted by name.
     for name, source in (("do-planish.ts", planish_ts), ("tf-implement.ts", tf_ts)):
-        for token in (
-            "workLogMapping",
+        for token in ("canonicalResolver", "RESOLVER_REL", "spawnSync(PYTHON_BIN"):
+            assert token in source, f"{name} must delegate to the resolver: {token!r}"
+        for banned in (
+            "parseSimpleYaml",
+            "parseYamlScalar",
             "parseFlowMapping",
-            'Object.keys(mapping).length === 0',
-            '"work_log" is empty',
+            "workLogMapping",
+            "stripComment",
         ):
-            assert token in source, f"{name} must fail loud on an empty work_log: {token!r}"
+            assert banned not in source, (
+                f"{name} must not parse config itself — {banned!r} is back"
+            )
+    # An empty `work_log:` block must still fail loud rather than sailing through
+    # as {} and quietly taking the default directory: the silent fallback this
+    # config contract exists to prevent. It now fails loud in ONE place.
     py = (
         REPO_ROOT / ".shared-llm/public/llm/common/common/planish_resolve.py"
     ).read_text()
     assert '"work_log" is empty' in py, "planish_resolve.py must fail loud on an empty work_log"
 
-    # Substring checks cannot prove two hand-rolled parsers agree — an EXECUTED
-    # corpus runs all three resolvers over the same configs. Pin it into `just
-    # test` so it cannot quietly stop running.
+    # Substring checks cannot prove the delegation is real and complete — an
+    # EXECUTED corpus runs both extensions and the script over the same configs,
+    # including the two cases that killed the scanners. Pin it into `just test`
+    # so it cannot quietly stop running.
     parity = REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts"
     assert parity.is_file(), "the executed resolver parity corpus must exist"
     recipe = (REPO_ROOT / "justfile").read_text().split("\ntest:", 1)[1].split("\n\n", 1)[0]

@@ -1,12 +1,16 @@
 /// <reference lib="es2022" />
-// Executed parity corpus for the THREE work-log resolvers: planish_resolve.py
-// (canonical) and the duplicated ones inside tf-implement.ts and do-planish.ts.
-// Every case is RUN against all three and their outcomes compared — substring
-// assertions over the sources cannot catch a parser that merely looks right.
+// Executed corpus for work-log resolution. There is now ONE implementation —
+// planish_resolve.py — and the two Pi extensions reach it by SUBPROCESS, so
+// what this corpus proves is that the delegation is real and complete: every
+// case is run against tf-implement.ts, do-planish.ts, and the script directly,
+// and the three outcomes must agree. Substring assertions over the sources
+// cannot catch an extension that quietly grew a parser of its own again.
 //   node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 //
-// Unifying the two hand-rolled scanners into one shared parser is the real fix
-// and is tracked separately; until then this corpus is what keeps them honest.
+// The last two cases are the ones that killed the hand-rolled scanners: an
+// escaped double-quote before ` #` (truncated at a comment that was never
+// there) and a quoted comma inside a flow mapping (split into a rejected
+// entry). Both are ordinary YAML that PyYAML has always read correctly.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -139,6 +143,25 @@ const CASES: Case[] = [
 		config: 'work_log:\n  dir: ""\n',
 		outcome: "fault",
 		faultScope: "dir",
+	},
+	{
+		// The hand-rolled scanners closed the quote on the `\"` escape and then
+		// truncated at the ` #` that followed, losing the rest of the path.
+		name: "escaped quote before a hash keeps the whole path",
+		config: 'work_log:\n  dir: "a\\" #b/{slug}"\n',
+		outcome: "resolve",
+		dir: `a" #b/${SLUG}`,
+		host: null,
+	},
+	{
+		// The hand-rolled scanners split a flow mapping on every comma, including
+		// one inside a quoted scalar, and then rejected the fragment as not a
+		// mapping entry — a config PyYAML reads without complaint.
+		name: "quoted comma inside a flow mapping",
+		config: 'work_log: {dir: "plans/a,b/{slug}", host: flow-host}\n',
+		outcome: "resolve",
+		dir: `plans/a,b/${SLUG}`,
+		host: "flow-host",
 	},
 	{
 		// A destination roster carries no work_log: — it must be skipped, not

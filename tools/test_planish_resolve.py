@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import multiprocessing
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -257,8 +266,52 @@ def test_review_url_maps_the_plan_dir_onto_the_served_root(tmp_path: Path) -> No
         "  serve_root: docs\n",
     )
     plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
-    url = resolver.resolve_review_url(tmp_path, plan_dir)
-    assert url == "http://example-host:8089/plans/redesign-auth"
+    # No artifact named: the URL is the DIRECTORY, and says so with a trailing
+    # slash rather than looking like a page that will not load.
+    assert (
+        resolver.resolve_review_url(tmp_path, plan_dir)
+        == "http://example-host:8089/plans/redesign-auth/"
+    )
+    # Named artifact: the URL is the page a reviewer actually opens.
+    assert (
+        resolver.resolve_review_url(tmp_path, plan_dir, "plan.html")
+        == "http://example-host:8089/plans/redesign-auth/plan.html"
+    )
+
+
+def test_review_url_percent_encodes_every_path_component(tmp_path: Path) -> None:
+    """A `#` in a configured directory is PATH, not a fragment; likewise a space
+    and a literal `%`. Handing back the raw characters gives a URL the server
+    never sees the whole of."""
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        '  dir: "docs/plans/#ticket 7/100%/{slug}"\n'
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
+    url = resolver.resolve_review_url(tmp_path, plan_dir, "plan.html")
+    assert url == (
+        "http://example-host:8089/plans/%23ticket%207/100%25/redesign-auth/plan.html"
+    )
+    split = urlsplit(url)
+    assert split.fragment == "" and split.query == ""
+
+
+def test_review_url_artifact_cannot_leave_the_plan_dir(tmp_path: Path) -> None:
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: docs/plans/{slug}\n"
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    plan_dir = resolver.resolve(tmp_path, "Topic")
+    with pytest.raises(ValueError, match="must stay inside the plan directory"):
+        resolver.resolve_review_url(tmp_path, plan_dir, "../other/plan.html")
+    with pytest.raises(ValueError, match="non-empty file name"):
+        resolver.resolve_review_url(tmp_path, plan_dir, "  ")
 
 
 def test_review_url_is_none_when_the_plan_dir_escapes_the_served_root(
@@ -288,7 +341,157 @@ def test_cli_reports_the_review_url(
     )
     assert resolver.main(["--topic", "Topic", "--cwd", str(tmp_path)]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["review_url"] == "http://example-host:8089/plans/topic"
+    assert payload["review_url"] == "http://example-host:8089/plans/topic/"
+
+    assert (
+        resolver.main(
+            ["--topic", "Topic", "--cwd", str(tmp_path), "--artifact", "plan.html"]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["review_url"] == "http://example-host:8089/plans/topic/plan.html"
+
+
+def test_handing_an_existing_plan_dir_back_reuses_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Asking for the URL of a page written later must not cost a new directory.
+    A run that already holds its plan dir passes it back as `--dir`: the same
+    directory comes out (no second `{n}` claim) with the artifact's URL."""
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: docs/plans/{slug}/v{n}\n"
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    run_dir = resolver.resolve(tmp_path, "Topic")
+    assert run_dir.name == "v1"
+
+    assert (
+        resolver.main(
+            [
+                "--topic",
+                "Topic",
+                "--cwd",
+                str(tmp_path),
+                "--dir",
+                str(run_dir),
+                "--artifact",
+                "plan/v2/plan.html",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan_dir"] == str(run_dir)
+    assert (
+        payload["review_url"]
+        == "http://example-host:8089/plans/topic/v1/plan/v2/plan.html"
+    )
+    assert not (run_dir.parent / "v2").exists()
+
+
+def test_cli_artifact_must_be_usable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: docs/plans/{slug}\n"
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        resolver.main(
+            ["--topic", "Topic", "--cwd", str(tmp_path), "--artifact", "../escape.html"]
+        )
+    assert "must stay inside the plan directory" in str(exit_info.value)
+    assert capsys.readouterr().out == ""
+
+
+# ─── review URL, fetched over HTTP ───────────────────────────────────────────
+#
+# A review URL that does not load is worse than none: the reviewer follows it,
+# gets a 404 or a directory listing, and the turn is wasted. These cases run a
+# real static server over the resolved tree and fetch what the resolver hands
+# back — the only check that proves the URL and the file agree.
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextlib.contextmanager
+def _static_server(root: Path) -> Iterator[str]:
+    """`python3 -m http.server` over `root`; yields its base URL."""
+    port = _free_port()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            str(root),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                urllib.request.urlopen(f"{base}/", timeout=1).close()
+                break
+            except urllib.error.URLError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+        yield base
+    finally:
+        process.terminate()
+        process.wait(timeout=15)
+
+
+def _fetch(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return response.read().decode()
+
+
+@pytest.mark.parametrize(
+    "segment", ["plain", "#ticket", "with space", "100%done", "a&b=c"]
+)
+def test_review_url_fetches_the_named_artifact(tmp_path: Path, segment: str) -> None:
+    root = tmp_path / "docs"
+    root.mkdir()
+    with _static_server(root) as base:
+        _write(
+            tmp_path / ".shared-llm.yaml",
+            "work_log:\n"
+            f'  dir: {json.dumps(f"docs/plans/{segment}/{{slug}}")}\n'
+            f"  url_base: {base}\n"
+            "  serve_root: docs\n",
+        )
+        plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
+        body = f"<h1>plan for {segment}</h1>"
+        (plan_dir / "plan.html").write_text(body)
+
+        url = resolver.resolve_review_url(tmp_path, plan_dir, "plan.html")
+        assert url is not None
+        assert _fetch(url) == body
+
+        # Without an artifact the same directory still answers — as a listing
+        # that names the page, never as a URL that 404s.
+        directory_url = resolver.resolve_review_url(tmp_path, plan_dir)
+        assert directory_url is not None and directory_url.endswith("/")
+        assert "plan.html" in _fetch(directory_url)
 
 
 # ─── concurrent {n} allocation ───────────────────────────────────────────────

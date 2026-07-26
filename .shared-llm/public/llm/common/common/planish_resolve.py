@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from urllib.parse import quote
 
 import yaml
 
@@ -213,13 +214,31 @@ def resolve_host(cwd: Path) -> str | None:
     return None
 
 
-def resolve_review_url(cwd: Path, plan_dir: Path) -> str | None:
-    """Browser URL for `plan_dir`, or None when the config cannot name one.
+def _artifact_parts(artifact: str) -> list[str]:
+    """Path components of `artifact`, rejecting anything that leaves plan_dir."""
+    parts = [part for part in artifact.split("/") if part]
+    if not parts or any(not part.strip() for part in parts):
+        raise ValueError(f'artifact "{artifact}" must be a non-empty file name')
+    if any(part in (".", "..") for part in parts):
+        raise ValueError(f'artifact "{artifact}" must stay inside the plan directory')
+    return parts
+
+
+def resolve_review_url(
+    cwd: Path, plan_dir: Path, artifact: str | None = None
+) -> str | None:
+    """Browser URL for `plan_dir` — or for `artifact` inside it — else None.
 
     Requires BOTH `work_log.url_base` (where the static server answers) and
     `work_log.serve_root` (the filesystem root it serves) — with only one of
     them, or with a plan directory outside that root, there is no way to know
     the URL, so this returns None rather than guessing one that 404s.
+
+    Name an `artifact` (`plan.html`) and the URL is the page itself; without one
+    it is the directory, ending in a slash so a static server lists it instead
+    of redirecting. Every component is percent-encoded, so a `#`, a space, or a
+    `%` in a configured directory stays part of the PATH rather than turning
+    into a fragment or a query the server never sees.
     """
     found = _find_work_log(cwd)
     if found is None:
@@ -237,21 +256,52 @@ def resolve_review_url(cwd: Path, plan_dir: Path) -> str | None:
         relative = plan_dir.relative_to(root.resolve())
     except ValueError:
         return None
+
+    parts = [] if relative == Path(".") else list(relative.parts)
+    if artifact is not None:
+        parts.extend(_artifact_parts(artifact))
+    url_path = "".join(f"/{quote(part, safe='')}" for part in parts)
     base = url_base.rstrip("/")
-    return base if relative == Path(".") else f"{base}/{relative.as_posix()}"
+    return f"{base}{url_path}" if artifact is not None else f"{base}{url_path}/"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="planish-resolve")
-    parser.add_argument("--topic", required=True)
+    parser.add_argument("--topic")
     parser.add_argument("--dir")
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--artifact",
+        help="file inside the plan directory the review URL should name, e.g. "
+        "plan.html; without it the URL names the directory",
+    )
+    parser.add_argument(
+        "--host-only",
+        action="store_true",
+        help="resolve the review host alone and create nothing — plan_dir and "
+        "review_url come back null",
+    )
     args = parser.parse_args(argv)
     cwd = args.cwd.resolve()
+
+    if args.host_only:
+        try:
+            host = resolve_host(cwd)
+        except (OSError, ValueError) as error:
+            sys.exit(f"planish-resolve: {error}")
+        print(
+            json.dumps(
+                {"host": host, "plan_dir": None, "review_url": None}, sort_keys=True
+            )
+        )
+        return 0
+
+    if not args.topic:
+        parser.error("--topic is required unless --host-only is given")
     try:
         directory = resolve(cwd, args.topic, args.dir)
         host = resolve_host(cwd)
-        review_url = resolve_review_url(cwd, directory)
+        review_url = resolve_review_url(cwd, directory, args.artifact)
     except (OSError, ValueError) as error:
         sys.exit(f"planish-resolve: {error}")
     print(

@@ -3,10 +3,12 @@
 # Every field is validated against code-owned policy in pipelines.py before a pipeline can be
 # listed or launched, and unknown keys fail loudly instead of being ignored: a typo in a stage
 # name or a review gate must be an error, never a pipeline that quietly runs a different shape.
-# Stage ids and gate values come from CLOSED sets owned by pipelines.py (SUPPORTED_STAGES,
-# SUPPORTED_SKIP_GATES) — `reserach` is rejected here rather than becoming a stage that never
-# runs. Pipeline ids stay open: the skill dispatches its prose by id, so a new one is a normal
-# addition.
+# Pipeline ids, stage ids, and gate values all come from CLOSED sets owned by pipelines.py
+# (SUPPORTED_PIPELINES, SUPPORTED_STAGES, SUPPORTED_SKIP_GATES) — `reserach` is rejected here
+# rather than becoming a stage that never runs, and `rpii` is rejected rather than listing and
+# launching a pane the skill has no route section for. Adding a pipeline is a CODE CHANGE, not a
+# registry edit: an entry here, a `## Pipeline: <id>` route section in the /upagent-pipeline skill,
+# and an id in SUPPORTED_PIPELINES — a test fails if those three ever disagree.
 #
 # Kit base only — there is deliberately no repo overlay. The specialist roster merges one because
 # a repo has to be able to name its own specialists; a pipeline carries `review_gate`, which IS

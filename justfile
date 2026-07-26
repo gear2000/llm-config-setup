@@ -99,7 +99,7 @@ test:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 
-# Runs planish_resolve.py and both duplicated TS resolvers over one corpus.
+# Runs planish_resolve.py and both Pi extensions that delegate to it over one corpus.
 test-resolver-parity:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 

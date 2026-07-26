@@ -101,6 +101,20 @@
 # The resolver never guesses a URL that would 404. A relative "serve_root"
 # resolves from the directory holding THIS file, same as "dir".
 #
+# `review_url` names the PLAN DIRECTORY (ending in "/") unless the resolver is
+# asked for a page:
+#
+#   planish_resolve.py --topic "redesign auth" --artifact plan.html
+#     →  http://localhost:8089/plans/2026-06-29/redesign-auth/plan.html
+#
+# Pass "--artifact" with the file you want opened. That URL is handed to a
+# human exactly as returned — nothing is appended to it afterwards, so without
+# "--artifact" the link opens the directory listing, not the plan.
+#
+# Every path component is percent-encoded, so a "dir" containing a "#", a
+# space, or a "%" still produces a URL whose path survives the trip to the
+# server (a raw "#" would otherwise be read as a fragment and never sent).
+#
 #
 # DEPRECATED PREDECESSORS
 # ───────────────────────

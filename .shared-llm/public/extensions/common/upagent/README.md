@@ -366,11 +366,17 @@ where the human review gate sits, and how many phases the implement stage may gr
 validates the offering roster — strict keys, no silent defaults, and every failure names the file
 and the field. Nothing in this engine interprets a pipeline; the stages are read by the
 `/upagent-pipeline` skill inside the launched pane, so a typo in a stage name or a review gate has
-to be an error here rather than a pane quietly running a different shape. Stage ids and gate
-values come from closed sets owned by `pipelines.py` (`SUPPORTED_STAGES`,
-`SUPPORTED_SKIP_GATES`): `reserach` is rejected at load rather than becoming a stage that never
-runs. Pipeline ids stay open — the skill dispatches its prose by id, so a new pipeline is an
-ordinary addition.
+to be an error here rather than a pane quietly running a different shape. Pipeline ids, stage ids,
+and gate values all come from closed sets owned by `pipelines.py` (`SUPPORTED_PIPELINES`,
+`SUPPORTED_STAGES`, `SUPPORTED_SKIP_GATES`): `reserach` is rejected at load rather than becoming a
+stage that never runs, and `rpii` is rejected rather than listing and launching a pane the skill
+has no route section for.
+
+Adding a pipeline is therefore a **code change, not a registry edit** — three things move together:
+an entry in `pipelines.yaml`, a `## Pipeline: <id>` route section in the `/upagent-pipeline` skill
+layer, and an id in `SUPPORTED_PIPELINES`. `pipelines_test.py` asserts that the shipped registry's
+ids equal `SUPPORTED_PIPELINES` exactly and that the skill's route sections match them one for one,
+so the registry and the skill cannot drift apart.
 
 No pipeline is ever gateless. When a pipeline's `review_gate` names a stage that `optional_stages`
 allows a flag to skip — `rpi` gates on `plan`, and `--skip-plan` skips it — the pipeline must

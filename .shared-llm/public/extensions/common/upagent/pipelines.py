@@ -61,9 +61,14 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # Code-owned vocabulary. A stage id is not free text: the `/upagent-pipeline` skill has one
 # section per stage, so `reserach` is not a new stage, it is a stage that will never run. Shape
-# alone cannot catch that — only a closed set can. Pipeline IDS stay open by contrast, because
-# the skill dispatches its per-pipeline prose by id and a new pipeline is a normal addition.
+# alone cannot catch that — only a closed set can.
 SUPPORTED_STAGES = ("research", "plan", "implement", "validate")
+# Pipeline ids are code-owned for the same reason. The skill dispatches its per-pipeline prose by
+# id and has one route section per id, so `rpii` is not a new pipeline — it is a registry entry
+# that lists, launches a pane, and lands in a skill with nothing to run. Adding a pipeline is a
+# code change: an entry in pipelines.yaml, a `## Pipeline: <id>` route section in the skill, and
+# an id here.
+SUPPORTED_PIPELINES = ("rpi", "no-mistakes")
 # Where human approval lands when the review_gate stage is skipped. Never gateless: skipping the
 # stage moves the gate, it does not remove it.
 SUPPORTED_SKIP_GATES = ("issue-approval",)
@@ -169,6 +174,13 @@ def _parse_pipeline(pipeline_id: object, value: object) -> Pipeline:
         raise PipelineError(
             f"pipeline id {pipeline_id!r} must be a shell-safe lowercase id "
             "(letters, digits, dashes)"
+        )
+    if pipeline_id not in SUPPORTED_PIPELINES:
+        raise PipelineError(
+            f"registry has unsupported pipeline {pipeline_id!r}; expected one of "
+            + ", ".join(SUPPORTED_PIPELINES)
+            + "; adding a pipeline is a code change (registry entry + skill route "
+            "section + SUPPORTED_PIPELINES entry)"
         )
     where = f"pipeline {pipeline_id}"
     if not isinstance(value, dict):

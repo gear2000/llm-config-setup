@@ -48,6 +48,8 @@ import { spawnSync } from "node:child_process";
 const PORT = 4390;
 const CONFIG_NAME = ".shared-llm.yaml";
 const LEGACY_CONFIG_NAME = ".planish.yaml";
+const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const RESOLVER_REL = "public/llm/common/common/planish_resolve.py";
 
 // ─── Server state (module-level) ─────────────────────────────────────────────
 
@@ -76,76 +78,13 @@ function esc(s: string): string {
 }
 
 // ─── Review host configuration ───────────────────────────────────────────────
-
-// A `#` only opens a comment at the start of a line or after whitespace, and
-// never inside a quoted scalar — so `dir: "plans/#ticket/{slug}"` keeps its
-// hash, exactly as PyYAML reads it for the canonical resolver.
-function stripComment(line: string): string {
-	let quote: string | null = null;
-	for (let i = 0; i < line.length; i++) {
-		const ch = line[i];
-		if (quote) {
-			if (ch === quote) quote = null;
-		} else if (ch === '"' || ch === "'") {
-			quote = ch;
-		} else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
-			return line.slice(0, i);
-		}
-	}
-	return line;
-}
-
-// Minimal YAML parser for the .shared-llm.yaml subset: top-level scalars and
-// one level of nested key: value blocks. Handles strings, integers, booleans.
-// A nested block of `- ` items is kept as an array rather than flattened into a
-// mapping, so callers that require a mapping can fail loud the way PyYAML does.
-function parseSimpleYaml(content: string): Record<string, any> {
-	const result: Record<string, any> = {};
-	let nestedKey: string | null = null;
-	let nested: Record<string, any> | null = null;
-	let sequence: string[] | null = null;
-	for (const raw of content.split("\n")) {
-		const line = stripComment(raw);
-		if (!line.trim()) continue;
-		const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
-		if (indent > 0 && line.trim().startsWith("-")) {
-			if (nestedKey === null) continue;
-			if (sequence === null) {
-				sequence = [];
-				result[nestedKey] = sequence;
-				nested = null;
-			}
-			sequence.push(line.trim().slice(1).trim());
-			continue;
-		}
-		const colon = line.indexOf(":");
-		if (colon === -1) continue;
-		const key = line.slice(0, colon).trim();
-		const rest = line.slice(colon + 1).trim();
-		if (indent === 0) {
-			nestedKey = key;
-			sequence = null;
-			if (rest === "") {
-				nested = {};
-				result[key] = nested;
-			} else {
-				nested = null;
-				result[key] = parseYamlScalar(rest);
-			}
-		} else if (nested !== null) {
-			nested[key] = parseYamlScalar(rest);
-		}
-	}
-	return result;
-}
-
-function parseYamlScalar(v: string): string | number | boolean {
-	if (v === "true") return true;
-	if (v === "false") return false;
-	const n = Number(v);
-	if (!isNaN(n) && v.trim() !== "") return n;
-	return v.replace(/^["']|["']$/g, "");
-}
+//
+// The config is NOT parsed here. planish_resolve.py is the one implementation
+// of work-log resolution and this extension runs it as a subprocess. A
+// hand-rolled scanner used to live here; run against the same configs as
+// PyYAML it kept diverging in ways substring checks never see (an escaped quote
+// before ` #`, a quoted comma inside a flow mapping), so it is gone. python3 is
+// already a kit prerequisite — `just init` checks for it.
 
 function findConfigUp(startDir: string, filename: string): string | null {
 	let dir = path.resolve(startDir);
@@ -158,80 +97,52 @@ function findConfigUp(startDir: string, filename: string): string | null {
 	}
 }
 
-// Nearest .shared-llm.yaml carrying a `work_log:` mapping. A file WITHOUT that
-// key is skipped and the walk continues — ~/.shared-llm.yaml is the machine's
-// destination roster and must never shadow a repo's work-log config.
-export function findWorkLogConfig(
-	startDir: string,
-): { configPath: string; workLog: Record<string, any> } | null {
-	let dir = path.resolve(startDir);
-	while (true) {
-		const candidate = path.join(dir, CONFIG_NAME);
-		if (fs.existsSync(candidate)) {
-			const parsed = parseSimpleYaml(fs.readFileSync(candidate, "utf-8"));
-			if (parsed.work_log !== undefined) {
-				return {
-					configPath: candidate,
-					workLog: workLogMapping(candidate, parsed.work_log),
-				};
-			}
-		}
-		const parent = path.dirname(dir);
-		if (parent === dir) return null;
-		dir = parent;
-	}
+// The canonical resolver, looked for by walking UP from cwd — a repo that has
+// adopted the kit carries it under .shared-llm/ — and then beside this
+// extension. The second location is how a DEPLOYED copy finds it: pi loads
+// extensions at their ~/.pi/agent/extensions/ symlink, where import.meta.url
+// does not follow the link, so the path is realpath-resolved back into the
+// generated kit tree first, exactly as the canonical toolkit below is.
+function canonicalResolver(startDir: string): string | null {
+	const fromCwd = findConfigUp(startDir, path.join(".shared-llm", RESOLVER_REL));
+	if (fromCwd) return fromCwd;
+	const beside = path.resolve(
+		path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))),
+		"../../../common/common/planish_resolve.py",
+	);
+	return fs.existsSync(beside) ? beside : null;
 }
 
-// A `work_log:` key that is present but carries nothing usable is a config typo
-// — an empty block (`work_log:` with no children) would otherwise sail through
-// as {} and silently fall back to the default directory, which is exactly what
-// this config contract exists to prevent. Fail loud instead, as the canonical
-// planish_resolve.py does.
-function workLogMapping(configPath: string, value: any): Record<string, any> {
-	// A YAML flow mapping — `work_log: {dir: plans, host: box}` — is valid YAML
-	// that the block-oriented scanner above collapses into a string; re-parse it
-	// so both spellings behave identically.
-	const mapping = typeof value === "string" ? parseFlowMapping(value) : value;
-	if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping))
-		throw new Error(`${configPath} "work_log" must be a mapping of dir/host`);
-	if (Object.keys(mapping).length === 0)
-		throw new Error(
-			`${configPath} "work_log" is empty — set "dir" and/or "host" under it`,
-		);
-	return mapping;
+interface ResolverResult {
+	host: string | null;
+	plan_dir: string | null;
+	review_url: string | null;
 }
 
-// Returns null when the text is not a flow mapping at all, so the caller can
-// report the useful "must be a mapping" error against the original value.
-function parseFlowMapping(value: string): Record<string, any> | null {
-	const text = value.trim();
-	if (!text.startsWith("{") || !text.endsWith("}")) return null;
-	const body = text.slice(1, -1).trim();
-	const mapping: Record<string, any> = {};
-	if (!body) return mapping;
-	for (const entry of body.split(",")) {
-		const colon = entry.indexOf(":");
-		if (colon === -1) return null;
-		mapping[entry.slice(0, colon).trim()] = parseYamlScalar(
-			entry.slice(colon + 1).trim(),
-		);
-	}
-	return mapping;
+// Run the canonical resolver. Its stderr — deprecation notices, the reason a
+// config was rejected — is passed through verbatim, and a non-zero exit is a
+// fault here too: never a quiet fall back to an invented host.
+function runResolver(
+	script: string,
+	cwd: string,
+	args: string[],
+): ResolverResult {
+	const result = spawnSync(PYTHON_BIN, [script, "--cwd", cwd, ...args], {
+		encoding: "utf-8",
+	});
+	if (result.error) throw result.error;
+	const stderr = (result.stderr ?? "").trim();
+	if (stderr) process.stderr.write(`${stderr}\n`);
+	if (result.status !== 0)
+		throw new Error(`${script} exited ${result.status}: ${stderr}`);
+	return JSON.parse(result.stdout) as ResolverResult;
 }
 
-// A key that is present but unusable is a config typo — fail loud, never fall
-// back. Absent is fine: the caller moves on to the next precedence step.
-function stringField(
-	configPath: string,
-	mapping: Record<string, any>,
-	key: string,
-	label: string,
-): string | null {
-	if (mapping[key] === undefined) return null;
-	const value = mapping[key];
-	if (typeof value !== "string" || !value.trim())
-		throw new Error(`${configPath} "${label}" must be a non-empty string`);
-	return value.trim();
+// The config file whose rules only the canonical script knows how to apply.
+function configPresent(cwd: string): string | null {
+	return (
+		findConfigUp(cwd, CONFIG_NAME) ?? findConfigUp(cwd, LEGACY_CONFIG_NAME)
+	);
 }
 
 // Deprecation notices go to stderr, never into a served page or a tool result.
@@ -248,9 +159,10 @@ function warnDeprecated(message: string): void {
 // host the server binds 0.0.0.0 so those remote connections are accepted;
 // the default stays 127.0.0.1-only. Resolved once, at first use.
 //
-// Precedence mirrors planish_resolve.py exactly: $WORK_LOG_HOST, $PLANISH_HOST
+// Precedence lives in planish_resolve.py — $WORK_LOG_HOST, $PLANISH_HOST
 // (deprecated), work_log.host, then a legacy .planish.yaml `host:` (deprecated)
-// — consulted only when no .shared-llm.yaml carries a work_log mapping.
+// — and is applied by running it with `--host-only`, which resolves the host
+// and creates nothing. Serving a page must never claim a work-log directory.
 
 let resolvedHost: string | null = null;
 
@@ -261,6 +173,8 @@ function resolveHost(): string {
 }
 
 export function configuredHost(): string | null {
+	// The env overrides come first and need no parser, so they still answer on a
+	// machine that carries neither the kit nor a config file.
 	if (process.env.WORK_LOG_HOST && process.env.WORK_LOG_HOST.trim()) {
 		return process.env.WORK_LOG_HOST.trim();
 	}
@@ -269,20 +183,22 @@ export function configuredHost(): string | null {
 		return process.env.PLANISH_HOST.trim();
 	}
 
-	const found = findWorkLogConfig(process.cwd());
-	if (found)
-		return stringField(found.configPath, found.workLog, "host", "work_log.host");
+	const cwd = process.cwd();
+	const script = canonicalResolver(cwd);
+	if (script) return runResolver(script, cwd, ["--host-only"]).host;
 
-	const legacyPath = findConfigUp(process.cwd(), LEGACY_CONFIG_NAME);
-	if (legacyPath) {
-		const parsed = parseSimpleYaml(fs.readFileSync(legacyPath, "utf-8"));
-		const host = stringField(legacyPath, parsed, "host", "host");
-		if (host !== null)
-			warnDeprecated(
-				`${legacyPath} is deprecated — move \`host:\` into ${CONFIG_NAME} under \`work_log.host\``,
-			);
-		return host;
-	}
+	// No script. Guessing what a config file says is how the deleted scanner got
+	// this wrong, so a config that could name a host is a loud stop rather than
+	// a silent "localhost" that strands a remote browser. $WORK_LOG_HOST above
+	// is the way past it without a kit.
+	const config = configPresent(cwd);
+	if (config)
+		throw new Error(
+			`${config} may configure the work log, but the canonical resolver ` +
+				`(.shared-llm/${RESOLVER_REL}) is not reachable from ${cwd} — run ` +
+				`\`just update\` for this repo, or set $WORK_LOG_HOST for this session. ` +
+				`This extension never parses the config itself.`,
+		);
 	return null;
 }
 

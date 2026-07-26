@@ -116,10 +116,21 @@ that replaces it (`issue-approval`).
 **Presenting a gate.** Render the artifact — `plan.md`, or the issue plus your approach — as a
 self-contained HTML page following the shared Planish HTML Grill Contract at
 `.shared-llm/public/llm/common/common/planish-html-grill-contract.md`: annotatable static page,
-sticky notes, Copy Feedback, no in-page submit. Use the resolver's `review_url` when it returns one.
-When it is null the work-log server is not configured: hand the human the page's absolute file path
-and say so. Never assemble a URL yourself — a directory and a host name do not determine a port or a
-server root, and a fabricated link wastes the human's turn. Give the human the page, end the turn,
+sticky notes, Copy Feedback, no in-page submit. For the link, ask the resolver for the page you just
+wrote, handing it back the run directory it already gave you so it reuses that directory instead of
+claiming another:
+
+```text
+.shared-llm/public/llm/common/common/planish_resolve.py \
+  --topic <issue-slug> --dir <run-dir> --artifact plan/v<N>/plan.html
+```
+
+`--artifact` is the page's path inside the run directory — name whatever you actually wrote. Give
+the human exactly the `review_url` that comes back and append nothing to it: without `--artifact`
+the URL names the directory, and a path you tacked on afterwards is a link nobody tested. When
+`review_url` is null the work-log server is not configured: hand the human the page's absolute file
+path and say so. Never assemble a URL yourself — a directory and a host name do not determine a port
+or a server root, and a fabricated link wastes the human's turn. Give the human the page, end the turn,
 and treat their pasted feedback as the next round. Record every round and the final approval in
 `pipeline-log.md`. No approval, no implementation — on every route.
 

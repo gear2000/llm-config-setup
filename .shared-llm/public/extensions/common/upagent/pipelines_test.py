@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -22,6 +23,14 @@ pipelines = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = pipelines
 spec.loader.exec_module(pipelines)
 PipelineError = pipelines.PipelineError
+
+# .../<repo>/.shared-llm/public/extensions/common/upagent -> <repo>. The skill layer is kit-synced
+# into every destination at the same path, so this resolves in the kit and in a destination alike.
+SKILL_COMMAND = (
+    HERE.parents[4]
+    / ".shared-llm/public/layers/slash-commands/common/common/upagent-pipeline/command.md"
+)
+_ROUTE_SECTION_RE = re.compile(r"^## Pipeline: `([^`]+)`", re.MULTILINE)
 
 
 def _shipped() -> dict[str, Any]:
@@ -64,6 +73,26 @@ def test_shipped_registry_loads_with_both_approved_pipelines() -> None:
     assert gate.review_gate == pipelines.NO_REVIEW_GATE
     assert gate.skip_gate is None
     assert gate.max_phases is None
+
+
+def test_the_shipped_registry_defines_exactly_the_code_owned_pipelines() -> None:
+    # A pipeline id is not free text either: the registry may only ship ids the code owns, and
+    # every id the code owns must actually be shipped. Order included — `list` prints in this one.
+    registry = pipelines.load_registry()
+
+    assert tuple(registry.pipelines) == pipelines.SUPPORTED_PIPELINES
+
+
+def test_every_supported_pipeline_has_exactly_one_skill_route_section() -> None:
+    # The registry can only launch what the skill can run. An id in one file and not the other is
+    # a pane that starts with nothing to follow, so the two files are pinned to each other here
+    # rather than to a comment asking the next author to remember.
+    assert SKILL_COMMAND.is_file(), f"skill layer not found: {SKILL_COMMAND}"
+
+    sections = _ROUTE_SECTION_RE.findall(SKILL_COMMAND.read_text())
+
+    assert sorted(sections) == sorted(pipelines.SUPPORTED_PIPELINES)
+    assert len(sections) == len(set(sections))
 
 
 def test_every_skippable_review_gate_declares_where_approval_goes() -> None:
@@ -118,6 +147,15 @@ def test_resolving_an_unknown_pipeline_lists_the_valid_ids() -> None:
                 "RPI", source["pipelines"]["rpi"]
             ),
             "pipeline id 'RPI' must be a shell-safe lowercase id",
+        ),
+        (
+            # `rpii` is regex-valid and every stage under it is supported, so shape alone
+            # accepts it. Only the closed id set catches a pipeline the skill cannot run.
+            "regex-valid-but-unsupported-pipeline-id",
+            lambda source: source["pipelines"].__setitem__(
+                "rpii", source["pipelines"]["rpi"]
+            ),
+            "registry has unsupported pipeline 'rpii'; expected one of rpi, no-mistakes",
         ),
         (
             "missing-description",
