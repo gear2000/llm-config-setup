@@ -41,6 +41,9 @@ import { spawnSync } from "node:child_process";
 const PI_DIR = path.join(os.homedir(), ".pi");
 const REQUEST_FIFO = path.join(PI_DIR, "tf-review-request.fifo");
 const RESPONSE_FIFO = path.join(PI_DIR, "tf-review-response.fifo");
+const CONFIG_NAME = ".shared-llm.yaml";
+const LEGACY_CONFIG_NAME = ".planish.yaml";
+const DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}";
 
 // ─── FIFO helpers ─────────────────────────────────────────────────────────────
 
@@ -110,19 +113,25 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 // directory, never the cwd (the .tf implementation files still go to cwd — only
 // the plan moves). Precedence for the directory:
 //   1. --dir <path> passed to /tf:auto
-//   2. $PLANISH_DIR
-//   3. nearest .planish.yaml walking UP from cwd — its "dir" template
-//   4. fallback: /tmp/planish/{date}/{slug}
+//   2. $WORK_LOG_DIR
+//   3. $PLANISH_DIR (deprecated — still honored, warns on stderr)
+//   4. nearest .shared-llm.yaml carrying a "work_log:" mapping, walking UP from
+//      cwd — its work_log.dir template. A .shared-llm.yaml WITHOUT that key is
+//      skipped and the walk continues, so the machine's destination roster at
+//      ~/.shared-llm.yaml never shadows a repo's work-log config.
+//   5. nearest .planish.yaml walking UP from cwd — its "dir" template
+//      (deprecated — still honored, warns on stderr)
+//   6. fallback: /var/tmp/work-log/{date}/{slug}
 // Template tokens: {date} → YYYY-MM-DD (local), {slug} → slugified topic,
 // {type} → "plan", {n} → next vN integer (glob the parent dir, max + 1, start
-// at 1). A relative template from .planish.yaml resolves against the directory
-// holding that file; a relative --dir / $PLANISH_DIR resolves against cwd.
+// at 1). A relative configured template resolves against the directory holding
+// the config file; a relative --dir / $WORK_LOG_DIR resolves against cwd.
 //
-// NOTE: this resolver is intentionally DUPLICATED (not shared) in do-planish.ts.
-// Keep the two copies in sync.
+// NOTE: this resolver is intentionally DUPLICATED (not shared) in do-planish.ts
+// and planish_resolve.py, which is the canonical reference. Keep them in sync.
 
-// Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
-// level of nested key: value blocks. Handles strings, integers, and booleans.
+// Minimal YAML parser for the .shared-llm.yaml subset: top-level scalars and
+// one level of nested key: value blocks. Handles strings, integers, booleans.
 function parseSimpleYaml(content: string): Record<string, any> {
   const result: Record<string, any> = {};
   let nested: Record<string, any> | null = null;
@@ -180,6 +189,85 @@ function findConfigUp(startDir: string, filename: string): string | null {
   }
 }
 
+// Nearest .shared-llm.yaml carrying a "work_log:" mapping; files without the
+// key are skipped and the walk continues.
+function findWorkLogConfig(
+  startDir: string,
+): { configPath: string; workLog: Record<string, any> } | null {
+  let dir = path.resolve(startDir);
+  while (true) {
+    const candidate = path.join(dir, CONFIG_NAME);
+    if (fs.existsSync(candidate)) {
+      const parsed = parseSimpleYaml(fs.readFileSync(candidate, "utf-8"));
+      if (parsed.work_log !== undefined) {
+        return {
+          configPath: candidate,
+          workLog: workLogMapping(candidate, parsed.work_log),
+        };
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// A `work_log:` key that is present but carries nothing usable is a config typo
+// — an empty block (`work_log:` with no children) would otherwise sail through
+// as {} and silently fall back to the default directory, which is exactly what
+// this config contract exists to prevent. Fail loud instead, as the canonical
+// planish_resolve.py does.
+function workLogMapping(configPath: string, value: any): Record<string, any> {
+  // A YAML flow mapping — `work_log: {dir: plans, host: box}` — is valid YAML
+  // that the block-oriented scanner above collapses into a string; re-parse it
+  // so both spellings behave identically.
+  const mapping = typeof value === "string" ? parseFlowMapping(value) : value;
+  if (typeof mapping !== "object" || mapping === null) {
+    throw new Error(`${configPath} "work_log" must be a mapping of dir/host`);
+  }
+  if (Object.keys(mapping).length === 0) {
+    throw new Error(`${configPath} "work_log" is empty — set "dir" and/or "host" under it`);
+  }
+  return mapping;
+}
+
+// Returns null when the text is not a flow mapping at all, so the caller can
+// report the useful "must be a mapping" error against the original value.
+function parseFlowMapping(value: string): Record<string, any> | null {
+  const text = value.trim();
+  if (!text.startsWith("{") || !text.endsWith("}")) return null;
+  const body = text.slice(1, -1).trim();
+  const mapping: Record<string, any> = {};
+  if (!body) return mapping;
+  for (const entry of body.split(",")) {
+    const colon = entry.indexOf(":");
+    if (colon === -1) return null;
+    mapping[entry.slice(0, colon).trim()] = parseYamlScalar(entry.slice(colon + 1).trim());
+  }
+  return mapping;
+}
+
+// A key present but unusable is a config typo — fail loud, never fall back.
+// Absent is fine: the caller moves on to the next precedence step.
+function stringField(
+  configPath: string,
+  mapping: Record<string, any>,
+  key: string,
+  label: string,
+): string | null {
+  if (mapping[key] === undefined) return null;
+  const value = mapping[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${configPath} "${label}" must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+// Deprecation notices go to stderr — never into a plan file or a tool result.
+function warnDeprecated(message: string): void {
+  console.error(`[tf-implement] ${message}`);
+}
+
 // Replace a {n} token in a path segment with the next version integer, found by
 // globbing the parent dir for siblings matching the segment's prefix/suffix.
 function expandVersionToken(absPath: string): string {
@@ -200,32 +288,41 @@ function expandVersionToken(absPath: string): string {
   return parts.join(path.sep);
 }
 
-function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
-  let template: string;
-  let baseDir: string;
-
-  if (dirFlag && dirFlag.trim()) {
-    template = dirFlag.trim();
-    baseDir = cwd;
-  } else if (process.env.PLANISH_DIR && process.env.PLANISH_DIR.trim()) {
-    template = process.env.PLANISH_DIR.trim();
-    baseDir = cwd;
-  } else {
-    const configPath = findConfigUp(cwd, ".planish.yaml");
-    const parsed = configPath ? parseSimpleYaml(fs.readFileSync(configPath, "utf-8")) : null;
-    if (configPath && parsed?.dir !== undefined) {
-      // dir present but unusable is a config typo — fail loud, never fall back.
-      if (typeof parsed.dir !== "string" || !parsed.dir.trim()) {
-        throw new Error(`${configPath} "dir" must be a non-empty string`);
-      }
-      template = parsed.dir.trim();
-      baseDir = path.dirname(configPath!);
-    } else {
-      // no config, or a host-only config — default template.
-      template = "/tmp/planish/{date}/{slug}";
-      baseDir = cwd;
-    }
+// The (template, base directory) pair the precedence selects.
+function resolveTemplate(cwd: string, dirFlag?: string): [string, string] {
+  if (dirFlag && dirFlag.trim()) return [dirFlag.trim(), cwd];
+  if (process.env.WORK_LOG_DIR && process.env.WORK_LOG_DIR.trim()) {
+    return [process.env.WORK_LOG_DIR.trim(), cwd];
   }
+  if (process.env.PLANISH_DIR && process.env.PLANISH_DIR.trim()) {
+    warnDeprecated("$PLANISH_DIR is deprecated — use $WORK_LOG_DIR");
+    return [process.env.PLANISH_DIR.trim(), cwd];
+  }
+
+  const found = findWorkLogConfig(cwd);
+  if (found) {
+    const configured = stringField(found.configPath, found.workLog, "dir", "work_log.dir");
+    // a host-only work_log block keeps the default template.
+    if (configured === null) return [DEFAULT_TEMPLATE, cwd];
+    return [configured, path.dirname(found.configPath)];
+  }
+
+  const legacyPath = findConfigUp(cwd, LEGACY_CONFIG_NAME);
+  if (legacyPath) {
+    const parsed = parseSimpleYaml(fs.readFileSync(legacyPath, "utf-8"));
+    const configured = stringField(legacyPath, parsed, "dir", "dir");
+    if (configured === null) return [DEFAULT_TEMPLATE, cwd];
+    warnDeprecated(
+      `${legacyPath} is deprecated — move \`dir:\` into ${CONFIG_NAME} under \`work_log.dir\``,
+    );
+    return [configured, path.dirname(legacyPath)];
+  }
+
+  return [DEFAULT_TEMPLATE, cwd];
+}
+
+function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
+  const [template, baseDir] = resolveTemplate(cwd, dirFlag);
 
   const expanded = template
     .replace(/\{date\}/g, todayYmd())

@@ -1,0 +1,22 @@
+# Canonical UpAgent pipeline registry — the named work shapes `/upagent-pipeline` can run.
+#
+# Every field is validated against code-owned policy in pipelines.py before a pipeline can be
+# listed or launched, and unknown keys fail loudly instead of being ignored: a typo in a stage
+# name or a review gate must be an error, never a pipeline that quietly runs a different shape.
+#
+# Kit base only — there is deliberately no repo overlay. The specialist roster merges one because
+# a repo has to be able to name its own specialists; a pipeline carries `review_gate`, which IS
+# the human approval step, so a same-named repo entry could drop a gate rather than merely
+# shorten a phone book. Adding an overlay later is additive; removing one is not.
+schema_version: 1
+pipelines:
+  rpi:
+    description: research -> plan -> implement; research and plan are optional stages
+    stages: [research, plan, implement]
+    optional_stages: [research, plan]     # skipped via --skip-research / --skip-plan
+    review_gate: plan                     # human approves the plan before implement
+    max_phases: 3                         # implement must stay small - 1, at most 2-3 phases
+  no-mistakes:
+    description: do the task, then validate through the no-mistakes gate (task-first mode)
+    stages: [implement, validate]
+    review_gate: none                     # the gate IS the pipeline; it parks at its own gates

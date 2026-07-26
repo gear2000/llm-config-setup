@@ -358,6 +358,47 @@ once with a controller assignment and held behind the phase-start gate; a stage 
 lease-private result contract. `upagent-phase-start` fails before creating a pane when the selected
 harness has no phase-leader template.
 
+## Pipelines (`pipelines.yaml`) — what shape of work to run
+
+A pipeline is one named work shape: an ordered stage list, which of those stages are optional,
+where the human review gate sits, and how many phases the implement stage may grow to.
+`pipelines.yaml` holds the registry and `pipelines.py` validates it the same way `offerings.py`
+validates the offering roster — strict keys, no silent defaults, and every failure names the file
+and the field. Nothing in this engine interprets a pipeline; the stages are read by the
+`/upagent-pipeline` skill inside the launched pane, so a typo in a stage name or a review gate has
+to be an error here rather than a pane quietly running a different shape.
+
+```
+just upagent-list-pipelines           # id, stages, description (`?` marks an optional stage)
+just upagent-list-pipelines --json    # the validated record, review gate and max_phases included
+just upagent-pipeline rpi docs/issues/dry-run-flag.md
+just upagent-pipeline rpi --skip-research https://github.com/org/repo/issues/42
+```
+
+`<issue-location>` is a LOCATION — a file path or a tracker reference the pipeline can fetch
+verbatim — never the issue text itself. The skill stops loudly on anything it cannot resolve, so
+`just upagent-pipeline rpi add a --dry-run flag` is a stop, not a shortcut.
+
+`just upagent-pipeline` puts an interactive Claude TUI in the unified `upagent` workspace's
+`control` tab — the same placement `just run-start` uses — preloaded with
+`/upagent-pipeline <name> <args>`. The name is resolved against the registry BEFORE any pane is
+created, so a typo costs a message rather than an orphaned pane. A Herdr server that is not
+running fails loud with the command to start it, and a startup that never becomes healthy closes
+what the launch created (its own pane in an adopted workspace, the whole workspace only when the
+launch created that too).
+
+The recipe passes `{{args}}` through the calling shell, exactly like every other `*args` recipe in
+this kit: arguments are word-split there, so a location containing a space arrives as two
+arguments and `$(...)` is expanded before Python ever sees it. Keep issue locations space-free at
+the command line, or start the session and give the location to `/upagent-pipeline` inside it.
+`pipeline_prompt` re-quotes with `shlex.join` and rejects control characters, but that is
+defense-in-depth on what survives the recipe shell — it is not the outermost gate.
+
+Unlike `specialists.yaml`, the pipeline registry is kit base only — there is deliberately no repo
+overlay. A repo has to be able to name its own specialists; a pipeline carries `review_gate`,
+which IS the human approval step, so a same-named repo entry could drop a gate rather than merely
+shorten a phone book. Adding an overlay later is additive; removing one is not.
+
 ## Adopt it
 
 1. Copy this whole directory to the same relative path (public tool modules land under a

@@ -88,7 +88,7 @@ pi-extensions:
 selfcompose:
     rm -rf examples/self
     ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/public/compose/slash-commands --target examples/self --placeholder OPS_REPO=your-repo-ops
-    for d in .claude/skills/*/; do n=$(basename "$d"); cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md"; done
+    for d in .claude/skills/*/; do n=$(basename "$d"); case "$n" in lavish) continue ;; esac; cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md" || exit 1; done
     @echo "selfcompose: regenerated the kit's tracked slash-command skills (.claude/skills/{cc,do}-*)"
 
 # ─── Tests ────────────────────────────────────────────

@@ -1,0 +1,123 @@
+# .shared-llm.yaml.example
+#
+# HOW IT WORKS
+# ─────────────
+# The planning flows (`/do-plan` on Pi, `/cc-plan` in Claude Code) write two
+# files — plan.md and plan.html — into a directory you control. You then open
+# the HTML file in a browser to read and annotate it.
+#
+# Two things must be configured together:
+#
+#   1. WHERE FILES ARE WRITTEN  →  "work_log.dir" in this file
+#   2. WHERE YOUR HTTP SERVER SERVES FROM  →  the --directory arg of the server
+#
+# The "work_log.dir" path must be INSIDE the directory your server serves, so
+# the HTML file has a URL you can actually open.
+#
+#
+# STEP-BY-STEP SETUP
+# ──────────────────
+# 1. Pick a docs/plans root on your machine, e.g. ~/my-project/docs
+#
+# 2. Start a static HTTP server from that root:
+#
+#      python3 -m http.server 8089 --directory ~/my-project/docs
+#
+#    (run this in a background terminal or add it to a startup script)
+#
+# 3. Set "work_log.dir" below to a path INSIDE that root:
+#
+#      work_log:
+#        dir: /home/<you>/my-project/docs/plans/{date}/{slug}
+#
+#    planning will write:
+#      /home/<you>/my-project/docs/plans/2026-06-29/redesign-auth/plan.md
+#      /home/<you>/my-project/docs/plans/2026-06-29/redesign-auth/plan.html
+#
+# 4. Open the HTML file in your browser at:
+#
+#      http://localhost:8089/plans/2026-06-29/redesign-auth/plan.html
+#
+#
+# TOKENS
+# ──────
+#   {date}  →  YYYY-MM-DD  (today)
+#   {slug}  →  your planning topic, lowercased and hyphenated
+#   {type}  →  "plan"
+#   {n}     →  next version integer, auto-incremented by scanning siblings
+#
+# A relative "work_log.dir" path resolves from the directory holding THIS file.
+# An absolute path is used as-is.
+#
+#
+# WHICH FILE WINS
+# ───────────────
+# Resolution walks UP from the current directory and takes the nearest
+# `.shared-llm.yaml` that CONTAINS a `work_log:` mapping. A `.shared-llm.yaml`
+# without that key is skipped and the walk continues — so `~/.shared-llm.yaml`,
+# the machine-level roster of kit destinations, never shadows a repo's config.
+# One file at your repo root therefore covers everything inside it.
+#
+# With nothing configured anywhere, plans land in
+# /var/tmp/work-log/{date}/{slug}. Fine for throwaway use, inconvenient when
+# you want plans versioned next to your work.
+#
+# A configured "work_log.dir" must be a non-empty string — a malformed value
+# fails loudly rather than silently falling back to the default.
+#
+# For a single run, `$WORK_LOG_DIR` overrides this file, and `--dir <path>`
+# passed through the planning command overrides both.
+#
+#
+# REMOTE SESSIONS (optional "work_log.host")
+# ──────────────────────────────────────────
+# When you reach this machine by name instead of localhost — Tailscale, LAN,
+# SSH from a laptop — set "work_log.host" to that machine name. Every URL the
+# planning flows hand out (the planish pages on port 4390 AND the static
+# grill/plan pages) then uses it instead of localhost, and the planish server
+# binds 0.0.0.0 so those remote connections are accepted. Default: localhost.
+# `$WORK_LOG_HOST` overrides it for a single session.
+#
+#   work_log:
+#     host: your-machine-name
+#
+# "host" works on its own too — a `work_log:` block with only "host" keeps the
+# default /var/tmp/work-log/{date}/{slug} directory.
+#
+#
+# DEPRECATED PREDECESSORS
+# ───────────────────────
+# The old `.planish.yaml` (top-level `dir:` / `host:`), `$PLANISH_DIR`, and
+# `$PLANISH_HOST` are still honored as a last-resort fallback and warn on
+# stderr. Move them into this file's `work_log:` block — the fallback goes away
+# in a future release.
+#
+#
+# ALSO READ BY: the /design-doc skill (skills/design-doc/SKILL.md) reuses
+# "work_log.host" for its own base_url (http://{host}:8089) when it has no more
+# specific config of its own — one hostname for every doc/plan URL this kit
+# hands out. See that skill's Step 0 for its own explicit-override option.
+#
+#
+# COPY AND RENAME TO ACTIVATE
+# ────────────────────────────
+# cp .shared-llm.yaml.example .shared-llm.yaml
+# Then edit the "dir" line below to match your setup.
+
+work_log:
+  dir: /absolute/path/to/your/docs/plans/{date}/{slug}
+  # host: your-machine-name
+
+# ── Alternative layouts ────────────────────────────────────────────────────────
+
+# If your server root IS your repo root (e.g. python3 -m http.server 8089):
+# work_log:
+#   dir: plans/{date}/{slug}
+
+# If you use an ops/docs directory structure:
+# work_log:
+#   dir: ops/docs/work-log/{date}/{slug}/plan
+
+# Versioned plans (v1, v2, …) in a named folder:
+# work_log:
+#   dir: plans/{slug}/v{n}

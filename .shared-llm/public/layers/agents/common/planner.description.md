@@ -1,0 +1,1 @@
+Writes one small tracer-bullet implementation plan for a single issue from its issue and research files — within a stated phase budget, every phase carrying checkable Done criteria, and never any implementation.

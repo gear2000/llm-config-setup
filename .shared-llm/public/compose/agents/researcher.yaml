@@ -1,0 +1,8 @@
+type: agent
+name: researcher
+model: sonnet
+color: cyan
+description: .shared-llm/public/layers/agents/common/researcher.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/researcher.md
+output: .claude/agents/researcher.md

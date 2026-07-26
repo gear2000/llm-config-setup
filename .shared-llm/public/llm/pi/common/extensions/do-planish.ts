@@ -31,8 +31,8 @@
  * front door. The old planish and plan-and-grill names are warning aliases.
  *
  * HTTP server: port 4390 (lazy start, shared across a session). The URL host
- * comes from `host:` in the nearest .planish.yaml or $PLANISH_HOST (default
- * localhost) — set it to the machine name remote browsers use (e.g. a
+ * comes from $WORK_LOG_HOST or `work_log.host` in the nearest .shared-llm.yaml
+ * (default localhost) — set it to the machine name remote browsers use (e.g. a
  * Tailscale name) and the server binds 0.0.0.0 so those connections work.
  */
 
@@ -46,6 +46,8 @@ import { spawnSync } from "node:child_process";
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const PORT = 4390;
+const CONFIG_NAME = ".shared-llm.yaml";
+const LEGACY_CONFIG_NAME = ".planish.yaml";
 
 // ─── Server state (module-level) ─────────────────────────────────────────────
 
@@ -75,8 +77,8 @@ function esc(s: string): string {
 
 // ─── Review host configuration ───────────────────────────────────────────────
 
-// Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
-// level of nested key: value blocks. Handles strings, integers, and booleans.
+// Minimal YAML parser for the .shared-llm.yaml subset: top-level scalars and
+// one level of nested key: value blocks. Handles strings, integers, booleans.
 function parseSimpleYaml(content: string): Record<string, any> {
 	const result: Record<string, any> = {};
 	let nested: Record<string, any> | null = null;
@@ -122,32 +124,132 @@ function findConfigUp(startDir: string, filename: string): string | null {
 	}
 }
 
+// Nearest .shared-llm.yaml carrying a `work_log:` mapping. A file WITHOUT that
+// key is skipped and the walk continues — ~/.shared-llm.yaml is the machine's
+// destination roster and must never shadow a repo's work-log config.
+function findWorkLogConfig(
+	startDir: string,
+): { configPath: string; workLog: Record<string, any> } | null {
+	let dir = path.resolve(startDir);
+	while (true) {
+		const candidate = path.join(dir, CONFIG_NAME);
+		if (fs.existsSync(candidate)) {
+			const parsed = parseSimpleYaml(fs.readFileSync(candidate, "utf-8"));
+			if (parsed.work_log !== undefined) {
+				return {
+					configPath: candidate,
+					workLog: workLogMapping(candidate, parsed.work_log),
+				};
+			}
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+// A `work_log:` key that is present but carries nothing usable is a config typo
+// — an empty block (`work_log:` with no children) would otherwise sail through
+// as {} and silently fall back to the default directory, which is exactly what
+// this config contract exists to prevent. Fail loud instead, as the canonical
+// planish_resolve.py does.
+function workLogMapping(configPath: string, value: any): Record<string, any> {
+	// A YAML flow mapping — `work_log: {dir: plans, host: box}` — is valid YAML
+	// that the block-oriented scanner above collapses into a string; re-parse it
+	// so both spellings behave identically.
+	const mapping = typeof value === "string" ? parseFlowMapping(value) : value;
+	if (typeof mapping !== "object" || mapping === null)
+		throw new Error(`${configPath} "work_log" must be a mapping of dir/host`);
+	if (Object.keys(mapping).length === 0)
+		throw new Error(
+			`${configPath} "work_log" is empty — set "dir" and/or "host" under it`,
+		);
+	return mapping;
+}
+
+// Returns null when the text is not a flow mapping at all, so the caller can
+// report the useful "must be a mapping" error against the original value.
+function parseFlowMapping(value: string): Record<string, any> | null {
+	const text = value.trim();
+	if (!text.startsWith("{") || !text.endsWith("}")) return null;
+	const body = text.slice(1, -1).trim();
+	const mapping: Record<string, any> = {};
+	if (!body) return mapping;
+	for (const entry of body.split(",")) {
+		const colon = entry.indexOf(":");
+		if (colon === -1) return null;
+		mapping[entry.slice(0, colon).trim()] = parseYamlScalar(
+			entry.slice(colon + 1).trim(),
+		);
+	}
+	return mapping;
+}
+
+// A key that is present but unusable is a config typo — fail loud, never fall
+// back. Absent is fine: the caller moves on to the next precedence step.
+function stringField(
+	configPath: string,
+	mapping: Record<string, any>,
+	key: string,
+	label: string,
+): string | null {
+	if (mapping[key] === undefined) return null;
+	const value = mapping[key];
+	if (typeof value !== "string" || !value.trim())
+		throw new Error(`${configPath} "${label}" must be a non-empty string`);
+	return value.trim();
+}
+
+// Deprecation notices go to stderr, never into a served page or a tool result.
+function warnDeprecated(message: string): void {
+	console.error(`[do-planish] ${message}`);
+}
+
 // ─── Serve host ─────────────────────────────────────────────────────────────
 //
 // URLs the tools hand out default to localhost, which breaks remote sessions
-// (Tailscale/SSH): the user's browser is not on this box. `host:` in the
-// nearest .planish.yaml — or $PLANISH_HOST — names this machine as the
+// (Tailscale/SSH): the user's browser is not on this box. `work_log.host` in
+// the nearest .shared-llm.yaml — or $WORK_LOG_HOST — names this machine as the
 // browser reaches it (e.g. a Tailscale MagicDNS name). With a non-localhost
 // host the server binds 0.0.0.0 so those remote connections are accepted;
 // the default stays 127.0.0.1-only. Resolved once, at first use.
+//
+// Precedence mirrors planish_resolve.py exactly: $WORK_LOG_HOST, $PLANISH_HOST
+// (deprecated), work_log.host, then a legacy .planish.yaml `host:` (deprecated)
+// — consulted only when no .shared-llm.yaml carries a work_log mapping.
 
 let resolvedHost: string | null = null;
 
 function resolveHost(): string {
 	if (resolvedHost) return resolvedHost;
-	let host = "localhost";
-	if (process.env.PLANISH_HOST && process.env.PLANISH_HOST.trim()) {
-		host = process.env.PLANISH_HOST.trim();
-	} else {
-		const configPath = findConfigUp(process.cwd(), ".planish.yaml");
-		if (configPath) {
-			const parsed = parseSimpleYaml(fs.readFileSync(configPath, "utf-8"));
-			if (typeof parsed?.host === "string" && parsed.host.trim())
-				host = parsed.host.trim();
-		}
+	resolvedHost = configuredHost() ?? "localhost";
+	return resolvedHost;
+}
+
+function configuredHost(): string | null {
+	if (process.env.WORK_LOG_HOST && process.env.WORK_LOG_HOST.trim()) {
+		return process.env.WORK_LOG_HOST.trim();
 	}
-	resolvedHost = host;
-	return host;
+	if (process.env.PLANISH_HOST && process.env.PLANISH_HOST.trim()) {
+		warnDeprecated("$PLANISH_HOST is deprecated — use $WORK_LOG_HOST");
+		return process.env.PLANISH_HOST.trim();
+	}
+
+	const found = findWorkLogConfig(process.cwd());
+	if (found)
+		return stringField(found.configPath, found.workLog, "host", "work_log.host");
+
+	const legacyPath = findConfigUp(process.cwd(), LEGACY_CONFIG_NAME);
+	if (legacyPath) {
+		const parsed = parseSimpleYaml(fs.readFileSync(legacyPath, "utf-8"));
+		const host = stringField(legacyPath, parsed, "host", "host");
+		if (host !== null)
+			warnDeprecated(
+				`${legacyPath} is deprecated — move \`host:\` into ${CONFIG_NAME} under \`work_log.host\``,
+			);
+		return host;
+	}
+	return null;
 }
 
 function isLocalOnly(host: string): boolean {

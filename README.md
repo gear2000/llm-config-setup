@@ -226,7 +226,7 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update a skill, agent definition, CLAUDE.md rule, or any shared-llm layer. Runs the full workflow:… |
 
-### Generic agents (27)
+### Generic agents (29)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.
 
@@ -251,8 +251,10 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `phase-evaluator` | Optional independent evaluator for one plan phase. The phase leader resolves its route profile and… |
 | `plan-adversary` | Read-only adversarial reviewer for approved candidate plans. Challenges feasibility, missing… |
 | `plan-watchdog` | Optional plan-phase conformance advisor. The managed phase leader sends one blocking review order… |
+| `planner` | Writes one small tracer-bullet implementation plan for a single issue from its issue and research… |
 | `playwright-cli` | Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend.… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
+| `researcher` | Bounded read-only investigator for one issue. Reads the issue inside the given worktree and writes… |
 | `reviewer` | Independent read-only reviewer for code, infrastructure, plans, and durable execution evidence. |
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
 | `team-pulse` | Narrow mechanical result watcher for a plan run. The TUI agent and phase leader own orchestration;… |
@@ -260,7 +262,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 
-### Slash-command skills (27)
+### Slash-command skills (28)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -292,6 +294,7 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `upagent-cleanup` | Dry-run or explicitly apply terminal-only UpAgent history pruning while retaining auditable,… |
 | `upagent-get` | Read one UpAgent request's state, retained result, receipt, and typed artifact pointers, including… |
 | `upagent-ls` | List active, terminal, or all requests known to the canonical machine-local UpAgent Recruiter… |
+| `upagent-pipeline` | Run one issue-sized change end to end through a registry pipeline: optional research and plan… |
 | `upagent-run` | Run one bounded ad-hoc task through the canonical machine-local UpAgent Recruiter with an explicit… |
 <!-- END:inventory -->
 
@@ -394,7 +397,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 **What it contains:**
 
-- `extensions/do-planish.ts` — The Pi Planish runtime. It registers the browser-backed `planish_grill` and `planish_submit_plan` tools used by `/do-plan` for annotation-only planning pages: sticky notes → Copy Feedback → paste the block back into the TUI. The legacy `/do-planish` slash command is a one-release warning alias to `/do-plan`. URLs honor the `host:` field of `.planish.yaml` (remote/Tailscale sessions).
+- `extensions/do-planish.ts` — The Pi Planish runtime. It registers the browser-backed `planish_grill` and `planish_submit_plan` tools used by `/do-plan` for annotation-only planning pages: sticky notes → Copy Feedback → paste the block back into the TUI. The legacy `/do-planish` slash command is a one-release warning alias to `/do-plan`. URLs honor the `work_log.host` field of `.shared-llm.yaml` (remote/Tailscale sessions).
 - `extensions/context-workflow.ts` — A Pi extension that wraps a structured write→test→review→fix→verify loop. Symlinked into `~/.pi/agent/extensions/` (auto-loaded by the Pi agent on startup).
 - `extensions/auto-compact.ts` — A model-relative context policy for Pi's long-lived TUI and RPC modes. After each `agent_settled` event, it reads Pi's authoritative active-model usage and triggers Pi's native compaction at 50% of the actual context window; print and JSON modes are deliberately excluded because their runtimes dispose immediately after a prompt settles. It does not replace Pi's summarizer: custom instructions focus the native summary on goals, constraints, decisions with rationale, evidence pointers, failed approaches, errors, and next steps. The policy re-arms only after fresh post-compaction usage falls below 50%, uses bounded exponential backoff, reports non-UI errors to stderr, invalidates stale callbacks on session/model changes, and exposes `/auto-compact-status` for inspection. Pi's built-in near-overflow compaction remains enabled as a second safety net.
 - `extensions/memsearch/` — A directory Pi extension (`index.ts` + `collection.ts`) that gives Pi memory over the **same shared store** Claude Code builds: per-project daily markdown logs under `<git-root>/.memsearch/memory/<YYYY-MM-DD>.md`, indexed into a per-project Milvus collection. The collection name is derived to **exactly match** memsearch's `derive-collection.sh`, so Pi and Claude converge on the same collection per repo.

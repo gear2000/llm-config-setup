@@ -34,7 +34,7 @@ The toolkit copies with a `document.execCommand` fallback (so Copy Feedback / Fi
 
 ## Deliver the page two ways — URL and downloadable file
 
-1. **URL** — always. The host is NOT hardcoded `localhost`: use the `host:` field of the nearest `.planish.yaml` when set (the machine name the user's browser reaches — e.g. a Tailscale name for remote sessions), else `localhost`. The Pi planish server reads the same field and binds `0.0.0.0` for a non-localhost host so remote connections actually work.
+1. **URL** — always. The host is NOT hardcoded `localhost`: use the `work_log.host` field of the nearest `.shared-llm.yaml` carrying a `work_log:` mapping when set (the machine name the user's browser reaches — e.g. a Tailscale name for remote sessions), else `localhost`. The Pi planish server reads the same field and binds `0.0.0.0` for a non-localhost host so remote connections actually work.
 2. **Downloadable file** — whenever the harness provides a file-send tool (e.g. `SendUserFile` in the Claude Code app), ALSO send the HTML file itself. Remote and app sessions often cannot reach the URL at all; a downloaded copy always opens.
 
 This only works because every page is **fully self-contained**: inline styles and scripts, no CDN, no external fetches — a grill or plan page must render and annotate correctly opened straight from a download (`file://`).
@@ -139,7 +139,7 @@ A customized planning change is incomplete if tests or review show any of these:
 - any Submit/Approve-style button, browser→assistant POST-back, or tool call that blocks waiting on the browser,
 - missing annotation/feedback controls,
 - a plan revised in place with no new `plan-v<k>` snapshot, or any `grill-v*`/`plan-v*` history file edited after the fact,
-- a hardcoded `localhost` URL where `.planish.yaml` sets `host:`, or no downloadable copy offered where a file-send tool exists,
+- a hardcoded `localhost` URL where `.shared-llm.yaml` sets `work_log.host`, or no downloadable copy offered where a file-send tool exists,
 - dropped ASCII/HTML visual fields, or any Mermaid reintroduced,
 - questions leading with file lists/undefined acronyms instead of plain-English mechanism questions,
 - a round page missing its unique `desdoc-key` (stale annotations),

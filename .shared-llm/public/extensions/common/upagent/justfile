@@ -101,6 +101,25 @@ upagent-specialists *args:
 upagent-consult consult:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter consult "{{consult}}"
 
+# Print the validated pipeline registry — the named work shapes `/upagent-pipeline` can run.
+# Default is a table (id, stages, description); `--json` prints the raw validated index.
+upagent-list-pipelines *args:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target pipelines list {{args}}
+
+# Launch one pipeline as an interactive Claude TUI in a Herdr `control` pane, preloaded with
+# `/upagent-pipeline <name> <args>`. The name is validated against the registry before any pane
+# is created, and a Herdr session that is not running fails loud with the command to start it.
+#
+# The pipeline takes a LOCATION for the issue — a file path or a tracker ref it can fetch
+# verbatim — never the issue text itself, which the skill stops on. `just` splits `{{args}}` in
+# the calling shell like every other `*args` recipe here, so a location with a space in it
+# arrives as two arguments; pass such a location from inside the session instead.
+#
+#   just upagent-pipeline rpi docs/issues/dry-run-flag.md
+#   just upagent-pipeline rpi --skip-research https://github.com/org/repo/issues/42
+upagent-pipeline name *args:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target pipelines launch --repo "{{invocation_directory()}}" "{{name}}" {{args}}
+
 # Reconcile dead/expired runners using their durable lease ownership records.
 upagent-reconcile:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter reconcile

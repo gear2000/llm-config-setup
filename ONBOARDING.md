@@ -178,18 +178,21 @@ Then run `just update` to (re)generate every registered destination's output fil
 
 ## I — Pi planning output directory (optional)
 
-The Planish runtime provides the browser-backed grill/review tools used by `/do-plan` (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). Without configuration it defaults to `/tmp/planish/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. Use `/do-plan` in Pi or `/cc-plan` in Claude Code for workflow-suite planning; `/do-planish` and `/cc-planish` are one-release warning aliases.
+The Planish runtime provides the browser-backed grill/review tools used by `/do-plan` (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). Without configuration it defaults to `/var/tmp/work-log/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. Use `/do-plan` in Pi or `/cc-plan` in Claude Code for workflow-suite planning; `/do-planish` and `/cc-planish` are one-release warning aliases.
 
-Put a `.planish.yaml` at your repo root (or any ancestor directory) to control where plans land and which hostname URLs use:
+Put a `.shared-llm.yaml` with a `work_log:` block at your repo root (or any ancestor directory) to control where plans land and which hostname URLs use — start from the tracked `.shared-llm.yaml.example`:
 
 ```yaml
-# .planish.yaml — controls where Planish-backed planning writes plan.md + plan.html,
+# .shared-llm.yaml — controls where the planning flows write plan.md + plan.html,
 # and the hostname planning-flow URLs use (remote/Tailscale sessions)
-dir: docs/plans/{date}/{slug}/v{n}
-host: your-machine-name   # optional — default localhost
+work_log:
+  dir: docs/plans/{date}/{slug}/v{n}
+  host: your-machine-name   # optional — default localhost
 ```
 
-**Two fields.** `dir` — where plans land; the path resolves relative to the directory that holds `.planish.yaml`, and Pi walks upward from cwd to find the file, so one at the repo root covers everything inside. `host` — optional; the machine name your browser uses to reach this box (e.g. a Tailscale name) when you work remotely. Every URL the planning flows hand out uses it instead of `localhost`, and the planish server (port 4390) binds `0.0.0.0` so those remote connections are accepted. `$PLANISH_HOST` overrides it for a single session, and `host:` works standalone (with `dir` falling back to `/tmp/planish/{date}/{slug}`).
+**Two fields.** `work_log.dir` — where plans land; the path resolves relative to the directory that holds `.shared-llm.yaml`. `work_log.host` — optional; the machine name your browser uses to reach this box (e.g. a Tailscale name) when you work remotely. Every URL the planning flows hand out uses it instead of `localhost`, and the planish server (port 4390) binds `0.0.0.0` so those remote connections are accepted. `$WORK_LOG_HOST` overrides it for a single session, and `host` works standalone (with `dir` falling back to `/var/tmp/work-log/{date}/{slug}`).
+
+**Which file wins.** Resolution walks upward from the current directory and takes the nearest `.shared-llm.yaml` that *contains* a `work_log:` mapping; a file without that key is skipped and the walk continues, so the machine-level destination roster at `~/.shared-llm.yaml` never shadows a repo's config. One file at your repo root covers everything inside it. A `work_log.dir` that is present but not a non-empty string fails loudly rather than falling back.
 
 **Available tokens:**
 
@@ -197,6 +200,7 @@ host: your-machine-name   # optional — default localhost
 |---|---|
 | `{date}` | Today's date — `YYYY-MM-DD` |
 | `{slug}` | Your topic, lowercased and hyphenated |
+| `{type}` | `plan` |
 | `{n}` | Next version integer — auto-incremented by scanning siblings |
 
 **Example outputs** for `dir: ops/mkdocs/docs/work-log/{date}/{slug}/plan` and topic `"redesign auth flow"`:
@@ -206,7 +210,9 @@ ops/mkdocs/docs/work-log/2026-06-29/redesign-auth-flow/plan/plan.md
 ops/mkdocs/docs/work-log/2026-06-29/redesign-auth-flow/plan/plan.html
 ```
 
-You can override the config file for a single run with `--dir <path>` passed through the planning command, or by setting `$PLANISH_DIR`.
+You can override the config file for a single run with `--dir <path>` passed through the planning command, or by setting `$WORK_LOG_DIR`.
+
+**Migrating from `.planish.yaml`.** The predecessor file (top-level `dir:` / `host:`) and the `$PLANISH_DIR` / `$PLANISH_HOST` variables are still honored as a last-resort fallback and warn on stderr when used. Move their values into a `work_log:` block in `.shared-llm.yaml`; the fallback goes away in a future release.
 
 1. **Review outputs** — open the generated `CLAUDE.md`, `AGENTS.md`, and skill files at the repo root. Read them as an LLM would. Adjust the layer prose until the generated content reads naturally and accurately describes your project, then recompose.
 

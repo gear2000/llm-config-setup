@@ -60,6 +60,12 @@ def test_mutation_classifier_keeps_reads_lock_free() -> None:
     assert client._is_mutating("recruiter", ["status"]) is False
     assert client._is_mutating("phase-await", ["wait"]) is False
     assert client._is_mutating("phase-await", ["publish"]) is True
+    assert client._is_mutating("pipelines", ["list"]) is False
+    assert client._is_mutating("pipelines", ["list", "--json"]) is False
+    assert client._is_mutating("pipelines", ["launch", "rpi"]) is True
+    # Fails closed: an unrecognized pipelines command is a mutation, never a lock-free read.
+    assert client._is_mutating("pipelines", ["retire", "rpi"]) is True
+    assert client._is_mutating("pipelines", []) is True
 
 
 def test_public_capture_keeps_internal_records_out_of_json_stdout(

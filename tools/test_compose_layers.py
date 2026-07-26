@@ -450,11 +450,21 @@ def test_grill_feedback_is_annotation_only() -> None:
 def test_plan_versioning_downloadable_and_host() -> None:
     """Plans freeze plan-v<k> history (never revised in place), pages are also
     offered as downloadable files where the harness can send them, and URLs
-    honor the .planish.yaml host: field for remote (Tailscale) sessions."""
+    honor the .shared-llm.yaml work_log.host field for remote (Tailscale)
+    sessions."""
     planish_ts = (
         REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts"
     ).read_text()
-    for token in ("plan-v<k>", "resolveHost", "PLANISH_HOST", "0.0.0.0"):
+    for token in (
+        "plan-v<k>",
+        "resolveHost",
+        "WORK_LOG_HOST",
+        "work_log.host",
+        # the legacy names stay wired as deprecated fallbacks
+        "PLANISH_HOST",
+        ".planish.yaml",
+        "0.0.0.0",
+    ):
         assert token in planish_ts, f"do-planish.ts must contain {token!r}"
     assert 'listen(PORT, "127.0.0.1"' not in planish_ts  # bind follows the host
 
@@ -467,12 +477,42 @@ def test_plan_versioning_downloadable_and_host() -> None:
     tf_ts = (
         REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/tf-implement.ts"
     ).read_text()
-    assert ".planish.yaml" in tf_ts, "tf-implement resolver must read .planish.yaml"
+    for token in (
+        ".shared-llm.yaml",
+        "work_log.dir",
+        "WORK_LOG_DIR",
+        "/var/tmp/work-log/{date}/{slug}",
+        # the legacy names stay wired as deprecated fallbacks
+        ".planish.yaml",
+        "PLANISH_DIR",
+    ):
+        assert token in tf_ts, f"tf-implement resolver must read {token!r}"
     assert ".planish.json" not in tf_ts, "drifted .planish.json reference"
     assert "plan-v<k>" in tf_ts
 
-    example = (REPO_ROOT / ".planish.yaml.example").read_text()
-    assert "host:" in example, ".planish.yaml.example must document host:"
+    # An empty `work_log:` block must fail loud in BOTH duplicated resolvers, the
+    # way planish_resolve.py does — parsing it as {} and quietly taking the
+    # default directory is the silent fallback this config contract exists to
+    # prevent. Flow-style `work_log: {dir: …}` is honored, not misreported.
+    for name, source in (("do-planish.ts", planish_ts), ("tf-implement.ts", tf_ts)):
+        for token in (
+            "workLogMapping",
+            "parseFlowMapping",
+            'Object.keys(mapping).length === 0',
+            '"work_log" is empty',
+        ):
+            assert token in source, f"{name} must fail loud on an empty work_log: {token!r}"
+    py = (
+        REPO_ROOT / ".shared-llm/public/llm/common/common/planish_resolve.py"
+    ).read_text()
+    assert '"work_log" is empty' in py, "planish_resolve.py must fail loud on an empty work_log"
+
+    example = (REPO_ROOT / ".shared-llm.yaml.example").read_text()
+    for token in ("work_log:", "dir:", "host:", "/var/tmp/work-log/{date}/{slug}"):
+        assert token in example, f".shared-llm.yaml.example must document {token!r}"
+    assert not (REPO_ROOT / ".planish.yaml.example").exists(), (
+        "the legacy .planish.yaml.example is retired — .shared-llm.yaml.example replaces it"
+    )
 
     text = (
         REPO_ROOT
@@ -485,9 +525,14 @@ def test_plan_versioning_downloadable_and_host() -> None:
         "Planish",
         "final human approval",
         "--dir <path>",
+        "$WORK_LOG_DIR",
+        "$WORK_LOG_HOST",
+        "`work_log:` mapping",
+        "work_log.dir",
+        # the legacy names stay documented as deprecated fallbacks
         "$PLANISH_DIR",
         ".planish.yaml",
-        "/tmp/planish/{date}/{slug}",
+        "/var/tmp/work-log/{date}/{slug}",
         "`host:`",
         "downloadable",
     ):
@@ -497,7 +542,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
         REPO_ROOT
         / ".shared-llm/public/llm/common/common/planish-html-grill-contract.md"
     ).read_text()
-    for token in ("Versioned history", "downloadable", "host:"):
+    for token in ("Versioned history", "downloadable", "work_log.host"):
         assert token in contract, f"contract must contain {token!r}"
 
 
