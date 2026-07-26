@@ -266,6 +266,7 @@ def test_review_url_maps_the_plan_dir_onto_the_served_root(tmp_path: Path) -> No
         "  serve_root: docs\n",
     )
     plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
+    _write(plan_dir / "plan.html", "<h1>plan</h1>")
     # No artifact named: the URL is the DIRECTORY, and says so with a trailing
     # slash rather than looking like a page that will not load.
     assert (
@@ -291,6 +292,7 @@ def test_review_url_percent_encodes_every_path_component(tmp_path: Path) -> None
         "  serve_root: docs\n",
     )
     plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
+    _write(plan_dir / "plan.html", "<h1>plan</h1>")
     url = resolver.resolve_review_url(tmp_path, plan_dir, "plan.html")
     assert url == (
         "http://example-host:8089/plans/%23ticket%207/100%25/redesign-auth/plan.html"
@@ -299,19 +301,83 @@ def test_review_url_percent_encodes_every_path_component(tmp_path: Path) -> None
     assert split.fragment == "" and split.query == ""
 
 
-def test_review_url_artifact_cannot_leave_the_plan_dir(tmp_path: Path) -> None:
+def _url_config(tmp_path: Path, url_base: str = "http://example-host:8089") -> Path:
     _write(
         tmp_path / ".shared-llm.yaml",
         "work_log:\n"
         "  dir: docs/plans/{slug}\n"
-        "  url_base: http://example-host:8089\n"
+        f"  url_base: {json.dumps(url_base)}\n"
         "  serve_root: docs\n",
     )
-    plan_dir = resolver.resolve(tmp_path, "Topic")
+    return resolver.resolve(tmp_path, "Topic")
+
+
+def test_review_url_artifact_cannot_leave_the_plan_dir(tmp_path: Path) -> None:
+    plan_dir = _url_config(tmp_path)
+    outside = tmp_path / "docs/other/plan.html"
+    _write(outside, "<h1>someone else's plan</h1>")
+    (plan_dir / "escape.html").symlink_to(outside)
+
     with pytest.raises(ValueError, match="must stay inside the plan directory"):
         resolver.resolve_review_url(tmp_path, plan_dir, "../other/plan.html")
+    with pytest.raises(ValueError, match="must be relative to the plan directory"):
+        resolver.resolve_review_url(tmp_path, plan_dir, str(outside))
     with pytest.raises(ValueError, match="non-empty file name"):
         resolver.resolve_review_url(tmp_path, plan_dir, "  ")
+    # A name with no `..` in it still leaves the directory when the file it
+    # names is a symlink out of it — containment is checked after resolution.
+    with pytest.raises(ValueError, match="must stay inside the plan directory"):
+        resolver.resolve_review_url(tmp_path, plan_dir, "escape.html")
+
+
+def test_review_url_refuses_an_artifact_that_is_not_a_file_there(
+    tmp_path: Path,
+) -> None:
+    """A URL for a page nobody wrote is a 404 handed over as if it were a plan."""
+    plan_dir = _url_config(tmp_path)
+    (plan_dir / "plan").mkdir()
+
+    with pytest.raises(ValueError, match="is not a file in the plan directory"):
+        resolver.resolve_review_url(tmp_path, plan_dir, "plna.html")
+    # A directory answers with a listing, not the page — also not an artifact.
+    with pytest.raises(ValueError, match="is not a file in the plan directory"):
+        resolver.resolve_review_url(tmp_path, plan_dir, "plan")
+
+
+def test_missing_artifact_fails_even_with_no_url_configured(tmp_path: Path) -> None:
+    """The typo is the fault, not the machine — the check runs before the config
+    lookup, so an unconfigured machine reports it too instead of returning the
+    same null it returns for every other reason."""
+    _write(tmp_path / ".shared-llm.yaml", "work_log:\n  dir: docs/plans/{slug}\n")
+    plan_dir = resolver.resolve(tmp_path, "Topic")
+
+    with pytest.raises(ValueError, match="is not a file in the plan directory"):
+        resolver.resolve_review_url(tmp_path, plan_dir, "plan.html")
+
+
+@pytest.mark.parametrize(
+    ("url_base", "label"),
+    [
+        ("http://example-host:8089?token=abc", "query"),
+        ("http://example-host:8089/?", "query"),
+        ("http://example-host:8089#top", "fragment"),
+        ("http://example-host:8089/plans#", "fragment"),
+    ],
+)
+def test_review_url_rejects_a_base_that_would_swallow_the_path(
+    tmp_path: Path, url_base: str, label: str
+) -> None:
+    """`url_base` + path is a PATH concatenation. A base carrying a query or a
+    fragment — even an empty one — puts the plan path there instead, where the
+    server never sees it. Neither is silently reordered around the path."""
+    plan_dir = _url_config(tmp_path, url_base)
+    _write(plan_dir / "plan.html", "<h1>plan</h1>")
+
+    for artifact in (None, "plan.html"):
+        with pytest.raises(
+            ValueError, match=f'work_log.url_base" must not carry a {label}'
+        ):
+            resolver.resolve_review_url(tmp_path, plan_dir, artifact)
 
 
 def test_review_url_is_none_when_the_plan_dir_escapes_the_served_root(
@@ -343,6 +409,7 @@ def test_cli_reports_the_review_url(
     payload = json.loads(capsys.readouterr().out)
     assert payload["review_url"] == "http://example-host:8089/plans/topic/"
 
+    _write(Path(payload["plan_dir"]) / "plan.html", "<h1>plan</h1>")
     assert (
         resolver.main(
             ["--topic", "Topic", "--cwd", str(tmp_path), "--artifact", "plan.html"]
@@ -368,6 +435,7 @@ def test_handing_an_existing_plan_dir_back_reuses_it(
     )
     run_dir = resolver.resolve(tmp_path, "Topic")
     assert run_dir.name == "v1"
+    _write(run_dir / "plan/v2/plan.html", "<h1>plan</h1>")
 
     assert (
         resolver.main(
@@ -492,6 +560,33 @@ def test_review_url_fetches_the_named_artifact(tmp_path: Path, segment: str) -> 
         directory_url = resolver.resolve_review_url(tmp_path, plan_dir)
         assert directory_url is not None and directory_url.endswith("/")
         assert "plan.html" in _fetch(directory_url)
+
+
+def test_a_typoed_artifact_fails_instead_of_returning_a_404_url(
+    tmp_path: Path,
+) -> None:
+    """The URL a typo used to produce is fetched here to show what it answers:
+    a 404 the human follows before anyone notices the name was wrong. The
+    resolver must refuse to build it at all."""
+    root = tmp_path / "docs"
+    root.mkdir()
+    with _static_server(root) as base:
+        _write(
+            tmp_path / ".shared-llm.yaml",
+            "work_log:\n"
+            "  dir: docs/plans/{slug}\n"
+            f"  url_base: {base}\n"
+            "  serve_root: docs\n",
+        )
+        plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
+        _write(plan_dir / "plan.html", "<h1>plan</h1>")
+
+        with pytest.raises(ValueError, match="is not a file in the plan directory"):
+            resolver.resolve_review_url(tmp_path, plan_dir, "plna.html")
+
+        with pytest.raises(urllib.error.HTTPError) as failure:
+            _fetch(f"{base}/plans/redesign-auth/plna.html")
+        assert failure.value.code == 404
 
 
 # ─── concurrent {n} allocation ───────────────────────────────────────────────

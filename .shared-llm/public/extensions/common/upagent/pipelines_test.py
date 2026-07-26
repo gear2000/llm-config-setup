@@ -30,7 +30,75 @@ SKILL_COMMAND = (
     HERE.parents[4]
     / ".shared-llm/public/layers/slash-commands/common/common/upagent-pipeline/command.md"
 )
-_ROUTE_SECTION_RE = re.compile(r"^## Pipeline: `([^`]+)`", re.MULTILINE)
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_HEADING_RE = re.compile(r"^(#{1,6})\s")
+_ROUTE_HEADING_RE = re.compile(r"^## Pipeline: `([^`]+)`\s*$")
+
+
+def _visible(line: str, in_comment: bool) -> tuple[str, bool]:
+    """`line` with any HTML-commented span removed, and whether one is still open."""
+    out: list[str] = []
+    while line:
+        if in_comment:
+            _, marker, rest = line.partition("-->")
+            if not marker:
+                return "".join(out), True
+            line, in_comment = rest, False
+            continue
+        before, marker, rest = line.partition("<!--")
+        out.append(before)
+        if not marker:
+            return "".join(out), False
+        line, in_comment = rest, True
+    return "".join(out), in_comment
+
+
+def _prose_lines(text: str) -> list[str]:
+    """`text` with fenced code blocks and HTML comments dropped."""
+    lines: list[str] = []
+    fence = ""
+    in_comment = False
+    for raw in text.splitlines():
+        if fence:
+            closer = raw.strip()
+            if closer.startswith(fence) and set(closer) == {fence[0]}:
+                fence = ""
+            continue
+        line, in_comment = _visible(raw, in_comment)
+        opener = _FENCE_RE.match(line)
+        if opener:
+            fence = opener.group(1)
+            continue
+        lines.append(line)
+    return lines
+
+
+def _route_sections(text: str) -> list[str]:
+    """Ids of the `## Pipeline: <id>` sections a worker could actually follow.
+
+    A heading shown inside a fenced block or an HTML comment is an EXAMPLE of a
+    route, and a heading with nothing under it is a route with no instructions:
+    counting either lets the registry pin pass while the pane that opens on that
+    id has nothing to do. So fences and comments come out first, and a section
+    must carry non-whitespace content before the next same-or-higher-level
+    heading to count as shipped.
+    """
+    found: list[str] = []
+    current: str | None = None
+    body: list[str] = []
+    for line in _prose_lines(text):
+        heading = _HEADING_RE.match(line)
+        if heading and len(heading.group(1)) <= 2:
+            if current is not None and any(entry.strip() for entry in body):
+                found.append(current)
+            route = _ROUTE_HEADING_RE.match(line)
+            current, body = (route.group(1) if route else None), []
+            continue
+        if current is not None:
+            body.append(line)
+    if current is not None and any(entry.strip() for entry in body):
+        found.append(current)
+    return found
 
 
 def _shipped() -> dict[str, Any]:
@@ -89,10 +157,38 @@ def test_every_supported_pipeline_has_exactly_one_skill_route_section() -> None:
     # rather than to a comment asking the next author to remember.
     assert SKILL_COMMAND.is_file(), f"skill layer not found: {SKILL_COMMAND}"
 
-    sections = _ROUTE_SECTION_RE.findall(SKILL_COMMAND.read_text())
+    sections = _route_sections(SKILL_COMMAND.read_text())
 
     assert sorted(sections) == sorted(pipelines.SUPPORTED_PIPELINES)
     assert len(sections) == len(set(sections))
+
+
+def test_a_route_section_only_counts_when_a_worker_could_follow_it() -> None:
+    # The three ways the pin used to pass on a route that is not there. Each is a
+    # `## Pipeline:` heading the regex matched and no worker could ever run: one
+    # quoted in a fenced example, one parked in an HTML comment, one heading with
+    # nothing under it. The real route in the same document must still be found.
+    document = (
+        "# /upagent-pipeline\n\n"
+        "## Invocation\n\n"
+        "```text\n"
+        "## Pipeline: `fenced`\n"
+        "```\n\n"
+        "~~~markdown\n"
+        "## Pipeline: `tilde-fenced`\n"
+        "~~~\n\n"
+        "<!--\n"
+        "## Pipeline: `commented`\n"
+        "-->\n\n"
+        "<!-- ## Pipeline: `one-line-comment` -->\n\n"
+        "## Pipeline: `empty`\n\n"
+        "## Pipeline: `real`\n\n"
+        "Do the work, then hand the human the page.\n\n"
+        "### A subheading is content, not the end of the section\n\n"
+        "## Cleanup\n"
+    )
+
+    assert _route_sections(document) == ["real"]
 
 
 def test_every_skippable_review_gate_declares_where_approval_goes() -> None:

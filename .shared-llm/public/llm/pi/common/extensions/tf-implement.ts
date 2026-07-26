@@ -272,13 +272,39 @@ function explicitTemplate(dirFlag?: string): string | null {
   return null;
 }
 
+// Python's Path.expanduser(), which the canonical script applies to the expanded
+// template: a "~" that is the whole first segment is the home directory, and a
+// "~" anywhere else is an ordinary path character. Without this, a
+// $WORK_LOG_DIR of "~/plans/{slug}" lands in <cwd>/~/plans/<slug> here while
+// the script puts it in $HOME/plans/<slug> — one template, two directories,
+// decided by which resolver happened to run.
+//
+// "~otheruser/…" is the one case this cannot mirror: resolving it needs a
+// passwd lookup Node has no equivalent for (Python either expands it or raises
+// RuntimeError). It is a loud stop rather than a path invented from os.homedir.
+function expandUser(template: string): string {
+  if (template === "~" || template.startsWith("~/")) {
+    return path.join(os.homedir(), template.slice(1));
+  }
+  if (template.startsWith("~")) {
+    throw new Error(
+      `cannot expand "${template}": this fallback expands "~" and "~/…" only, ` +
+        `never another user's home — use an absolute path in $WORK_LOG_DIR ` +
+        `(or --dir), or make the canonical resolver reachable`,
+    );
+  }
+  return template;
+}
+
 // Used only when the canonical script is unreachable AND no config file decides
 // the directory. Nothing here reads YAML, so nothing here can drift from PyYAML.
 function fallbackPlanPath(cwd: string, topic: string, dirFlag?: string): string {
-  const expanded = (explicitTemplate(dirFlag) ?? DEFAULT_TEMPLATE)
-    .replace(/\{date\}/g, todayYmd())
-    .replace(/\{slug\}/g, slugifyTopic(topic))
-    .replace(/\{type\}/g, "plan");
+  const expanded = expandUser(
+    (explicitTemplate(dirFlag) ?? DEFAULT_TEMPLATE)
+      .replace(/\{date\}/g, todayYmd())
+      .replace(/\{slug\}/g, slugifyTopic(topic))
+      .replace(/\{type\}/g, "plan"),
+  );
   return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
 }
 

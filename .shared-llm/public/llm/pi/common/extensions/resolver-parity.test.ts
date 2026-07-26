@@ -228,6 +228,94 @@ for (const testCase of CASES) {
 	);
 }
 
+// ─── The copied extension with no script and no config ────────────────────────
+//
+// tf-implement.ts carries ONE piece of resolution of its own: the fallback for a
+// machine that has neither the canonical script nor any config file. It is
+// reached only by a COPY of the extension living outside the kit, so the checks
+// above — which import the in-tree file, beside the script — never touch it.
+// Here the extension is copied to a temp directory (nothing resolvable beside
+// it), run from a temp cwd with no config above it, and its answer compared to
+// the script's for the same $WORK_LOG_DIR. A "~" template is the case that
+// diverged: the script expands it to $HOME, the copy used to make a literal "~"
+// directory under the cwd.
+function copiedExtensionOutcome(cwd: string, env: NodeJS.ProcessEnv): Outcome {
+	const box = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "parity-copy-")));
+	const copy = path.join(box, "tf-implement.ts");
+	fs.copyFileSync(TF_EXTENSION, copy);
+	const runner = path.join(box, "run.ts");
+	fs.writeFileSync(
+		runner,
+		`import { resolvePlanDir } from ${JSON.stringify(copy)};\n` +
+			`console.log(resolvePlanDir(process.argv[2], ${JSON.stringify(TOPIC)}));\n`,
+	);
+	try {
+		const stdout = execFileSync(
+			process.execPath,
+			["--experimental-strip-types", runner, cwd],
+			{ encoding: "utf-8", env, stdio: ["ignore", "pipe", "pipe"] },
+		);
+		return { ok: true, dir: stdout.trim() };
+	} catch {
+		return { ok: false };
+	}
+}
+
+function pythonOutcomeWithEnv(cwd: string, env: NodeJS.ProcessEnv): Outcome {
+	try {
+		const stdout = execFileSync(
+			PYTHON,
+			[RESOLVER_PY, "--topic", TOPIC, "--cwd", cwd],
+			{ encoding: "utf-8", env, stdio: ["ignore", "pipe", "pipe"] },
+		);
+		const parsed = JSON.parse(stdout);
+		return { ok: true, dir: parsed.plan_dir, host: parsed.host };
+	} catch {
+		return { ok: false };
+	}
+}
+
+{
+	const fakeHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "parity-home-")));
+	// A temp cwd with no .shared-llm.yaml / .planish.yaml anywhere above it, so
+	// the copy takes the fallback instead of stopping on a config it cannot read.
+	const bareCwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "parity-bare-")));
+
+	for (const template of ["~/plans/{slug}", "~"]) {
+		const env = { ...process.env, HOME: fakeHome, WORK_LOG_DIR: template };
+		const py = pythonOutcomeWithEnv(bareCwd, env);
+		const copied = copiedExtensionOutcome(bareCwd, env);
+		check(
+			py.ok && copied.ok,
+			`copied extension, $WORK_LOG_DIR=${template}: both resolvers must succeed — ` +
+				`python=${py.ok} copy=${copied.ok}`,
+		);
+		if (!py.ok || !copied.ok) continue;
+		check(
+			py.dir === copied.dir,
+			`copied extension, $WORK_LOG_DIR=${template}: plan dir differs — ` +
+				`python=${py.dir} copy=${copied.dir}`,
+		);
+		check(
+			copied.dir!.startsWith(fakeHome + path.sep) || copied.dir === fakeHome,
+			`copied extension, $WORK_LOG_DIR=${template}: "~" must expand to ${fakeHome}, ` +
+				`got ${copied.dir}`,
+		);
+	}
+
+	// "~otheruser" needs a passwd lookup Node has no equivalent for. The copy
+	// refuses it rather than inventing <cwd>/~otheruser or a path under $HOME.
+	const otherUser = {
+		...process.env,
+		HOME: fakeHome,
+		WORK_LOG_DIR: "~nosuchuser42/plans/{slug}",
+	};
+	check(
+		!copiedExtensionOutcome(bareCwd, otherUser).ok,
+		'copied extension: "~nosuchuser42/…" must fail loud, not resolve',
+	);
+}
+
 // ─── Concurrent {n} allocation ────────────────────────────────────────────────
 //
 // Scan-then-mkdir(recursive) hands the same vN to every caller that scans before

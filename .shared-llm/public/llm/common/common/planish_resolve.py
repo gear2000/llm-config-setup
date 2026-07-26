@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import yaml
 
@@ -214,14 +214,60 @@ def resolve_host(cwd: Path) -> str | None:
     return None
 
 
-def _artifact_parts(artifact: str) -> list[str]:
-    """Path components of `artifact`, rejecting anything that leaves plan_dir."""
+def _artifact_parts(plan_dir: Path, artifact: str) -> list[str]:
+    """Path components of `artifact`, checked against the plan directory.
+
+    A URL is only worth handing to a human if the file behind it is there, so
+    the name is resolved on disk before it is allowed into one: an artifact that
+    leaves the plan directory (a `..`, an absolute path, a symlink pointing
+    out), or that is not an existing regular file inside it, is a loud failure
+    rather than a URL that answers 404.
+    """
+    if artifact.startswith("/"):
+        raise ValueError(
+            f'artifact "{artifact}" must be relative to the plan directory'
+        )
     parts = [part for part in artifact.split("/") if part]
     if not parts or any(not part.strip() for part in parts):
         raise ValueError(f'artifact "{artifact}" must be a non-empty file name')
     if any(part in (".", "..") for part in parts):
         raise ValueError(f'artifact "{artifact}" must stay inside the plan directory')
+
+    root = plan_dir.resolve()
+    target = root.joinpath(*parts).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError(
+            f'artifact "{artifact}" must stay inside the plan directory {root}'
+        )
+    if not target.is_file():
+        raise ValueError(
+            f'artifact "{artifact}" is not a file in the plan directory {root} — '
+            "name the page you actually wrote"
+        )
     return parts
+
+
+def _checked_url_base(config: Path, url_base: str) -> str:
+    """`url_base` without its trailing slash, rejecting one that eats the path.
+
+    The plan path is appended to this base as PATH. A base carrying a query or
+    a fragment (`…?token=x`, `…#top`) puts that path inside the query or the
+    fragment instead, where the server never sees it — and a bare `?` or `#`
+    does it just as thoroughly, so the delimiter alone is the fault. Neither is
+    reordered around the path: a base that cannot carry one is rejected.
+    """
+    split = urlsplit(url_base)
+    for label, delimiter, component in (
+        ("query", "?", split.query),
+        ("fragment", "#", split.fragment),
+    ):
+        if component or delimiter in url_base:
+            raise ValueError(
+                f'{config} "work_log.url_base" must not carry a {label} '
+                f'("{delimiter}") — the plan path is appended to it as path, so '
+                f'"{url_base}" would put that path in the {label}'
+            )
+    return url_base.rstrip("/")
 
 
 def resolve_review_url(
@@ -236,10 +282,15 @@ def resolve_review_url(
 
     Name an `artifact` (`plan.html`) and the URL is the page itself; without one
     it is the directory, ending in a slash so a static server lists it instead
-    of redirecting. Every component is percent-encoded, so a `#`, a space, or a
-    `%` in a configured directory stays part of the PATH rather than turning
-    into a fragment or a query the server never sees.
+    of redirecting. A named artifact must be an existing regular file inside the
+    plan directory — checked before any URL is built, so a typo fails loudly on
+    both the configured and the unconfigured machine instead of only on the one
+    that hands back a 404. Every component is percent-encoded, so a `#`, a
+    space, or a `%` in a configured directory stays part of the PATH rather than
+    turning into a fragment or a query the server never sees.
     """
+    artifact_parts = None if artifact is None else _artifact_parts(plan_dir, artifact)
+
     found = _find_work_log(cwd)
     if found is None:
         return None
@@ -248,6 +299,7 @@ def resolve_review_url(
     serve_root = _string_field(config, work_log, "serve_root", "work_log.serve_root")
     if url_base is None or serve_root is None:
         return None
+    base = _checked_url_base(config, url_base)
 
     root = Path(serve_root).expanduser()
     if not root.is_absolute():
@@ -258,10 +310,9 @@ def resolve_review_url(
         return None
 
     parts = [] if relative == Path(".") else list(relative.parts)
-    if artifact is not None:
-        parts.extend(_artifact_parts(artifact))
+    if artifact_parts is not None:
+        parts.extend(artifact_parts)
     url_path = "".join(f"/{quote(part, safe='')}" for part in parts)
-    base = url_base.rstrip("/")
     return f"{base}{url_path}" if artifact is not None else f"{base}{url_path}/"
 
 
@@ -273,7 +324,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--artifact",
         help="file inside the plan directory the review URL should name, e.g. "
-        "plan.html; without it the URL names the directory",
+        "plan.html; it must already exist there, and without it the URL names "
+        "the directory",
     )
     parser.add_argument(
         "--host-only",
