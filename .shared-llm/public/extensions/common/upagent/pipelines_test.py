@@ -457,6 +457,14 @@ def test_the_registry_the_duplicate_cases_are_built_from_loads(tmp_path: Path) -
             "stages: [implement], review_gate: none, review_gate: implement}}\n",
             "review_gate",
         ),
+        # A merge key is skipped by the check, but only itself: an ordinary key
+        # repeated in the same block still has to be caught beside one.
+        (
+            "beside a merge key",
+            _DUPLICATE_BASE.replace("  rpi:\n", "  rpi: &rpi\n")
+            + "  no-mistakes:\n    <<: *rpi\n    max_phases: 1\n    max_phases: 2\n",
+            "max_phases",
+        ),
     ],
 )
 def test_a_duplicate_key_is_refused_at_every_level(
@@ -473,6 +481,55 @@ def test_a_duplicate_key_is_refused_at_every_level(
     ) as fault:
         pipelines.load_registry(path)
     assert str(path) in str(fault.value)
+
+
+def test_a_pipeline_reusing_an_anchored_sibling_loads(tmp_path: Path) -> None:
+    """A `<<:` merge key is an instruction, not a duplicate. Rejecting it would cost
+    the registry a shape YAML has always accepted — one pipeline anchored and reused
+    by a sibling that overrides a field or two — and the anchored original must come
+    through untouched beside it."""
+    registry = pipelines.load_registry(
+        _written_text(
+            tmp_path,
+            _DUPLICATE_BASE.replace("  rpi:\n", "  rpi: &rpi\n")
+            + "  no-mistakes:\n"
+            "    <<: *rpi\n"
+            "    description: the same shape, capped lower\n"
+            "    max_phases: 1\n",
+        )
+    )
+    merged = registry.resolve("no-mistakes")
+
+    # Everything but the two explicit keys arrives through the merge, and those two
+    # win over the anchor's — which is what a merge is written for.
+    assert merged.stages == ("research", "plan", "implement")
+    assert merged.optional_stages == ("research",)
+    assert merged.review_gate == "plan"
+    assert merged.max_phases == 1
+    assert registry.resolve("rpi").max_phases == 3
+
+
+def test_repeated_merge_keys_in_one_block_are_accepted(tmp_path: Path) -> None:
+    """More than one `<<:` per block is valid YAML — PyYAML flattens them in order —
+    so the duplicate refusal must not read the second `<<:` as a repeat of the first.
+    Pipeline ids are a closed set of two, so there is no third block to anchor: the
+    same anchor merged twice is what proves the second `<<:` is accepted."""
+    registry = pipelines.load_registry(
+        _written_text(
+            tmp_path,
+            _DUPLICATE_BASE.replace("  rpi:\n", "  rpi: &rpi\n")
+            + "  no-mistakes:\n"
+            "    <<: *rpi\n"
+            "    <<: *rpi\n"
+            "    max_phases: 1\n",
+        )
+    )
+    merged = registry.resolve("no-mistakes")
+
+    # Both merges flattened and the explicit key still wins over them.
+    assert merged.stages == ("research", "plan", "implement")
+    assert merged.review_gate == "plan"
+    assert merged.max_phases == 1
 
 
 # --- listing ------------------------------------------------------------------

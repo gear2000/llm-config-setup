@@ -170,6 +170,14 @@ def test_empty_work_log_fails_loud(tmp_path: Path, body: str) -> None:
             "url_base",
             1,
         ),
+        # A merge key is skipped by the check, but only itself: an ordinary key
+        # repeated in the same block still has to be caught beside one.
+        (
+            'shared: &shared\n  host: example-host\nwork_log:\n  <<: *shared\n'
+            '  dir: "a/{slug}"\n  dir: "b/{slug}"\n',
+            "dir",
+            6,
+        ),
     ],
 )
 def test_duplicate_config_keys_fail_loud(
@@ -209,6 +217,66 @@ def test_a_config_naming_each_key_once_still_resolves(tmp_path: Path) -> None:
         "  serve_root: docs\n",
     )
     plan_dir = resolver.resolve(tmp_path, "Topic")
+    assert plan_dir == tmp_path / "docs/plans/topic"
+    assert resolver.resolve_host(tmp_path) == "example-host"
+    assert (
+        resolver.resolve_review_url(tmp_path, plan_dir)
+        == "http://example-host:8089/plans/topic/"
+    )
+
+
+def test_an_anchor_merged_into_a_sibling_still_resolves(tmp_path: Path) -> None:
+    """A `<<:` merge key is an instruction, not a duplicate. Rejecting it would
+    make the refusal cost a config YAML has always accepted — an anchored block
+    reused elsewhere in the same file, alongside a work_log nobody touched."""
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "defaults: &defaults\n"
+        "  retries: 2\n"
+        "  timeout: 30\n"
+        "sibling:\n"
+        "  <<: *defaults\n"
+        "  name: thing\n"
+        "work_log:\n"
+        "  dir: plans/{slug}\n",
+    )
+    assert resolver.resolve(tmp_path, "Topic") == tmp_path / "plans/topic"
+
+
+def test_work_log_built_from_a_merge_key_resolves(tmp_path: Path) -> None:
+    """The merge has to flatten *into* work_log, not just past it: `dir` arrives
+    from the anchor and the block's own `host` stands beside it."""
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "shared: &shared\n"
+        "  dir: plans/{slug}\n"
+        "work_log:\n"
+        "  <<: *shared\n"
+        "  host: example-host\n",
+    )
+    assert resolver.resolve(tmp_path, "Topic") == tmp_path / "plans/topic"
+    assert resolver.resolve_host(tmp_path) == "example-host"
+
+
+def test_repeated_merge_keys_in_one_block_are_accepted(tmp_path: Path) -> None:
+    """More than one `<<:` per block is valid YAML — PyYAML flattens them in
+    order — so the duplicate refusal must not read the second one as a repeat."""
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "place: &place\n"
+        "  dir: docs/plans/{slug}\n"
+        "serving: &serving\n"
+        "  serve_root: docs\n"
+        "  url_base: http://example-host:8089\n"
+        "work_log:\n"
+        "  <<: *place\n"
+        "  <<: *serving\n"
+        "  host: example-host\n",
+    )
+    plan_dir = resolver.resolve(tmp_path, "Topic")
+
+    # `dir` comes from the first merge, `serve_root`/`url_base` from the second,
+    # `host` from the block itself — the URL only forms if all three arrived.
     assert plan_dir == tmp_path / "docs/plans/topic"
     assert resolver.resolve_host(tmp_path) == "example-host"
     assert (

@@ -278,6 +278,9 @@ def _skip_gate(
     return skip_gate
 
 
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
 class _NoDuplicateKeyLoader(yaml.SafeLoader):
     """SafeLoader that refuses a duplicate mapping key instead of keeping the last one.
 
@@ -295,10 +298,18 @@ class _NoDuplicateKeyLoader(yaml.SafeLoader):
     def construct_mapping(
         self, node: yaml.MappingNode, deep: bool = False
     ) -> dict[Any, Any]:
-        # Keys are compared by equality in a list, never hashed: an unhashable key is
-        # PyYAML's own error to report, below, with the line and column it knows.
+        # What is rejected is one *syntactic* level naming an ordinary key twice.
+        # A `<<:` merge key is not one of those: it is an instruction to pull in
+        # another mapping, `super()` flattens it below, and YAML lets a block carry
+        # more than one, so repeated `<<:` is valid and passes. A key that only
+        # collides once merged is likewise not a duplicate — the explicit key wins
+        # per the merge spec, which is what a shared anchor is written for.
         seen: list[Any] = []
         for key_node, _ in node.value:
+            if key_node.tag == _MERGE_TAG:
+                continue
+            # Keys are compared by equality in a list, never hashed: an unhashable key is
+            # PyYAML's own error to report, below, with the line and column it knows.
             key = self.construct_object(key_node, deep=True)
             if key in seen:
                 raise PipelineError(
