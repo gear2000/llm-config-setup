@@ -85,6 +85,23 @@
 # default /var/tmp/work-log/{date}/{slug} directory.
 #
 #
+# REVIEW URL (optional "url_base" + "serve_root")
+# ──────────────────────────────────────────────
+# Set BOTH to have the resolver hand back a ready-to-open `review_url` instead
+# of leaving you to work it out from the plan path:
+#
+#   work_log:
+#     dir: /home/<you>/my-project/docs/plans/{date}/{slug}
+#     url_base: http://localhost:8089     # where the static server answers
+#     serve_root: /home/<you>/my-project/docs   # the fs root it serves
+#
+# The URL is url_base + the plan directory's path relative to serve_root. Both
+# keys are required and the plan directory must sit inside serve_root — with
+# only one key set, or a plan directory outside that root, `review_url` is null.
+# The resolver never guesses a URL that would 404. A relative "serve_root"
+# resolves from the directory holding THIS file, same as "dir".
+#
+#
 # DEPRECATED PREDECESSORS
 # ───────────────────────
 # The old `.planish.yaml` (top-level `dir:` / `host:`), `$PLANISH_DIR`, and
@@ -107,6 +124,8 @@
 work_log:
   dir: /absolute/path/to/your/docs/plans/{date}/{slug}
   # host: your-machine-name
+  # url_base: http://localhost:8089
+  # serve_root: /absolute/path/to/your/docs
 
 # ── Alternative layouts ────────────────────────────────────────────────────────
 

@@ -59,6 +59,15 @@ SCHEMA_VERSION = 1
 NO_REVIEW_GATE = "none"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
+# Code-owned vocabulary. A stage id is not free text: the `/upagent-pipeline` skill has one
+# section per stage, so `reserach` is not a new stage, it is a stage that will never run. Shape
+# alone cannot catch that — only a closed set can. Pipeline IDS stay open by contrast, because
+# the skill dispatches its per-pipeline prose by id and a new pipeline is a normal addition.
+SUPPORTED_STAGES = ("research", "plan", "implement", "validate")
+# Where human approval lands when the review_gate stage is skipped. Never gateless: skipping the
+# stage moves the gate, it does not remove it.
+SUPPORTED_SKIP_GATES = ("issue-approval",)
+
 SLASH_COMMAND = "/upagent-pipeline"
 CLAUDE_LAUNCH = "claude --dangerously-skip-permissions"
 EXPECTED_AGENT = "claude"
@@ -85,6 +94,7 @@ class Pipeline:
     stages: tuple[str, ...]
     optional_stages: tuple[str, ...]
     review_gate: str
+    skip_gate: str | None
     max_phases: int | None
 
     def required_stages(self) -> tuple[str, ...]:
@@ -100,6 +110,7 @@ class Pipeline:
             "optional_stages": list(self.optional_stages),
             "required_stages": list(self.required_stages()),
             "review_gate": self.review_gate,
+            "skip_gate": self.skip_gate,
             "max_phases": self.max_phases,
         }
 
@@ -142,6 +153,11 @@ def _stage_ids(value: object, where: str) -> tuple[str, ...]:
     for item in value:
         if not isinstance(item, str) or _ID_RE.fullmatch(item) is None:
             raise PipelineError(f"{where} has an invalid stage id: {item!r}")
+        if item not in SUPPORTED_STAGES:
+            raise PipelineError(
+                f"{where} has unsupported stage {item!r}; expected one of "
+                + ", ".join(SUPPORTED_STAGES)
+            )
         if item in stages:
             raise PipelineError(f"{where} repeats stage {item!r}")
         stages.append(item)
@@ -159,7 +175,14 @@ def _parse_pipeline(pipeline_id: object, value: object) -> Pipeline:
         raise PipelineError(f"{where} must be an object")
     _strict_keys(
         value,
-        {"description", "stages", "optional_stages", "review_gate", "max_phases"},
+        {
+            "description",
+            "stages",
+            "optional_stages",
+            "review_gate",
+            "skip_gate",
+            "max_phases",
+        },
         where,
     )
     description = value.get("description")
@@ -183,6 +206,10 @@ def _parse_pipeline(pipeline_id: object, value: object) -> Pipeline:
             f"{where} review_gate must be {NO_REVIEW_GATE!r} or one of its stages "
             f"({', '.join(stages)}); got {review_gate!r}"
         )
+    # A skippable review gate has to say where approval goes instead. A pipeline whose gate
+    # stage can be skipped and that names no fallback is not a pipeline with a smaller gate,
+    # it is a pipeline that runs ungated whenever the human passes one flag.
+    skip_gate = _skip_gate(value, where, review_gate, optional)
     # Absent means unbounded. An explicit `max_phases:` with no value is a half-written
     # bound, so it fails here rather than reading as unbounded.
     max_phases: int | None = None
@@ -199,8 +226,44 @@ def _parse_pipeline(pipeline_id: object, value: object) -> Pipeline:
             )
         max_phases = candidate
     return Pipeline(
-        pipeline_id, description.strip(), stages, optional, review_gate, max_phases
+        pipeline_id,
+        description.strip(),
+        stages,
+        optional,
+        review_gate,
+        skip_gate,
+        max_phases,
     )
+
+
+def _skip_gate(
+    value: dict[str, Any],
+    where: str,
+    review_gate: str,
+    optional_stages: tuple[str, ...],
+) -> str | None:
+    """The fallback gate, required exactly when the review_gate stage is skippable.
+
+    Required, because skipping the gate stage must move human approval rather than remove it.
+    Forbidden otherwise, because a `skip_gate` on a pipeline whose gate can never be skipped
+    reads as a gate that exists and is one nobody will ever reach.
+    """
+    skippable = review_gate != NO_REVIEW_GATE and review_gate in optional_stages
+    if not skippable:
+        if "skip_gate" in value:
+            raise PipelineError(
+                f"{where} sets skip_gate but its review_gate {review_gate!r} is not an "
+                "optional stage, so the fallback gate can never apply"
+            )
+        return None
+    skip_gate = value.get("skip_gate")
+    if skip_gate not in SUPPORTED_SKIP_GATES:
+        raise PipelineError(
+            f"{where} lists its review_gate {review_gate!r} in optional_stages, so it "
+            "must declare where approval goes when that stage is skipped: skip_gate must "
+            "be one of " + ", ".join(SUPPORTED_SKIP_GATES) + f"; got {skip_gate!r}"
+        )
+    return skip_gate
 
 
 def load_registry(path: str | Path | None = None) -> PipelineRegistry:

@@ -507,6 +507,14 @@ def test_plan_versioning_downloadable_and_host() -> None:
     ).read_text()
     assert '"work_log" is empty' in py, "planish_resolve.py must fail loud on an empty work_log"
 
+    # Substring checks cannot prove two hand-rolled parsers agree — an EXECUTED
+    # corpus runs all three resolvers over the same configs. Pin it into `just
+    # test` so it cannot quietly stop running.
+    parity = REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts"
+    assert parity.is_file(), "the executed resolver parity corpus must exist"
+    recipe = (REPO_ROOT / "justfile").read_text().split("\ntest:", 1)[1].split("\n\n", 1)[0]
+    assert "resolver-parity.test.ts" in recipe, "`just test` must run the parity corpus"
+
     example = (REPO_ROOT / ".shared-llm.yaml.example").read_text()
     for token in ("work_log:", "dir:", "host:", "/var/tmp/work-log/{date}/{slug}"):
         assert token in example, f".shared-llm.yaml.example must document {token!r}"

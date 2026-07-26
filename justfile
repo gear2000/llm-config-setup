@@ -97,6 +97,11 @@ test:
     ${PYTHON_BIN:-python3} -m pytest tools/ .shared-llm/public/extensions/common/ -q
     node --experimental-strip-types .shared-llm/public/llm/pi/common/meta-plan/meta-plan-schema.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
+
+# Runs planish_resolve.py and both duplicated TS resolvers over one corpus.
+test-resolver-parity:
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 
 test-auto-compact:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts

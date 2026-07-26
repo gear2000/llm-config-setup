@@ -77,20 +77,54 @@ function esc(s: string): string {
 
 // ─── Review host configuration ───────────────────────────────────────────────
 
+// A `#` only opens a comment at the start of a line or after whitespace, and
+// never inside a quoted scalar — so `dir: "plans/#ticket/{slug}"` keeps its
+// hash, exactly as PyYAML reads it for the canonical resolver.
+function stripComment(line: string): string {
+	let quote: string | null = null;
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i];
+		if (quote) {
+			if (ch === quote) quote = null;
+		} else if (ch === '"' || ch === "'") {
+			quote = ch;
+		} else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+			return line.slice(0, i);
+		}
+	}
+	return line;
+}
+
 // Minimal YAML parser for the .shared-llm.yaml subset: top-level scalars and
 // one level of nested key: value blocks. Handles strings, integers, booleans.
+// A nested block of `- ` items is kept as an array rather than flattened into a
+// mapping, so callers that require a mapping can fail loud the way PyYAML does.
 function parseSimpleYaml(content: string): Record<string, any> {
 	const result: Record<string, any> = {};
+	let nestedKey: string | null = null;
 	let nested: Record<string, any> | null = null;
+	let sequence: string[] | null = null;
 	for (const raw of content.split("\n")) {
-		const line = raw.replace(/#.*$/, ""); // strip inline comments
+		const line = stripComment(raw);
 		if (!line.trim()) continue;
 		const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
+		if (indent > 0 && line.trim().startsWith("-")) {
+			if (nestedKey === null) continue;
+			if (sequence === null) {
+				sequence = [];
+				result[nestedKey] = sequence;
+				nested = null;
+			}
+			sequence.push(line.trim().slice(1).trim());
+			continue;
+		}
 		const colon = line.indexOf(":");
 		if (colon === -1) continue;
 		const key = line.slice(0, colon).trim();
 		const rest = line.slice(colon + 1).trim();
 		if (indent === 0) {
+			nestedKey = key;
+			sequence = null;
 			if (rest === "") {
 				nested = {};
 				result[key] = nested;
@@ -127,7 +161,7 @@ function findConfigUp(startDir: string, filename: string): string | null {
 // Nearest .shared-llm.yaml carrying a `work_log:` mapping. A file WITHOUT that
 // key is skipped and the walk continues — ~/.shared-llm.yaml is the machine's
 // destination roster and must never shadow a repo's work-log config.
-function findWorkLogConfig(
+export function findWorkLogConfig(
 	startDir: string,
 ): { configPath: string; workLog: Record<string, any> } | null {
 	let dir = path.resolve(startDir);
@@ -158,7 +192,7 @@ function workLogMapping(configPath: string, value: any): Record<string, any> {
 	// that the block-oriented scanner above collapses into a string; re-parse it
 	// so both spellings behave identically.
 	const mapping = typeof value === "string" ? parseFlowMapping(value) : value;
-	if (typeof mapping !== "object" || mapping === null)
+	if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping))
 		throw new Error(`${configPath} "work_log" must be a mapping of dir/host`);
 	if (Object.keys(mapping).length === 0)
 		throw new Error(
@@ -226,7 +260,7 @@ function resolveHost(): string {
 	return resolvedHost;
 }
 
-function configuredHost(): string | null {
+export function configuredHost(): string | null {
 	if (process.env.WORK_LOG_HOST && process.env.WORK_LOG_HOST.trim()) {
 		return process.env.WORK_LOG_HOST.trim();
 	}

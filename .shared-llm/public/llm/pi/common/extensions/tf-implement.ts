@@ -44,6 +44,7 @@ const RESPONSE_FIFO = path.join(PI_DIR, "tf-review-response.fifo");
 const CONFIG_NAME = ".shared-llm.yaml";
 const LEGACY_CONFIG_NAME = ".planish.yaml";
 const DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}";
+const CLAIM_ATTEMPTS = 64;
 
 // ─── FIFO helpers ─────────────────────────────────────────────────────────────
 
@@ -132,18 +133,52 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 
 // Minimal YAML parser for the .shared-llm.yaml subset: top-level scalars and
 // one level of nested key: value blocks. Handles strings, integers, booleans.
+// A `#` only opens a comment at the start of a line or after whitespace, and
+// never inside a quoted scalar — so `dir: "plans/#ticket/{slug}"` keeps its
+// hash, exactly as PyYAML reads it for the canonical resolver.
+function stripComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+// A nested block of `- ` items is kept as an array rather than flattened into a
+// mapping, so callers that require a mapping can fail loud the way PyYAML does.
 function parseSimpleYaml(content: string): Record<string, any> {
   const result: Record<string, any> = {};
+  let nestedKey: string | null = null;
   let nested: Record<string, any> | null = null;
+  let sequence: string[] | null = null;
   for (const raw of content.split("\n")) {
-    const line = raw.replace(/#.*$/, ""); // strip inline comments
+    const line = stripComment(raw);
     if (!line.trim()) continue;
     const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
+    if (indent > 0 && line.trim().startsWith("-")) {
+      if (nestedKey === null) continue;
+      if (sequence === null) {
+        sequence = [];
+        result[nestedKey] = sequence;
+        nested = null;
+      }
+      sequence.push(line.trim().slice(1).trim());
+      continue;
+    }
     const colon = line.indexOf(":");
     if (colon === -1) continue;
     const key = line.slice(0, colon).trim();
     const rest = line.slice(colon + 1).trim();
     if (indent === 0) {
+      nestedKey = key;
+      sequence = null;
       if (rest === "") {
         nested = {};
         result[key] = nested;
@@ -191,7 +226,7 @@ function findConfigUp(startDir: string, filename: string): string | null {
 
 // Nearest .shared-llm.yaml carrying a "work_log:" mapping; files without the
 // key are skipped and the walk continues.
-function findWorkLogConfig(
+export function findWorkLogConfig(
   startDir: string,
 ): { configPath: string; workLog: Record<string, any> } | null {
   let dir = path.resolve(startDir);
@@ -222,7 +257,7 @@ function workLogMapping(configPath: string, value: any): Record<string, any> {
   // that the block-oriented scanner above collapses into a string; re-parse it
   // so both spellings behave identically.
   const mapping = typeof value === "string" ? parseFlowMapping(value) : value;
-  if (typeof mapping !== "object" || mapping === null) {
+  if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping)) {
     throw new Error(`${configPath} "work_log" must be a mapping of dir/host`);
   }
   if (Object.keys(mapping).length === 0) {
@@ -268,6 +303,38 @@ function warnDeprecated(message: string): void {
   console.error(`[tf-implement] ${message}`);
 }
 
+// Create the resolved directory, claiming a {n} version exclusively. Scanning
+// for the highest sibling and then creating with `recursive: true` hands the
+// same directory to every caller that scans before any of them creates, so the
+// version segment is claimed with a NON-recursive mkdir: whoever loses the race
+// gets EEXIST, rescans, and takes the next integer. Mirrors planish_resolve.py.
+function claimPlanDir(absPath: string): string {
+  const parts = absPath.split(path.sep);
+  const idx = parts.findIndex((seg) => seg.includes("{n}"));
+  if (idx === -1) {
+    // No version token — concurrent callers legitimately share the path.
+    fs.mkdirSync(absPath, { recursive: true });
+    return absPath;
+  }
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+    const versioned = expandVersionToken(absPath);
+    const claim = versioned.split(path.sep).slice(0, idx + 1).join(path.sep) || path.sep;
+    fs.mkdirSync(path.dirname(claim), { recursive: true });
+    try {
+      fs.mkdirSync(claim);
+    } catch (err: any) {
+      if (err?.code === "EEXIST") continue;
+      throw err;
+    }
+    fs.mkdirSync(versioned, { recursive: true });
+    return versioned;
+  }
+  throw new Error(
+    `could not claim a version directory under ${parts.slice(0, idx).join(path.sep)} ` +
+      `after ${CLAIM_ATTEMPTS} attempts`,
+  );
+}
+
 // Replace a {n} token in a path segment with the next version integer, found by
 // globbing the parent dir for siblings matching the segment's prefix/suffix.
 function expandVersionToken(absPath: string): string {
@@ -289,7 +356,7 @@ function expandVersionToken(absPath: string): string {
 }
 
 // The (template, base directory) pair the precedence selects.
-function resolveTemplate(cwd: string, dirFlag?: string): [string, string] {
+export function resolveTemplate(cwd: string, dirFlag?: string): [string, string] {
   if (dirFlag && dirFlag.trim()) return [dirFlag.trim(), cwd];
   if (process.env.WORK_LOG_DIR && process.env.WORK_LOG_DIR.trim()) {
     return [process.env.WORK_LOG_DIR.trim(), cwd];
@@ -321,7 +388,7 @@ function resolveTemplate(cwd: string, dirFlag?: string): [string, string] {
   return [DEFAULT_TEMPLATE, cwd];
 }
 
-function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
+export function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
   const [template, baseDir] = resolveTemplate(cwd, dirFlag);
 
   const expanded = template
@@ -329,9 +396,7 @@ function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
     .replace(/\{slug\}/g, slugifyTopic(topic))
     .replace(/\{type\}/g, "plan");
   const absPath = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
-  const finalDir = expandVersionToken(absPath);
-  fs.mkdirSync(finalDir, { recursive: true });
-  return finalDir;
+  return claimPlanDir(absPath);
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────

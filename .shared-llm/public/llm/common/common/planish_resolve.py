@@ -16,6 +16,7 @@ import yaml
 CONFIG_NAME = ".shared-llm.yaml"
 LEGACY_CONFIG_NAME = ".planish.yaml"
 DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}"
+_CLAIM_ATTEMPTS = 64
 
 
 def _warn(message: str) -> None:
@@ -104,6 +105,39 @@ def _next_version(path: Path) -> Path:
     return Path(*parts)
 
 
+def _claim(candidate: Path) -> Path:
+    """Create the resolved directory, claiming a `{n}` version exclusively.
+
+    Scanning for the highest sibling and then creating with `exist_ok=True`
+    hands the same directory to every caller that scans before any of them
+    creates. The version segment is therefore claimed with a non-recursive
+    `mkdir(exist_ok=False)`: whoever loses the race sees FileExistsError,
+    rescans, and takes the next integer.
+    """
+    parts = candidate.parts
+    try:
+        index = next(i for i, part in enumerate(parts) if "{n}" in part)
+    except StopIteration:
+        # No version token — concurrent callers legitimately share the path.
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+
+    for _ in range(_CLAIM_ATTEMPTS):
+        versioned = _next_version(candidate)
+        claim = Path(*versioned.parts[: index + 1])
+        claim.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            claim.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        versioned.mkdir(parents=True, exist_ok=True)
+        return versioned
+    raise ValueError(
+        f"could not claim a version directory under {Path(*parts[:index])} "
+        f"after {_CLAIM_ATTEMPTS} attempts"
+    )
+
+
 def _template(cwd: Path, explicit_dir: str | None) -> tuple[str, Path]:
     """Return the (template, base directory) pair the precedence selects."""
     if explicit_dir and explicit_dir.strip():
@@ -150,9 +184,7 @@ def resolve(cwd: Path, topic: str, explicit_dir: str | None = None) -> Path:
     candidate = Path(expanded).expanduser()
     if not candidate.is_absolute():
         candidate = base / candidate
-    resolved = _next_version(candidate.resolve())
-    resolved.mkdir(parents=True, exist_ok=True)
-    return resolved
+    return _claim(candidate.resolve())
 
 
 def resolve_host(cwd: Path) -> str | None:
@@ -181,6 +213,34 @@ def resolve_host(cwd: Path) -> str | None:
     return None
 
 
+def resolve_review_url(cwd: Path, plan_dir: Path) -> str | None:
+    """Browser URL for `plan_dir`, or None when the config cannot name one.
+
+    Requires BOTH `work_log.url_base` (where the static server answers) and
+    `work_log.serve_root` (the filesystem root it serves) — with only one of
+    them, or with a plan directory outside that root, there is no way to know
+    the URL, so this returns None rather than guessing one that 404s.
+    """
+    found = _find_work_log(cwd)
+    if found is None:
+        return None
+    config, work_log = found
+    url_base = _string_field(config, work_log, "url_base", "work_log.url_base")
+    serve_root = _string_field(config, work_log, "serve_root", "work_log.serve_root")
+    if url_base is None or serve_root is None:
+        return None
+
+    root = Path(serve_root).expanduser()
+    if not root.is_absolute():
+        root = config.parent / root
+    try:
+        relative = plan_dir.relative_to(root.resolve())
+    except ValueError:
+        return None
+    base = url_base.rstrip("/")
+    return base if relative == Path(".") else f"{base}/{relative.as_posix()}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="planish-resolve")
     parser.add_argument("--topic", required=True)
@@ -191,9 +251,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         directory = resolve(cwd, args.topic, args.dir)
         host = resolve_host(cwd)
+        review_url = resolve_review_url(cwd, directory)
     except (OSError, ValueError) as error:
         sys.exit(f"planish-resolve: {error}")
-    print(json.dumps({"host": host, "plan_dir": str(directory)}, sort_keys=True))
+    print(
+        json.dumps(
+            {"host": host, "plan_dir": str(directory), "review_url": review_url},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

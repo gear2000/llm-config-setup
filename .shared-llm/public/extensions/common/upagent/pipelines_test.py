@@ -56,12 +56,25 @@ def test_shipped_registry_loads_with_both_approved_pipelines() -> None:
     assert rpi.optional_stages == ("research", "plan")
     assert rpi.required_stages() == ("implement",)
     assert rpi.review_gate == "plan"
+    assert rpi.skip_gate == "issue-approval"
     assert rpi.max_phases == 3
     gate = registry.resolve("no-mistakes")
     assert gate.stages == ("implement", "validate")
     assert gate.optional_stages == ()
     assert gate.review_gate == pipelines.NO_REVIEW_GATE
+    assert gate.skip_gate is None
     assert gate.max_phases is None
+
+
+def test_every_skippable_review_gate_declares_where_approval_goes() -> None:
+    # The registry's own invariant, checked against whatever it ships: no pipeline may be
+    # gateless, so a gate stage that a flag can skip must name its fallback.
+    for pipeline in pipelines.load_registry().pipelines.values():
+        if (
+            pipeline.review_gate != pipelines.NO_REVIEW_GATE
+            and pipeline.review_gate in pipeline.optional_stages
+        ):
+            assert pipeline.skip_gate in pipelines.SUPPORTED_SKIP_GATES
 
 
 def test_resolving_an_unknown_pipeline_lists_the_valid_ids() -> None:
@@ -136,11 +149,55 @@ def test_resolving_an_unknown_pipeline_lists_the_valid_ids() -> None:
             "pipeline rpi stages repeats stage 'research'",
         ),
         (
+            "typo-stage-id",
+            lambda source: source["pipelines"]["rpi"].__setitem__(
+                "stages", ["reserach", "plan", "implement"]
+            ),
+            "pipeline rpi stages has unsupported stage 'reserach'; expected one of "
+            "research, plan, implement, validate",
+        ),
+        (
+            "regex-valid-but-unsupported-stage",
+            lambda source: source["pipelines"]["rpi"].__setitem__(
+                "stages", ["research", "plan", "deploy"]
+            ),
+            "pipeline rpi stages has unsupported stage 'deploy'",
+        ),
+        (
+            "typo-optional-stage-id",
+            lambda source: source["pipelines"]["rpi"].__setitem__(
+                "optional_stages", ["research", "plna"]
+            ),
+            "pipeline rpi optional_stages has unsupported stage 'plna'",
+        ),
+        (
+            "skippable-review-gate-without-skip-gate",
+            lambda source: source["pipelines"]["rpi"].pop("skip_gate"),
+            "lists its review_gate 'plan' in optional_stages, so it must declare where "
+            "approval goes",
+        ),
+        (
+            "skippable-review-gate-with-unknown-skip-gate",
+            lambda source: source["pipelines"]["rpi"].__setitem__(
+                "skip_gate", "trust-the-worker"
+            ),
+            "skip_gate must be one of issue-approval; got 'trust-the-worker'",
+        ),
+        (
+            "skip-gate-that-can-never-apply",
+            lambda source: source["pipelines"]["no-mistakes"].__setitem__(
+                "skip_gate", "issue-approval"
+            ),
+            "sets skip_gate but its review_gate 'none' is not an optional stage",
+        ),
+        (
+            # `validate` is a supported stage, just not one THIS pipeline runs — so the
+            # subset check is what has to catch it, not the vocabulary check.
             "optional-stage-outside-stages",
             lambda source: source["pipelines"]["rpi"].__setitem__(
-                "optional_stages", ["research", "review"]
+                "optional_stages", ["research", "validate"]
             ),
-            "optional_stages must be stages of the pipeline; review not in",
+            "optional_stages must be stages of the pipeline; validate not in",
         ),
         (
             "optional-stages-not-a-list",
@@ -231,9 +288,11 @@ def test_json_index_carries_the_full_validated_record() -> None:
         "optional_stages": ["research", "plan"],
         "required_stages": ["implement"],
         "review_gate": "plan",
+        "skip_gate": "issue-approval",
         "max_phases": 3,
     }
     assert index["no-mistakes"]["review_gate"] == "none"
+    assert index["no-mistakes"]["skip_gate"] is None
     assert index["no-mistakes"]["max_phases"] is None
 
 

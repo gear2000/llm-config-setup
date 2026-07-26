@@ -39,6 +39,14 @@ The engine lives **only** in the kit and is never copied into your repo. You dri
 
      (If a kit-synced `public/` layer carries a `{{TOKEN}}`, add a `placeholders:` map to this repo's entry in `~/.shared-llm.yaml` — see group B below and the README's *Placeholder convention*.)
 
+3. **Import the tool-module justfiles into your repo's root justfile.** `just update` copies these modules into your repo, but nothing wires them up — without the import line the recipes simply do not exist, and any skill that shells out to one fails at its first step. The UpAgent module is the one to add if you add only one: the `/upagent-pipeline` skill opens with `just upagent-list-pipelines --json`, which lives there.
+
+   ```just
+   import '.shared-llm/public/extensions/common/upagent/justfile'
+   ```
+
+   The kit's own root justfile also imports the sibling modules — `common/herdr/justfile` (Herdr lab), `common/runner/justfile` (run/session recipes), and `common/iac/justfile`. They are independent: import the ones whose recipes you intend to call. Check with `just --list`.
+
 The rest of this checklist happens **inside your target repo** — that is where the `.shared-llm/` tree now lives. `just update` (re)builds the `public/` tree from the kit (never touching your `this_repo/` tree), composes its output files, and wires the per-harness skill links.
 
 **See what still needs you:** `find . -name 'TEMPLATE.*'` lists every unfilled stub. For each: fill it in (the groups below map every token to its file), **delete the `<!-- TEMPLATE … -->` banner**, then **rename it to drop the `TEMPLATE.` prefix** (e.g. `TEMPLATE.general.md` → `general.md`).

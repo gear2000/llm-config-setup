@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import multiprocessing
 from datetime import date
 from pathlib import Path
 
@@ -233,6 +234,99 @@ def test_work_log_config_without_host_does_not_reach_legacy(tmp_path: Path) -> N
     assert resolver.resolve_host(tmp_path / "repo") is None
 
 
+# ─── review URL ──────────────────────────────────────────────────────────────
+
+
+def test_review_url_needs_both_url_base_and_serve_root(tmp_path: Path) -> None:
+    """One key alone cannot name a URL — never guess one that 404s."""
+    for body in (
+        "work_log:\n  dir: docs/plans/{slug}\n  url_base: http://example-host:8089\n",
+        "work_log:\n  dir: docs/plans/{slug}\n  serve_root: docs\n",
+    ):
+        _write(tmp_path / ".shared-llm.yaml", body)
+        plan_dir = resolver.resolve(tmp_path, "Topic")
+        assert resolver.resolve_review_url(tmp_path, plan_dir) is None
+
+
+def test_review_url_maps_the_plan_dir_onto_the_served_root(tmp_path: Path) -> None:
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: docs/plans/{slug}\n"
+        "  url_base: http://example-host:8089/\n"
+        "  serve_root: docs\n",
+    )
+    plan_dir = resolver.resolve(tmp_path, "Redesign Auth")
+    url = resolver.resolve_review_url(tmp_path, plan_dir)
+    assert url == "http://example-host:8089/plans/redesign-auth"
+
+
+def test_review_url_is_none_when_the_plan_dir_escapes_the_served_root(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: elsewhere/{slug}\n"
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    plan_dir = resolver.resolve(tmp_path, "Topic")
+    assert resolver.resolve_review_url(tmp_path, plan_dir) is None
+
+
+def test_cli_reports_the_review_url(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: docs/plans/{slug}\n"
+        "  host: example-host\n"
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    assert resolver.main(["--topic", "Topic", "--cwd", str(tmp_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["review_url"] == "http://example-host:8089/plans/topic"
+
+
+# ─── concurrent {n} allocation ───────────────────────────────────────────────
+
+
+def _claim_worker(barrier, queue, cwd: str) -> None:  # pragma: no cover - subprocess
+    barrier.wait()
+    try:
+        queue.put(str(resolver.resolve(Path(cwd), "Topic")))
+    except Exception as error:  # noqa: BLE001 - reported to the parent verbatim
+        queue.put(f"ERROR: {error}")
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="needs fork so children share the already-loaded resolver module",
+)
+def test_concurrent_callers_each_claim_their_own_version(tmp_path: Path) -> None:
+    """Scan-then-create hands the same vN to everyone who scans first."""
+    _write(tmp_path / ".shared-llm.yaml", "work_log:\n  dir: plans/{slug}/v{n}\n")
+    ctx = multiprocessing.get_context("fork")
+    callers = 8
+    barrier = ctx.Barrier(callers)
+    queue = ctx.Queue()
+    workers = [
+        ctx.Process(target=_claim_worker, args=(barrier, queue, str(tmp_path)))
+        for _ in range(callers)
+    ]
+    for worker in workers:
+        worker.start()
+    claimed = [queue.get(timeout=30) for _ in range(callers)]
+    for worker in workers:
+        worker.join(timeout=30)
+
+    assert all(not entry.startswith("ERROR") for entry in claimed), claimed
+    assert len(set(claimed)) == callers, claimed
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 
@@ -244,7 +338,11 @@ def test_cli_stdout_stays_pure_json_while_warning(
     assert resolver.main(["--topic", "Topic", "--cwd", str(tmp_path)]) == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload == {"host": "env-host", "plan_dir": str(tmp_path / "plans/topic")}
+    assert payload == {
+        "host": "env-host",
+        "plan_dir": str(tmp_path / "plans/topic"),
+        "review_url": None,
+    }
     assert "deprecated" in captured.err
 
 

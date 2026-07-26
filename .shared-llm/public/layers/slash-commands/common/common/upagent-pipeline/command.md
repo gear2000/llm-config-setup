@@ -25,8 +25,10 @@ research, plan, approve, implement, done.
    registry is read from the canonical UpAgent source, so a `no checked-out main branch UpAgent
    source found` failure here means `UPAGENT_CANONICAL_REPO` must be set to an absolute checkout
    root — report that fix rather than the raw traceback.
-2. Read the selected pipeline's `optional_stages` and `max_phases` from that same output. A
-   `--skip-*` flag naming a stage this pipeline does not list as optional is a stop, not a warning.
+2. Read the selected pipeline's `optional_stages`, `max_phases`, and `skip_gate` from that same
+   output. A `--skip-*` flag naming a stage this pipeline does not list as optional is a stop, not a
+   warning. `skip_gate` names the human gate a route falls back to when the stage carrying the
+   pipeline's normal gate is skipped.
 3. Resolve `<issue-location>` to issue text before anything else:
    - An existing file path is used as-is; copy it verbatim into the run tree as `issue.md`.
    - A tracker reference or URL (GitHub, Forgejo, Linear) is fetched verbatim — `gh issue view`, the
@@ -70,31 +72,56 @@ failure and stop or re-hire; never write the missing artifact yourself.
 
 ## Pipeline: `rpi`
 
-1. **Research** — skipped by `--skip-research`. Persona `researcher`. Brief: read
+The skip flags choose the route. Every route ends at a human gate and none of them implements
+without an approval — when there is no plan to approve, the registry's `skip_gate` names the gate
+that replaces it (`issue-approval`).
+
+| Flags | Route |
+|---|---|
+| none | research → plan → phase-count gate → plan approval → implement |
+| `--skip-research` | plan → phase-count gate → plan approval → implement |
+| `--skip-plan` | research → issue approval → implement |
+| both | issue approval → implement |
+
+1. **Research** — runs unless `--skip-research`. Persona `researcher`. Brief: read
    `<run-dir>/issue.md`, investigate inside the worktree, write findings to exactly
    `<run-dir>/research/v<N>/research.md`.
-2. **Plan** — skipped by `--skip-plan`. Persona `planner`. Brief: the absolute `issue.md` path and
+2. **Plan** — runs unless `--skip-plan`. Persona `planner`. Brief: the absolute `issue.md` path and
    the absolute research path (say explicitly that research was skipped when it was), the phase
    budget from the registry's `max_phases`, and exactly one output path,
    `<run-dir>/plan/v<N>/plan.md`. Plans are small: one phase is the target, `max_phases` is the
    ceiling.
-3. **Phase-count gate — mechanical, before anything else reads the plan.** Count the phases in
-   `plan.md` yourself. Over `max_phases`, refuse to continue: append the count and the refusal to
-   `pipeline-log.md` and tell the human the plan is too big for this pipeline, with the two ways
-   forward — re-hire the planner on a narrower issue, or take the work to `/cc-plan`. Do not trim
-   the plan to make it fit. A prose phase limit gets bypassed; this count is the enforcement.
-4. **Human review gate.** Render `plan.md` as a work-log HTML page following the shared Planish HTML
-   Grill Contract at `.shared-llm/public/llm/common/common/planish-html-grill-contract.md` —
-   annotatable static page, sticky notes, Copy Feedback, no in-page submit. Build the URL with the
-   resolver's `host` value, give it to the human, and end the turn. Apply pasted feedback either by
-   editing `plan.md` yourself for small corrections or by placing a fresh `planner` order for a
-   rewrite, freezing each revision as the next `plan/v<N>/`. Loop until the human approves. Record
-   every round and the final approval in `pipeline-log.md`. No approval, no implementation.
-5. **Implement.** Implement the approved phases **directly in the worktree**, the way you would any
-   small change: read the code first, make the change, run the checks the plan names, preserve
-   unrelated work. No phase leaders, no stage workers, no `route.yaml`, no `/tui-control`. If the
-   plan turns out to be wrong, go back to the review gate with what you found; do not redesign
-   mid-implementation.
+3. **Phase-count gate — mechanical, before anything else reads the plan.** Runs only on a route that
+   produced a plan. Count the phases in `plan.md` yourself. Over `max_phases`, refuse to continue:
+   append the count and the refusal to `pipeline-log.md` and tell the human the plan is too big for
+   this pipeline, with the two ways forward — re-hire the planner on a narrower issue, or take the
+   work to `/cc-plan`. Do not trim the plan to make it fit. A prose phase limit gets bypassed; this
+   count is the enforcement.
+4. **Plan approval gate.** Runs only on a route that produced a plan. Present `plan.md` to the human
+   (below) and loop revisions — edit `plan.md` yourself for small corrections, or place a fresh
+   `planner` order for a rewrite, freezing each revision as the next `plan/v<N>/` — until the human
+   approves.
+5. **Issue approval gate.** Replaces steps 3 and 4 whenever `--skip-plan` was passed. There is no
+   `plan.md`, so there is nothing to count and nothing to render from a plan — never count phases or
+   read a plan file on this route. Present `issue.md` together with your own implementation approach
+   stated briefly: what you will change, which files, and how you will verify it. Loop revisions on
+   that approach until the human approves it explicitly. A declined or unanswered gate ends the run;
+   never implement off your own approach unapproved.
+6. **Implement.** Implement the approved plan's phases — or the approved approach on a `--skip-plan`
+   route — **directly in the worktree**, the way you would any small change: read the code first,
+   make the change, run the checks the plan or approach names, preserve unrelated work. No phase
+   leaders, no stage workers, no `route.yaml`, no `/tui-control`. If what was approved turns out to
+   be wrong, go back to the gate with what you found; do not redesign mid-implementation.
+
+**Presenting a gate.** Render the artifact — `plan.md`, or the issue plus your approach — as a
+self-contained HTML page following the shared Planish HTML Grill Contract at
+`.shared-llm/public/llm/common/common/planish-html-grill-contract.md`: annotatable static page,
+sticky notes, Copy Feedback, no in-page submit. Use the resolver's `review_url` when it returns one.
+When it is null the work-log server is not configured: hand the human the page's absolute file path
+and say so. Never assemble a URL yourself — a directory and a host name do not determine a port or a
+server root, and a fabricated link wastes the human's turn. Give the human the page, end the turn,
+and treat their pasted feedback as the next round. Record every round and the final approval in
+`pipeline-log.md`. No approval, no implementation — on every route.
 
 ## Pipeline: `no-mistakes`
 

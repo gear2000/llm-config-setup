@@ -366,11 +366,22 @@ where the human review gate sits, and how many phases the implement stage may gr
 validates the offering roster — strict keys, no silent defaults, and every failure names the file
 and the field. Nothing in this engine interprets a pipeline; the stages are read by the
 `/upagent-pipeline` skill inside the launched pane, so a typo in a stage name or a review gate has
-to be an error here rather than a pane quietly running a different shape.
+to be an error here rather than a pane quietly running a different shape. Stage ids and gate
+values come from closed sets owned by `pipelines.py` (`SUPPORTED_STAGES`,
+`SUPPORTED_SKIP_GATES`): `reserach` is rejected at load rather than becoming a stage that never
+runs. Pipeline ids stay open — the skill dispatches its prose by id, so a new pipeline is an
+ordinary addition.
+
+No pipeline is ever gateless. When a pipeline's `review_gate` names a stage that `optional_stages`
+allows a flag to skip — `rpi` gates on `plan`, and `--skip-plan` skips it — the pipeline must
+declare a `skip_gate`, and skipping the stage MOVES human approval rather than removing it.
+`rpi`'s `skip_gate: issue-approval` means the human approves the issue and the stated approach
+before implementation. A missing `skip_gate` on a skippable gate is a load failure, and so is a
+`skip_gate` on a pipeline whose gate can never be skipped.
 
 ```
 just upagent-list-pipelines           # id, stages, description (`?` marks an optional stage)
-just upagent-list-pipelines --json    # the validated record, review gate and max_phases included
+just upagent-list-pipelines --json    # the validated record: gates, skip gate, max_phases
 just upagent-pipeline rpi docs/issues/dry-run-flag.md
 just upagent-pipeline rpi --skip-research https://github.com/org/repo/issues/42
 ```

@@ -172,6 +172,7 @@ There is no scaffolding command — a destination is set up by hand once, then d
 2. **Fill the `TEMPLATE.*` stubs** (see `ONBOARDING.md`), deleting the `TEMPLATE.` prefix from each as you finish it.
 3. **Register it:** `just configure -d /path/to/repo -l cc,pi` (add a `placeholders:` map to its entry in `~/.shared-llm.yaml` if any kit-synced layer carries a `{{TOKEN}}` — see [Placeholder convention](#placeholder-convention)).
 4. **Build it:** `just update` — this creates the `public/` tree from the kit and composes the outputs.
+5. **Import the tool-module justfiles** you intend to use into the repo's root justfile — starting with `import '.shared-llm/public/extensions/common/upagent/justfile'`, which the `/upagent-pipeline` skill needs. `just update` copies the modules in but does not wire them up; see `ONBOARDING.md` step 3.
 
 From then on, `just update` keeps every registered destination in sync: it rebuilds `public/` from the kit (your `this_repo/` tree is never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
 
