@@ -398,6 +398,83 @@ def test_unreadable_registry_fails_loud(tmp_path: Path) -> None:
         pipelines.load_registry(tmp_path / "absent.yaml")
 
 
+# A registry written as text, because the duplicate keys below cannot be dumped
+# from a dict — a dict is exactly what has already lost one of them.
+_DUPLICATE_BASE = """schema_version: 1
+pipelines:
+  rpi:
+    description: research, plan, implement
+    stages: [research, plan, implement]
+    optional_stages: [research]
+    review_gate: plan
+    max_phases: 3
+"""
+
+
+def _written_text(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "pipelines.yaml"
+    path.write_text(text)
+    return path
+
+
+def test_the_registry_the_duplicate_cases_are_built_from_loads(tmp_path: Path) -> None:
+    """Without a duplicate this registry is valid and gates on `plan` — which is
+    what the silent last-one-wins below would have replaced with no gate."""
+    registry = pipelines.load_registry(_written_text(tmp_path, _DUPLICATE_BASE))
+
+    assert registry.resolve("rpi").review_gate == "plan"
+    assert registry.resolve("rpi").max_phases == 3
+
+
+@pytest.mark.parametrize(
+    ("case", "registry", "key"),
+    [
+        (
+            "top-level key",
+            _DUPLICATE_BASE + "pipelines:\n  no-mistakes:\n"
+            "    description: validate only\n"
+            "    stages: [validate]\n    review_gate: none\n",
+            "pipelines",
+        ),
+        (
+            "pipeline id",
+            _DUPLICATE_BASE + "  rpi:\n    description: a second rpi\n"
+            "    stages: [implement]\n    review_gate: none\n",
+            "rpi",
+        ),
+        (
+            "nested field",
+            _DUPLICATE_BASE.replace(
+                "    review_gate: plan\n",
+                "    review_gate: plan\n    review_gate: none\n",
+            ),
+            "review_gate",
+        ),
+        ("max_phases", _DUPLICATE_BASE + "    max_phases: 99\n", "max_phases"),
+        (
+            "flow mapping",
+            "schema_version: 1\npipelines: {rpi: {description: d, "
+            "stages: [implement], review_gate: none, review_gate: implement}}\n",
+            "review_gate",
+        ),
+    ],
+)
+def test_a_duplicate_key_is_refused_at_every_level(
+    tmp_path: Path, case: str, registry: str, key: str
+) -> None:
+    """PyYAML keeps the last of two same-named keys and says nothing, so every
+    check in this module then passes on a registry nobody wrote: `review_gate:
+    plan` followed by `review_gate: none` validates cleanly as `none` and the
+    human plan gate is gone. Two keys with one name are never a legible intent."""
+    path = _written_text(tmp_path, registry)
+
+    with pytest.raises(
+        PipelineError, match=f"sets '{key}' twice in one block"
+    ) as fault:
+        pipelines.load_registry(path)
+    assert str(path) in str(fault.value)
+
+
 # --- listing ------------------------------------------------------------------
 
 

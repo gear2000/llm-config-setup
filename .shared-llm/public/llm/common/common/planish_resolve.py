@@ -18,6 +18,13 @@ CONFIG_NAME = ".shared-llm.yaml"
 LEGACY_CONFIG_NAME = ".planish.yaml"
 DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}"
 _CLAIM_ATTEMPTS = 64
+# The only schemes a review URL can be handed to a human in. `file:` needs no
+# base, and anything else either does not fetch or is not a location at all.
+_URL_SCHEMES = ("http", "https")
+# Dot-separated host labels — a DNS name or an IPv4 literal, matched against the
+# lowercased `.hostname`. IP literals in brackets are checked by urlsplit itself.
+_LABEL = r"[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?"
+_HOSTNAME_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*\.?")
 
 
 def _warn(message: str) -> None:
@@ -248,15 +255,52 @@ def _artifact_parts(plan_dir: Path, artifact: str) -> list[str]:
 
 
 def _checked_url_base(config: Path, url_base: str) -> str:
-    """`url_base` without its trailing slash, rejecting one that eats the path.
+    """`url_base` without its trailing slash, checked as a base a browser opens.
 
-    The plan path is appended to this base as PATH. A base carrying a query or
-    a fragment (`…?token=x`, `…#top`) puts that path inside the query or the
-    fragment instead, where the server never sees it — and a bare `?` or `#`
-    does it just as thoroughly, so the delimiter alone is the fault. Neither is
-    reordered around the path: a base that cannot carry one is rejected.
+    The plan path is appended to this base as PATH, so the base has to be an
+    absolute http(s) URL naming a real host: `http://` names no host, `not a
+    url` names no scheme, and `javascript:alert(1)` is not a location at all —
+    each one hands a human a "review link" that is dead or worse.
+
+    A base carrying a query or a fragment (`…?token=x`, `…#top`) puts that path
+    inside the query or the fragment instead, where the server never sees it —
+    and a bare `?` or `#` does it just as thoroughly, so the delimiter alone is
+    the fault. Neither is reordered around the path: a base that cannot carry
+    one is rejected.
     """
-    split = urlsplit(url_base)
+
+    def fault(reason: str) -> ValueError:
+        return ValueError(f'{config} "work_log.url_base" {reason}: "{url_base}"')
+
+    try:
+        split = urlsplit(url_base)
+        # `.hostname` and `.port` parse the netloc lazily, so an unclosed
+        # bracket, a bad IPv6 literal, or a port that is not an integer in range
+        # surfaces on access — here, rather than in whatever opens the link.
+        host, _port = split.hostname, split.port
+    except ValueError as error:
+        raise fault(f"is not a usable URL ({error})") from error
+
+    if split.scheme not in _URL_SCHEMES:
+        raise fault(
+            "must be an absolute URL starting with "
+            + " or ".join(f"{scheme}://" for scheme in _URL_SCHEMES)
+        )
+    # urlsplit drops tabs and newlines outright, so the parsed host is only as
+    # trustworthy as the raw string: "http://exa\nmple" parses as "example".
+    if any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in url_base
+    ):
+        raise fault("must not contain whitespace or control characters")
+    if not host:
+        raise fault("names no host, so there is nothing to serve the plan path")
+    # A bracketed host is an IP literal `.hostname` validated above; anything
+    # else is a name, and a name is dot-separated labels.
+    if not split.netloc.rpartition("@")[2].startswith("["):
+        if _HOSTNAME_RE.fullmatch(host) is None:
+            raise fault(f'names an invalid host "{host}"')
+
     for label, delimiter, component in (
         ("query", "?", split.query),
         ("fragment", "#", split.fragment),

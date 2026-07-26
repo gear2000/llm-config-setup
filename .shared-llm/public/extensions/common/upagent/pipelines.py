@@ -278,11 +278,49 @@ def _skip_gate(
     return skip_gate
 
 
+class _NoDuplicateKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicate mapping key instead of keeping the last one.
+
+    PyYAML's default is last-one-wins, silently. Every check in this module then runs
+    against a registry nobody wrote: a block with `review_gate: plan` and, further down,
+    `review_gate: none` validates cleanly as `none` and drops the human gate. Two keys
+    with one name are never a legible intent, so the duplicate is the fault — at every
+    level, so a second `pipelines:` block and a repeated pipeline id fail the same way.
+    """
+
+    def __init__(self, stream: Any, source: Path) -> None:
+        super().__init__(stream)
+        self.source = source
+
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Any, Any]:
+        # Keys are compared by equality in a list, never hashed: an unhashable key is
+        # PyYAML's own error to report, below, with the line and column it knows.
+        seen: list[Any] = []
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise PipelineError(
+                    f"pipeline registry {self.source} sets {key!r} twice in one block "
+                    f"(line {key_node.start_mark.line + 1}); the later value would "
+                    "silently replace the earlier one"
+                )
+            seen.append(key)
+        return cast(dict[Any, Any], super().construct_mapping(node, deep=deep))
+
+
 def load_registry(path: str | Path | None = None) -> PipelineRegistry:
     """Read and validate the pipeline registry. Fail-loud on every malformed field."""
     source = Path(path or HERE / REGISTRY_FILE).resolve()
     try:
-        raw = yaml.safe_load(source.read_text())
+        # `yaml.load` with a SafeLoader subclass — the same safe tag set as
+        # `yaml.safe_load`, plus the duplicate-key refusal, and the source path
+        # so the refusal can name the file it read.
+        raw = yaml.load(
+            source.read_text(),
+            lambda stream: _NoDuplicateKeyLoader(stream, source),
+        )
     except (OSError, yaml.YAMLError) as error:
         raise PipelineError(
             f"pipeline registry {source} is unreadable or invalid YAML: {error}"

@@ -380,6 +380,67 @@ def test_review_url_rejects_a_base_that_would_swallow_the_path(
             resolver.resolve_review_url(tmp_path, plan_dir, artifact)
 
 
+@pytest.mark.parametrize(
+    ("url_base", "reason"),
+    [
+        ("http://", "names no host"),
+        ("not a url", "must be an absolute URL"),
+        ("javascript:alert(1)", "must be an absolute URL"),
+        ("http://exa mple-host:8089", "must not contain whitespace"),
+        ("http://exa\nmple-host:8089", "must not contain whitespace"),
+        ("http://example-host:99999", "Port out of range"),
+        ("http://example-host:abc", "Port could not be cast"),
+    ],
+)
+def test_review_url_rejects_a_base_that_is_not_a_reachable_url(
+    tmp_path: Path, url_base: str, reason: str
+) -> None:
+    """A base is only worth appending a plan path to if a browser can open the
+    result. A scheme that is not http(s), a missing host, whitespace inside the
+    base, or a port that is not a port all produce a link that is dead or worse,
+    so the base is refused rather than concatenated into one."""
+    plan_dir = _url_config(tmp_path, url_base)
+    _write(plan_dir / "plan.html", "<h1>plan</h1>")
+
+    for artifact in (None, "plan.html"):
+        with pytest.raises(ValueError, match='work_log.url_base"') as failure:
+            resolver.resolve_review_url(tmp_path, plan_dir, artifact)
+        assert reason in str(failure.value)
+        assert str(tmp_path / ".shared-llm.yaml") in str(failure.value)
+
+
+@pytest.mark.parametrize("url_base", ["http://", "not a url", "javascript:alert(1)"])
+def test_the_refused_bases_are_the_ones_no_client_can_open(url_base: str) -> None:
+    """What the concatenation used to hand a human, opened here to show it: a
+    URL with no host, a string that is not a URL, and a scheme that is not a
+    location. None of the three ever reaches a plan."""
+    with pytest.raises((ValueError, urllib.error.URLError)):
+        urllib.request.urlopen(f"{url_base}/plans/topic/", timeout=2).close()
+
+
+@pytest.mark.parametrize(
+    "url_base",
+    [
+        "http://localhost:8089",
+        "https://example-host",
+        "http://192.168.1.9:8089",
+        "http://[::1]:8089",
+        "http://example-host:8089/plans/",
+        "http://my_host.internal.example.com",
+    ],
+)
+def test_review_url_accepts_the_bases_that_do_serve_a_plan(
+    tmp_path: Path, url_base: str
+) -> None:
+    """The checks above must not cost a base anyone actually configures: a bare
+    host, an IPv4 literal, a bracketed IPv6 literal, and a path prefix."""
+    plan_dir = _url_config(tmp_path, url_base)
+
+    url = resolver.resolve_review_url(tmp_path, plan_dir)
+    assert url is not None and url.endswith("/plans/topic/")
+    assert url.startswith(url_base.rstrip("/"))
+
+
 def test_review_url_is_none_when_the_plan_dir_escapes_the_served_root(
     tmp_path: Path,
 ) -> None:

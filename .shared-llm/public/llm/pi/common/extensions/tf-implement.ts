@@ -284,7 +284,12 @@ function explicitTemplate(dirFlag?: string): string | null {
 // RuntimeError). It is a loud stop rather than a path invented from os.homedir.
 function expandUser(template: string): string {
   if (template === "~" || template.startsWith("~/")) {
-    return path.join(os.homedir(), template.slice(1));
+    // posixpath.expanduser verbatim: strip trailing slashes off the home, glue
+    // the rest of the template on, and call an empty result the root. Not
+    // path.join — path.join("", "") is ".", which path.resolve then turns into
+    // the cwd, so an empty $HOME would put the plan log wherever the caller
+    // happened to be standing while the script puts it in "/".
+    return (tildeHome().replace(/\/+$/, "") + template.slice(1)) || "/";
   }
   if (template.startsWith("~")) {
     throw new Error(
@@ -294,6 +299,23 @@ function expandUser(template: string): string {
     );
   }
   return template;
+}
+
+// The home directory posixpath.expanduser would use. It reads $HOME whenever the
+// variable is SET — an empty $HOME expands "~" to "/" there — and consults the
+// passwd entry only when the variable is absent. os.homedir() cannot express
+// that difference: it treats an empty $HOME as unset and falls back to passwd,
+// so $HOME is read directly and os.homedir() is used only for the passwd case
+// it does match. With neither, the answer is not knowable and this stops.
+function tildeHome(): string {
+  const home = process.env.HOME;
+  if (home !== undefined) return home;
+  const fromPasswd = os.homedir();
+  if (fromPasswd) return fromPasswd;
+  throw new Error(
+    `cannot expand "~": $HOME is unset and this machine has no home directory ` +
+      `to fall back to — set $WORK_LOG_DIR (or --dir) to an absolute path`,
+  );
 }
 
 // Used only when the canonical script is unreachable AND no config file decides

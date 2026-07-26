@@ -303,6 +303,31 @@ function pythonOutcomeWithEnv(cwd: string, env: NodeJS.ProcessEnv): Outcome {
 		);
 	}
 
+	// An EMPTY $HOME is SET, not absent. posixpath.expanduser reads it anyway, so
+	// the script expands "~" to "/". os.homedir() reports "" for it, and
+	// path.join("", "") is ".", which path.resolve turns into the cwd — so the
+	// copy used to put the plan log wherever the caller happened to be standing.
+	const emptyHome = { ...process.env, HOME: "", WORK_LOG_DIR: "~" };
+	const pyEmpty = pythonOutcomeWithEnv(bareCwd, emptyHome);
+	const copiedEmpty = copiedExtensionOutcome(bareCwd, emptyHome);
+	check(
+		pyEmpty.ok && copiedEmpty.ok,
+		"copied extension, empty $HOME: both resolvers must succeed — " +
+			`python=${pyEmpty.ok} copy=${copiedEmpty.ok}`,
+	);
+	check(
+		pyEmpty.dir === copiedEmpty.dir,
+		`copied extension, empty $HOME: plan dir differs — python=${pyEmpty.dir} copy=${copiedEmpty.dir}`,
+	);
+	check(
+		copiedEmpty.dir === path.sep,
+		`copied extension, empty $HOME: "~" must expand to "${path.sep}", got ${copiedEmpty.dir}`,
+	);
+	check(
+		copiedEmpty.dir !== bareCwd,
+		`copied extension, empty $HOME: "~" must never resolve to the cwd (${bareCwd})`,
+	);
+
 	// "~otheruser" needs a passwd lookup Node has no equivalent for. The copy
 	// refuses it rather than inventing <cwd>/~otheruser or a path under $HOME.
 	const otherUser = {
