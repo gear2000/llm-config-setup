@@ -65,6 +65,11 @@ link:
 global:
     ${PYTHON_BIN:-python3} tools/harness.py global
 
+# Remove manifest-tracked home deployments that no recipe produces anymore
+# (renamed/retired skills, agents, hooks). Same pruning `just update` runs.
+prune:
+    ${PYTHON_BIN:-python3} tools/harness.py prune
+
 # Install the kit's pinned third-party Pi extensions from the manifest (idempotent;
 # no-op without pi). Wraps the `pi install` network path — kept as a helper because
 # it drives the pi CLI, not the file composer.

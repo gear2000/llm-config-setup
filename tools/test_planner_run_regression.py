@@ -34,8 +34,6 @@ PI_SKILLS = {
 COMMON_REQUIRED_SKILLS = {
     "tui-control": ".claude/skills/tui-control",
     "phase-leader": ".claude/skills/phase-leader",
-    "meta-plan-check": ".claude/skills/meta-plan-check",
-    "meta-plan-convert": ".claude/skills/meta-plan-convert",
 }
 PI_REQUIRED_SKILLS = {
     **{name: path.rsplit("/SKILL.md", 1)[0] for name, path in PI_SKILLS.items()},
@@ -53,6 +51,8 @@ FORBIDDEN_SKILL_NAMES = {
     "meta-connect",
     "meta-herdr",
     "meta-phase-leader",
+    "meta-plan-check",
+    "meta-plan-convert",
     "meta-response",
     "meta-run",
     "rphase-create",

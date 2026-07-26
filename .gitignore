@@ -14,6 +14,10 @@
 # Never committed.
 /.memsearch/
 
+# Lavish review artifacts — locally rendered HTML for a single review session,
+# naming this machine and its absolute $HOME paths. Never committed.
+/.lavish/
+
 # Local planish config — machine-specific (dir layout + hostname). The tracked
 # template is .planish.yaml.example; the real file never belongs in the repo.
 /.planish.yaml

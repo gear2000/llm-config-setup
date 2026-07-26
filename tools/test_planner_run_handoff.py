@@ -32,8 +32,6 @@ ALIASES = {
     "cc-plan-and-grill": LAYERS / "common/claude/cc-plan-and-grill/command.md",
     "cc-planish": LAYERS / "common/claude/cc-planish/command.md",
     "do-plan-and-grill": LAYERS / "common/common/do-plan-and-grill/command.md",
-    "meta-plan-check": LAYERS / "common/common/meta-plan-check/command.md",
-    "meta-plan-convert": LAYERS / "common/common/meta-plan-convert/command.md",
 }
 
 FORBIDDEN = ("rphase-create", "rphase-run", "rphase-unblock", "cc-loop", "do-loop")
@@ -138,8 +136,6 @@ def test_aliases_are_warning_delegate_only() -> None:
         assert "route.todo.yaml" not in text, name
     assert "/cc-plan <same arguments>" in ALIASES["cc-plan-and-grill"].read_text()
     assert "/do-plan <same arguments>" in ALIASES["do-plan-and-grill"].read_text()
-    assert "/cc-convert --herdr" in ALIASES["meta-plan-convert"].read_text()
-    assert "/do-convert --herdr" in ALIASES["meta-plan-convert"].read_text()
 
 
 def _assert_no_retired_execution_instructions(path: Path, text: str) -> None:
@@ -182,10 +178,11 @@ def test_recipe_inventory_has_new_surface_and_retired_meta_wrapper_removed() -> 
         "do-plan-and-grill",
         "do-research",
     }
-    assert {"meta-plan-check", "meta-plan-convert"} <= recipes
     assert {"tui-control", "phase-leader"} <= recipes
     assert "herdr-run" not in recipes
     assert "meta-cc-plan-and-grill" not in recipes
+    assert "meta-plan-check" not in recipes
+    assert "meta-plan-convert" not in recipes
     assert not any(name.startswith("rphase-") for name in recipes)
 
 

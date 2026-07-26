@@ -891,7 +891,14 @@ def test_home_runtime_reconciles_managed_herdr_config(tmp_path: Path) -> None:
     m.do_home_runtime(cfg, _quiet(m))
     target = home / ".config/herdr/config.toml"
     assert target.is_symlink()
-    assert target.resolve() == (m.project_root() / "herdr-config.toml").resolve()
+    # The link points at the DURABLE generated copy, never at the repo checkout,
+    # so a moved or deleted kit clone cannot break the user's runtime.
+    generated = home / ".shared-llm/generated/herdr-config.toml"
+    assert target.resolve() == generated.resolve()
+    assert (
+        generated.read_bytes()
+        == (m.project_root() / "herdr-config.toml").read_bytes()
+    )
 
     counts = m.reconcile(
         m.plan_herdr_config(m.project_root()),
@@ -930,7 +937,9 @@ def test_herdr_config_repoints_and_prunes_managed_stale_link(tmp_path: Path) -> 
     _write(source, "onboarding = false\n")
     target = home / ".config/herdr/config.toml"
     target.parent.mkdir(parents=True)
-    target.symlink_to(kit / "old/herdr-config.toml")
+    # The pre-decoupling deployment: a link straight at the kit's own managed
+    # path. It is ours, so this run repoints it at the durable generated copy.
+    target.symlink_to(source)
 
     counts = m.reconcile(
         m.plan_herdr_config(kit),
@@ -939,7 +948,9 @@ def test_herdr_config_repoints_and_prunes_managed_stale_link(tmp_path: Path) -> 
         force=False,
         repo_root=kit,
     )
-    assert target.resolve() == source.resolve()
+    generated = home / ".shared-llm/generated/herdr-config.toml"
+    assert target.resolve() == generated.resolve()
+    assert generated.read_bytes() == source.read_bytes()
     assert counts["repoint"] == 1
 
     source.unlink()
@@ -1153,3 +1164,264 @@ if __name__ == "__main__":
     import subprocess
 
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-q"]))
+
+
+# --- durable generated tree + manifest safety ------------------------------
+
+
+def test_no_home_link_targets_the_repo_checkout(tmp_path: Path) -> None:
+    """Full decoupling: every home symlink resolves into ~/.shared-llm/generated,
+    never into the kit checkout — a moved or deleted clone cannot break the
+    user's runtime."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc", "pi"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+
+    kit = str(m.project_root())
+    generated = home / ".shared-llm/generated"
+    checked = 0
+    for base in (home / ".claude", home / ".pi", home / ".agents", home / ".config"):
+        if not base.is_dir():
+            continue
+        for entry in base.rglob("*"):
+            if not entry.is_symlink():
+                continue
+            checked += 1
+            resolved = entry.resolve()
+            assert not str(resolved).startswith(kit + "/"), f"{entry} -> {resolved}"
+            assert resolved.is_relative_to(generated.resolve()), f"{entry}"
+    assert checked, "expected home symlinks to exist"
+    # The whole pieces are COPIES under the generated tree, not links out of it.
+    assert (generated / "claude/statusline.sh").is_file()
+    assert any((generated / "pi/extensions").iterdir())
+    assert (generated / "pi/agents/doc-reviewer.md").is_file()
+
+
+def test_ownership_is_resolved_path_not_substring(tmp_path: Path) -> None:
+    """A foreign path that merely SPELLS the generated marker is not ours."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    decoy = tmp_path / "foreign/.shared-llm/generated/x"
+    _write(decoy, "not ours\n")
+    link = home / "decoy-link"
+    link.symlink_to(decoy)
+    assert m._link_points_generated(link) is False
+
+    real = home / ".shared-llm/generated/skills/thing"
+    _write(real / "SKILL.md", "ours\n")
+    ours = home / "ours-link"
+    ours.symlink_to(real)
+    assert m._link_points_generated(ours) is True
+
+    # A DANGLING link into our generated tree is still ours (so it is prunable).
+    dangling = home / "dangling-link"
+    dangling.symlink_to(home / ".shared-llm/generated/skills/gone")
+    assert m._link_points_generated(dangling) is True
+
+
+def test_retired_recipe_output_is_not_resurrected_from_staging(tmp_path: Path) -> None:
+    """Compose staging is cumulative on disk; an output left by a retired recipe
+    must not be read back as current and redeployed."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+
+    staging = m.project_root() / "examples"
+    _write(staging / ".claude/agents/retired-agent.md", "---\nname: retired\n---\n")
+    _write(staging / ".claude/skills/retired-skill/SKILL.md", "---\nname: r\n---\n")
+
+    m.do_global_flow(cfg, _quiet(m))
+    assert not (home / ".claude/agents/retired-agent.md").exists()
+    assert not (home / ".claude/skills/retired-skill").exists()
+
+
+def test_empty_global_list_prunes_previous_deployment(tmp_path: Path) -> None:
+    """Empty `global:` means an empty desired set — everything previously
+    deployed is pruned, identically across every entry point."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+    agent = home / ".claude/agents/backend.md"
+    skill = home / ".claude/skills/python"
+    assert agent.is_symlink() and skill.is_symlink()
+
+    m.do_global_flow({**cfg, "global": []}, _quiet(m))
+    assert not agent.exists() and not agent.is_symlink()
+    assert not skill.exists() and not skill.is_symlink()
+    # Settings are mutable and user-owned — never destructively pruned.
+    assert (home / ".claude/settings.json").is_file()
+
+
+def test_unreadable_manifest_prunes_nothing(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+    agent = home / ".claude/agents/backend.md"
+    assert agent.is_symlink()
+
+    _write(m.manifest_path(), "{not json")
+    m.do_global_flow({**cfg, "global": []}, _quiet(m))
+    # Fail closed: an untrustworthy manifest deletes nothing this run...
+    assert agent.is_symlink()
+    # ...but a fresh, valid manifest is written so the next run prunes normally.
+    import json as _json
+
+    assert _json.loads(m.manifest_path().read_text())["version"] == 1
+    # Tracking resumes on the next run that deploys, so a later retirement prunes.
+    m.do_global_flow(cfg, _quiet(m))
+    m.do_global_flow({**cfg, "global": []}, _quiet(m))
+    assert not agent.is_symlink()
+
+
+def test_preexisting_settings_are_never_adopted_or_deleted(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    _write(home / ".claude/settings.json", '{"mine": true}\n')
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+    import json as _json
+
+    recorded = _json.loads(m.manifest_path().read_text())["paths"]
+    assert str(home / ".claude/settings.json") not in recorded
+
+    # A settings file we DID create is recorded, survives the user editing it,
+    # and keeps its original deployment hash rather than the mutated bytes.
+    home2 = tmp_path / "home2"
+    _patch_home(m, home2)
+    m.do_global_flow(cfg, _quiet(m))
+    settings = home2 / ".claude/settings.json"
+    original = _json.loads(m.manifest_path().read_text())["paths"][str(settings)]
+    assert original["kind"] == "settings"
+    settings.write_text('{"edited": true}\n')
+    m.do_global_flow({**cfg, "global": []}, _quiet(m))
+    assert settings.read_text() == '{"edited": true}\n'
+    after = _json.loads(m.manifest_path().read_text())["paths"][str(settings)]
+    assert after["sha256"] == original["sha256"]
+
+
+def test_generated_sources_survive_a_run_with_only_foreign_targets(
+    tmp_path: Path,
+) -> None:
+    """Retention follows the DESIRED recipe set, not successful deployment, so a
+    run whose home targets are all foreign does not churn the generated tree."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    # A divergent real dir at every home skill target: nothing can be deployed.
+    _write(home / ".claude/skills/python/SKILL.md", "mine\n")
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+    generated = home / ".shared-llm/generated/skills/python"
+    assert generated.is_dir()
+    m.do_global_flow(cfg, _quiet(m))
+    assert generated.is_dir()
+
+
+# --- destination vs global ownership ---------------------------------------
+
+
+def _add_common_skill(dest: Path, name: str) -> None:
+    """A repo-owned common-scope skill under an arbitrary name, so a destination
+    can want a name the global home flow also deploys."""
+    s = dest / ".shared-llm"
+    _write(s / f"this_repo/layers/skills/this_repo/{name}.md", f"{name} body\n")
+    _write(
+        s / f"this_repo/compose/skills/{name}.yaml",
+        yaml.safe_dump(
+            {
+                "type": "skill",
+                "name": name,
+                "description": f".shared-llm/this_repo/layers/skills/this_repo/{name}.md",
+                "inputs": [f".shared-llm/this_repo/layers/skills/this_repo/{name}.md"],
+                "output": f".claude/skills/{name}/SKILL.md",
+            },
+            sort_keys=False,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "harness, skill_dir",
+    [("pi", ".pi/agent/skills"), ("codex", ".agents/skills")],
+)
+def test_destination_takes_over_a_name_the_global_flow_deployed(
+    tmp_path: Path, harness: str, skill_dir: str
+) -> None:
+    """A destination that wants a skill name the global flow currently owns takes
+    it (destination wins), in ONE update — the generated link must not be judged
+    foreign by the link step and then deleted as stale by the global step, which
+    left the name with no link at all until a second update."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    target = home / skill_dir / "python"
+
+    # A global run owns the name, pointing into the generated tree.
+    m.do_global_flow(
+        {"source": str(m.DEFAULT_SOURCE), "global": [harness], "destinations": []},
+        _quiet(m),
+    )
+    assert target.is_symlink()
+    assert target.resolve().is_relative_to((home / ".shared-llm/generated").resolve())
+
+    # Now a destination wants its own `python`, and global is emptied.
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    _add_common_skill(dest, "python")
+    cfg = _cfg(m, dest, [harness])
+    log = _quiet(m)
+    m.do_compose(cfg, log)
+    # Exactly what cmd_update does: both home-link steps under one lock.
+    with m.home_lock(log):
+        m.do_link(cfg, log)
+        m.do_global_flow(cfg, log, lock_held=True)
+
+    assert target.is_symlink(), "the destination's skill must still be linked"
+    assert target.resolve() == (dest / ".claude/skills/python").resolve()
+    # The retired generated source is gone, and nothing points at it.
+    assert not (home / ".shared-llm/generated/skills/python").exists()
+
+
+def test_disabling_a_harness_retires_its_whole_generated_pieces(
+    tmp_path: Path,
+) -> None:
+    """Emptying `global:` retires the whole pieces too — hooks, statusline, Pi
+    extensions and personas, herdr config — not just skills and agents."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": ["cc", "pi"], "destinations": []}
+    m.do_global_flow(cfg, _quiet(m))
+
+    gen = home / ".shared-llm/generated"
+    pieces = [
+        gen / "claude/hooks",
+        gen / "claude/statusline.sh",
+        gen / "pi/extensions",
+        gen / "pi/agents",
+        gen / "herdr-config.toml",
+    ]
+    assert all(p.exists() for p in pieces), "baseline: every whole piece deployed"
+
+    m.do_global_flow({**cfg, "global": []}, _quiet(m))
+    for p in pieces:
+        if p.is_dir():
+            assert sorted(p.iterdir()) == [], f"{p} still holds generated sources"
+        else:
+            assert not p.exists(), f"{p} survived the retirement"
+    # And no home link survives pointing at any of it.
+    for base in (home / ".claude", home / ".pi", home / ".config"):
+        if not base.is_dir():
+            continue
+        for entry in base.rglob("*"):
+            assert not entry.is_symlink(), f"{entry} should have been pruned"

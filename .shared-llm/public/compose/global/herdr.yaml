@@ -1,0 +1,13 @@
+# Global (all-projects) herdr control skill recipe.
+#
+# The herdr TUI control skill — drive workspaces, tabs, panes, and agents from
+# inside a herdr-managed pane over its local unix socket. Gated on HERDR_ENV=1
+# by its own prose, so it is safe to install for every harness globally.
+#
+# Inputs: ONLY the general layer — practices.md + description.md. No per-project
+# stub; the skill is machine-level, like the convention skills beside it.
+name: herdr
+description: .shared-llm/public/layers/skills/common/herdr/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/herdr/practices.md
+output: global-staging/skills/herdr/SKILL.md

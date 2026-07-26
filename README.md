@@ -162,7 +162,7 @@ ONBOARDING.md                     — token-by-token checklist for filling the T
 
 - **layers** are pure source prose — never generated, never frontmatter. The portable `common/` layers ship ready-to-use; the `this_repo/` layers ship as `TEMPLATE.*` stubs you fill in.
 - **compose** recipes are the build instructions: each YAML names the input layers, the output path, and (for skills/agents) the frontmatter name + description. The engine concatenates the inputs and writes the output. Every path in a recipe resolves against the repo root.
-- **llm/pi** and **llm/claude** are runtime config for the coding agents (Pi extensions and agent personas; Claude hooks, statusline, settings). They are **not** compose inputs — their files are never concatenated into any output. The **global** step symlinks the Pi files into `~/.pi/` (reconciling: create missing, re-point drifted, prune renamed/deleted) and copies the Claude files into `~/.claude/`. See "Pi harness runtime config" and "Claude harness runtime config" below.
+- **llm/pi** and **llm/claude** are runtime config for the coding agents (Pi extensions and agent personas; Claude hooks, statusline, settings). They are **not** compose inputs — their files are never concatenated into any output. The **global** step copies both trees into `~/.shared-llm/generated/` (executable bits preserved) and symlinks them from there into `~/.pi/` and `~/.claude/` (reconciling: create missing, re-point drifted, prune renamed/deleted), recording every deployed path in `~/.shared-llm/manifest.json`. See "Pi harness runtime config" and "Claude harness runtime config" below.
 
 ## Setting up a destination repo
 
@@ -187,11 +187,15 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 
 When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
-1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, then copies each into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
-2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section) and copies each persona into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
-3. **Pi runtime** — symlinks the bundled Pi extensions + agent personas into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
-4. **Claude runtime** — copies the generic hooks into `~/.claude/hooks/` and the statusline into `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent (never clobbers per-machine tweaks).
-5. **Herdr config** — reconciles the kit-owned `herdr-config.toml` symlink at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning.
+1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, syncs each into the durable per-machine generated tree (`~/.shared-llm/generated/skills/`), and **symlinks** it into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). `readlink` on any home skill answers "generated or handwritten"; a byte-identical pre-existing copy from the old copy mechanism is upgraded to a link in place. The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
+2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section), syncs each persona into `~/.shared-llm/generated/agents/`, and symlinks it into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
+3. **Pi runtime** — copies the bundled Pi extensions + agent personas into `~/.shared-llm/generated/` and symlinks them from there into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
+4. **Claude runtime** — copies the generic hooks and the statusline into the generated tree and links them into `~/.claude/hooks/` and `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent — settings stays a **real file** on purpose: Claude Code mutates it at runtime, and a rename-style save would silently replace a symlink.
+5. **Herdr config** — deploys `herdr-config.toml` the same way, as a generated copy linked at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning.
+
+Home links always point into `~/.shared-llm/generated/`, never into the kit checkout, so moving or deleting the repository never breaks a live runtime.
+
+Every path the global step deploys is recorded in `~/.shared-llm/manifest.json`. On the next run, a manifest entry whose recipe no longer produces it is **pruned** — but only when the deployed path is a symlink provably ours (one resolving into the generated tree). Scaffolded mutable settings stay real files and are **retained**: the engine deletes no real file, and drift in one is logged, never acted on. `just prune` runs the same reconciliation on demand. Composed `CLAUDE.md` / `AGENTS.md` in destination repos stay real committed files (portable to clones without the kit) and carry a `GENERATED by llm-config-setup` header instead.
 
 Third-party Pi extensions are a separate network step — `just pi-extensions`. It reconciles the pinned manifest through the Pi CLI (installs missing entries and removes the one explicitly retired package) but deliberately leaves unrelated user-installed packages untouched.
 
@@ -256,7 +260,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
 
-### Slash-command skills (29)
+### Slash-command skills (27)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -278,8 +282,6 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `do-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
 | `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
-| `meta-plan-check` | Deprecated alias for the converter's internal validation. Warns, then delegates to `/cc-convert… |
-| `meta-plan-convert` | Deprecated alias for `/cc-convert --herdr` or `/do-convert --herdr`. Warns, then delegates to the… |
 | `phase-leader` | Run one canonical plan phase as the phase leader, sent to a cockpit pane by `/tui-control`.… |
 | `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
@@ -358,19 +360,22 @@ See `ONBOARDING.md` for the ordered, token-by-token fill checklist.
 
 `.shared-llm/public/llm/claude/common/` holds Claude Code-specific runtime config —
 hooks, the statusline, and a home settings template. Like the Pi runtime config,
-these are **not composed into prose**; the global step of `just update` places
-them at the home level so they apply to every project:
+these are **not composed into prose**; the global step of `just update` copies
+them into `~/.shared-llm/generated/` (executable bits preserved) and links them
+at the home level so they apply to every project — the home links resolve into
+the generated tree, never into this checkout:
 
 - **`hooks/*.sh`** — four generic, project-agnostic quality hooks (prettier
-  format, TypeScript check, console.log warn/audit). Copied into `~/.claude/hooks/`
+  format, TypeScript check, console.log warn/audit). Linked into `~/.claude/hooks/`
   and wired in the settings template. They **self-gate by file type** — a
   TypeScript hook no-ops in a Python repo — so firing in every project is safe.
 - **`statusline.sh`** — a dependency-free statusline (dir, branch, model, context
-  bar). Copied to `~/.claude/statusline.sh`.
+  bar). Linked at `~/.claude/statusline.sh`.
 - **`settings.template.json`** — general Claude Code settings (statusline pointer,
   agent-teams flag, the generic hook wiring, `permissions.defaultMode: acceptEdits`,
-  plugins). Scaffolded to `~/.claude/settings.json` **only when absent** — a
-  re-run never overwrites your per-machine tweaks. Bump `defaultMode` or add
+  plugins). Scaffolded to `~/.claude/settings.json` **only when absent**, and as
+  a **real file, never a link** — Claude Code mutates it at runtime, and a re-run
+  never overwrites your per-machine tweaks. Bump `defaultMode` or add
   personal permissions in `~/.claude/settings.local.json` (gitignored), which
   Claude Code merges on top.
 
@@ -385,7 +390,7 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 
 ## Pi harness runtime config (optional)
 
-`.shared-llm/public/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, the global step of `just update` symlinks them directly into `~/.pi/` (reconciling: it creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted) so Pi can discover and load them at runtime.
+`.shared-llm/public/llm/pi/common/` holds runtime config for the [Pi coding agent](https://github.com/earendil-works/pi-mono). This directory is **not a compose input** — its contents are never concatenated into `CLAUDE.md` or `AGENTS.md`. Instead, the global step of `just update` copies them into `~/.shared-llm/generated/` (executable bits preserved) and symlinks them from there into `~/.pi/` (reconciling: it refreshes the copies, creates missing links, re-points drifted ones, and prunes links whose source was renamed or deleted) so Pi can discover and load them at runtime. Every deployed path is recorded in `~/.shared-llm/manifest.json`, and no home link ever resolves into this checkout.
 
 **What it contains:**
 
@@ -400,13 +405,13 @@ deep-merged — dicts recurse, hook arrays concatenate, scalars overlay-win).
 - `agents/codex-reviewer.md`, `agents/doc-reviewer.md`, `agents/pr-reviewer.md` — The system prompts for the review agents invoked by the hub extensions. Symlinked into `~/.pi/agent/agents/`.
 - `third-party-extensions.txt` — Pinned manifest of **third-party** Pi extensions, one `pi install` source per line. `tools/install-pi-extensions.sh` reads it and installs each via `pi install` (skipping any already present), so the set reproduces on any machine with one command. `just pi-extensions` runs that installer.
 - `THIRD-PARTY-EXTENSIONS.md` — The per-extension reference: what each one does, its runtime deps, and the own-vs-third-party rule below.
-- `settings.template.json` — A starter Pi settings file (provider, model, thinking level). Copied to `~/.pi/agent/settings.json` only if that file does not already exist, so your live settings are never overwritten. Its `packages` array starts empty — the installer fills it.
+- `settings.template.json` — A starter Pi settings file (provider, model, thinking level). Scaffolded to `~/.pi/agent/settings.json` as a real file — never a link — and only if that file does not already exist, so your live settings are never overwritten. Its `packages` array starts empty — the installer fills it.
 
 ### Own vs third-party extensions — keep them separate
 
 Two kinds of Pi extension, two install paths. **Do not mix them.**
 
-- **OWN** (the `.ts` files authored in `extensions/` above) are **symlinked** into `~/.pi/` by the global step of `just update` — copied/layered, never installed from a registry. The same managed-link ownership model reconciles the kit's `herdr-config.toml` into `~/.config/herdr/config.toml`.
+- **OWN** (the `.ts` files authored in `extensions/` above) are **copied into `~/.shared-llm/generated/` and symlinked from there** into `~/.pi/` by the global step of `just update` — never installed from a registry. The same generated-copy-plus-manifest ownership model deploys the kit's `herdr-config.toml` to `~/.config/herdr/config.toml`.
 - **THIRD-PARTY** are **installed from source** via the pinned manifest and `pi install` — never copied or vendored into this repo (no committed `node_modules`). The installer also removes only its explicit retired-package entry; it does not prune unrelated user packages.
 
 There is one install path for third-party extensions: `pi install` + the manifest. See `.shared-llm/public/llm/pi/common/THIRD-PARTY-EXTENSIONS.md` for the full set and per-extension runtime deps.
@@ -414,7 +419,7 @@ There is one install path for third-party extensions: `pi install` + the manifes
 **Wiring (part of `just update` when `global:` includes `pi`):**
 
 ```bash
-just update          # symlinks the OWN extensions + personas into ~/.pi/ (global step)
+just update          # deploys the OWN extensions + personas into ~/.pi/ via the generated tree (global step)
 just pi-extensions   # installs the pinned THIRD-PARTY extensions via `pi install`
 ```
 
@@ -427,7 +432,7 @@ just pi-status   # show hub + socket state
 just pi-clean    # stop the hub, remove stale sockets
 ```
 
-If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agent/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), the global step leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks that resolve into this repo family.
+If `~/.pi/agent/extensions/context-workflow.ts` or `~/.pi/agent/agents/codex-reviewer.md` already exists as a real file (not a symlink this kit manages), the global step leaves it untouched and reports it as foreign — it only ever creates, re-points, or prunes the symlinks it owns per `~/.shared-llm/manifest.json`, which resolve into `~/.shared-llm/generated/`.
 
 Third-party extensions are installed via `pi install` (into `~/.pi/agent/npm/node_modules/`), never committed here. `settings.template.json` is the template; your live `~/.pi/agent/settings.json` (runtime-mutated by Pi) is never tracked.
 

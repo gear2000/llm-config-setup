@@ -60,7 +60,7 @@ If the approved plan requires an external candidate gate such as an exact-SHA sh
 ## Hard rules
 
 - `--herdr` is required. Without it, stop and say this converter currently supports only Herdr conversion.
-- Conversion performs validation itself; do not ask the user to run `/meta-plan-check`.
+- Conversion performs validation itself; do not ask the user to run a separate validation command.
 - Run startup rechecks the frozen pair, but conversion must still validate before declaring the output runnable.
 - A TODO route is not runnable. Either resolve the value with the human or return a clear non-runnable result.
 - Do not implement the plan and do not start the checked run from this command.

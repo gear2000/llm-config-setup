@@ -1,8 +1,0 @@
-type: skill
-name: meta-plan-convert
-description: .shared-llm/public/layers/slash-commands/common/common/meta-plan-convert/description.md
-frontmatter:
-  argument-hint: "<plan.md> [--out <converted-run-dir>]"
-inputs:
-  - .shared-llm/public/layers/slash-commands/common/common/meta-plan-convert/command.md
-output: .claude/skills/meta-plan-convert/SKILL.md
