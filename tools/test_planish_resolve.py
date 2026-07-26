@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import ipaddress
 import json
 import multiprocessing
 import socket
@@ -143,6 +144,77 @@ def test_empty_work_log_fails_loud(tmp_path: Path, body: str) -> None:
     _write(tmp_path / ".shared-llm.yaml", body)
     with pytest.raises(ValueError, match="work_log"):
         resolver.resolve(tmp_path, "Topic")
+
+
+@pytest.mark.parametrize(
+    ("body", "key", "line"),
+    [
+        ('work_log:\n  dir: "a/{slug}"\nwork_log:\n  dir: "b/{slug}"\n', "work_log", 3),
+        ('work_log:\n  dir: "a/{slug}"\n  dir: "b/{slug}"\n', "dir", 3),
+        ('work_log: {dir: "a/{slug}", dir: "b/{slug}"}\n', "dir", 1),
+        (
+            'work_log:\n  dir: "a/{slug}"\n'
+            '  url_base: "http://a-host:8089"\n'
+            '  url_base: "http://b-host:8089"\n',
+            "url_base",
+            4,
+        ),
+        (
+            'work_log:\n  dir: "a/{slug}"\n  serve_root: docs\n  serve_root: other\n',
+            "serve_root",
+            4,
+        ),
+        (
+            'work_log: {dir: "a/{slug}", url_base: "http://a-host:8089", '
+            'url_base: "http://b-host:8089"}\n',
+            "url_base",
+            1,
+        ),
+    ],
+)
+def test_duplicate_config_keys_fail_loud(
+    tmp_path: Path, body: str, key: str, line: int
+) -> None:
+    """PyYAML keeps the last of two same-named keys, silently. That hands back a
+    directory — or a review URL — nobody wrote, so the duplicate is the fault at
+    every level and in both block and flow form, named with its key, line, and
+    file."""
+    config = tmp_path / ".shared-llm.yaml"
+    _write(config, body)
+    with pytest.raises(ValueError) as failure:
+        resolver.resolve(tmp_path, "Topic")
+    message = str(failure.value)
+    assert f"sets '{key}' twice" in message
+    assert f"line {line}" in message
+    assert str(config) in message
+
+
+def test_duplicate_legacy_config_keys_fail_loud(tmp_path: Path) -> None:
+    config = tmp_path / ".planish.yaml"
+    _write(config, 'dir: "a/{slug}"\ndir: "b/{slug}"\n')
+    with pytest.raises(ValueError) as failure:
+        resolver.resolve(tmp_path, "Topic")
+    assert "sets 'dir' twice" in str(failure.value)
+    assert str(config) in str(failure.value)
+
+
+def test_a_config_naming_each_key_once_still_resolves(tmp_path: Path) -> None:
+    """The duplicate refusal must not cost a config anyone actually writes."""
+    _write(
+        tmp_path / ".shared-llm.yaml",
+        "work_log:\n"
+        "  dir: docs/plans/{slug}\n"
+        "  host: example-host\n"
+        "  url_base: http://example-host:8089\n"
+        "  serve_root: docs\n",
+    )
+    plan_dir = resolver.resolve(tmp_path, "Topic")
+    assert plan_dir == tmp_path / "docs/plans/topic"
+    assert resolver.resolve_host(tmp_path) == "example-host"
+    assert (
+        resolver.resolve_review_url(tmp_path, plan_dir)
+        == "http://example-host:8089/plans/topic/"
+    )
 
 
 def test_work_log_flow_mapping_is_honored(tmp_path: Path) -> None:
@@ -409,6 +481,44 @@ def test_review_url_rejects_a_base_that_is_not_a_reachable_url(
         assert str(tmp_path / ".shared-llm.yaml") in str(failure.value)
 
 
+@pytest.mark.parametrize(
+    ("url_base", "reason"),
+    [
+        ("http://256.256.256.256", "not a usable IPv4 address"),
+        ("http://192.168.1.9.9:8089", "not a usable IPv4 address"),
+        ("http://192.168.1:8089", "not a usable IPv4 address"),
+        (f"http://{'a' * 64}.example.com", "past the 63"),
+        (f"http://{'.'.join(['label'] * 42)}.example", "past the 253"),
+    ],
+)
+def test_review_url_rejects_a_host_nothing_can_resolve(
+    tmp_path: Path, url_base: str, reason: str
+) -> None:
+    """Four numeric labels read as a DNS name to any label pattern, so
+    `256.256.256.256` used to pass one — and then `new URL()` throws on it and
+    no resolver answers for it. An all-numeric host is checked as the IPv4
+    literal it is trying to be, and a name against the DNS length limits."""
+    plan_dir = _url_config(tmp_path, url_base)
+    _write(plan_dir / "plan.html", "<h1>plan</h1>")
+
+    for artifact in (None, "plan.html"):
+        with pytest.raises(ValueError, match='work_log.url_base"') as failure:
+            resolver.resolve_review_url(tmp_path, plan_dir, artifact)
+        assert reason in str(failure.value)
+        assert str(tmp_path / ".shared-llm.yaml") in str(failure.value)
+
+
+def test_the_rejected_ipv4_literal_is_one_python_also_refuses(tmp_path: Path) -> None:
+    """The boundary the check is drawn at, shown rather than asserted: the last
+    address that exists is accepted, the first one past it is not."""
+    with pytest.raises(ValueError):
+        ipaddress.IPv4Address("256.256.256.256")
+
+    plan_dir = _url_config(tmp_path, "http://255.255.255.255:8089")
+    url = resolver.resolve_review_url(tmp_path, plan_dir)
+    assert url == "http://255.255.255.255:8089/plans/topic/"
+
+
 @pytest.mark.parametrize("url_base", ["http://", "not a url", "javascript:alert(1)"])
 def test_the_refused_bases_are_the_ones_no_client_can_open(url_base: str) -> None:
     """What the concatenation used to hand a human, opened here to show it: a
@@ -427,13 +537,16 @@ def test_the_refused_bases_are_the_ones_no_client_can_open(url_base: str) -> Non
         "http://[::1]:8089",
         "http://example-host:8089/plans/",
         "http://my_host.internal.example.com",
+        "http://255.255.255.255:8089",
+        f"http://{'a' * 63}.example.com",
     ],
 )
 def test_review_url_accepts_the_bases_that_do_serve_a_plan(
     tmp_path: Path, url_base: str
 ) -> None:
     """The checks above must not cost a base anyone actually configures: a bare
-    host, an IPv4 literal, a bracketed IPv6 literal, and a path prefix."""
+    host, an IPv4 literal, a bracketed IPv6 literal, a path prefix, and the
+    boundary values the DNS and IPv4 limits still allow."""
     plan_dir = _url_config(tmp_path, url_base)
 
     url = resolver.resolve_review_url(tmp_path, plan_dir)

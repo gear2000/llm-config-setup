@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from datetime import date
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import sys
+from typing import Any
 from urllib.parse import quote, urlsplit
 
 import yaml
@@ -25,6 +28,11 @@ _URL_SCHEMES = ("http", "https")
 # lowercased `.hostname`. IP literals in brackets are checked by urlsplit itself.
 _LABEL = r"[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?"
 _HOSTNAME_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*\.?")
+# DNS limits the pattern says nothing about: a label is at most 63 characters
+# and a name at most 253 once the root's trailing dot is dropped. Past either,
+# no resolver will answer for it.
+_MAX_LABEL = 63
+_MAX_HOSTNAME = 253
 
 
 def _warn(message: str) -> None:
@@ -37,9 +45,50 @@ def _slug(topic: str) -> str:
     return value or "plan"
 
 
+class _NoDuplicateKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicate mapping key instead of keeping the last one.
+
+    PyYAML's default is last-one-wins, silently. A config with `dir:` written
+    twice then resolves to a directory nobody configured, and a second
+    `url_base:` hands a human a review URL nobody wrote — exactly the quiet pick
+    every other check here exists to prevent. Two keys with one name are never a
+    legible intent, so the duplicate is the fault, at every level: a repeated
+    top-level `work_log:` and a repeated `dir:` inside it fail the same way.
+    """
+
+    def __init__(self, stream: Any, source: Path) -> None:
+        super().__init__(stream)
+        self.source = source
+
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Any, Any]:
+        # Keys are compared by equality in a list, never hashed: an unhashable
+        # key is PyYAML's own error to report, below, with its own line.
+        seen: list[Any] = []
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise ValueError(
+                    f"{self.source} sets {key!r} twice in one block "
+                    f"(line {key_node.start_mark.line + 1}); the later value "
+                    "would silently replace the earlier one"
+                )
+            seen.append(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def _load_mapping(path: Path) -> dict:
     try:
-        value = yaml.safe_load(path.read_text()) or {}
+        # `yaml.load` with a SafeLoader subclass — the same safe tag set as
+        # `yaml.safe_load`, plus the duplicate-key refusal, and the source path
+        # so the refusal can name the file it read.
+        value = (
+            yaml.load(
+                path.read_text(), lambda stream: _NoDuplicateKeyLoader(stream, path)
+            )
+            or {}
+        )
     except (OSError, yaml.YAMLError) as error:
         raise ValueError(f"{path} is invalid: {error}") from error
     if not isinstance(value, dict):
@@ -254,6 +303,41 @@ def _artifact_parts(plan_dir: Path, artifact: str) -> list[str]:
     return parts
 
 
+def _check_name_host(host: str, fault: Callable[[str], ValueError]) -> None:
+    """Check an unbracketed host as what it actually is — a literal or a name.
+
+    Four numeric labels satisfy any label pattern, so `256.256.256.256` reads as
+    a DNS name and passes one — then no resolver answers for it and `new URL()`
+    throws on the "review link" it produced. An all-numeric host is an IPv4
+    literal or nothing, so it is checked as one; a real name is checked against
+    the DNS length limits, which the label pattern does not express.
+    """
+    name = host[:-1] if host.endswith(".") else host
+    labels = name.split(".")
+    if name and all(label.isdigit() for label in labels):
+        try:
+            ipaddress.IPv4Address(name)
+        except ValueError as error:
+            raise fault(
+                f'names "{host}", which is not a usable IPv4 address'
+            ) from error
+        return
+
+    if _HOSTNAME_RE.fullmatch(host) is None:
+        raise fault(f'names an invalid host "{host}"')
+    if len(name) > _MAX_HOSTNAME:
+        raise fault(
+            f"names a host of {len(name)} characters, past the {_MAX_HOSTNAME} "
+            "DNS allows"
+        )
+    for label in labels:
+        if len(label) > _MAX_LABEL:
+            raise fault(
+                f'names a host whose label "{label[:20]}…" is {len(label)} '
+                f"characters, past the {_MAX_LABEL} DNS allows"
+            )
+
+
 def _checked_url_base(config: Path, url_base: str) -> str:
     """`url_base` without its trailing slash, checked as a base a browser opens.
 
@@ -296,10 +380,9 @@ def _checked_url_base(config: Path, url_base: str) -> str:
     if not host:
         raise fault("names no host, so there is nothing to serve the plan path")
     # A bracketed host is an IP literal `.hostname` validated above; anything
-    # else is a name, and a name is dot-separated labels.
+    # else is a name or an IPv4 literal, checked as whichever it is.
     if not split.netloc.rpartition("@")[2].startswith("["):
-        if _HOSTNAME_RE.fullmatch(host) is None:
-            raise fault(f'names an invalid host "{host}"')
+        _check_name_host(host, fault)
 
     for label, delimiter, component in (
         ("query", "?", split.query),
