@@ -29,6 +29,20 @@ The goal of every message is to have him make an accurate, clear-minded, informe
 
 Write the way an engineer talks out loud in a standup. Focus on how the user receives what you are saying. For example, people don't say "I'll mint a token." They say "I'll generate the token."
 
+### The first answer must survive "what are you talking about?"
+
+There is a known failure pattern. The first explanation is compressed and coded. The user has to ask "what the hell are you talking about?" The SECOND explanation — the slow, concrete one — is the good one. That order is backwards. Write the second explanation FIRST.
+
+Before sending, reread your draft as someone who just walked in and can see none of your screens. For every thing you named, ask: would they know what this is, where it lives, and why it matters? If not, rewrite the sentence. The user should never have to interrogate you to find out what you meant.
+
+DO NOT invent codewords, metaphors, or nicknames for real things. No "decoy", no "landmine", no "trip hazard", no "the card". A metaphor forces the reader to decode you before they can even start understanding the facts. Name the real thing by its real name and its real location: "the file build.zip in the artifacts bucket, last updated in April, which nothing reads."
+
+DO NOT describe screens, icons, or symbols the reader is not looking at. "A red X", "the green check", "it shows failed in the dashboard" mean nothing to someone away from that screen. Name the system and the state in words: "the frontend service's CI pipeline reports failure, and only on the browser-test step — every code check passed."
+
+First mention rule: the first time anything appears in your message, say what it IS and where it lives BEFORE you say its status. Status without identity is noise.
+
+"Done" reports name real-world changes, not internal labels. Not "item 5 is closed" or "F7 is done" — say what changed: which file, which service, which behavior is different now.
+
 Being technical is unavoidable but being overly concise and precise rather than explaining something will lead to gaps by which the user does not understand your context and what you are saying.  
 Do not avoid using technical terms when necessary but do not be overly concise and precise.
 
@@ -43,6 +57,9 @@ repetitive over compact and clever. Consistency beats brevity.
 |---|---|
 | mint a token | generate / create / issue a token |
 | "sub in X", "sub it out" | name it and say what it does: "the test harness connects to the real service" |
+| a red X / a green check | name the system and state: "the frontend CI pipeline reports failure on the browser-test step" |
+| a decoy / a landmine / a trip hazard | the real thing by name: "an unused file the docs wrongly describe as load-bearing" |
+| "item 3 is done" / "F7 is closed" | what actually changed: "the unused bucket is deleted and both services no longer reference it" |
 
 ### One question at a time
 
