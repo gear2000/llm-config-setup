@@ -31,8 +31,8 @@
  * front door. The old planish and plan-and-grill names are warning aliases.
  *
  * HTTP server: port 4390 (lazy start, shared across a session). The URL host
- * comes from `host:` in the nearest .planish.yaml or $PLANISH_HOST (default
- * localhost) — set it to the machine name remote browsers use (e.g. a
+ * comes from $WORK_LOG_HOST or `work_log.host` in the nearest .shared-llm.yaml
+ * (default localhost) — set it to the machine name remote browsers use (e.g. a
  * Tailscale name) and the server binds 0.0.0.0 so those connections work.
  */
 
@@ -46,6 +46,10 @@ import { spawnSync } from "node:child_process";
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const PORT = 4390;
+const CONFIG_NAME = ".shared-llm.yaml";
+const LEGACY_CONFIG_NAME = ".planish.yaml";
+const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const RESOLVER_REL = "public/llm/common/common/planish_resolve.py";
 
 // ─── Server state (module-level) ─────────────────────────────────────────────
 
@@ -74,42 +78,13 @@ function esc(s: string): string {
 }
 
 // ─── Review host configuration ───────────────────────────────────────────────
-
-// Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
-// level of nested key: value blocks. Handles strings, integers, and booleans.
-function parseSimpleYaml(content: string): Record<string, any> {
-	const result: Record<string, any> = {};
-	let nested: Record<string, any> | null = null;
-	for (const raw of content.split("\n")) {
-		const line = raw.replace(/#.*$/, ""); // strip inline comments
-		if (!line.trim()) continue;
-		const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
-		const colon = line.indexOf(":");
-		if (colon === -1) continue;
-		const key = line.slice(0, colon).trim();
-		const rest = line.slice(colon + 1).trim();
-		if (indent === 0) {
-			if (rest === "") {
-				nested = {};
-				result[key] = nested;
-			} else {
-				nested = null;
-				result[key] = parseYamlScalar(rest);
-			}
-		} else if (nested !== null) {
-			nested[key] = parseYamlScalar(rest);
-		}
-	}
-	return result;
-}
-
-function parseYamlScalar(v: string): string | number | boolean {
-	if (v === "true") return true;
-	if (v === "false") return false;
-	const n = Number(v);
-	if (!isNaN(n) && v.trim() !== "") return n;
-	return v.replace(/^["']|["']$/g, "");
-}
+//
+// The config is NOT parsed here. planish_resolve.py is the one implementation
+// of work-log resolution and this extension runs it as a subprocess. A
+// hand-rolled scanner used to live here; run against the same configs as
+// PyYAML it kept diverging in ways substring checks never see (an escaped quote
+// before ` #`, a quoted comma inside a flow mapping), so it is gone. python3 is
+// already a kit prerequisite — `just init` checks for it.
 
 function findConfigUp(startDir: string, filename: string): string | null {
 	let dir = path.resolve(startDir);
@@ -122,32 +97,109 @@ function findConfigUp(startDir: string, filename: string): string | null {
 	}
 }
 
+// The canonical resolver, looked for by walking UP from cwd — a repo that has
+// adopted the kit carries it under .shared-llm/ — and then beside this
+// extension. The second location is how a DEPLOYED copy finds it: pi loads
+// extensions at their ~/.pi/agent/extensions/ symlink, where import.meta.url
+// does not follow the link, so the path is realpath-resolved back into the
+// generated kit tree first, exactly as the canonical toolkit below is.
+function canonicalResolver(startDir: string): string | null {
+	const fromCwd = findConfigUp(startDir, path.join(".shared-llm", RESOLVER_REL));
+	if (fromCwd) return fromCwd;
+	const beside = path.resolve(
+		path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))),
+		"../../../common/common/planish_resolve.py",
+	);
+	return fs.existsSync(beside) ? beside : null;
+}
+
+interface ResolverResult {
+	host: string | null;
+	plan_dir: string | null;
+	review_url: string | null;
+}
+
+// Run the canonical resolver. Its stderr — deprecation notices, the reason a
+// config was rejected — is passed through verbatim, and a non-zero exit is a
+// fault here too: never a quiet fall back to an invented host.
+function runResolver(
+	script: string,
+	cwd: string,
+	args: string[],
+): ResolverResult {
+	const result = spawnSync(PYTHON_BIN, [script, "--cwd", cwd, ...args], {
+		encoding: "utf-8",
+	});
+	if (result.error) throw result.error;
+	const stderr = (result.stderr ?? "").trim();
+	if (stderr) process.stderr.write(`${stderr}\n`);
+	if (result.status !== 0)
+		throw new Error(`${script} exited ${result.status}: ${stderr}`);
+	return JSON.parse(result.stdout) as ResolverResult;
+}
+
+// The config file whose rules only the canonical script knows how to apply.
+function configPresent(cwd: string): string | null {
+	return (
+		findConfigUp(cwd, CONFIG_NAME) ?? findConfigUp(cwd, LEGACY_CONFIG_NAME)
+	);
+}
+
+// Deprecation notices go to stderr, never into a served page or a tool result.
+function warnDeprecated(message: string): void {
+	console.error(`[do-planish] ${message}`);
+}
+
 // ─── Serve host ─────────────────────────────────────────────────────────────
 //
 // URLs the tools hand out default to localhost, which breaks remote sessions
-// (Tailscale/SSH): the user's browser is not on this box. `host:` in the
-// nearest .planish.yaml — or $PLANISH_HOST — names this machine as the
+// (Tailscale/SSH): the user's browser is not on this box. `work_log.host` in
+// the nearest .shared-llm.yaml — or $WORK_LOG_HOST — names this machine as the
 // browser reaches it (e.g. a Tailscale MagicDNS name). With a non-localhost
 // host the server binds 0.0.0.0 so those remote connections are accepted;
 // the default stays 127.0.0.1-only. Resolved once, at first use.
+//
+// Precedence lives in planish_resolve.py — $WORK_LOG_HOST, $PLANISH_HOST
+// (deprecated), work_log.host, then a legacy .planish.yaml `host:` (deprecated)
+// — and is applied by running it with `--host-only`, which resolves the host
+// and creates nothing. Serving a page must never claim a work-log directory.
 
 let resolvedHost: string | null = null;
 
 function resolveHost(): string {
 	if (resolvedHost) return resolvedHost;
-	let host = "localhost";
-	if (process.env.PLANISH_HOST && process.env.PLANISH_HOST.trim()) {
-		host = process.env.PLANISH_HOST.trim();
-	} else {
-		const configPath = findConfigUp(process.cwd(), ".planish.yaml");
-		if (configPath) {
-			const parsed = parseSimpleYaml(fs.readFileSync(configPath, "utf-8"));
-			if (typeof parsed?.host === "string" && parsed.host.trim())
-				host = parsed.host.trim();
-		}
+	resolvedHost = configuredHost() ?? "localhost";
+	return resolvedHost;
+}
+
+export function configuredHost(): string | null {
+	// The env overrides come first and need no parser, so they still answer on a
+	// machine that carries neither the kit nor a config file.
+	if (process.env.WORK_LOG_HOST && process.env.WORK_LOG_HOST.trim()) {
+		return process.env.WORK_LOG_HOST.trim();
 	}
-	resolvedHost = host;
-	return host;
+	if (process.env.PLANISH_HOST && process.env.PLANISH_HOST.trim()) {
+		warnDeprecated("$PLANISH_HOST is deprecated — use $WORK_LOG_HOST");
+		return process.env.PLANISH_HOST.trim();
+	}
+
+	const cwd = process.cwd();
+	const script = canonicalResolver(cwd);
+	if (script) return runResolver(script, cwd, ["--host-only"]).host;
+
+	// No script. Guessing what a config file says is how the deleted scanner got
+	// this wrong, so a config that could name a host is a loud stop rather than
+	// a silent "localhost" that strands a remote browser. $WORK_LOG_HOST above
+	// is the way past it without a kit.
+	const config = configPresent(cwd);
+	if (config)
+		throw new Error(
+			`${config} may configure the work log, but the canonical resolver ` +
+				`(.shared-llm/${RESOLVER_REL}) is not reachable from ${cwd} — run ` +
+				`\`just update\` for this repo, or set $WORK_LOG_HOST for this session. ` +
+				`This extension never parses the config itself.`,
+		);
+	return null;
 }
 
 function isLocalOnly(host: string): boolean {

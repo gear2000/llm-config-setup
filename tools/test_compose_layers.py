@@ -450,11 +450,21 @@ def test_grill_feedback_is_annotation_only() -> None:
 def test_plan_versioning_downloadable_and_host() -> None:
     """Plans freeze plan-v<k> history (never revised in place), pages are also
     offered as downloadable files where the harness can send them, and URLs
-    honor the .planish.yaml host: field for remote (Tailscale) sessions."""
+    honor the .shared-llm.yaml work_log.host field for remote (Tailscale)
+    sessions."""
     planish_ts = (
         REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/do-planish.ts"
     ).read_text()
-    for token in ("plan-v<k>", "resolveHost", "PLANISH_HOST", "0.0.0.0"):
+    for token in (
+        "plan-v<k>",
+        "resolveHost",
+        "WORK_LOG_HOST",
+        "work_log.host",
+        # the legacy names stay wired as deprecated fallbacks
+        "PLANISH_HOST",
+        ".planish.yaml",
+        "0.0.0.0",
+    ):
         assert token in planish_ts, f"do-planish.ts must contain {token!r}"
     assert 'listen(PORT, "127.0.0.1"' not in planish_ts  # bind follows the host
 
@@ -463,16 +473,63 @@ def test_plan_versioning_downloadable_and_host() -> None:
     for token in ("autoFreezePlan", "newestFrozenVersion", "planish_submit_plan"):
         assert token in planish_ts, f"do-planish.ts must wire auto-freeze via {token!r}"
 
-    # tf-implement's duplicated resolver must stay in sync: same config file.
+    # tf-implement documents the same config surface it delegates resolution of.
     tf_ts = (
         REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/tf-implement.ts"
     ).read_text()
-    assert ".planish.yaml" in tf_ts, "tf-implement resolver must read .planish.yaml"
+    for token in (
+        ".shared-llm.yaml",
+        "work_log.dir",
+        "WORK_LOG_DIR",
+        "/var/tmp/work-log/{date}/{slug}",
+        # the legacy names stay wired as deprecated fallbacks
+        ".planish.yaml",
+        "PLANISH_DIR",
+    ):
+        assert token in tf_ts, f"tf-implement resolver must read {token!r}"
     assert ".planish.json" not in tf_ts, "drifted .planish.json reference"
     assert "plan-v<k>" in tf_ts
 
-    example = (REPO_ROOT / ".planish.yaml.example").read_text()
-    assert "host:" in example, ".planish.yaml.example must document host:"
+    # Neither extension parses the config. Both hand-rolled YAML scanners were
+    # deleted — two reviews caught them diverging from PyYAML — so each one now
+    # locates planish_resolve.py and runs it as a subprocess. A scanner growing
+    # back here is the regression to catch, so the ban is asserted by name.
+    for name, source in (("do-planish.ts", planish_ts), ("tf-implement.ts", tf_ts)):
+        for token in ("canonicalResolver", "RESOLVER_REL", "spawnSync(PYTHON_BIN"):
+            assert token in source, f"{name} must delegate to the resolver: {token!r}"
+        for banned in (
+            "parseSimpleYaml",
+            "parseYamlScalar",
+            "parseFlowMapping",
+            "workLogMapping",
+            "stripComment",
+        ):
+            assert banned not in source, (
+                f"{name} must not parse config itself — {banned!r} is back"
+            )
+    # An empty `work_log:` block must still fail loud rather than sailing through
+    # as {} and quietly taking the default directory: the silent fallback this
+    # config contract exists to prevent. It now fails loud in ONE place.
+    py = (
+        REPO_ROOT / ".shared-llm/public/llm/common/common/planish_resolve.py"
+    ).read_text()
+    assert '"work_log" is empty' in py, "planish_resolve.py must fail loud on an empty work_log"
+
+    # Substring checks cannot prove the delegation is real and complete — an
+    # EXECUTED corpus runs both extensions and the script over the same configs,
+    # including the two cases that killed the scanners. Pin it into `just test`
+    # so it cannot quietly stop running.
+    parity = REPO_ROOT / ".shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts"
+    assert parity.is_file(), "the executed resolver parity corpus must exist"
+    recipe = (REPO_ROOT / "justfile").read_text().split("\ntest:", 1)[1].split("\n\n", 1)[0]
+    assert "resolver-parity.test.ts" in recipe, "`just test` must run the parity corpus"
+
+    example = (REPO_ROOT / ".shared-llm.yaml.example").read_text()
+    for token in ("work_log:", "dir:", "host:", "/var/tmp/work-log/{date}/{slug}"):
+        assert token in example, f".shared-llm.yaml.example must document {token!r}"
+    assert not (REPO_ROOT / ".planish.yaml.example").exists(), (
+        "the legacy .planish.yaml.example is retired — .shared-llm.yaml.example replaces it"
+    )
 
     text = (
         REPO_ROOT
@@ -485,9 +542,14 @@ def test_plan_versioning_downloadable_and_host() -> None:
         "Planish",
         "final human approval",
         "--dir <path>",
+        "$WORK_LOG_DIR",
+        "$WORK_LOG_HOST",
+        "`work_log:` mapping",
+        "work_log.dir",
+        # the legacy names stay documented as deprecated fallbacks
         "$PLANISH_DIR",
         ".planish.yaml",
-        "/tmp/planish/{date}/{slug}",
+        "/var/tmp/work-log/{date}/{slug}",
         "`host:`",
         "downloadable",
     ):
@@ -497,7 +559,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
         REPO_ROOT
         / ".shared-llm/public/llm/common/common/planish-html-grill-contract.md"
     ).read_text()
-    for token in ("Versioned history", "downloadable", "host:"):
+    for token in ("Versioned history", "downloadable", "work_log.host"):
         assert token in contract, f"contract must contain {token!r}"
 
 

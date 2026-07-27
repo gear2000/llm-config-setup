@@ -1,0 +1,177 @@
+# .shared-llm.yaml.example
+#
+# HOW IT WORKS
+# ─────────────
+# The planning flows (`/do-plan` on Pi, `/cc-plan` in Claude Code) write two
+# files — plan.md and plan.html — into a directory you control. You then open
+# the HTML file in a browser to read and annotate it.
+#
+# Two things must be configured together:
+#
+#   1. WHERE FILES ARE WRITTEN  →  "work_log.dir" in this file
+#   2. WHERE YOUR HTTP SERVER SERVES FROM  →  the --directory arg of the server
+#
+# The "work_log.dir" path must be INSIDE the directory your server serves, so
+# the HTML file has a URL you can actually open.
+#
+#
+# STEP-BY-STEP SETUP
+# ──────────────────
+# 1. Pick a docs/plans root on your machine, e.g. ~/my-project/docs
+#
+# 2. Start a static HTTP server from that root:
+#
+#      python3 -m http.server 8089 --directory ~/my-project/docs
+#
+#    (run this in a background terminal or add it to a startup script)
+#
+# 3. Set "work_log.dir" below to a path INSIDE that root:
+#
+#      work_log:
+#        dir: /home/<you>/my-project/docs/plans/{date}/{slug}
+#
+#    planning will write:
+#      /home/<you>/my-project/docs/plans/2026-06-29/redesign-auth/plan.md
+#      /home/<you>/my-project/docs/plans/2026-06-29/redesign-auth/plan.html
+#
+# 4. Open the HTML file in your browser at:
+#
+#      http://localhost:8089/plans/2026-06-29/redesign-auth/plan.html
+#
+#
+# TOKENS
+# ──────
+#   {date}  →  YYYY-MM-DD  (today)
+#   {slug}  →  your planning topic, lowercased and hyphenated
+#   {type}  →  "plan"
+#   {n}     →  next version integer, auto-incremented by scanning siblings
+#
+# A relative "work_log.dir" path resolves from the directory holding THIS file.
+# An absolute path is used as-is.
+#
+#
+# WHICH FILE WINS
+# ───────────────
+# Resolution walks UP from the current directory and takes the nearest
+# `.shared-llm.yaml` that CONTAINS a `work_log:` mapping. A `.shared-llm.yaml`
+# without that key is skipped and the walk continues — so `~/.shared-llm.yaml`,
+# the machine-level roster of kit destinations, never shadows a repo's config.
+# One file at your repo root therefore covers everything inside it.
+#
+# With nothing configured anywhere, plans land in
+# /var/tmp/work-log/{date}/{slug}. Fine for throwaway use, inconvenient when
+# you want plans versioned next to your work.
+#
+# A configured "work_log.dir" must be a non-empty string — a malformed value
+# fails loudly rather than silently falling back to the default.
+#
+# For a single run, `$WORK_LOG_DIR` overrides this file, and `--dir <path>`
+# passed through the planning command overrides both.
+#
+#
+# REMOTE SESSIONS (optional "work_log.host")
+# ──────────────────────────────────────────
+# When you reach this machine by name instead of localhost — Tailscale, LAN,
+# SSH from a laptop — set "work_log.host" to that machine name. Every URL the
+# planning flows hand out (the planish pages on port 4390 AND the static
+# grill/plan pages) then uses it instead of localhost, and the planish server
+# binds 0.0.0.0 so those remote connections are accepted. Default: localhost.
+# `$WORK_LOG_HOST` overrides it for a single session.
+#
+#   work_log:
+#     host: your-machine-name
+#
+# "host" works on its own too — a `work_log:` block with only "host" keeps the
+# default /var/tmp/work-log/{date}/{slug} directory.
+#
+#
+# REVIEW URL (optional "url_base" + "serve_root")
+# ──────────────────────────────────────────────
+# Set BOTH to have the resolver hand back a ready-to-open `review_url` instead
+# of leaving you to work it out from the plan path:
+#
+#   work_log:
+#     dir: /home/<you>/my-project/docs/plans/{date}/{slug}
+#     url_base: http://localhost:8089     # where the static server answers
+#     serve_root: /home/<you>/my-project/docs   # the fs root it serves
+#
+# The URL is url_base + the plan directory's path relative to serve_root. Both
+# keys are required and the plan directory must sit inside serve_root — with
+# only one key set, or a plan directory outside that root, `review_url` is null.
+# A relative "serve_root" resolves from the directory holding THIS file, same
+# as "dir".
+#
+# "url_base" is a base for a PATH: the plan path is appended to it. A base
+# carrying a query or a fragment ("http://host:8089?token=x", ".../plans#top",
+# or a bare trailing "?" or "#") would put that path inside the query or the
+# fragment, where the server never sees it — so such a base is rejected with an
+# error naming "work_log.url_base" rather than quietly reordered.
+#
+# `review_url` names the PLAN DIRECTORY (ending in "/") unless the resolver is
+# asked for a page:
+#
+#   planish_resolve.py --topic "redesign auth" --artifact plan.html
+#     →  http://localhost:8089/plans/2026-06-29/redesign-auth/plan.html
+#
+# Pass "--artifact" with the file you want opened. That URL is handed to a
+# human exactly as returned — nothing is appended to it afterwards, so without
+# "--artifact" the link opens the directory listing, not the plan.
+#
+# What the resolver guarantees about a URL it returns, precisely:
+#
+#   • WITH "--artifact": the named file exists as a regular file inside the
+#     plan directory. It is looked up on disk first, and a name that is missing,
+#     is a directory, or leaves the plan directory (a "..", an absolute path, a
+#     symlink pointing out) is a loud error and NO URL — on an unconfigured
+#     machine too, so a typo never comes back as the same null as "no server
+#     configured".
+#   • WITHOUT "--artifact": the URL names the plan directory, which the
+#     resolver has just created. What the server answers for a directory — a
+#     listing, an index page, a redirect — is the server's business.
+#
+# It is still your static server that has to be running, and serving
+# "serve_root", for either URL to load.
+#
+# Every path component is percent-encoded, so a "dir" containing a "#", a
+# space, or a "%" still produces a URL whose path survives the trip to the
+# server (a raw "#" would otherwise be read as a fragment and never sent).
+#
+#
+# DEPRECATED PREDECESSORS
+# ───────────────────────
+# The old `.planish.yaml` (top-level `dir:` / `host:`), `$PLANISH_DIR`, and
+# `$PLANISH_HOST` are still honored as a last-resort fallback and warn on
+# stderr. Move them into this file's `work_log:` block — the fallback goes away
+# in a future release.
+#
+#
+# ALSO READ BY: the /design-doc skill (skills/design-doc/SKILL.md) reuses
+# "work_log.host" for its own base_url (http://{host}:8089) when it has no more
+# specific config of its own — one hostname for every doc/plan URL this kit
+# hands out. See that skill's Step 0 for its own explicit-override option.
+#
+#
+# COPY AND RENAME TO ACTIVATE
+# ────────────────────────────
+# cp .shared-llm.yaml.example .shared-llm.yaml
+# Then edit the "dir" line below to match your setup.
+
+work_log:
+  dir: /absolute/path/to/your/docs/plans/{date}/{slug}
+  # host: your-machine-name
+  # url_base: http://localhost:8089
+  # serve_root: /absolute/path/to/your/docs
+
+# ── Alternative layouts ────────────────────────────────────────────────────────
+
+# If your server root IS your repo root (e.g. python3 -m http.server 8089):
+# work_log:
+#   dir: plans/{date}/{slug}
+
+# If you use an ops/docs directory structure:
+# work_log:
+#   dir: ops/docs/work-log/{date}/{slug}/plan
+
+# Versioned plans (v1, v2, …) in a named folder:
+# work_log:
+#   dir: plans/{slug}/v{n}

@@ -1,0 +1,6 @@
+type: skill
+name: upagent-pipeline
+description: .shared-llm/public/layers/slash-commands/common/common/upagent-pipeline/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/upagent-pipeline/command.md
+output: .claude/skills/upagent-pipeline/SKILL.md

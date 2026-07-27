@@ -34,6 +34,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -41,6 +42,12 @@ import { spawnSync } from "node:child_process";
 const PI_DIR = path.join(os.homedir(), ".pi");
 const REQUEST_FIFO = path.join(PI_DIR, "tf-review-request.fifo");
 const RESPONSE_FIFO = path.join(PI_DIR, "tf-review-response.fifo");
+const CONFIG_NAME = ".shared-llm.yaml";
+const LEGACY_CONFIG_NAME = ".planish.yaml";
+const DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}";
+const CLAIM_ATTEMPTS = 64;
+const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const RESOLVER_REL = "public/llm/common/common/planish_resolve.py";
 
 // ─── FIFO helpers ─────────────────────────────────────────────────────────────
 
@@ -108,54 +115,24 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 //
 // In planish mode the PLAN (plan.md + plan.html) is written into a RESOLVED
 // directory, never the cwd (the .tf implementation files still go to cwd — only
-// the plan moves). Precedence for the directory:
-//   1. --dir <path> passed to /tf:auto
-//   2. $PLANISH_DIR
-//   3. nearest .planish.yaml walking UP from cwd — its "dir" template
-//   4. fallback: /tmp/planish/{date}/{slug}
-// Template tokens: {date} → YYYY-MM-DD (local), {slug} → slugified topic,
-// {type} → "plan", {n} → next vN integer (glob the parent dir, max + 1, start
-// at 1). A relative template from .planish.yaml resolves against the directory
-// holding that file; a relative --dir / $PLANISH_DIR resolves against cwd.
+// the plan moves). There is exactly ONE implementation of that resolution:
+// planish_resolve.py, run here as a subprocess. This extension used to carry a
+// hand-rolled YAML scanner beside it; two reviews running the same configs
+// through both found it diverging from PyYAML in ways substring checks never
+// see (an escaped quote before ` #`, a quoted comma inside a flow mapping), so
+// the scanner is gone and no config is parsed here at all. python3 is already a
+// kit prerequisite — `just init` checks for it.
 //
-// NOTE: this resolver is intentionally DUPLICATED (not shared) in do-planish.ts.
-// Keep the two copies in sync.
-
-// Minimal YAML parser for the .planish.yaml subset: top-level scalars and one
-// level of nested key: value blocks. Handles strings, integers, and booleans.
-function parseSimpleYaml(content: string): Record<string, any> {
-  const result: Record<string, any> = {};
-  let nested: Record<string, any> | null = null;
-  for (const raw of content.split("\n")) {
-    const line = raw.replace(/#.*$/, ""); // strip inline comments
-    if (!line.trim()) continue;
-    const indent = raw.match(/^(\s+)/)?.[1]?.length ?? 0;
-    const colon = line.indexOf(":");
-    if (colon === -1) continue;
-    const key = line.slice(0, colon).trim();
-    const rest = line.slice(colon + 1).trim();
-    if (indent === 0) {
-      if (rest === "") {
-        nested = {};
-        result[key] = nested;
-      } else {
-        nested = null;
-        result[key] = parseYamlScalar(rest);
-      }
-    } else if (nested !== null) {
-      nested[key] = parseYamlScalar(rest);
-    }
-  }
-  return result;
-}
-
-function parseYamlScalar(v: string): string | number | boolean {
-  if (v === "true") return true;
-  if (v === "false") return false;
-  const n = Number(v);
-  if (!isNaN(n) && v.trim() !== "") return n;
-  return v.replace(/^["']|["']$/g, "");
-}
+// Precedence (--dir, $WORK_LOG_DIR, $PLANISH_DIR, work_log.dir, legacy
+// .planish.yaml, then /var/tmp/work-log/{date}/{slug}), the {date}/{slug}/
+// {type}/{n} tokens, the atomic {n} claim, and the fail-loud rules for a
+// malformed config ALL live in that script. It creates and claims the directory
+// it returns, so nothing here claims it a second time.
+//
+// The only resolution left below is the fallback for a machine carrying neither
+// the kit nor any config file: with nothing configured there is nothing to
+// diverge from. A config file present WITHOUT the canonical script is a loud
+// failure — re-implementing the parse is exactly what this change removed.
 
 function slugifyTopic(topic: string): string {
   const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -180,6 +157,86 @@ function findConfigUp(startDir: string, filename: string): string | null {
   }
 }
 
+// The canonical resolver, looked for by walking UP from cwd — a repo that has
+// adopted the kit carries it under .shared-llm/ — and then beside this
+// extension. The second location is how a DEPLOYED copy finds it: pi loads
+// extensions at their ~/.pi/agent/extensions/ symlink, where import.meta.url
+// does not follow the link, so the path is realpath-resolved back into the
+// generated kit tree first (the same trick do-planish uses for its toolkit).
+function canonicalResolver(startDir: string): string | null {
+  const fromCwd = findConfigUp(startDir, path.join(".shared-llm", RESOLVER_REL));
+  if (fromCwd) return fromCwd;
+  const beside = path.resolve(
+    path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))),
+    "../../../common/common/planish_resolve.py",
+  );
+  return fs.existsSync(beside) ? beside : null;
+}
+
+interface ResolverResult {
+  host: string | null;
+  plan_dir: string | null;
+  review_url: string | null;
+}
+
+// Run the canonical resolver. Its stderr — deprecation notices, the reason a
+// config was rejected — is passed through verbatim, and a non-zero exit is a
+// fault here too: never a quiet fall back to a locally invented directory.
+function runResolver(script: string, cwd: string, args: string[]): ResolverResult {
+  const result = spawnSync(PYTHON_BIN, [script, "--cwd", cwd, ...args], {
+    encoding: "utf-8",
+  });
+  if (result.error) throw result.error;
+  const stderr = (result.stderr ?? "").trim();
+  if (stderr) process.stderr.write(`${stderr}\n`);
+  if (result.status !== 0) {
+    throw new Error(`${script} exited ${result.status}: ${stderr}`);
+  }
+  return JSON.parse(result.stdout) as ResolverResult;
+}
+
+// The config file whose rules only the canonical script knows how to apply.
+function configPresent(cwd: string): string | null {
+  return findConfigUp(cwd, CONFIG_NAME) ?? findConfigUp(cwd, LEGACY_CONFIG_NAME);
+}
+
+// Deprecation notices go to stderr — never into a plan file or a tool result.
+function warnDeprecated(message: string): void {
+  console.error(`[tf-implement] ${message}`);
+}
+
+// Create the resolved directory, claiming a {n} version exclusively. Scanning
+// for the highest sibling and then creating with `recursive: true` hands the
+// same directory to every caller that scans before any of them creates, so the
+// version segment is claimed with a NON-recursive mkdir: whoever loses the race
+// gets EEXIST, rescans, and takes the next integer. Mirrors planish_resolve.py.
+function claimPlanDir(absPath: string): string {
+  const parts = absPath.split(path.sep);
+  const idx = parts.findIndex((seg) => seg.includes("{n}"));
+  if (idx === -1) {
+    // No version token — concurrent callers legitimately share the path.
+    fs.mkdirSync(absPath, { recursive: true });
+    return absPath;
+  }
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+    const versioned = expandVersionToken(absPath);
+    const claim = versioned.split(path.sep).slice(0, idx + 1).join(path.sep) || path.sep;
+    fs.mkdirSync(path.dirname(claim), { recursive: true });
+    try {
+      fs.mkdirSync(claim);
+    } catch (err: any) {
+      if (err?.code === "EEXIST") continue;
+      throw err;
+    }
+    fs.mkdirSync(versioned, { recursive: true });
+    return versioned;
+  }
+  throw new Error(
+    `could not claim a version directory under ${parts.slice(0, idx).join(path.sep)} ` +
+      `after ${CLAIM_ATTEMPTS} attempts`,
+  );
+}
+
 // Replace a {n} token in a path segment with the next version integer, found by
 // globbing the parent dir for siblings matching the segment's prefix/suffix.
 function expandVersionToken(absPath: string): string {
@@ -200,41 +257,107 @@ function expandVersionToken(absPath: string): string {
   return parts.join(path.sep);
 }
 
-function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
-  let template: string;
-  let baseDir: string;
+// The template a --dir flag or an env var names, or null when neither is set
+// and the directory therefore has to come from a config file. These beat the
+// config outright in the canonical precedence, so reading one costs no parsing.
+function explicitTemplate(dirFlag?: string): string | null {
+  if (dirFlag && dirFlag.trim()) return dirFlag.trim();
+  if (process.env.WORK_LOG_DIR && process.env.WORK_LOG_DIR.trim()) {
+    return process.env.WORK_LOG_DIR.trim();
+  }
+  if (process.env.PLANISH_DIR && process.env.PLANISH_DIR.trim()) {
+    warnDeprecated("$PLANISH_DIR is deprecated — use $WORK_LOG_DIR");
+    return process.env.PLANISH_DIR.trim();
+  }
+  return null;
+}
 
-  if (dirFlag && dirFlag.trim()) {
-    template = dirFlag.trim();
-    baseDir = cwd;
-  } else if (process.env.PLANISH_DIR && process.env.PLANISH_DIR.trim()) {
-    template = process.env.PLANISH_DIR.trim();
-    baseDir = cwd;
-  } else {
-    const configPath = findConfigUp(cwd, ".planish.yaml");
-    const parsed = configPath ? parseSimpleYaml(fs.readFileSync(configPath, "utf-8")) : null;
-    if (configPath && parsed?.dir !== undefined) {
-      // dir present but unusable is a config typo — fail loud, never fall back.
-      if (typeof parsed.dir !== "string" || !parsed.dir.trim()) {
-        throw new Error(`${configPath} "dir" must be a non-empty string`);
-      }
-      template = parsed.dir.trim();
-      baseDir = path.dirname(configPath!);
-    } else {
-      // no config, or a host-only config — default template.
-      template = "/tmp/planish/{date}/{slug}";
-      baseDir = cwd;
-    }
+// Python's Path.expanduser(), which the canonical script applies to the expanded
+// template: a "~" that is the whole first segment is the home directory, and a
+// "~" anywhere else is an ordinary path character. Without this, a
+// $WORK_LOG_DIR of "~/plans/{slug}" lands in <cwd>/~/plans/<slug> here while
+// the script puts it in $HOME/plans/<slug> — one template, two directories,
+// decided by which resolver happened to run.
+//
+// "~otheruser/…" is the one case this cannot mirror: resolving it needs a
+// passwd lookup Node has no equivalent for (Python either expands it or raises
+// RuntimeError). It is a loud stop rather than a path invented from os.homedir.
+function expandUser(template: string): string {
+  if (template === "~" || template.startsWith("~/")) {
+    // posixpath.expanduser verbatim: strip trailing slashes off the home, glue
+    // the rest of the template on, and call an empty result the root. Not
+    // path.join — path.join("", "") is ".", which path.resolve then turns into
+    // the cwd, so an empty $HOME would put the plan log wherever the caller
+    // happened to be standing while the script puts it in "/".
+    return (tildeHome().replace(/\/+$/, "") + template.slice(1)) || "/";
+  }
+  if (template.startsWith("~")) {
+    throw new Error(
+      `cannot expand "${template}": this fallback expands "~" and "~/…" only, ` +
+        `never another user's home — use an absolute path in $WORK_LOG_DIR ` +
+        `(or --dir), or make the canonical resolver reachable`,
+    );
+  }
+  return template;
+}
+
+// The home directory posixpath.expanduser would use. It reads $HOME whenever the
+// variable is SET — an empty $HOME expands "~" to "/" there — and consults the
+// passwd entry only when the variable is absent. os.homedir() cannot express
+// that difference: it treats an empty $HOME as unset and falls back to passwd,
+// so $HOME is read directly and os.homedir() is used only for the passwd case
+// it does match. With neither, the answer is not knowable and this stops.
+function tildeHome(): string {
+  const home = process.env.HOME;
+  if (home !== undefined) return home;
+  const fromPasswd = os.homedir();
+  if (fromPasswd) return fromPasswd;
+  throw new Error(
+    `cannot expand "~": $HOME is unset and this machine has no home directory ` +
+      `to fall back to — set $WORK_LOG_DIR (or --dir) to an absolute path`,
+  );
+}
+
+// Used only when the canonical script is unreachable AND no config file decides
+// the directory. Nothing here reads YAML, so nothing here can drift from PyYAML.
+function fallbackPlanPath(cwd: string, topic: string, dirFlag?: string): string {
+  const expanded = expandUser(
+    (explicitTemplate(dirFlag) ?? DEFAULT_TEMPLATE)
+      .replace(/\{date\}/g, todayYmd())
+      .replace(/\{slug\}/g, slugifyTopic(topic))
+      .replace(/\{type\}/g, "plan"),
+  );
+  return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+}
+
+export function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
+  const script = canonicalResolver(cwd);
+  if (script) {
+    // An empty description used to slugify to "plan"; the canonical script
+    // rejects an empty topic, so name that slug explicitly to keep /tf:auto
+    // with no description landing where it always did.
+    const args = ["--topic", topic.trim() || "plan"];
+    if (dirFlag && dirFlag.trim()) args.push("--dir", dirFlag.trim());
+    const resolved = runResolver(script, cwd, args);
+    // The script created and claimed it — claiming again would burn a version.
+    if (!resolved.plan_dir) throw new Error(`${script} returned no plan_dir`);
+    return resolved.plan_dir;
   }
 
-  const expanded = template
-    .replace(/\{date\}/g, todayYmd())
-    .replace(/\{slug\}/g, slugifyTopic(topic))
-    .replace(/\{type\}/g, "plan");
-  const absPath = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
-  const finalDir = expandVersionToken(absPath);
-  fs.mkdirSync(finalDir, { recursive: true });
-  return finalDir;
+  // No script. Guessing what a config file says is how the deleted scanner got
+  // this wrong, so a config that would decide the directory is a loud stop —
+  // unless a flag or env var already outranks it, in which case the config is
+  // never consulted anyway and there is nothing to guess at.
+  const config = explicitTemplate(dirFlag) === null ? configPresent(cwd) : null;
+  if (config) {
+    throw new Error(
+      `${config} may configure the work log, but the canonical resolver ` +
+        `(.shared-llm/${RESOLVER_REL}) is not reachable from ${cwd} — run ` +
+        `\`just update\` for this repo, or set $WORK_LOG_DIR for this session. ` +
+        `This extension never parses the config itself.`,
+    );
+  }
+  return claimPlanDir(fallbackPlanPath(cwd, topic, dirFlag));
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────

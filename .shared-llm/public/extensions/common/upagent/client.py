@@ -146,6 +146,7 @@ TARGETS = {
     "phase-controller": "phase_controller.py",
     "phase-await": "phase_await.py",
     "direct-controller": "direct_controller.py",
+    "pipelines": "pipelines.py",
 }
 RUNNER_TARGETS = {
     "tui-controller": "tui_controller.py",
@@ -190,6 +191,8 @@ def _is_mutating(target: str, argv: list[str]) -> bool:
         return command != "wait"
     if target == "direct-controller":
         return command != "steps"
+    if target == "pipelines":
+        return command != "list"
     return target not in ("tui-controller", "run-lifecycle")
 
 

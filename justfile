@@ -88,7 +88,7 @@ pi-extensions:
 selfcompose:
     rm -rf examples/self
     ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/public/compose/slash-commands --target examples/self --placeholder OPS_REPO=your-repo-ops
-    for d in .claude/skills/*/; do n=$(basename "$d"); cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md"; done
+    for d in .claude/skills/*/; do n=$(basename "$d"); case "$n" in lavish) continue ;; esac; cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md" || exit 1; done
     @echo "selfcompose: regenerated the kit's tracked slash-command skills (.claude/skills/{cc,do}-*)"
 
 # ─── Tests ────────────────────────────────────────────
@@ -97,6 +97,11 @@ test:
     ${PYTHON_BIN:-python3} -m pytest tools/ .shared-llm/public/extensions/common/ -q
     node --experimental-strip-types .shared-llm/public/llm/pi/common/meta-plan/meta-plan-schema.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
+
+# Runs planish_resolve.py and both Pi extensions that delegate to it over one corpus.
+test-resolver-parity:
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 
 test-auto-compact:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts

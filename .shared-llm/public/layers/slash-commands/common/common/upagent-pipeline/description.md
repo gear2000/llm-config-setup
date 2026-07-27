@@ -1,0 +1,1 @@
+Run one issue-sized change end to end through a registry pipeline: optional research and plan stages hired as one-shot UpAgent workers, a mechanical phase-budget gate, human plan approval, then direct implementation in an isolated worktree.
