@@ -4,6 +4,15 @@
   "defaultThinkingLevel": "medium",
   "_transport_note": "sse forces the Codex provider onto HTTP/SSE instead of the WebSocket. The Codex WS rejects large requests (close 1009 'message too big') and auto-mode then blows the hardcoded 10s SSE-header fallback timeout — 'Codex SSE response headers timed out after 10000ms'. SSE is a plain HTTP POST with no frame-size cap, so large coding payloads go through. Values: sse|websocket|websocket-cached|auto.",
   "transport": "sse",
+  "compaction": {
+    "enabled": true
+  },
+  "openaiNativeCompaction": {
+    "enabled": true,
+    "maxTokens": 120000,
+    "triggerThreshold": 0.6
+  },
+  "_openai_native_compaction_note": "openaiNativeCompaction is used by the third-party pi-openai-compaction package. enabled is honored by the package; maxTokens and triggerThreshold are kept here as operator intent/future-compatible knobs. Pi's built-in auto-compaction threshold is controlled by compaction.reserveTokens/keepRecentTokens if you need to tune it.",
   "_packages_note": "Third-party extensions are NOT listed here. setup-pi.sh runs tools/install-pi-extensions.sh, which `pi install`s the pinned set from third-party-extensions.txt and fills this array. Single source of truth is the manifest.",
   "packages": []
 }

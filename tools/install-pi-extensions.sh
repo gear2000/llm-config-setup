@@ -105,6 +105,15 @@ if printf '%s\n' "$installed_names" | grep -qxF '@hypabolic/pi-hypa'; then
 	run pi remove npm:@hypabolic/pi-hypa
 fi
 
+# pi-openai-compaction moved from the npm package name below to the git source
+# in the manifest. Remove the old npm entry first so Pi does not load both
+# package copies on machines that installed it before this manifest changed.
+if printf '%s\n' "$installed_names" | grep -qxF '@jordyvd/pi-openai-compaction'; then
+	echo "  remove  npm:@jordyvd/pi-openai-compaction  (replaced by git source)"
+	run pi remove npm:@jordyvd/pi-openai-compaction
+	installed_names="$(printf '%s\n' "$installed_names" | grep -vxF '@jordyvd/pi-openai-compaction' || true)"
+fi
+
 # pi-subagents carries a version FLOOR, not just a pin: below it, user-agent
 # discovery reads ~/.agents/skills/**/SKILL.md as agent definitions and the
 # Codex `backend` skill shadows this kit's `backend` persona (see the reconciler
