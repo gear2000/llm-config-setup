@@ -50,12 +50,6 @@ npm:pi-intercom@0.6.0
 # @ayulab/pi-rewind — /rewind checkpoint navigation.
 npm:@ayulab/pi-rewind@0.4.2
 
-# pi-openai-compaction — OpenAI native compaction replay for openai/openai-codex
-#   Responses providers. Installed from git because the maintained package source
-#   currently lives there; the installer removes the older npm package name first
-#   if it is present, so machines do not load both copies.
-git:github.com/jordyvandomselaar/pi-openai-compaction
-
 # --- Opt-in: not enabled in this release (this project doesn't use Cursor) ---
 # pi-cursor-sdk — use Cursor's models inside Pi.
 #   To enable in a project that uses Cursor: uncomment the line below and run

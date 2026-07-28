@@ -45,3 +45,5 @@ build/
 .vscode/
 .shared-llm/public/llm/pi/common/extensions/meta-orchestrator-hub/hub/hub
 .pi-lens
+.pi
+.shared-llm/this_repo

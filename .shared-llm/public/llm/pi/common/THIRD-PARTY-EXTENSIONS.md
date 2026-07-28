@@ -51,7 +51,6 @@ pi install npm:pi-markdown-preview@0.10.0      # rendered markdown / Mermaid / L
 pi install npm:pi-simplify@0.2.2               # review recently changed code for clarity
 pi install npm:pi-intercom@0.6.0               # 1:1 messaging between Pi sessions
 pi install npm:@ayulab/pi-rewind@0.4.2         # /rewind checkpoint navigation
-pi install git:github.com/jordyvandomselaar/pi-openai-compaction  # OpenAI native compaction replay
 ```
 
 Three packages this list used to carry — `@juicesharp/rpiv-btw`, `@plannotator/pi-extension`, and
@@ -59,17 +58,12 @@ Three packages this list used to carry — `@juicesharp/rpiv-btw`, `@plannotator
 installed. Re-add a line to `third-party-extensions.txt` if you want one back; adding it here does
 nothing.
 
-The older npm package entry `npm:@jordyvd/pi-openai-compaction` is treated as replaced by the git
-source above. The installer removes that npm entry first when it is present, so Pi does not load both
-copies of the compaction extension.
-
 ### Runtime dependencies (the kit never installs these — install them yourself if you want the feature)
 
 - **pi-markdown-preview** needs, at runtime:
   - **Pandoc** (+ a LaTeX engine such as `xelatex`) — for `/preview` rendering and PDF export. **Not present on this machine** as of writing; without it the PDF/preview rendering paths are unavailable, but the extension still loads. Install Pandoc separately (`apt install pandoc` / `brew install pandoc`); set `PANDOC_PATH` if it is off `PATH`.
   - A **Chromium-based browser** (Chrome / Brave / Edge / Chromium) for terminal/PNG preview. A Chrome binary is present here (`/usr/bin/google-chrome`). Set `PUPPETEER_EXECUTABLE_PATH` to override detection.
   - Optional: Mermaid CLI for Mermaid-in-PDF.
-- **pi-openai-compaction** is active only for `openai` / `openai-codex` Responses providers. Its config block is `openaiNativeCompaction` in `~/.pi/agent/settings.json`; the starter template enables it alongside Pi's built-in `compaction.enabled` flag.
 
 ## Retired: @hypabolic/pi-hypa (do not re-enable casually)
 
