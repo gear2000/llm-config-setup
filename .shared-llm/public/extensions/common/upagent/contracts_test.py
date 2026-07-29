@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
-_spec = importlib.util.spec_from_file_location("upagent_contracts", Path(__file__).with_name("contracts.py"))
+_spec = importlib.util.spec_from_file_location(
+    "upagent_contracts", Path(__file__).with_name("contracts.py")
+)
 assert _spec and _spec.loader
 contracts = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(contracts)
@@ -46,6 +48,24 @@ def _valid_result() -> dict:
 def test_valid_order_parses() -> None:
     order = contracts.parse_order(json.dumps(_valid_order()))
     assert order["stage_id"] == "stage-1-implementation"
+
+
+def test_order_accepts_only_requester_release_completion_policy() -> None:
+    order = _valid_order()
+    order["completion_policy"] = "requester_release"
+    assert (
+        contracts.parse_order(json.dumps(order))["completion_policy"]
+        == "requester_release"
+    )
+
+    order["completion_policy"] = "keep_forever"
+    with pytest.raises(ContractError, match="completion_policy"):
+        contracts.parse_order(json.dumps(order))
+
+    order["completion_policy"] = "requester_release"
+    order["timeout_ms"] = 7_200_001
+    with pytest.raises(ContractError, match="120 minutes"):
+        contracts.parse_order(json.dumps(order))
 
 
 def test_order_management_override_accepts_both_modes() -> None:
@@ -267,7 +287,9 @@ def test_result_singleton_full_log_list_is_rejected() -> None:
 
 def test_result_order_id_mismatch_fails() -> None:
     with pytest.raises(ContractError, match="does not match"):
-        contracts.parse_result(json.dumps(_valid_result()), expected_order_id="other-id")
+        contracts.parse_result(
+            json.dumps(_valid_result()), expected_order_id="other-id"
+        )
 
 
 def test_failed_verdict_requires_revisit() -> None:
@@ -350,13 +372,17 @@ def test_event_rejects_unknown_kind() -> None:
 def test_blocked_event_is_terminal() -> None:
     # A blocked phase ends its attempt; the owner decides and replays as a fresh pass.
     assert contracts.EVENT_KINDS["blocked"] is True
-    event = contracts.parse_event(json.dumps(_valid_event(kind="blocked", terminal=True)))
+    event = contracts.parse_event(
+        json.dumps(_valid_event(kind="blocked", terminal=True))
+    )
     assert event["terminal"] is True
 
 
 def test_event_terminal_flag_must_match_kind() -> None:
     with pytest.raises(ContractError, match="terminal"):
-        contracts.parse_event(json.dumps(_valid_event(kind="completed", terminal=False)))
+        contracts.parse_event(
+            json.dumps(_valid_event(kind="completed", terminal=False))
+        )
 
 
 def test_event_sequence_must_be_positive_integer() -> None:

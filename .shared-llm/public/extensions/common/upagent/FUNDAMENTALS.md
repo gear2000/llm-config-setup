@@ -89,6 +89,10 @@ PYTHON RECRUITER
 └─ projects and revalidates every public artifact before receipt and terminal evidence
 ```
 
+## Use case: retain one worker for controller review
+
+A managed requester may opt one worker into `completion_policy: requester_release` (the public façade exposes this as `--keep-open`). The worker performs a coding pass, writes a numbered lease-private checkpoint, and returns to idle in the same Herdr pane/session. The requester inspects the worktree and tests, then authenticates with the original control-token file to send feedback to that same worker or release it for terminal artifact publication. Checkpoints and feedback are durable; Herdr prompt injection only wakes the already-owned worker. The original lease deadline covers both work and review and may be extended through the existing requester-owned timeout decision. Only release authorizes a normal terminal bundle and cleanup; cancellation, timeout, or an early worker exit may still produce a Python-authored blocked terminal outcome. Ordinary workers remain one-shot.
+
 ## Reliability invariants
 
 1. Every request has a globally unique durable identity; a caller's human-readable order id is not
@@ -159,7 +163,8 @@ PYTHON RECRUITER
     launched. One failed revalidation, crash reconciliation, or worker/manager cleanup failure
     regenerates one Python-authored schema-valid blocked three-file bundle; specialists also
     receive a valid failure answer. Success prose is never retained beside a blocked result.
-17. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
+17. Retained review is explicit and release-gated. A valid checkpoint keeps the same worker pane live; it is not a terminal result. Feedback and release require the current requester control token and current lease identity. Premature terminal artifacts are quarantined, and a worker that exits before release blocks rather than entering artifact repair. The default order shape and one-shot cleanup path are unchanged when no completion policy is present.
+18. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
     can pass only with matching Recruiter-verified receipts whose answers are cited successes. Absent,
     rejected, failed, borrowed, or forged claims block finalization; direct source reading is not
     consult evidence.
@@ -175,6 +180,7 @@ negotiating/startup-check/running
     → needs-requester → retrying | cancelling | blocked
 
 running
+    → awaiting-review → running (feedback) | finalizing (release)
     → timeout-warning → awaiting-requester
     → extended | cancelling
 

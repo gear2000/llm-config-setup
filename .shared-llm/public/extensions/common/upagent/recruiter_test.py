@@ -11,6 +11,7 @@ Run: python3 -m pytest .shared-llm/extensions/common/upagent/recruiter_test.py -
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import multiprocessing
@@ -1485,7 +1486,10 @@ def test_requester_decision_is_fenced_to_current_lease_and_extends_it(
     key, _ = ledger.submit(order)
     token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
     assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
     lease = ledger.mark_awaiting_requester(key, token, "nonce-1", 1)
+    assert lease is not None
     decision = recruiter.lifecycle.parse_requester_decision(
         json.dumps(
             {
@@ -1506,6 +1510,18 @@ def test_requester_decision_is_fenced_to_current_lease_and_extends_it(
     assert path.is_file()
     assert new_expiry > old_expiry
     assert ledger.state(key)["state"] == "running"
+
+
+def test_retained_order_default_timeout_is_30_minutes_not_stage_default() -> None:
+    ordinary = _order(stage_id="stage-1-implementation")
+    retained = _order(
+        stage_id="stage-1-implementation", completion_policy="requester_release"
+    )
+    explicit = {**retained, "timeout_ms": 7_200_000}
+
+    assert recruiter._order_timeout_ms(ordinary) == 10_800_000
+    assert recruiter._order_timeout_ms(retained) == 1_800_000
+    assert recruiter._order_timeout_ms(explicit) == 7_200_000
 
 
 def test_run_order_honors_authorized_extension_after_timeout(
@@ -1641,6 +1657,8 @@ def test_timeout_waits_for_authenticated_requester_extension(
     key, _ = ledger.submit(order)
     token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
     assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
     manager = {
         "address": "manager-name",
         "config": SimpleNamespace(
@@ -1702,6 +1720,344 @@ def test_worker_instructions_have_no_result_only_fallback(tmp_path: Path) -> Non
     assert '`verdict`: exactly one of "passed", "failed", or "blocked"' in text
     assert "`full_log`: a non-empty transcript path" in text
     assert "Write exactly one result JSON file" not in text
+
+
+def test_retained_worker_instructions_checkpoint_before_terminal_artifacts(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "instructions.md"
+    original.write_text("Implement the change.\n")
+    order = _order(
+        instructions_path=str(original),
+        result_path=str(tmp_path / "public/result.json"),
+        completion_policy="requester_release",
+    )
+    manifest = _manifest_for_private(order, tmp_path / "private/result.json")
+    generated = tmp_path / "worker-instructions.md"
+
+    recruiter._write_worker_instructions(
+        order, manifest.artifact("result").staging_path, generated, manifest
+    )
+
+    text = generated.read_text()
+    assert "retained review-loop assignment" in text
+    assert "checkpoint-0001.json" in text
+    assert "Do NOT write result.json" in text
+    assert "Only REVIEW_RELEASE authorizes" in text
+
+
+def test_retained_checkpoint_requires_review_evidence(tmp_path: Path) -> None:
+    order = _order(completion_policy="requester_release")
+    review_dir = tmp_path / "review"
+    recruiter.JobLedger._write_json(
+        review_dir / "checkpoint-0001.json",
+        {
+            "schema_version": 1,
+            "order_id": order["order_id"],
+            "sequence": 1,
+            "summary": "looks done",
+        },
+    )
+    with pytest.raises(RecruiterError, match="summary, tests, and changed_files"):
+        recruiter._retained_checkpoint(review_dir, order, 1)
+
+
+def test_unreleased_retained_result_is_never_preserved_after_wait_fault() -> None:
+    order = _order(completion_policy="requester_release")
+    assert (
+        recruiter._may_preserve_worker_result(
+            order, _result(order["order_id"]), startup_validated=True
+        )
+        is False
+    )
+
+
+def test_finalize_rejects_unreleased_retained_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    submitted = _order(
+        result_path=str(tmp_path / "public/result.json"),
+        completion_policy="requester_release",
+    )
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(submitted)
+    order = ledger.order(key)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={"generation": 1, "herdr_session": "test-session", "runner_pid": -1},
+    )
+    assert isinstance(token, str)
+    result = _result(order["order_id"])
+    recruiter.JobLedger._write_json(ledger.result_staging_path(key, token), result)
+    with pytest.raises(RecruiterError, match="signed requester release"):
+        ledger.finalize(
+            key,
+            token,
+            order,
+            result,
+            cleanup={"status": "closed", "verified_absent": True},
+        )
+
+
+def test_retained_completion_monitor_quarantines_result_until_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    submitted = _order(
+        result_path=str(tmp_path / "public/result.json"),
+        completion_policy="requester_release",
+    )
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(submitted)
+    order = ledger.order(key)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={"generation": 1, "herdr_session": "test-session", "runner_pid": -1},
+    )
+    assert isinstance(token, str)
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    control_token = ledger.state(key)["requester_control_token"]
+    manifest = recruiter.completion.build_manifest(
+        order,
+        ledger.request_dir(key),
+        token,
+        recruiter.lifecycle.request_identity(order),
+    )
+    result_path = manifest.artifact("result").staging_path
+    result_path.parent.mkdir(parents=True)
+    stop, finalized, thread = recruiter._start_completion_monitor(
+        order,
+        result_path,
+        1_000,
+        artifact_manifest=manifest,
+    )
+    try:
+        # Worker-visible staging cannot authorize its own release.
+        recruiter.JobLedger._write_json(
+            result_path.parent / "review/release.json",
+            {
+                "schema_version": 1,
+                "order_id": order["order_id"],
+                "lease_token": manifest.lease_token,
+                "sequence": 1,
+            },
+        )
+        result_path.write_text(json.dumps(_result(order["order_id"])))
+        deadline = time.monotonic() + 2
+        while result_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not result_path.exists()
+        assert not finalized.is_set()
+        assert list((result_path.parent / "review/premature").glob("*/result.json"))
+
+        review_dir = result_path.parent / "review"
+        checkpoint_path = review_dir / "checkpoint-0001.json"
+        recruiter.JobLedger._write_json(
+            checkpoint_path,
+            {
+                "schema_version": 1,
+                "order_id": order["order_id"],
+                "request_id": recruiter.lifecycle.request_identity(order),
+                "lease_token": token,
+                "generation": 1,
+                "sequence": 1,
+                "summary": "ready for review",
+                "tests": "pass",
+                "changed_files": ["x.py"],
+            },
+        )
+        checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        authoritative = recruiter._review_release_path(result_path)
+        recruiter.JobLedger._write_json(
+            authoritative,
+            {
+                "schema_version": 1,
+                "order_id": order["order_id"],
+                "request_id": recruiter.lifecycle.request_identity(order),
+                "lease_token": manifest.lease_token,
+                "generation": 1,
+                "sequence": 1,
+                "checkpoint_sha256": checkpoint_sha256,
+                "created_at_ns": time.time_ns(),
+                "requester_signature": "0" * 64,
+            },
+        )
+        result_path.write_text(json.dumps(_result(order["order_id"])))
+        deadline = time.monotonic() + 2
+        while result_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not result_path.exists()
+        assert not finalized.is_set()
+
+        _release, reservation_id = ledger.authorize_review_release(
+            key, control_token, token, order, 1, checkpoint_sha256
+        )
+        assert list((authoritative.parent / "quarantine").glob("*.json"))
+        ledger.complete_review_release(key, token, reservation_id)
+        result_path.write_text(json.dumps(_result(order["order_id"])))
+        assert finalized.wait(timeout=2)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+def test_internal_retained_review_commands_continue_and_release_same_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    order = _order(
+        result_path=str(tmp_path / "public/result.json"),
+        completion_policy="requester_release",
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        120_000,
+        owner={"generation": 1, "herdr_session": "test-session", "runner_pid": -1},
+    )
+    assert isinstance(token, str)
+    assert ledger.record_worker(
+        key, token, "worker-pane", "workspace", "worker-address"
+    )
+    assert ledger.mark_worker_healthy(key, token, {"healthy": True})
+    control_token = ledger.state(key)["requester_control_token"]
+    review_dir = ledger.result_staging_path(key, token).parent / "review"
+    request_id = recruiter.lifecycle.request_identity(order)
+    checkpoint1 = review_dir / "checkpoint-0001.json"
+    recruiter.JobLedger._write_json(
+        checkpoint1,
+        {
+            "schema_version": 1,
+            "order_id": order["order_id"],
+            "request_id": request_id,
+            "lease_token": token,
+            "generation": 1,
+            "sequence": 1,
+            "summary": "first pass",
+            "tests": "pass",
+            "changed_files": ["x.py"],
+        },
+    )
+    checkpoint1_sha256 = hashlib.sha256(checkpoint1.read_bytes()).hexdigest()
+    feedback = tmp_path / "feedback.md"
+    feedback.write_text("Tighten the edge case.\n")
+    prompts: list[str] = []
+    cancellation_races: list[str] = []
+    timeout_races: list[object] = []
+
+    def capture_prompt(_address: str, message: str, **_kwargs: object) -> None:
+        prompts.append(message)
+        with pytest.raises(RecruiterError) as error:
+            ledger.begin_cancel(key, control_token)
+        cancellation_races.append(str(error.value))
+        timeout_races.append(
+            ledger.mark_awaiting_requester(
+                key, token, f"nonce-{len(prompts)}", len(prompts)
+            )
+        )
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", capture_prompt)
+
+    checkpoint1_bytes = checkpoint1.read_bytes()
+    changed = json.loads(checkpoint1_bytes)
+    changed["summary"] = "worker replaced the reviewed bytes"
+    recruiter.JobLedger._write_json(checkpoint1, changed)
+    with pytest.raises(RecruiterError, match="changed after requester inspection"):
+        recruiter.cmd_review_continue(
+            str(order_path), control_token, 1, checkpoint1_sha256, str(feedback)
+        )
+    checkpoint1.write_bytes(checkpoint1_bytes)
+
+    assert (
+        recruiter.cmd_review_continue(
+            str(order_path), control_token, 1, checkpoint1_sha256, str(feedback)
+        )
+        == 0
+    )
+    assert "checkpoint-0002.json" in prompts[0]
+    assert (review_dir / "feedback-0001.delivery.json").is_file()
+    feedback_state = ledger.state(key)
+    assert "review_delivery_sequence" not in feedback_state
+    assert "review_delivery_reserved_at_ns" not in feedback_state
+
+    checkpoint2 = review_dir / "checkpoint-0002.json"
+    recruiter.JobLedger._write_json(
+        checkpoint2,
+        {
+            "schema_version": 1,
+            "order_id": order["order_id"],
+            "request_id": request_id,
+            "lease_token": token,
+            "generation": 1,
+            "sequence": 2,
+            "summary": "revised pass",
+            "tests": "pass",
+            "changed_files": ["x.py"],
+        },
+    )
+    checkpoint2_sha256 = hashlib.sha256(checkpoint2.read_bytes()).hexdigest()
+    with pytest.raises(RecruiterError, match="latest retained checkpoint"):
+        recruiter.cmd_review_release(
+            str(order_path), control_token, 1, checkpoint1_sha256
+        )
+
+    def fail_release(*_args: object, **_kwargs: object) -> None:
+        raise RecruiterError("injected release delivery failure")
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", fail_release)
+    with pytest.raises(RecruiterError, match="injected release"):
+        recruiter.cmd_review_release(
+            str(order_path), control_token, 2, checkpoint2_sha256
+        )
+    assert ledger.state(key)["state"] == "running"
+    assert not ledger.review_release_path(key, token).exists()
+
+    _release, partial_reservation_id = ledger.authorize_review_release(
+        key, control_token, token, order, 2, checkpoint2_sha256
+    )
+    claim_path = ledger.active / "requests" / key / "lease.json"
+    partial_lease = ledger._lease(claim_path)
+    partial_lease.pop("release_delivery_reservation_id")
+    partial_lease.pop("release_delivery_reserved_at_ns")
+    ledger._write_json(claim_path, partial_lease)
+    ledger._snapshot(key, "running", **partial_lease)
+
+    _release, stale_reservation_id = ledger.authorize_review_release(
+        key, control_token, token, order, 2, checkpoint2_sha256
+    )
+    assert stale_reservation_id == partial_reservation_id
+    stale_lease = ledger._lease(claim_path)
+    stale_lease["release_delivery_reserved_at_ns"] = 0
+    ledger._write_json(claim_path, stale_lease)
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", capture_prompt)
+    assert (
+        recruiter.cmd_review_release(
+            str(order_path), control_token, 2, checkpoint2_sha256
+        )
+        == 0
+    )
+    assert "REVIEW_RELEASE" in prompts[1]
+    release_record = json.loads(ledger.review_release_path(key, token).read_text())
+    assert release_record["sequence"] == 2
+    assert release_record["delivery_reservation_id"] == stale_reservation_id
+    assert "review-delivering" in cancellation_races[0]
+    assert "release-delivering" in cancellation_races[1]
+    assert timeout_races == [None, None]
+    final_state = ledger.state(key)
+    assert final_state["state"] == "finalizing"
+    assert "release_delivery_reservation_id" not in final_state
+    assert "release_delivery_reserved_at_ns" not in final_state
 
 
 def test_typed_worker_instructions_name_every_private_artifact_and_no_public_answer(

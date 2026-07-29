@@ -68,6 +68,10 @@ per-run isolation. The mode is chosen once at `just upagent-up` and inherited by
    report a warning and leave the agent in its source tab if Herdr cannot move or resize it, but
    never fail or alter a healthy worker lifecycle because of cockpit geometry.
 
+## Retained worker interaction
+
+For an explicitly controller-owned ad-hoc task, this managed TUI may use `/upagent-run --duration-minutes <1..120> --keep-open <task>`. The runner owner token file is the caller proof. Follow the checkpoint loop: inspect the actual diff/tests, send authenticated `review-continue` feedback to the same live worker, and use `review-release` only when accepted; then await its terminal receipt. The initial duration covers coding plus review and may be extended through the existing timeout decision. Do not use this to bypass the phase transaction: a retained stage worker remains owned by its phase leader, not by this TUI, and ordinary workers remain one-shot.
+
 ## Phase loop
 
 For each phase, in canonical order starting at `--start-phase` (respecting `--max-phases`):

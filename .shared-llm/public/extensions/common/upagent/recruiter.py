@@ -167,6 +167,7 @@ UPAGENT_PANE_LABEL = "upagent"
 LEGACY_RECRUITER_PANE_LABEL = "recruiter"
 SERVICES_TAB_LABEL = "services"
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 min per worker unless the order overrides
+MAX_RETAINED_TIMEOUT_MS = 7_200_000  # 120 min across coding plus requester review
 LEASE_GRACE_SECONDS = 60
 COMPLETION_MONITOR_POLL_SECONDS = 0.05
 INVALID_RESULT_SETTLE_SECONDS = 0.5
@@ -293,6 +294,75 @@ class AgentWaitTimeout(RecruiterError):
 
 class StartupRejectedByManager(RecruiterError):
     """A dedicated manager explicitly refused the startup; a ruling, not a launch flake."""
+
+
+def _signed_release_record(
+    record: dict[str, object], control_token: str
+) -> dict[str, object]:
+    signed = json.dumps(record, separators=(",", ":"), sort_keys=True).encode()
+    return {
+        **record,
+        "requester_signature": hmac.new(
+            control_token.encode(), signed, hashlib.sha256
+        ).hexdigest(),
+    }
+
+
+def _validate_signed_release(
+    path: Path,
+    order: dict,
+    lease_token: str,
+    generation: int,
+    control_token: str,
+) -> dict:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"retained release record {path} is invalid: {error}"
+        ) from error
+    expected_keys = {
+        "schema_version",
+        "order_id",
+        "request_id",
+        "lease_token",
+        "generation",
+        "sequence",
+        "checkpoint_sha256",
+        "delivery_reservation_id",
+        "created_at_ns",
+        "requester_signature",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_keys
+        or value.get("schema_version") != 1
+        or value.get("order_id") != order["order_id"]
+        or value.get("request_id") != lifecycle.request_identity(order)
+        or value.get("lease_token") != lease_token
+        or value.get("generation") != generation
+        or not isinstance(value.get("sequence"), int)
+        or isinstance(value.get("sequence"), bool)
+        or value["sequence"] <= 0
+        or not isinstance(value.get("checkpoint_sha256"), str)
+        or not isinstance(value.get("delivery_reservation_id"), str)
+        or not value["delivery_reservation_id"]
+        or re.fullmatch(r"[0-9a-f]{64}", value["checkpoint_sha256"]) is None
+        or not isinstance(value.get("requester_signature"), str)
+    ):
+        raise RecruiterError(
+            "retained release authorization has invalid signed identity"
+        )
+    unsigned = {
+        field: item for field, item in value.items() if field != "requester_signature"
+    }
+    expected = cast(
+        str, _signed_release_record(unsigned, control_token)["requester_signature"]
+    )
+    signature = cast(str, value["requester_signature"])
+    if not hmac.compare_digest(signature, expected):
+        raise RecruiterError("retained release authorization signature is invalid")
+    return value
 
 
 class JobLedger:
@@ -907,6 +977,385 @@ class JobLedger:
     def worker_instructions_path(self, key: str, token: str) -> Path:
         return self.request_dir(key) / "workers" / f"{token}-instructions.md"
 
+    def review_release_path(self, key: str, lease_token: str) -> Path:
+        return self.request_dir(key) / "review-control" / lease_token / "release.json"
+
+    def authorize_review_release(
+        self,
+        key: str,
+        control_token: str,
+        lease_token: str,
+        order: dict,
+        sequence: int,
+        checkpoint_sha256: str,
+    ) -> tuple[Path, str]:
+        """Reserve one exclusive requester release delivery under the active lease fence."""
+        with self._claim_lock(key):
+            self.verify_control_token(key, control_token)
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                raise RecruiterError("retained request has no active lease")
+            lease = self._lease(claim_dir / "lease.json")
+            if lease.get("token") != lease_token:
+                raise RecruiterError("retained release lost current lease ownership")
+            lifecycle_state = self.state(key).get("state")
+            reclaimed_reservation: str | None = None
+            if lifecycle_state == "release-delivering":
+                reserved_at = lease.get("release_delivery_reserved_at_ns")
+                candidate = lease.get("release_delivery_reservation_id")
+                stale = (
+                    isinstance(reserved_at, int)
+                    and not isinstance(reserved_at, bool)
+                    and reserved_at + 120_000_000_000 < time.time_ns()
+                    and isinstance(candidate, str)
+                    and bool(candidate)
+                )
+                if not stale:
+                    raise RecruiterError(
+                        "retained release delivery reservation is active"
+                    )
+                reclaimed_reservation = cast(str, candidate)
+            elif lifecycle_state != "running":
+                raise RecruiterError(
+                    "retained release requires a running worker with no active delivery"
+                )
+            path = self.review_release_path(key, lease_token)
+            existing = None
+            if re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha256) is None:
+                raise RecruiterError("retained release checkpoint hash is invalid")
+            generation = lease.get("generation", 1)
+            control = lease.get("requester_control_token")
+            if (
+                not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or not isinstance(control, str)
+            ):
+                raise RecruiterError(
+                    "retained release lease has invalid control identity"
+                )
+            review_dir = self.result_staging_path(key, lease_token).parent / "review"
+            latest = _latest_retained_checkpoint(
+                review_dir, order, lease_token, generation
+            )
+            if (
+                latest is None
+                or latest[0] != sequence
+                or latest[2] != checkpoint_sha256
+            ):
+                raise RecruiterError(
+                    "retained release checkpoint changed before authorization"
+                )
+            if path.is_file():
+                try:
+                    existing = _validate_signed_release(
+                        path, order, lease_token, generation, control
+                    )
+                except RecruiterError:
+                    quarantine = path.parent / "quarantine" / f"{time.time_ns()}.json"
+                    quarantine.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(path, quarantine)
+                    existing = None
+            reservation_id = reclaimed_reservation or (
+                cast(str, existing["delivery_reservation_id"])
+                if isinstance(existing, dict)
+                else uuid.uuid4().hex
+            )
+            record = _signed_release_record(
+                {
+                    "schema_version": 1,
+                    "order_id": order["order_id"],
+                    "request_id": lifecycle.request_identity(order),
+                    "lease_token": lease_token,
+                    "generation": generation,
+                    "sequence": sequence,
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "delivery_reservation_id": reservation_id,
+                    "created_at_ns": time.time_ns(),
+                },
+                control_token,
+            )
+            if existing is not None and any(
+                existing.get(field) != record[field]
+                for field in (
+                    "order_id",
+                    "request_id",
+                    "lease_token",
+                    "generation",
+                    "sequence",
+                    "checkpoint_sha256",
+                )
+            ):
+                raise RecruiterError(
+                    "retained request has a conflicting release authorization"
+                )
+            if existing is None:
+                self._write_json(path, record)
+            lease.pop("review_transition_grace_used", None)
+            lease["release_delivery_reservation_id"] = reservation_id
+            lease["release_delivery_reserved_at_ns"] = time.time_ns()
+            self._write_json(claim_dir / "lease.json", lease)
+            self._snapshot(
+                key,
+                "release-delivering",
+                **lease,
+                release_path=str(path),
+                release_sequence=sequence,
+            )
+            return path, reservation_id
+
+    def complete_review_release(
+        self, key: str, lease_token: str, reservation_id: str
+    ) -> Path:
+        with self._claim_lock(key):
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                raise RecruiterError("retained request has no active lease")
+            lease = self._lease(claim_dir / "lease.json")
+            if (
+                lease.get("token") != lease_token
+                or lease.get("release_delivery_reservation_id") != reservation_id
+                or self.state(key).get("state") != "release-delivering"
+            ):
+                raise RecruiterError("retained release delivery lost its reservation")
+            release = self.review_release_path(key, lease_token)
+            order = self.order(key)
+            generation = lease.get("generation", 1)
+            control = lease.get("requester_control_token")
+            if (
+                not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or not isinstance(control, str)
+            ):
+                raise RecruiterError(
+                    "retained release delivery has invalid lease identity"
+                )
+            authorization = _validate_signed_release(
+                release, order, lease_token, generation, control
+            )
+            if authorization.get("delivery_reservation_id") != reservation_id:
+                raise RecruiterError(
+                    "retained release authorization has another reservation"
+                )
+            delivery = release.with_name("release.delivery.json")
+            self._write_json(
+                delivery,
+                {
+                    "schema_version": 1,
+                    "order_id": order["order_id"],
+                    "request_id": lifecycle.request_identity(order),
+                    "lease_token": lease_token,
+                    "generation": generation,
+                    "sequence": authorization["sequence"],
+                    "delivery_reservation_id": reservation_id,
+                    "delivered_at_ns": time.time_ns(),
+                },
+            )
+            committed_lease = dict(lease)
+            committed_lease.pop("release_delivery_reservation_id", None)
+            committed_lease.pop("release_delivery_reserved_at_ns", None)
+            committed_lease.pop("review_transition_grace_used", None)
+            self._snapshot(
+                key,
+                "finalizing",
+                **committed_lease,
+                release_delivery_path=str(delivery),
+            )
+            self._write_json(claim_dir / "lease.json", committed_lease)
+            return delivery
+
+    def abort_review_release(
+        self, key: str, lease_token: str, reservation_id: str, reason: str
+    ) -> None:
+        with self._claim_lock(key):
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                return
+            lease = self._lease(claim_dir / "lease.json")
+            if (
+                lease.get("token") != lease_token
+                or lease.get("release_delivery_reservation_id") != reservation_id
+                or self.state(key).get("state") != "release-delivering"
+            ):
+                return
+            release = self.review_release_path(key, lease_token)
+            if release.is_file():
+                failed = release.parent / "failed-delivery" / f"{time.time_ns()}.json"
+                failed.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(release, failed)
+            lease.pop("review_transition_grace_used", None)
+            lease.pop("release_delivery_reservation_id", None)
+            lease.pop("release_delivery_reserved_at_ns", None)
+            self._write_json(claim_dir / "lease.json", lease)
+            self._event(key, "review-release-delivery-failed", reason=reason)
+            self._snapshot(key, "running", **lease, release_delivery_error=reason)
+
+    def reserve_review_feedback(
+        self,
+        key: str,
+        control_token: str,
+        lease_token: str,
+        order: dict,
+        sequence: int,
+        checkpoint_sha256: str,
+        feedback: str,
+        feedback_sha256: str,
+    ) -> None:
+        with self._claim_lock(key):
+            self.verify_control_token(key, control_token)
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                raise RecruiterError("retained request has no active lease")
+            lease = self._lease(claim_dir / "lease.json")
+            if (
+                lease.get("token") != lease_token
+                or self.state(key).get("state") != "running"
+            ):
+                raise RecruiterError(
+                    "retained feedback lost the running lease decision race"
+                )
+            generation = lease.get("generation", 1)
+            if isinstance(generation, bool) or not isinstance(generation, int):
+                raise RecruiterError("retained feedback lease generation is invalid")
+            review_dir = self.result_staging_path(key, lease_token).parent / "review"
+            latest = _latest_retained_checkpoint(
+                review_dir, order, lease_token, generation
+            )
+            if (
+                latest is None
+                or latest[0] != sequence
+                or latest[2] != checkpoint_sha256
+            ):
+                raise RecruiterError(
+                    "retained feedback checkpoint changed before delivery reservation"
+                )
+            feedback_path = review_dir / f"feedback-{sequence:04d}.json"
+            existing = None
+            if feedback_path.is_file():
+                try:
+                    existing = json.loads(feedback_path.read_text())
+                except (OSError, json.JSONDecodeError) as error:
+                    raise RecruiterError(
+                        f"retained feedback record is invalid: {error}"
+                    ) from error
+            if existing is not None and (
+                not isinstance(existing, dict)
+                or existing.get("lease_token") != lease_token
+                or existing.get("prompt_sha256") != feedback_sha256
+            ):
+                raise RecruiterError(
+                    "retained checkpoint already has different feedback"
+                )
+            if existing is None:
+                self._write_json(
+                    feedback_path,
+                    {
+                        "schema_version": 1,
+                        "order_id": order["order_id"],
+                        "request_id": lifecycle.request_identity(order),
+                        "lease_token": lease_token,
+                        "generation": generation,
+                        "sequence": sequence,
+                        "prompt_sha256": feedback_sha256,
+                        "feedback": feedback,
+                        "created_at_ns": time.time_ns(),
+                    },
+                )
+            lease["review_delivery_sequence"] = sequence
+            lease["review_delivery_reserved_at_ns"] = time.time_ns()
+            self._write_json(claim_dir / "lease.json", lease)
+            self._snapshot(key, "review-delivering", **lease)
+
+    def commit_review_feedback(self, key: str, lease_token: str, sequence: int) -> Path:
+        with self._claim_lock(key):
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                raise RecruiterError("retained request has no active lease")
+            lease = self._lease(claim_dir / "lease.json")
+            if (
+                lease.get("token") != lease_token
+                or lease.get("review_delivery_sequence") != sequence
+                or self.state(key).get("state") != "review-delivering"
+            ):
+                raise RecruiterError("retained feedback delivery lost lease ownership")
+            generation = lease.get("generation", 1)
+            if isinstance(generation, bool) or not isinstance(generation, int):
+                raise RecruiterError("retained feedback delivery generation is invalid")
+            order = self.order(key)
+            review_dir = self.result_staging_path(key, lease_token).parent / "review"
+            delivery = review_dir / f"feedback-{sequence:04d}.delivery.json"
+            self._write_json(
+                delivery,
+                {
+                    "schema_version": 1,
+                    "order_id": order["order_id"],
+                    "request_id": lifecycle.request_identity(order),
+                    "lease_token": lease_token,
+                    "generation": generation,
+                    "sequence": sequence,
+                    "delivered_at_ns": time.time_ns(),
+                },
+            )
+            committed_lease = dict(lease)
+            committed_lease.pop("review_delivery_sequence", None)
+            committed_lease.pop("review_delivery_reserved_at_ns", None)
+            committed_lease.pop("review_transition_grace_used", None)
+            self._snapshot(
+                key,
+                "running",
+                **committed_lease,
+                feedback_delivery_path=str(delivery),
+            )
+            self._write_json(claim_dir / "lease.json", committed_lease)
+            return delivery
+
+    def abort_review_feedback(self, key: str, lease_token: str, sequence: int) -> None:
+        with self._claim_lock(key):
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                return
+            lease = self._lease(claim_dir / "lease.json")
+            if (
+                lease.get("token") != lease_token
+                or lease.get("review_delivery_sequence") != sequence
+                or self.state(key).get("state") != "review-delivering"
+            ):
+                return
+            review_dir = self.result_staging_path(key, lease_token).parent / "review"
+            feedback = review_dir / f"feedback-{sequence:04d}.json"
+            if feedback.is_file():
+                failed = (
+                    review_dir
+                    / "failed-delivery"
+                    / f"feedback-{sequence:04d}-{time.time_ns()}.json"
+                )
+                failed.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(feedback, failed)
+            lease.pop("review_delivery_sequence", None)
+            lease.pop("review_delivery_reserved_at_ns", None)
+            lease.pop("review_transition_grace_used", None)
+            self._write_json(claim_dir / "lease.json", lease)
+            self._snapshot(key, "running", **lease)
+
+    def consume_review_transition_grace(
+        self, key: str, lease_token: str, grace_ms: int = 60_000
+    ) -> int | None:
+        with self._claim_lock(key):
+            claim_dir = self.active / "requests" / key
+            if not claim_dir.is_dir():
+                return None
+            lease = self._lease(claim_dir / "lease.json")
+            if lease.get("token") != lease_token:
+                return None
+            state = self.state(key).get("state")
+            if state not in ("review-delivering", "release-delivering", "finalizing"):
+                return None
+            if lease.get("review_transition_grace_used") is True:
+                return None
+            lease["review_transition_grace_used"] = True
+            self._write_json(claim_dir / "lease.json", lease)
+            self._snapshot(key, cast(str, state), **lease)
+            return grace_ms
+
     def mark_runner_completed(
         self, key: str, *, source: str, require_dead: bool = False
     ) -> bool:
@@ -1344,8 +1793,8 @@ class JobLedger:
 
     def mark_awaiting_requester(
         self, key: str, token: str, nonce: str, timeout_number: int
-    ) -> dict:
-        """Publish a timeout decision point while preserving the lease ownership fence."""
+    ) -> dict | None:
+        """Publish a timeout decision only while running; a review transition wins races."""
         claim_dir = self.active / "requests" / key
         with self._claim_lock(key):
             if not claim_dir.is_dir():
@@ -1353,6 +1802,8 @@ class JobLedger:
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
                 raise RecruiterError("request lease changed before timeout warning")
+            if self.state(key).get("state") != "running":
+                return None
             detail = {"decision_nonce": nonce, "timeout_number": timeout_number}
             self._event(key, "timeout-warning", **detail)
             self._snapshot(key, "awaiting-requester", **lease, **detail)
@@ -1367,6 +1818,10 @@ class JobLedger:
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
                 raise RecruiterError("request lease changed before extension")
+            if self.state(key).get("state") != "awaiting-requester":
+                raise RecruiterError(
+                    "request is no longer awaiting this extension decision"
+                )
             expires_at = (
                 max(lease["expires_at"], int(time.time()))
                 + int(extension_ms / 1000)
@@ -1445,6 +1900,43 @@ class JobLedger:
             ):
                 raise RecruiterError(
                     "requester control token does not match the current request generation"
+                )
+            lifecycle_state = self.state(key).get("state")
+            if lifecycle_state in ("release-delivering", "review-delivering"):
+                reserved_field = (
+                    "release_delivery_reserved_at_ns"
+                    if lifecycle_state == "release-delivering"
+                    else "review_delivery_reserved_at_ns"
+                )
+                reserved_at = lease.get(reserved_field)
+                stale = (
+                    isinstance(reserved_at, int)
+                    and not isinstance(reserved_at, bool)
+                    and reserved_at + 120_000_000_000 < time.time_ns()
+                )
+                if not stale:
+                    raise RecruiterError(
+                        f"request is {lifecycle_state}; cancellation lost the active delivery race"
+                    )
+                if lifecycle_state == "release-delivering":
+                    release = self.review_release_path(key, cast(str, lease["token"]))
+                    if release.is_file():
+                        failed = (
+                            release.parent / "stale-delivery" / f"{time.time_ns()}.json"
+                        )
+                        failed.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(release, failed)
+                    lease.pop("release_delivery_reservation_id", None)
+                    lease.pop("release_delivery_reserved_at_ns", None)
+                else:
+                    lease.pop("review_delivery_sequence", None)
+                    lease.pop("review_delivery_reserved_at_ns", None)
+                self._write_json(claim_dir / "lease.json", lease)
+                self._snapshot(key, "running", **lease)
+                lifecycle_state = "running"
+            if lifecycle_state == "finalizing":
+                raise RecruiterError(
+                    "request is finalizing; cancellation lost the completed release race"
                 )
             existing_cancellation = lease.get("cancel_requested_at_ns")
             if isinstance(existing_cancellation, int) and not isinstance(
@@ -1696,6 +2188,17 @@ class JobLedger:
             parsed = parse_result(
                 json.dumps(result), expected_order_id=order["order_id"]
             )
+            if (
+                order.get("completion_policy") == "requester_release"
+                and parsed.get("verdict") != "blocked"
+                and _verified_delivered_review_release(
+                    self.result_staging_path(key, token), order, token
+                )
+                is None
+            ):
+                raise RecruiterError(
+                    "retained worker result cannot finalize without signed requester release"
+                )
             manifest = completion.build_manifest(
                 order,
                 self.request_dir(key),
@@ -2085,6 +2588,16 @@ def _specialist_index(roster: dict) -> dict[str, dict]:
 def _default_timeout_ms(stage_id: str) -> int:
     """Return the stage-specific default without duplicating stage validation."""
     return STAGE_TIMEOUT_MS.get(stage_id, DEFAULT_TIMEOUT_MS)
+
+
+def _order_timeout_ms(order: dict) -> int:
+    """Keep retained workers on the public 30-minute default unless explicitly extended."""
+    explicit = order.get("timeout_ms")
+    if isinstance(explicit, int) and not isinstance(explicit, bool):
+        return explicit
+    if order.get("completion_policy") == "requester_release":
+        return DEFAULT_TIMEOUT_MS
+    return _default_timeout_ms(order["stage_id"])
 
 
 def _phase_start_receipt(order: dict) -> Path | None:
@@ -3256,6 +3769,7 @@ def _write_worker_instructions(
     worker_result_path: Path,
     destination: Path,
     artifact_manifest: Any,
+    review_generation: int = 1,
 ) -> None:
     """Append one final, literal delivery contract to the stage brief.
 
@@ -3270,8 +3784,28 @@ def _write_worker_instructions(
     paths = {item.kind: item.staging_path for item in artifact_manifest.artifacts}
     # Ask for every artifact; the publisher separately tolerates a missing summary rather than
     # discarding finished work. Do not advertise that tolerance here, or summaries stop arriving.
+    retained = order.get("completion_policy") == "requester_release"
+    review_dir = worker_result_path.parent / "review"
+    retained_contract = (
+        "This is a retained review-loop assignment. Complete the first coding pass, then "
+        "write a checkpoint JSON object atomically to "
+        f"{review_dir / 'checkpoint-0001.json'} with `order_id` exactly "
+        f'"{order["order_id"]}", `request_id` exactly "{artifact_manifest.request_id}", '
+        f'`lease_token` exactly "{artifact_manifest.lease_token}", `generation` {review_generation}, '
+        "`schema_version` 1, `sequence` 1, and non-empty `summary`, `tests`, and "
+        "`changed_files` fields. Do NOT write result.json, compacted.md, or handoff.md yet, "
+        "and do not exit. Return to idle and wait for REVIEW_CONTINUE or REVIEW_RELEASE from "
+        "the owning requester. Each REVIEW_CONTINUE names the next checkpoint path. Only "
+        "REVIEW_RELEASE authorizes the terminal artifacts below.\n\n"
+        if retained
+        else ""
+    )
     destinations = (
-        "Write ALL of these artifacts to these literal lease-private paths:\n"
+        retained_contract
+        + "Terminal delivery paths (write only after REVIEW_RELEASE in retained mode):\n"
+        if retained
+        else "Write ALL of these artifacts to these literal lease-private paths:\n"
+    ) + (
         f"- result.json: {paths['result']}  (REQUIRED — your work is not recorded without it)\n"
         f"- compacted.md: {paths['compacted']}\n"
         f"- handoff.md: {paths['handoff']}\n"
@@ -3491,7 +4025,7 @@ def _may_preserve_worker_result(
     order: dict, result: dict, *, startup_validated: bool
 ) -> bool:
     """A wait fault may preserve only a semantically terminal worker result."""
-    if not startup_validated:
+    if not startup_validated or order.get("completion_policy") == "requester_release":
         return False
     try:
         return _watchdog_terminal_reason(order, result) is None
@@ -3632,6 +4166,125 @@ def _complete_typed_bundle(
     return python_blocked
 
 
+def _review_dir(worker_result_path: Path) -> Path:
+    return worker_result_path.parent / "review"
+
+
+def _review_release_path(worker_result_path: Path) -> Path:
+    return (
+        worker_result_path.parents[2]
+        / "review-control"
+        / worker_result_path.parent.name
+        / "release.json"
+    )
+
+
+def _review_record(path: Path, order: dict, lease_token: str, kind: str) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"retained-worker {kind} record {path} is invalid: {error}"
+        ) from error
+    if not isinstance(value, dict):
+        raise RecruiterError(f"retained-worker {kind} record {path} must be an object")
+    if (
+        value.get("order_id") != order["order_id"]
+        or value.get("lease_token") != lease_token
+    ):
+        raise RecruiterError(
+            f"retained-worker {kind} record {path} has stale ownership"
+        )
+    sequence = value.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+        raise RecruiterError(
+            f"retained-worker {kind} record {path} has invalid sequence"
+        )
+    return value
+
+
+def _verified_review_authorization(
+    worker_result_path: Path, order: dict, lease_token: str
+) -> dict | None:
+    path = _review_release_path(worker_result_path)
+    value = _review_record(path, order, lease_token, "release")
+    if value is None:
+        return None
+    ledger = JobLedger()
+    key = ledger.key_for_order(order)
+    claim_dir = ledger.active / "requests" / key
+    if not claim_dir.is_dir():
+        raise RecruiterError("retained release has no active lease to verify")
+    lease = ledger._lease(claim_dir / "lease.json")
+    generation = lease.get("generation", 1)
+    control_token = lease.get("requester_control_token")
+    if (
+        lease.get("token") != lease_token
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or not isinstance(control_token, str)
+    ):
+        raise RecruiterError("retained release lease identity is invalid")
+    value = _validate_signed_release(
+        path, order, lease_token, generation, control_token
+    )
+    review_dir = _review_dir(worker_result_path)
+    latest = _latest_retained_checkpoint(review_dir, order, lease_token, generation)
+    if latest is None or value.get("sequence") != latest[0]:
+        raise RecruiterError("retained release no longer targets the latest checkpoint")
+    if value.get("checkpoint_sha256") != latest[2]:
+        raise RecruiterError("retained release checkpoint changed after authorization")
+    return value
+
+
+def _verified_delivered_review_release(
+    worker_result_path: Path, order: dict, lease_token: str
+) -> dict | None:
+    authorization = _verified_review_authorization(
+        worker_result_path, order, lease_token
+    )
+    if authorization is None:
+        return None
+    delivery_path = _review_release_path(worker_result_path).with_name(
+        "release.delivery.json"
+    )
+    try:
+        delivery = json.loads(delivery_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"retained release delivery record is absent or invalid: {error}"
+        ) from error
+    expected = {
+        "schema_version": 1,
+        "order_id": order["order_id"],
+        "request_id": lifecycle.request_identity(order),
+        "lease_token": lease_token,
+        "generation": authorization["generation"],
+        "sequence": authorization["sequence"],
+        "delivery_reservation_id": authorization["delivery_reservation_id"],
+    }
+    if (
+        not isinstance(delivery, dict)
+        or any(delivery.get(field) != value for field, value in expected.items())
+        or not isinstance(delivery.get("delivered_at_ns"), int)
+        or isinstance(delivery.get("delivered_at_ns"), bool)
+    ):
+        raise RecruiterError("retained release delivery does not match authorization")
+    return authorization
+
+
+def _archive_premature_retained_bundle(
+    artifact_manifest: Any, review_dir: Path
+) -> None:
+    archive = review_dir / "premature" / str(time.time_ns())
+    archive.mkdir(parents=True, exist_ok=False)
+    for artifact in artifact_manifest.artifacts:
+        if artifact.staging_path.is_file():
+            os.replace(artifact.staging_path, archive / artifact.staging_path.name)
+
+
 def _start_completion_monitor(
     order: dict,
     worker_result_path: Path,
@@ -3657,6 +4310,8 @@ def _start_completion_monitor(
     def monitor() -> None:
         nonlocal next_check
         check_number = 0
+        retained = order.get("completion_policy") == "requester_release"
+        review_dir = _review_dir(worker_result_path)
         while not stop.is_set():
             if (
                 next_check is not None
@@ -3675,6 +4330,31 @@ def _start_completion_monitor(
             except CompletionError:
                 stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
                 continue
+            if retained:
+                try:
+                    release = _verified_delivered_review_release(
+                        worker_result_path, order, artifact_manifest.lease_token
+                    )
+                except RecruiterError as error:
+                    try:
+                        pending = _verified_review_authorization(
+                            worker_result_path, order, artifact_manifest.lease_token
+                        )
+                    except RecruiterError:
+                        pending = None
+                    if pending is not None:
+                        # A requester-authenticated release is currently being delivered. Do not
+                        # quarantine a fast worker's result in the narrow pre-commit window.
+                        stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
+                        continue
+                    command_runtime.write_stderr(
+                        f"recruiter: quarantining unauthenticated retained completion: {error}\n"
+                    )
+                    release = None
+                if release is None:
+                    _archive_premature_retained_bundle(artifact_manifest, review_dir)
+                    stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
+                    continue
             finalized.set()
             while finalized.is_set() and not stop.wait(COMPLETION_MONITOR_POLL_SECONDS):
                 pass
@@ -4203,6 +4883,10 @@ def _await_requester_timeout_decision(
     request_id = lifecycle.request_identity(order)
     nonce = uuid.uuid4().hex
     lease = ledger.mark_awaiting_requester(key, token, nonce, timeout_number)
+    if lease is None:
+        # Release or feedback delivery won the state race. Permit one bounded finalization
+        # grace; a second timeout hard-stops instead of extending forever.
+        return ledger.consume_review_transition_grace(key, token)
     control_token = cast(str, lease["requester_control_token"])
     config = cast(Any, manager["config"])
     response_path = ledger.request_dir(key) / "responses" / f"{nonce}.json"
@@ -4419,6 +5103,7 @@ def _run_order(
     herdr_session: str | None = None,
     start_worker_agent: Callable[..., tuple[str, str | None, str]] | None = None,
     artifact_manifest: Any | None = None,
+    review_generation: int = 1,
 ) -> tuple[int, dict, dict[str, object]]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -4460,7 +5145,11 @@ def _run_order(
             or worker_result_path.with_name("worker-instructions.md")
         )
         _write_worker_instructions(
-            order, worker_result_path, effective_instructions, artifact_manifest
+            order,
+            worker_result_path,
+            effective_instructions,
+            artifact_manifest,
+            review_generation,
         )
         execution_order["instructions_path"] = str(effective_instructions)
         launch = resolve_launch_command(execution_order, roster)
@@ -4502,7 +5191,7 @@ def _run_order(
         if on_worker_healthy is not None:
             on_worker_healthy(health)
         startup_validated = True
-        wait_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+        wait_ms = _order_timeout_ms(order)
         wait_deadline = time.monotonic() + wait_ms / 1000
         timeout_number = 0
         premature_number = 0
@@ -4529,6 +5218,17 @@ def _run_order(
                 wait_deadline = time.monotonic() + extension_ms / 1000
                 continue
 
+            # A retained worker may become terminal only after the owning requester writes the
+            # lease-fenced release record. An early worker exit is a fail-loud blocked outcome;
+            # the completion repair path must never manufacture authorization.
+            if order.get("completion_policy") == "requester_release":
+                release = _verified_delivered_review_release(
+                    worker_result_path, order, artifact_manifest.lease_token
+                )
+                if release is None:
+                    raise RecruiterError(
+                        f"retained worker {worker_pane} exited before requester release"
+                    )
             # Ordinary workers proceed directly to the completion reactor, which validates the
             # whole bundle and can repair it while the original worker is still addressable.
             # Watchdogs alone need an early semantic check because a syntactically valid result
@@ -4665,6 +5365,7 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "result_path": ("result_path", "result", "result_file", "output_path", "output"),
     "cockpit_pane": ("cockpit_pane", "pane", "cockpit"),
     "timeout_ms": ("timeout_ms", "timeout"),
+    "completion_policy": ("completion_policy",),
     "env": ("env",),
     "requester": ("requester",),
     "management": ("management",),
@@ -4706,6 +5407,7 @@ ORDER_INTAKE_PROTECTED = (
     "result_path",
     "cockpit_pane",
     "timeout_ms",
+    "completion_policy",
     "env",
     "requester",
     "management",
@@ -6041,7 +6743,9 @@ def _intake_order(order_path: str, roster_path: str) -> dict:
             return _interpret_submission(order_path, path, paths, roster_path)
     except IntakeOutcomeError:
         raise
-    except RecruiterError as error:  # the Recruiter's own workspace, never the submission
+    except (
+        RecruiterError
+    ) as error:  # the Recruiter's own workspace, never the submission
         raise IntakeOutcomeError(
             "infrastructure-failure",
             order_path,
@@ -6468,7 +7172,7 @@ def _terminalize_start_failure(
     error: OSError | RuntimeError | RecruiterError,
 ) -> bool:
     """Publish the Python-authored blocked bundle for a runner launch failure."""
-    timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+    timeout_ms = _order_timeout_ms(order)
     token = ledger.claim(key, order["order_id"], timeout_ms, owner=owner)
     if token is None:
         ledger._event(key, "start-failed-unowned", reason=str(error))
@@ -6579,6 +7283,28 @@ def _reconcile_claim(
                 load_result=load_result,
                 load_answer=contracts_consult.load_answer,
             )
+            if order.get("completion_policy") == "requester_release":
+                try:
+                    release = _verified_delivered_review_release(
+                        manifest.artifact("result").staging_path,
+                        order,
+                        lease["token"],
+                    )
+                except RecruiterError as error:
+                    release = None
+                    release_error = str(error)
+                else:
+                    release_error = "signed requester release is absent"
+                if release is None:
+                    _archive_premature_retained_bundle(
+                        manifest, _review_dir(manifest.artifact("result").staging_path)
+                    )
+                    result = _write_required_blocked_bundle(
+                        order,
+                        manifest,
+                        "runner reconciliation: unreleased retained result; "
+                        + release_error,
+                    )
         except CompletionError as error:
             result = _write_required_blocked_bundle(
                 order, manifest, f"runner reconciliation: {error}"
@@ -6915,7 +7641,7 @@ def _order_log_payload(
         "order_id": order.get("order_id"),
         "request_id": lifecycle.request_identity(order),
         "stage_id": order.get("stage_id"),
-        "timeout_ms": order.get("timeout_ms", _default_timeout_ms(order["stage_id"])),
+        "timeout_ms": _order_timeout_ms(order),
     }
     if order_path is not None:
         payload["order_path"] = order_path
@@ -6951,7 +7677,7 @@ def _dispatch_order(order: dict, roster_path: str) -> int:
                     f"could not start a contender for live order {order['order_id']}: {error}"
                 ) from error
             process = None
-        timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+        timeout_ms = _order_timeout_ms(order)
         deadline = time.monotonic() + timeout_ms / 1000 + LEASE_GRACE_SECONDS
         while (
             ledger.completed_result(key, order) is None and time.monotonic() < deadline
@@ -7219,10 +7945,7 @@ def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
             f"request {lifecycle.request_identity(order)} has not been submitted"
         )
     started = time.monotonic()
-    deadline = started + (
-        order.get("timeout_ms", _default_timeout_ms(order["stage_id"])) / 1000
-        + LEASE_GRACE_SECONDS
-    )
+    deadline = started + (_order_timeout_ms(order) / 1000 + LEASE_GRACE_SECONDS)
     next_reconcile = 0.0
     while time.monotonic() < deadline:
         now = time.monotonic()
@@ -7540,6 +8263,381 @@ def cmd_respond(
     return 0
 
 
+def _retained_order_context(
+    order_path: str, control_token: str | None = None
+) -> tuple[dict, JobLedger, str, str, dict, Path]:
+    try:
+        order = load_order(order_path)
+    except ContractError as error:
+        raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    if order.get("completion_policy") != "requester_release":
+        raise RecruiterError("order does not use completion_policy=requester_release")
+    ledger = JobLedger()
+    key = ledger.key_for_order(order)
+    order = ledger.order(key)
+    if control_token is not None:
+        ledger.verify_control_token(key, control_token)
+    state = ledger.state(key)
+    if control_token is not None and state.get("state") not in (
+        "running",
+        "release-delivering",
+        "finalizing",
+    ):
+        raise RecruiterError(
+            "retained review mutation requires running/release-delivering/finalizing "
+            f"state, got {state.get('state')!r}"
+        )
+    token = state.get("token")
+    if not isinstance(token, str) or not token:
+        raise RecruiterError("retained order has no active lease")
+    review_dir = ledger.result_staging_path(key, token).parent / "review"
+    return order, ledger, key, token, state, review_dir
+
+
+def _validate_retained_checkpoint_value(
+    value: object,
+    order: dict,
+    sequence: int,
+    *,
+    lease_token: str | None = None,
+    generation: int | None = None,
+) -> dict:
+    tests = value.get("tests") if isinstance(value, dict) else None
+    changed_files = value.get("changed_files") if isinstance(value, dict) else None
+    tests_valid = (isinstance(tests, str) and bool(tests.strip())) or (
+        isinstance(tests, list)
+        and bool(tests)
+        and all(isinstance(item, str) and item.strip() for item in tests)
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("order_id") != order["order_id"]
+        or value.get("request_id") != lifecycle.request_identity(order)
+        or value.get("sequence") != sequence
+        or not isinstance(value.get("lease_token"), str)
+        or (lease_token is not None and value.get("lease_token") != lease_token)
+        or isinstance(value.get("generation"), bool)
+        or not isinstance(value.get("generation"), int)
+        or (generation is not None and value.get("generation") != generation)
+        or not isinstance(value.get("summary"), str)
+        or not value["summary"].strip()
+        or not tests_valid
+        or not isinstance(changed_files, list)
+        or not changed_files
+        or not all(isinstance(item, str) and item.strip() for item in changed_files)
+    ):
+        raise RecruiterError(
+            f"retained checkpoint {sequence} needs schema_version 1, matching identity, "
+            "and non-empty summary, tests, and changed_files"
+        )
+    return value
+
+
+def _retained_checkpoint(
+    review_dir: Path,
+    order: dict,
+    sequence: int,
+    *,
+    lease_token: str | None = None,
+    generation: int | None = None,
+) -> dict:
+    path = review_dir / f"checkpoint-{sequence:04d}.json"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"retained checkpoint {sequence} is not ready: {error}"
+        ) from error
+    return _validate_retained_checkpoint_value(
+        value,
+        order,
+        sequence,
+        lease_token=lease_token,
+        generation=generation,
+    )
+
+
+def _latest_retained_checkpoint(
+    review_dir: Path,
+    order: dict,
+    lease_token: str,
+    generation: int,
+) -> tuple[int, dict, str] | None:
+    candidates = list(review_dir.glob("checkpoint-*.json"))
+    parsed: dict[int, tuple[dict, str]] = {}
+    for path in candidates:
+        match = re.fullmatch(r"checkpoint-([0-9]{4})\.json", path.name)
+        if match is None:
+            raise RecruiterError(
+                f"retained checkpoint has malformed filename: {path.name}"
+            )
+        sequence = int(match.group(1))
+        if sequence <= 0 or sequence in parsed:
+            raise RecruiterError(
+                "retained checkpoint sequence must be unique and positive"
+            )
+        try:
+            raw = path.read_bytes()
+            value = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(
+                f"retained checkpoint {sequence} is not ready: {error}"
+            ) from error
+        parsed[sequence] = (
+            _validate_retained_checkpoint_value(
+                value,
+                order,
+                sequence,
+                lease_token=lease_token,
+                generation=generation,
+            ),
+            hashlib.sha256(raw).hexdigest(),
+        )
+    if not parsed:
+        return None
+    latest = max(parsed)
+    if sorted(parsed) != list(range(1, latest + 1)):
+        raise RecruiterError("retained checkpoint sequence has a gap")
+    return latest, parsed[latest][0], parsed[latest][1]
+
+
+def cmd_review_await(order_path: str, after: int, timeout_ms: int) -> int:
+    if after < 0 or timeout_ms <= 0:
+        raise RecruiterError("review-await requires after >= 0 and timeout_ms > 0")
+    order, ledger, key, token, initial_state, review_dir = _retained_order_context(
+        order_path
+    )
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        state = ledger.state(key)
+        if state.get("state") == "awaiting-requester":
+            print(
+                "REQUESTER_DECISION_REQUIRED "
+                + json.dumps(
+                    {
+                        "decision_nonce": state.get("decision_nonce"),
+                        "request_id": lifecycle.request_identity(order),
+                        "timeout_number": state.get("timeout_number"),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
+        if state.get("state") == "cancelling":
+            print(
+                json.dumps(
+                    {
+                        "request_id": lifecycle.request_identity(order),
+                        "state": "cancelling",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if state.get("state") in ("finished", "cleanup-failed"):
+            print(
+                json.dumps(
+                    {
+                        "receipt": ledger.completed_receipt(key, order),
+                        "request_id": lifecycle.request_identity(order),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        generation = state.get("generation", initial_state.get("generation", 1))
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise RecruiterError("retained order state has invalid generation")
+        latest = _latest_retained_checkpoint(review_dir, order, token, generation)
+        if latest is not None and latest[0] > after:
+            print(
+                json.dumps(
+                    {
+                        "checkpoint": latest[1],
+                        "checkpoint_sha256": latest[2],
+                        "request_id": lifecycle.request_identity(order),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        time.sleep(0.25)
+    raise RecruiterError(
+        f"retained order produced no checkpoint after {after} within {timeout_ms} ms"
+    )
+
+
+def cmd_review_continue(
+    order_path: str,
+    control_token: str,
+    checkpoint: int,
+    checkpoint_sha256: str,
+    feedback_path: str,
+) -> int:
+    order, ledger, key, token, state, review_dir = _retained_order_context(
+        order_path, control_token
+    )
+    if state.get("state") != "running":
+        raise RecruiterError("review feedback requires a running retained worker")
+    generation = state.get("generation", 1)
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        raise RecruiterError("retained order state has invalid generation")
+    latest = _latest_retained_checkpoint(review_dir, order, token, generation)
+    if latest is None or checkpoint != latest[0]:
+        raise RecruiterError(
+            "review feedback must target the latest retained checkpoint"
+        )
+    checkpoint_path = review_dir / f"checkpoint-{checkpoint:04d}.json"
+    actual_checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+    if actual_checkpoint_sha256 != checkpoint_sha256:
+        raise RecruiterError("checkpoint changed after requester inspection")
+    release_path = ledger.review_release_path(key, token)
+    if release_path.exists():
+        try:
+            released = _verified_delivered_review_release(
+                ledger.result_staging_path(key, token), order, token
+            )
+        except RecruiterError:
+            released = None
+        if released is not None:
+            raise RecruiterError("retained order has already been released")
+    next_sequence = checkpoint + 1
+    if (review_dir / f"checkpoint-{next_sequence:04d}.json").exists():
+        raise RecruiterError(
+            f"checkpoint {next_sequence} already supersedes this feedback target"
+        )
+    feedback_source = Path(feedback_path)
+    if not feedback_source.is_absolute() or not feedback_source.is_file():
+        raise RecruiterError("feedback path must be an existing absolute file")
+    try:
+        feedback = feedback_source.read_text()
+    except (OSError, UnicodeDecodeError) as error:
+        raise RecruiterError(f"feedback is unreadable UTF-8 text: {error}") from error
+    if not feedback.strip():
+        raise RecruiterError("feedback must contain non-whitespace text")
+    feedback_record = review_dir / f"feedback-{checkpoint:04d}.json"
+    delivery = review_dir / f"feedback-{checkpoint:04d}.delivery.json"
+    digest = hashlib.sha256(feedback.encode()).hexdigest()
+    existing = None
+    if feedback_record.is_file():
+        try:
+            existing = json.loads(feedback_record.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(
+                f"retained feedback record is invalid: {error}"
+            ) from error
+    if existing is not None and (
+        not isinstance(existing, dict)
+        or existing.get("lease_token") != token
+        or existing.get("prompt_sha256") != digest
+    ):
+        raise RecruiterError("retained checkpoint already has different feedback")
+    if not delivery.is_file():
+        ledger.reserve_review_feedback(
+            key,
+            control_token,
+            token,
+            order,
+            checkpoint,
+            checkpoint_sha256,
+            feedback,
+            digest,
+        )
+        worker_address = state.get("worker_address")
+        herdr_session = state.get("herdr_session")
+        if not isinstance(worker_address, str) or not isinstance(herdr_session, str):
+            ledger.abort_review_feedback(key, token, checkpoint)
+            raise RecruiterError("retained worker address is unavailable")
+        try:
+            _submit_agent_prompt(
+                worker_address,
+                "REVIEW_CONTINUE: Apply this feedback to the same worktree. Do not write terminal "
+                f"artifacts or exit. Then write checkpoint {next_sequence} atomically to "
+                f"{review_dir / f'checkpoint-{next_sequence:04d}.json'} with schema_version 1, "
+                f"order_id {order['order_id']!r}, request_id {lifecycle.request_identity(order)!r}, "
+                f"lease_token {token!r}, generation {generation}, sequence {next_sequence}, and "
+                "non-empty summary, tests, and changed_files; "
+                f"then return to idle.\n\n{feedback}",
+                idle_timeout_ms=60_000,
+                herdr_session=herdr_session,
+            )
+        except Exception:
+            ledger.abort_review_feedback(key, token, checkpoint)
+            raise
+        ledger.commit_review_feedback(key, token, checkpoint)
+    print(
+        json.dumps(
+            {
+                "accepted": True,
+                "checkpoint": checkpoint,
+                "next_checkpoint": next_sequence,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def cmd_review_release(
+    order_path: str, control_token: str, checkpoint: int, checkpoint_sha256: str
+) -> int:
+    order, ledger, key, token, state, review_dir = _retained_order_context(
+        order_path, control_token
+    )
+    generation = state.get("generation", 1)
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        raise RecruiterError("retained order state has invalid generation")
+    latest = _latest_retained_checkpoint(review_dir, order, token, generation)
+    if latest is None or checkpoint != latest[0]:
+        raise RecruiterError(
+            "review release must target the latest retained checkpoint"
+        )
+    if (review_dir / f"feedback-{checkpoint:04d}.json").exists():
+        raise RecruiterError(
+            "current checkpoint has feedback; await the next checkpoint before release"
+        )
+    checkpoint_path = review_dir / f"checkpoint-{checkpoint:04d}.json"
+    actual_checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+    if actual_checkpoint_sha256 != checkpoint_sha256:
+        raise RecruiterError("checkpoint changed after requester inspection")
+    _release, reservation_id = ledger.authorize_review_release(
+        key, control_token, token, order, checkpoint, checkpoint_sha256
+    )
+    worker_address = state.get("worker_address")
+    herdr_session = state.get("herdr_session")
+    if not isinstance(worker_address, str) or not isinstance(herdr_session, str):
+        ledger.abort_review_release(
+            key, token, reservation_id, "retained worker address is unavailable"
+        )
+        raise RecruiterError("retained worker address is unavailable")
+    manifest = completion.build_manifest(
+        order, ledger.request_dir(key), token, lifecycle.request_identity(order)
+    )
+    paths = "\n".join(
+        f"- {item.kind}: {item.staging_path}" for item in manifest.artifacts
+    )
+    try:
+        _submit_agent_prompt(
+            worker_address,
+            f"REVIEW_RELEASE: Checkpoint {checkpoint} is accepted. Run final checks, write the "
+            f"terminal artifacts below, then exit.\n{paths}",
+            idle_timeout_ms=60_000,
+            herdr_session=herdr_session,
+        )
+    except Exception as error:
+        ledger.abort_review_release(key, token, reservation_id, str(error))
+        raise
+    ledger.complete_review_release(key, token, reservation_id)
+    print(
+        json.dumps(
+            {"accepted": True, "checkpoint": checkpoint, "released": True},
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _await_inflight_launches(
     ledger: JobLedger, key: str, *, timeout_seconds: float = 10.0
 ) -> None:
@@ -7637,7 +8735,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     order = ledger.order(key)
     roster = load_roster(roster_path)
     management_config = llm_management.load_management_config(roster)
-    timeout_ms = order.get("timeout_ms", _default_timeout_ms(order["stage_id"]))
+    timeout_ms = _order_timeout_ms(order)
     request_id = lifecycle.request_identity(order)
     generation = 1
     owner = {
@@ -7979,6 +9077,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             herdr_session=herdr_session,
             start_worker_agent=start_worker,
             artifact_manifest=artifact_manifest,
+            review_generation=generation,
         )
         if len(worker_launches) > before:
             launch_id, pane = worker_launches[-1]
@@ -9134,6 +10233,27 @@ def main(argv: list[str] | None = None) -> int:
     p_respond.add_argument(
         "extension_ms", type=int, help="positive for extend; 0 for cancel"
     )
+    p_review_await = sub.add_parser(
+        "review-await", help="wait for the next retained checkpoint"
+    )
+    p_review_await.add_argument("order")
+    p_review_await.add_argument("--after", type=int, default=0)
+    p_review_await.add_argument("--timeout-ms", type=int, default=600_000)
+    p_review_continue = sub.add_parser(
+        "review-continue", help="send feedback to a retained worker"
+    )
+    p_review_continue.add_argument("order")
+    p_review_continue.add_argument("control_token")
+    p_review_continue.add_argument("checkpoint", type=int)
+    p_review_continue.add_argument("checkpoint_sha256")
+    p_review_continue.add_argument("feedback_path")
+    p_review_release = sub.add_parser(
+        "review-release", help="release a retained worker to finalize"
+    )
+    p_review_release.add_argument("order")
+    p_review_release.add_argument("control_token")
+    p_review_release.add_argument("checkpoint", type=int)
+    p_review_release.add_argument("checkpoint_sha256")
     p_run = sub.add_parser("run-job", help=argparse.SUPPRESS)
     p_run.add_argument("key", help=argparse.SUPPRESS)
     p_up = sub.add_parser("up", help="ensure the services workspace")
@@ -9201,6 +10321,23 @@ def main(argv: list[str] | None = None) -> int:
                 args.action,
                 extension_ms,
                 f"Requester authorized {args.action}.",
+            )
+        if args.command == "review-await":
+            return cmd_review_await(args.order, args.after, args.timeout_ms)
+        if args.command == "review-continue":
+            return cmd_review_continue(
+                args.order,
+                args.control_token,
+                args.checkpoint,
+                args.checkpoint_sha256,
+                args.feedback_path,
+            )
+        if args.command == "review-release":
+            return cmd_review_release(
+                args.order,
+                args.control_token,
+                args.checkpoint,
+                args.checkpoint_sha256,
             )
         if args.command == "run-job":
             return cmd_run_job(args.key, args.roster)

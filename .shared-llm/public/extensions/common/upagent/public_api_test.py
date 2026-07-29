@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -71,6 +72,28 @@ def _worker_argv(tmp_path: Path, **overrides: str) -> list[str]:
 
 def _args(argv: list[str]) -> Any:
     return public_api.contract.parse_argv(argv)
+
+
+def _enable_managed_leader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    receipt = tmp_path / "phase-start.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "state": "ready",
+                "phase_id": "phase-1",
+                "leader_pane": "leader-pane",
+                "herdr_session": "test-session",
+            }
+        )
+    )
+    monkeypatch.setenv("UPAGENT_PHASE_START_RECEIPT", str(receipt))
+    monkeypatch.setenv("HERDR_PANE_ID", "leader-pane")
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "test-session"
+    )
+    monkeypatch.setattr(
+        recruiter, "_live_pane_ids", lambda **_kwargs: {"leader-pane", "tui-pane"}
+    )
 
 
 def _control_token_file(tmp_path: Path, token: str) -> str:
@@ -212,6 +235,305 @@ def test_verifier_request_ignores_unrelated_invalid_specialist_roster(
         == 0
     )
     assert len(calls) == 1
+
+
+def test_duration_minutes_accepts_120_and_defaults_to_60(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    default_request = public_api.validate_request(
+        _args(_worker_argv(tmp_path)), tmp_path
+    )
+    default_registered = public_api.PublicRequestStore().register(
+        default_request, "recruiter-pane"
+    )
+    default_order = json.loads(default_registered.order_path.read_text())
+    assert "duration_minutes" not in default_request.payload
+    assert default_order["timeout_ms"] == 3_600_000
+
+    long_id = "01957f4e-7f7f-7f8b-9c42-6e7f52f9321b"
+    argv = _worker_argv(tmp_path) + [
+        "--request-id",
+        long_id,
+        "--duration-minutes",
+        "120",
+    ]
+    long_request = public_api.validate_request(_args(argv), tmp_path)
+    long_registered = public_api.PublicRequestStore().register(
+        long_request, "recruiter-pane"
+    )
+    long_order = json.loads(long_registered.order_path.read_text())
+    assert long_request.payload["duration_minutes"] == 120
+    assert long_order["timeout_ms"] == 7_200_000
+
+
+@pytest.mark.parametrize("minutes", ("0", "121", "-1"))
+def test_duration_minutes_rejects_values_outside_public_cap(
+    tmp_path: Path, minutes: str
+) -> None:
+    with pytest.raises(
+        public_api.contract.PublicCommandError, match="between 1 and 120"
+    ):
+        _args(_worker_argv(tmp_path) + ["--duration-minutes", minutes])
+
+
+def test_keep_open_is_worker_only_and_maps_to_release_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    _enable_managed_leader(tmp_path, monkeypatch)
+    request = public_api.validate_request(
+        _args(_worker_argv(tmp_path) + ["--keep-open"]), tmp_path
+    )
+    registered = public_api.PublicRequestStore().register(request, "recruiter-pane")
+    order = json.loads(registered.order_path.read_text())
+    assert request.payload["keep_open"] is True
+    assert order["completion_policy"] == "requester_release"
+    with pytest.raises(public_api.PublicError, match="incompatible with --wait"):
+        public_api.execute(
+            _args(_worker_argv(tmp_path) + ["--keep-open", "--wait"]), tmp_path
+        )
+
+    prompt = _prompt(tmp_path, "Question\n")
+    with pytest.raises(public_api.PublicError, match="incompatible keep_open"):
+        public_api.validate_request(
+            _args(
+                [
+                    "request",
+                    "--type",
+                    "specialist",
+                    "--specialist",
+                    "backend",
+                    "--prompt-file",
+                    str(prompt),
+                    "--cwd",
+                    str(tmp_path),
+                    "--keep-open",
+                ]
+            ),
+            tmp_path,
+        )
+
+
+def test_keep_open_accepts_managed_tui_owner_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "b" * 32
+    monkeypatch.setenv("RUNNER_OWNER_TOKEN_FILE", _control_token_file(tmp_path, token))
+    monkeypatch.setenv("RUNNER_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "run-owner.json").write_text(
+        json.dumps(
+            {
+                "token": token,
+                "heartbeat_at_ns": public_api.time.time_ns(),
+                "heartbeat_ttl_seconds": 60,
+                "owner": {
+                    "kind": "tui",
+                    "pane_id": "tui-pane",
+                    "herdr_session": "test-session",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "test-session"
+    )
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: {"tui-pane"})
+    request = public_api.validate_request(
+        _args(_worker_argv(tmp_path) + ["--keep-open"]), tmp_path
+    )
+    assert request.payload["managed_requester"] == {
+        "id": "tui-controller:tui-pane",
+        "kind": "herdr-agent",
+        "address": "tui-pane",
+    }
+    lease_path = control / "run-owner.json"
+    stale = json.loads(lease_path.read_text())
+    stale["token"] = "c" * 32
+    lease_path.write_text(json.dumps(stale))
+    with pytest.raises(public_api.PublicError, match="stale or does not match"):
+        public_api.validate_request(
+            _args(_worker_argv(tmp_path) + ["--keep-open"]), tmp_path
+        )
+
+
+def test_keep_open_rejects_unmanaged_public_caller(tmp_path: Path) -> None:
+    with pytest.raises(
+        public_api.PublicError, match="managed TUI controller or phase leader"
+    ):
+        public_api.validate_request(
+            _args(_worker_argv(tmp_path) + ["--keep-open"]), tmp_path
+        )
+
+
+def test_review_status_preserves_requester_timeout_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    _enable_managed_leader(tmp_path, monkeypatch)
+    request = public_api.validate_request(
+        _args(_worker_argv(tmp_path) + ["--keep-open"]), tmp_path
+    )
+    store = public_api.PublicRequestStore()
+    registered = store.register(request, "recruiter-pane")
+    order = recruiter.load_order(registered.order_path)
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={"generation": 1, "herdr_session": "test-session", "runner_pid": -1},
+    )
+    assert isinstance(token, str)
+    assert ledger.record_worker(
+        key, token, "worker-pane", "workspace", "worker-address"
+    )
+    assert ledger.mark_worker_healthy(key, token, {"healthy": True})
+    ledger.mark_awaiting_requester(key, token, "nonce-1", 1)
+
+    status = public_api._public_status(store, registered)
+    assert status["state"]["state"] == "awaiting-requester"
+    assert (
+        public_api.execute(
+            _args(["review-await", "--request", REQUEST_ID, "--timeout-ms", "10"]),
+            tmp_path,
+        )
+        == 2
+    )
+
+
+def test_retained_continue_and_release_use_same_live_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    _enable_managed_leader(tmp_path, monkeypatch)
+    request = public_api.validate_request(
+        _args(_worker_argv(tmp_path) + ["--keep-open", "--duration-minutes", "120"]),
+        tmp_path,
+    )
+    store = public_api.PublicRequestStore()
+    registered = store.register(request, "recruiter-pane")
+    order = recruiter.load_order(registered.order_path)
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        order["timeout_ms"],
+        owner={"generation": 1, "herdr_session": "test-session", "runner_pid": -1},
+    )
+    assert isinstance(token, str)
+    assert ledger.record_worker(
+        key, token, "worker-pane", "workspace", "worker-address"
+    )
+    assert ledger.mark_worker_healthy(key, token, {"healthy": True})
+    control_token = ledger.state(key)["requester_control_token"]
+    control_file = _control_token_file(tmp_path, control_token)
+    review_dir = ledger.result_staging_path(key, token).parent / "review"
+    checkpoint1 = review_dir / "checkpoint-0001.json"
+    recruiter.JobLedger._write_json(
+        checkpoint1,
+        {
+            "schema_version": 1,
+            "order_id": order["order_id"],
+            "request_id": REQUEST_ID,
+            "lease_token": token,
+            "generation": 1,
+            "sequence": 1,
+            "summary": "First pass",
+            "tests": "pass",
+            "changed_files": ["x.py"],
+        },
+    )
+    checkpoint1_sha256 = hashlib.sha256(checkpoint1.read_bytes()).hexdigest()
+    feedback = tmp_path / "feedback.md"
+    feedback.write_text("Please tighten the edge case.\n")
+    prompts: list[tuple[str, str, str | None]] = []
+
+    def capture_prompt(
+        address: str,
+        message: str,
+        idle_timeout_ms: int,
+        *,
+        herdr_session: str | None = None,
+    ) -> None:
+        assert idle_timeout_ms == 60_000
+        prompts.append((address, message, herdr_session))
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", capture_prompt)
+
+    assert (
+        public_api.execute(
+            _args(
+                [
+                    "review-continue",
+                    "--request",
+                    REQUEST_ID,
+                    "--checkpoint",
+                    "1",
+                    "--checkpoint-sha256",
+                    checkpoint1_sha256,
+                    "--prompt-file",
+                    str(feedback),
+                    "--control-token-file",
+                    control_file,
+                ]
+            ),
+            tmp_path,
+        )
+        == 0
+    )
+    feedback_record = json.loads((review_dir / "feedback-0001.json").read_text())
+    assert feedback_record["feedback"] == "Please tighten the edge case.\n"
+    assert (review_dir / "feedback-0001.delivery.json").is_file()
+    assert prompts[0][0::2] == ("worker-address", "test-session")
+    assert "checkpoint-0002.json" in prompts[0][1]
+
+    checkpoint2 = review_dir / "checkpoint-0002.json"
+    recruiter.JobLedger._write_json(
+        checkpoint2,
+        {
+            "schema_version": 1,
+            "order_id": order["order_id"],
+            "request_id": REQUEST_ID,
+            "lease_token": token,
+            "generation": 1,
+            "sequence": 2,
+            "summary": "Revised pass",
+            "tests": "pass",
+            "changed_files": ["x.py"],
+        },
+    )
+    checkpoint2_sha256 = hashlib.sha256(checkpoint2.read_bytes()).hexdigest()
+    assert (
+        public_api.execute(
+            _args(
+                [
+                    "review-release",
+                    "--request",
+                    REQUEST_ID,
+                    "--checkpoint",
+                    "2",
+                    "--checkpoint-sha256",
+                    checkpoint2_sha256,
+                    "--control-token-file",
+                    control_file,
+                ]
+            ),
+            tmp_path,
+        )
+        == 0
+    )
+    release_path = ledger.review_release_path(key, token)
+    release = json.loads(release_path.read_text())
+    assert release["lease_token"] == token and release["sequence"] == 2
+    assert release_path.with_name("release.delivery.json").is_file()
+    assert prompts[1][0] == "worker-address"
+    assert "REVIEW_RELEASE" in prompts[1][1]
 
 
 def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:

@@ -47,6 +47,7 @@ MANAGER_PLACEMENT_MODES = ("shared", "requester", "workspace")
 # Per-order lifecycle-ownership override. KEEP IN SYNC with
 # llm_management.MANAGEMENT_MODES (both modules load standalone by path).
 MANAGEMENT_MODES = ("direct", "dedicated")
+COMPLETION_POLICIES = ("requester_release",)
 OPERATIONS = ("plan", "apply")
 WATCHDOG_KINDS = {
     "phase-watchdog": "phase",
@@ -139,6 +140,18 @@ def parse_order(text: str) -> dict:
             raise ContractError(
                 "order.json: `timeout_ms` must be a positive integer when present"
             )
+    completion_policy = order.get("completion_policy")
+    if completion_policy is not None and completion_policy not in COMPLETION_POLICIES:
+        raise ContractError(
+            "order.json: `completion_policy` must be requester_release when present"
+        )
+    if (
+        completion_policy == "requester_release"
+        and order.get("timeout_ms", 1) > 7_200_000
+    ):
+        raise ContractError(
+            "order.json: retained-worker `timeout_ms` may not exceed 7200000 (120 minutes)"
+        )
     # Optional `env` must be a flat str->str map when present (injected via `pane split --env`).
     env = order.get("env")
     if env is not None and (

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -91,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--specialist")
     request.add_argument("--prompt-file")
     request.add_argument("--cwd")
+    request.add_argument("--duration-minutes", type=int)
+    request.add_argument("--keep-open", action="store_true", default=None)
     request.add_argument("--wait", action="store_true")
     request.add_argument("--json", action="store_true")
 
@@ -132,6 +135,35 @@ def build_parser() -> argparse.ArgumentParser:
     respond.add_argument("--action", required=True, choices=("extend", "cancel"))
     respond.add_argument("--extension-ms", required=True, type=int)
     respond.add_argument("--json", action="store_true")
+
+    review_await = sub.add_parser(
+        "review-await",
+        help="block until a retained worker publishes its next checkpoint",
+    )
+    review_await.add_argument("--request", required=True)
+    review_await.add_argument("--after", type=int, default=0)
+    review_await.add_argument("--timeout-ms", type=int, default=600_000)
+    review_await.add_argument("--json", action="store_true")
+
+    review_continue = sub.add_parser(
+        "review-continue", help="send feedback to one retained worker checkpoint"
+    )
+    review_continue.add_argument("--request", required=True)
+    review_continue.add_argument("--checkpoint", required=True, type=int)
+    review_continue.add_argument("--checkpoint-sha256", required=True)
+    review_continue.add_argument("--prompt-file", required=True)
+    review_continue.add_argument("--control-token-file", required=True)
+    review_continue.add_argument("--json", action="store_true")
+
+    review_release = sub.add_parser(
+        "review-release",
+        help="release one retained worker to publish its terminal result",
+    )
+    review_release.add_argument("--request", required=True)
+    review_release.add_argument("--checkpoint", required=True, type=int)
+    review_release.add_argument("--checkpoint-sha256", required=True)
+    review_release.add_argument("--control-token-file", required=True)
+    review_release.add_argument("--json", action="store_true")
 
     cancel = sub.add_parser(
         "cancel", help="cancel one owned request without a timeout nonce"
@@ -176,6 +208,8 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
             "specialist",
             "prompt_file",
             "cwd",
+            "duration_minutes",
+            "keep_open",
         )
         if args.file is not None and any(
             getattr(args, field) is not None for field in defining
@@ -187,6 +221,8 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
             raise PublicCommandError(
                 "request requires either --file or --type with named request flags"
             )
+        if args.duration_minutes is not None and not 1 <= args.duration_minutes <= 120:
+            raise PublicCommandError("--duration-minutes must be between 1 and 120")
         if args.file is None and args.type == "worker":
             missing = [
                 field
@@ -214,6 +250,15 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
                 "specialist request requires --specialist and --prompt-file and is "
                 "incompatible with --offering, --effort, and --agent"
             )
+    if args.command == "review-await" and (args.after < 0 or args.timeout_ms <= 0):
+        raise PublicCommandError(
+            "review-await requires --after >= 0 and --timeout-ms > 0"
+        )
+    if args.command in ("review-continue", "review-release"):
+        if args.checkpoint <= 0:
+            raise PublicCommandError("--checkpoint must be a positive integer")
+        if re.fullmatch(r"[0-9a-f]{64}", args.checkpoint_sha256) is None:
+            raise PublicCommandError("--checkpoint-sha256 must be lowercase SHA-256")
     if args.command == "await" and args.notify_after_ms < 0:
         raise PublicCommandError("--notify-after-ms must be zero or greater")
     if args.command == "await-any" and args.timeout_ms <= 0:

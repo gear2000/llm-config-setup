@@ -51,6 +51,7 @@ def _bind_recruiter_runtime(runtime: Any) -> None:
 
 
 SCHEMA_VERSION = 1
+PUBLIC_DEFAULT_DURATION_MINUTES = 60
 REQUEST_KEYS = {
     "schema_version",
     "request_id",
@@ -61,6 +62,8 @@ REQUEST_KEYS = {
     "specialist",
     "prompt_file",
     "cwd",
+    "duration_minutes",
+    "keep_open",
 }
 REQUEST_ID_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab0-9a-f][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -202,6 +205,78 @@ def _absolute_directory(value: object | None, caller_cwd: Path) -> Path:
     return path.resolve()
 
 
+def _managed_retained_requester() -> dict[str, str]:
+    receipt_value = command_runtime.getenv("UPAGENT_PHASE_START_RECEIPT")
+    owner_token_file = command_runtime.getenv("RUNNER_OWNER_TOKEN_FILE")
+    run_dir_value = command_runtime.getenv("RUNNER_RUN_DIR")
+    pane = command_runtime.getenv("HERDR_PANE_ID")
+    if pane and owner_token_file and run_dir_value:
+        owner_token = _private_control_token_file(owner_token_file)
+        run_dir = Path(run_dir_value)
+        lease_path = run_dir / "control" / "run-owner.json"
+        try:
+            lease = json.loads(lease_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise PublicError(
+                f"--keep-open run owner lease is unreadable: {error}"
+            ) from error
+        owner = lease.get("owner") if isinstance(lease, dict) else None
+        session = owner.get("herdr_session") if isinstance(owner, dict) else None
+        heartbeat = lease.get("heartbeat_at_ns") if isinstance(lease, dict) else None
+        ttl = lease.get("heartbeat_ttl_seconds") if isinstance(lease, dict) else None
+        if (
+            not isinstance(owner, dict)
+            or lease.get("token") != owner_token
+            or owner.get("kind") != "tui"
+            or owner.get("pane_id") != pane
+            or not isinstance(session, str)
+            or isinstance(heartbeat, bool)
+            or not isinstance(heartbeat, int)
+            or isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or heartbeat + ttl * 1_000_000_000 < time.time_ns()
+            or session != recruiter._resolve_current_herdr_session_name()
+            or pane not in recruiter._live_pane_ids(herdr_session=session)
+        ):
+            raise PublicError(
+                "--keep-open TUI owner lease is stale or does not match this live pane"
+            )
+        return {"id": f"tui-controller:{pane}", "kind": "herdr-agent", "address": pane}
+    if not receipt_value or not pane:
+        raise PublicError(
+            "--keep-open is limited to a managed TUI controller or phase leader"
+        )
+    receipt_path = Path(receipt_value)
+    if not receipt_path.is_absolute() or not receipt_path.is_file():
+        raise PublicError(
+            "--keep-open phase-start receipt must be an existing absolute file"
+        )
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PublicError(
+            f"--keep-open phase-start receipt is unreadable: {error}"
+        ) from error
+    session = receipt.get("herdr_session") if isinstance(receipt, dict) else None
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("state") != "ready"
+        or receipt.get("leader_pane") != pane
+        or not isinstance(receipt.get("phase_id"), str)
+        or not isinstance(session, str)
+        or session != recruiter._resolve_current_herdr_session_name()
+        or pane not in recruiter._live_pane_ids(herdr_session=session)
+    ):
+        raise PublicError(
+            "--keep-open caller is not the ready leader recorded by its phase-start receipt"
+        )
+    return {
+        "id": f"phase-leader:{receipt['phase_id']}",
+        "kind": "herdr-agent",
+        "address": pane,
+    }
+
+
 def _known_personas(
     cwd: Path, specialist_index: dict[str, dict[str, object]]
 ) -> set[str]:
@@ -246,6 +321,8 @@ def _inline_request(args: Any) -> dict[str, object]:
         "specialist",
         "prompt_file",
         "cwd",
+        "duration_minutes",
+        "keep_open",
     ):
         item = getattr(args, field)
         if item is not None:
@@ -266,9 +343,22 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
         raw.get("schema_version"), bool
     ):
         raise PublicError("request schema_version must be integer 1")
+    string_fields = REQUEST_KEYS - {"schema_version", "duration_minutes", "keep_open"}
     for key, value in raw.items():
-        if key != "schema_version" and (not isinstance(value, str) or not value):
+        if key in string_fields and (not isinstance(value, str) or not value):
             raise PublicError(f"request {key} must be a non-empty string")
+    duration_minutes = raw.get("duration_minutes")
+    if duration_minutes is not None and (
+        isinstance(duration_minutes, bool)
+        or not isinstance(duration_minutes, int)
+        or not 1 <= duration_minutes <= 120
+    ):
+        raise PublicError(
+            "request duration_minutes must be an integer between 1 and 120"
+        )
+    keep_open = raw.get("keep_open", False)
+    if not isinstance(keep_open, bool):
+        raise PublicError("request keep_open must be a boolean when present")
     request_type = raw.get("type")
     if request_type not in ("worker", "specialist"):
         raise PublicError("request type must be worker or specialist")
@@ -315,6 +405,8 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
         prohibited = [
             field for field in ("offering", "effort", "agent") if field in raw
         ]
+        if keep_open:
+            prohibited.append("keep_open")
         if missing or prohibited:
             detail = []
             if missing:
@@ -352,6 +444,11 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     }
     if specialist_name is not None:
         payload["specialist"] = specialist_name
+    if duration_minutes is not None:
+        payload["duration_minutes"] = duration_minutes
+    if keep_open:
+        payload["keep_open"] = True
+        payload["managed_requester"] = _managed_retained_requester()
     return ValidatedRequest(
         request_id=request_id,
         payload=payload,
@@ -547,6 +644,21 @@ class PublicRequestStore:
                 "cockpit_pane": cockpit_pane,
                 "offering_snapshot": payload["offering_snapshot"],
                 "management": {"mode": "dedicated"},
+                **(
+                    {"requester": payload["managed_requester"]}
+                    if "managed_requester" in payload
+                    else {}
+                ),
+                "timeout_ms": cast(
+                    int,
+                    payload.get("duration_minutes", PUBLIC_DEFAULT_DURATION_MINUTES),
+                )
+                * 60_000,
+                **(
+                    {"completion_policy": "requester_release"}
+                    if payload.get("keep_open") is True
+                    else {}
+                ),
                 "artifact_publication": {
                     "schema_version": 1,
                     "compacted_path": str(final_compacted),
@@ -830,6 +942,56 @@ def _public_status(
         )
     if isinstance(public_evidence.get("answer_path"), str):
         artifacts.append({"kind": "answer", "path": public_evidence["answer_path"]})
+    review: dict[str, object] | None = None
+    if order.get("completion_policy") == "requester_release":
+        token = state.get("token")
+        if isinstance(token, str):
+            review_dir = ledger.result_staging_path(key, token).parent / "review"
+            generation = state.get("generation", 1)
+            if isinstance(generation, bool) or not isinstance(generation, int):
+                raise PublicError("retained request state has invalid generation")
+            try:
+                latest = recruiter._latest_retained_checkpoint(
+                    review_dir, order, token, generation
+                )
+            except recruiter.RecruiterError as error:
+                raise PublicError(str(error)) from error
+            latest_sequence = latest[0] if latest is not None else 0
+            latest_checkpoint = latest[1] if latest is not None else None
+            checkpoint_sha256 = latest[2] if latest is not None else None
+            release_path = ledger.review_release_path(key, token)
+            released = False
+            if release_path.is_file():
+                try:
+                    released = (
+                        recruiter._verified_delivered_review_release(
+                            ledger.result_staging_path(key, token), order, token
+                        )
+                        is not None
+                    )
+                except recruiter.RecruiterError:
+                    released = False
+            feedback_sent = (
+                latest_sequence > 0
+                and (review_dir / f"feedback-{latest_sequence:04d}.json").is_file()
+            )
+            review = {
+                "latest_checkpoint": latest_checkpoint,
+                "latest_sequence": latest_sequence,
+                "checkpoint_sha256": checkpoint_sha256,
+                "released": released,
+            }
+            if state.get("state") == "running":
+                state = {
+                    **state,
+                    "state": (
+                        "finalizing"
+                        if released
+                        else "running"
+                        if feedback_sent or latest_sequence == 0
+                        else "awaiting-review"
+                    ),
+                }
     return {
         "request_id": registered.request_id,
         "submission": submission,
@@ -844,6 +1006,7 @@ def _public_status(
         ),
         "receipt": receipt,
         "result": result,
+        "review": review,
         "pruned": False,
     }
 
@@ -1104,6 +1267,245 @@ def _cleanup_one(
         }
 
 
+def _retained_context(
+    store: PublicRequestStore, request_id: str, control_token: str
+) -> tuple[RegisteredRequest, dict, Any, str, dict, Path]:
+    registered = store.load(request_id)
+    if registered.pruned:
+        raise PublicError("retained review is unavailable for a pruned request")
+    order = recruiter.load_order(registered.order_path)
+    if order.get("completion_policy") != "requester_release":
+        raise PublicError("request was not started with --keep-open")
+    ledger = recruiter.JobLedger()
+    key = ledger.key_for_order(order)
+    control = ledger.verify_control_token(key, control_token)
+    state = ledger.state(key)
+    if state.get("state") not in ("running", "release-delivering", "finalizing"):
+        raise PublicError(
+            "retained review mutation requires running/release-delivering/finalizing "
+            f"state, got {state.get('state')!r}"
+        )
+    token = state.get("token")
+    if not isinstance(token, str) or not token:
+        raise PublicError("retained request has no active worker lease")
+    if state.get("generation") != control.get("generation"):
+        raise PublicError(
+            "retained request control token belongs to a stale generation"
+        )
+    review_dir = ledger.result_staging_path(key, token).parent / "review"
+    return registered, order, ledger, token, state, review_dir
+
+
+def _review_await(args: Any, store: PublicRequestStore) -> int:
+    registered = store.load(args.request)
+    if (
+        recruiter.load_order(registered.order_path).get("completion_policy")
+        != "requester_release"
+    ):
+        raise PublicError("request was not started with --keep-open")
+    deadline = time.monotonic() + args.timeout_ms / 1000
+    while time.monotonic() < deadline:
+        status = _public_status(store, store.load(args.request))
+        review = status.get("review")
+        sequence = review.get("latest_sequence", 0) if isinstance(review, dict) else 0
+        state = status.get("state")
+        state_name = state.get("state") if isinstance(state, dict) else None
+        terminal = state_name in TERMINAL_STATES
+        if state_name == "awaiting-requester":
+            _emit(
+                status,
+                args.json,
+                f"request {args.request}: requester decision required",
+            )
+            return 2
+        if state_name == "cancelling":
+            _emit(status, args.json, f"request {args.request}: cancelling")
+            return 1
+        if (isinstance(sequence, int) and sequence > args.after) or terminal:
+            _emit(status, args.json, f"request {args.request}: checkpoint {sequence}")
+            return 0
+        time.sleep(0.25)
+    raise PublicError(
+        f"retained request {args.request} produced no checkpoint after {args.after} "
+        f"within {args.timeout_ms} ms"
+    )
+
+
+def _review_continue(args: Any, store: PublicRequestStore) -> int:
+    control_token = _private_control_token_file(args.control_token_file)
+    _feedback_path, feedback_bytes = _absolute_readable_file(
+        args.prompt_file, "--prompt-file"
+    )
+    feedback_text = feedback_bytes.decode("utf-8")
+    feedback_sha256 = hashlib.sha256(feedback_bytes).hexdigest()
+    delivery_path: Path
+    should_deliver = True
+    with store.request_lock(args.request):
+        registered, order, ledger, token, state, review_dir = _retained_context(
+            store, args.request, control_token
+        )
+        if state.get("state") != "running":
+            raise PublicError("review feedback requires a running retained worker")
+        generation = state.get("generation", 1)
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise PublicError("retained request state has invalid generation")
+        try:
+            latest = recruiter._latest_retained_checkpoint(
+                review_dir, order, token, generation
+            )
+        except recruiter.RecruiterError as error:
+            raise PublicError(str(error)) from error
+        if latest is None or args.checkpoint != latest[0]:
+            raise PublicError(
+                "review feedback must target the latest retained checkpoint"
+            )
+        key = ledger.key_for_order(order)
+        release_path = ledger.review_release_path(key, token)
+        if release_path.exists():
+            try:
+                released = recruiter._verified_delivered_review_release(
+                    ledger.result_staging_path(key, token), order, token
+                )
+            except recruiter.RecruiterError:
+                released = None
+            if released is not None:
+                raise PublicError("retained request has already been released")
+        next_sequence = args.checkpoint + 1
+        if (review_dir / f"checkpoint-{next_sequence:04d}.json").exists():
+            raise PublicError(
+                f"checkpoint {next_sequence} already supersedes this feedback target"
+            )
+        feedback_path = review_dir / f"feedback-{args.checkpoint:04d}.json"
+        delivery_path = review_dir / f"feedback-{args.checkpoint:04d}.delivery.json"
+        existing = _read_json_optional(feedback_path, "retained feedback")
+        if existing is not None and (
+            existing.get("lease_token") != token
+            or existing.get("prompt_sha256") != feedback_sha256
+        ):
+            raise PublicError("retained checkpoint already has different feedback")
+        should_deliver = not delivery_path.is_file()
+        key = ledger.key_for_order(order)
+        checkpoint_path = review_dir / f"checkpoint-{args.checkpoint:04d}.json"
+        checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        if checkpoint_sha256 != args.checkpoint_sha256:
+            raise PublicError("checkpoint changed after requester inspection")
+        if should_deliver:
+            try:
+                ledger.reserve_review_feedback(
+                    key,
+                    control_token,
+                    token,
+                    order,
+                    args.checkpoint,
+                    args.checkpoint_sha256,
+                    feedback_text,
+                    feedback_sha256,
+                )
+            except recruiter.RecruiterError as error:
+                raise PublicError(str(error)) from error
+        worker_address = state.get("worker_address")
+        herdr_session = state.get("herdr_session")
+        if not isinstance(worker_address, str) or not isinstance(herdr_session, str):
+            if should_deliver:
+                ledger.abort_review_feedback(key, token, args.checkpoint)
+            raise PublicError("retained worker address is unavailable")
+    if should_deliver:
+        try:
+            recruiter._submit_agent_prompt(
+                worker_address,
+                "REVIEW_CONTINUE: Apply the requester feedback below to the same worktree. "
+                "Do not write terminal artifacts or exit. When this pass is ready, atomically write "
+                f"checkpoint {next_sequence} to {review_dir / f'checkpoint-{next_sequence:04d}.json'} "
+                f"with schema_version 1, order_id {order['order_id']!r}, request_id {args.request!r}, "
+                f"lease_token {token!r}, generation {generation}, sequence {next_sequence}, and "
+                "non-empty summary, tests, and changed_files fields; then return to idle.\n\n"
+                + feedback_text,
+                idle_timeout_ms=60_000,
+                herdr_session=herdr_session,
+            )
+        except Exception:
+            ledger.abort_review_feedback(key, token, args.checkpoint)
+            raise
+        ledger.commit_review_feedback(key, token, args.checkpoint)
+    status = _public_status(store, registered)
+    _emit(status, args.json, f"feedback sent for checkpoint {args.checkpoint}")
+    return 0
+
+
+def _review_release(args: Any, store: PublicRequestStore) -> int:
+    control_token = _private_control_token_file(args.control_token_file)
+    should_deliver = True
+    with store.request_lock(args.request):
+        registered, order, ledger, token, state, review_dir = _retained_context(
+            store, args.request, control_token
+        )
+        generation = state.get("generation", 1)
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise PublicError("retained request state has invalid generation")
+        try:
+            latest = recruiter._latest_retained_checkpoint(
+                review_dir, order, token, generation
+            )
+        except recruiter.RecruiterError as error:
+            raise PublicError(str(error)) from error
+        if latest is None or args.checkpoint != latest[0]:
+            raise PublicError(
+                "review release must target the latest retained checkpoint"
+            )
+        if (review_dir / f"feedback-{args.checkpoint:04d}.json").exists():
+            raise PublicError(
+                f"checkpoint {args.checkpoint} already has feedback; await the next checkpoint before release"
+            )
+        key = ledger.key_for_order(order)
+        checkpoint_path = review_dir / f"checkpoint-{args.checkpoint:04d}.json"
+        checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        if checkpoint_sha256 != args.checkpoint_sha256:
+            raise PublicError("checkpoint changed after requester inspection")
+        try:
+            release_path, reservation_id = ledger.authorize_review_release(
+                key,
+                control_token,
+                token,
+                order,
+                args.checkpoint,
+                args.checkpoint_sha256,
+            )
+        except recruiter.RecruiterError as error:
+            raise PublicError(str(error)) from error
+        should_deliver = True
+        worker_address = state.get("worker_address")
+        herdr_session = state.get("herdr_session")
+        if not isinstance(worker_address, str) or not isinstance(herdr_session, str):
+            ledger.abort_review_release(
+                key, token, reservation_id, "retained worker address is unavailable"
+            )
+            raise PublicError("retained worker address is unavailable")
+        manifest = recruiter.completion.build_manifest(
+            order, ledger.request_dir(ledger.key_for_order(order)), token, args.request
+        )
+        paths = "\n".join(
+            f"- {artifact.kind}: {artifact.staging_path}"
+            for artifact in manifest.artifacts
+        )
+    if should_deliver:
+        try:
+            recruiter._submit_agent_prompt(
+                worker_address,
+                "REVIEW_RELEASE: The owning requester accepts checkpoint "
+                f"{args.checkpoint}. Finalize now: run any final checks, write every terminal "
+                "artifact to the lease-private paths below, then exit.\n" + paths,
+                idle_timeout_ms=60_000,
+                herdr_session=herdr_session,
+            )
+        except Exception as error:
+            ledger.abort_review_release(key, token, reservation_id, str(error))
+            raise
+        ledger.complete_review_release(key, token, reservation_id)
+    status = _public_status(store, registered)
+    _emit(status, args.json, f"checkpoint {args.checkpoint} released for finalization")
+    return 0
+
+
 def _cancel(args: Any, store: PublicRequestStore) -> int:
     control_token = _private_control_token_file(args.control_token_file)
     with store.request_lock(args.request):
@@ -1236,6 +1638,10 @@ def _submit_registered(
 
 def _request(args: Any, cwd: Path) -> int:
     validated = validate_request(args, cwd)
+    if args.wait and validated.payload.get("keep_open") is True:
+        raise PublicError(
+            "--keep-open is incompatible with --wait; submit asynchronously to receive the review control token"
+        )
     store = PublicRequestStore()
     registered = store.register(validated, _cockpit_pane())
     code, submitted_now = _submit_registered(store, registered, wait=args.wait)
@@ -1383,6 +1789,12 @@ def execute(args: Any, cwd: Path) -> int:
         value = json.loads(output)
         _emit(value, args.json, f"response accepted: {args.action}")
         return code
+    if args.command == "review-await":
+        return _review_await(args, store)
+    if args.command == "review-continue":
+        return _review_continue(args, store)
+    if args.command == "review-release":
+        return _review_release(args, store)
     if args.command == "cancel":
         return _cancel(args, store)
     if args.command == "cleanup":

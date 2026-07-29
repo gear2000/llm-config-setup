@@ -79,7 +79,8 @@ just upagent status [--request ID] [--json]
 just upagent get --request ID [--json]
 just upagent lists --type offerings|specialists|workers [--status active|terminal|all] [--json]
 just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
-  --prompt-file /absolute/brief.md [--cwd /absolute/worktree] [--wait] [--json]
+  --prompt-file /absolute/brief.md [--cwd /absolute/worktree] \
+  [--duration-minutes 1..120] [--keep-open] [--wait] [--json]
 just upagent request --type specialist --specialist NAME \
   --prompt-file /absolute/question.md [--cwd /absolute/worktree] [--wait] [--json]
 just upagent request --file /absolute/request.json [--wait] [--json]
@@ -88,6 +89,11 @@ just upagent await-any --request ID [--request ID ...] [--cursor JSON] [--timeou
 just upagent verify --request ID --offering ID --effort LEVEL --agent PERSONA [--wait] [--json]
 just upagent respond --request ID --control-token TOKEN --nonce NONCE \
   --action extend|cancel --extension-ms MS [--json]
+just upagent review-await --request ID [--after N] [--timeout-ms MS] [--json]
+just upagent review-continue --request ID --checkpoint N --checkpoint-sha256 SHA256 \
+  --prompt-file /absolute/feedback.md --control-token-file /absolute/private-token [--json]
+just upagent review-release --request ID --checkpoint N --checkpoint-sha256 SHA256 \
+  --control-token-file /absolute/private-token [--json]
 just upagent cancel --request ID --control-token-file /absolute/private-token [--json]
 just upagent cleanup (--request ID | --all-terminal) \
   [--older-than-seconds N] [--apply] [--json]
@@ -98,7 +104,7 @@ just upagent reconcile [--json]
 
 Named flags and `--file` enter one closed `schema_version: 1` parser. A file must be one readable
 absolute JSON object and may contain only `schema_version`, `request_id`, `type`, `offering`,
-`effort`, `agent`, `specialist`, `prompt_file`, and `cwd`. `--file` is mutually exclusive with
+`effort`, `agent`, `specialist`, `prompt_file`, `cwd`, `duration_minutes`, and `keep_open`. Duration must be an integer from 1 through 120; omission uses the 60-minute public default. `keep_open` must be boolean, applies only to workers, and maps to the release-gated retained lifecycle. `--file` is mutually exclusive with
 request-defining flags; `--wait` and `--json` are invocation controls and never enter the immutable
 payload. Worker requests require explicit offering, effort, persona, and prompt. Specialist
 requests require a specialist and prompt and resolve that specialist's pinned offering. Unknown
@@ -116,6 +122,10 @@ Recruiter's idempotent ledger. Same id plus same hash attaches without another l
 a changed hash returns `request_id_conflict` before request mutation. This remains true after
 history pruning: the compact tombstone retains the immutable payload hash, so an identical retry
 attaches and a changed payload still conflicts without launching.
+
+### Retained review loop
+
+`--keep-open` is an opt-in controller workflow; the default remains one-shot. It is incompatible with request `--wait`: retained work must submit asynchronously so the originating response can return the private control token before the first checkpoint decision. The same initial lease and requested duration cover coding plus review. After its first pass the worker writes a lease-private numbered checkpoint and returns to idle without writing terminal artifacts. `review-await` blocks until the next checkpoint without consuming an LLM polling loop. The owning requester inspects the real diff and tests, preserves the checkpoint SHA-256 returned by review status/await, then authenticates with the original private control-token file and that digest to either send `review-continue` feedback into the same idle Herdr session or write `review-release` and request final artifacts. Feedback names the next checkpoint sequence. Only a lease-fenced release allows the completion monitor to accept terminal artifacts and clean up the pane; premature terminal bundles are quarantined. Worker exit before release fails loud as blocked. Existing timeout extension and cancellation remain valid while reviewing. Public `/upagent-run` callers use `just upagent review-await|review-continue|review-release`; phase leaders operating on their own strict stage order use `just upagent-review-await`, `just upagent-review-continue`, and `just upagent-review-release`.
 
 ### Read, cancel, and terminal cleanup
 
