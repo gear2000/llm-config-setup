@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
   just upagent lists --type offerings
   just upagent request --type worker --offering pi-gpt-5-6-sol --effort high \\
     --agent backend --prompt-file /abs/brief.md
-  just upagent request --file /abs/request.json --wait --json
+  just upagent request --file /abs/request.json --cockpit-pane LIVE_PANE --wait --json
   just upagent get --request 01957f4e-7f7f-7f8b-9c42-6e7f52f9321a --json
   just upagent cancel --request ID --control-token-file /private/token
   just upagent cleanup --all-terminal --older-than-seconds 86400
@@ -94,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--cwd")
     request.add_argument("--duration-minutes", type=int)
     request.add_argument("--keep-open", action="store_true", default=None)
+    request.add_argument(
+        "--cockpit-pane",
+        metavar="LIVE_PANE",
+        help="invocation-only live caller-pane override; excluded from the request payload",
+    )
     request.add_argument("--wait", action="store_true")
     request.add_argument("--json", action="store_true")
 
@@ -215,7 +220,7 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
             getattr(args, field) is not None for field in defining
         ):
             raise PublicCommandError(
-                "--file is mutually exclusive with every request-defining flag; --wait and --json remain allowed"
+                "--file is mutually exclusive with every request-defining flag; --cockpit-pane, --wait, and --json remain allowed"
             )
         if args.file is None and args.type is None:
             raise PublicCommandError(

@@ -170,6 +170,7 @@ def test_public_help_describes_manager_degradation_and_cursor_map() -> None:
     help_text = public_api.contract.help_text()
 
     assert "advisory manager failure degrades" in help_text
+    assert "--cockpit-pane LIVE_PANE" in help_text
     assert "--cursor '{\"ID\": 12}'" in help_text
 
 
@@ -554,13 +555,27 @@ def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:
         )
     )
 
-    inline = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+    inline = public_api.validate_request(
+        _args([*_worker_argv(tmp_path), "--cockpit-pane", "caller-pane"]),
+        tmp_path,
+    )
     from_file = public_api.validate_request(
-        _args(["request", "--file", str(file_path), "--wait", "--json"]),
+        _args(
+            [
+                "request",
+                "--file",
+                str(file_path),
+                "--cockpit-pane",
+                "caller-pane",
+                "--wait",
+                "--json",
+            ]
+        ),
         tmp_path,
     )
 
     assert inline.payload == from_file.payload
+    assert "cockpit_pane" not in inline.payload
     assert inline.payload_sha256 == from_file.payload_sha256
     assert inline.prompt_bytes == from_file.prompt_bytes
 
@@ -569,6 +584,7 @@ def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:
     ("mutate", "message"),
     [
         (lambda value: value.update(extra=True), "unknown keys"),
+        (lambda value: value.update(cockpit_pane="caller-pane"), "unknown keys"),
         (lambda value: value.update(schema_version="1"), "schema_version"),
         (lambda value: value.update(offering="unknown"), "unknown offering"),
         (lambda value: value.update(effort="ultra"), "does not allow effort"),
@@ -622,8 +638,91 @@ def test_file_is_mutually_exclusive_with_defining_flags_but_not_transport_flags(
         public_api.contract.PublicCommandError, match="mutually exclusive"
     ):
         _args(["request", "--file", str(request_file), "--agent", "backend"])
-    parsed = _args(["request", "--file", str(request_file), "--wait", "--json"])
+    parsed = _args(
+        [
+            "request",
+            "--file",
+            str(request_file),
+            "--cockpit-pane",
+            "caller-pane",
+            "--wait",
+            "--json",
+        ]
+    )
+    assert parsed.cockpit_pane == "caller-pane"
     assert parsed.wait is True and parsed.json is True
+
+
+def test_explicit_live_cockpit_pane_is_written_to_submitted_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(
+        public_api,
+        "_cockpit_pane",
+        lambda: pytest.fail("explicit pane must bypass service-pane resolution"),
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_resolve_current_herdr_session_name",
+        lambda: "current-session",
+    )
+    listed_sessions: list[str | None] = []
+
+    def live_panes(*, herdr_session: str | None = None) -> set[str]:
+        listed_sessions.append(herdr_session)
+        return {"caller-pane", "other-pane"}
+
+    submitted_orders: list[dict[str, object]] = []
+
+    def submit(order_path: str, _roster_path: str) -> int:
+        submitted_orders.append(json.loads(Path(order_path).read_text()))
+        return 0
+
+    monkeypatch.setattr(public_api.recruiter, "_live_pane_ids", live_panes)
+    monkeypatch.setattr(public_api.recruiter, "cmd_request_strict", submit)
+    args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "caller-pane"])
+
+    assert public_api.execute(args, tmp_path) == 0
+
+    assert listed_sessions == ["current-session"]
+    assert submitted_orders[0]["cockpit_pane"] == "caller-pane"
+
+
+def test_non_live_cockpit_pane_is_rejected_before_registration_or_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(
+        public_api,
+        "_cockpit_pane",
+        lambda: pytest.fail("explicit pane must bypass service-pane resolution"),
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_resolve_current_herdr_session_name",
+        lambda: "current-session",
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_live_pane_ids",
+        lambda *, herdr_session=None: {"other-pane"},
+    )
+    submissions: list[str] = []
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda order, _roster: submissions.append(order) or 0,
+    )
+    args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "stale-pane"])
+
+    with pytest.raises(
+        public_api.PublicError, match="not live in the current Herdr session"
+    ):
+        public_api.execute(args, tmp_path)
+
+    assert submissions == []
+    assert not (tmp_path / "ledger/public/requests").exists()
 
 
 def test_specialist_resolves_pinned_offering_and_rejects_public_override(

@@ -80,10 +80,11 @@ just upagent get --request ID [--json]
 just upagent lists --type offerings|specialists|workers [--status active|terminal|all] [--json]
 just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
   --prompt-file /absolute/brief.md [--cwd /absolute/worktree] \
-  [--duration-minutes 1..120] [--keep-open] [--wait] [--json]
+  [--duration-minutes 1..120] [--keep-open] [--cockpit-pane LIVE_PANE] [--wait] [--json]
 just upagent request --type specialist --specialist NAME \
-  --prompt-file /absolute/question.md [--cwd /absolute/worktree] [--wait] [--json]
-just upagent request --file /absolute/request.json [--wait] [--json]
+  --prompt-file /absolute/question.md [--cwd /absolute/worktree] \
+  [--cockpit-pane LIVE_PANE] [--wait] [--json]
+just upagent request --file /absolute/request.json [--cockpit-pane LIVE_PANE] [--wait] [--json]
 just upagent await --request ID [--notify-after-ms MS] [--json]
 just upagent await-any --request ID [--request ID ...] [--cursor JSON] [--timeout-ms MS] [--json]
 just upagent verify --request ID --offering ID --effort LEVEL --agent PERSONA [--wait] [--json]
@@ -104,13 +105,23 @@ just upagent reconcile [--json]
 
 Named flags and `--file` enter one closed `schema_version: 1` parser. A file must be one readable
 absolute JSON object and may contain only `schema_version`, `request_id`, `type`, `offering`,
-`effort`, `agent`, `specialist`, `prompt_file`, `cwd`, `duration_minutes`, and `keep_open`. Duration must be an integer from 1 through 120; omission uses the 60-minute public default. `keep_open` must be boolean, applies only to workers, and maps to the release-gated retained lifecycle. `--file` is mutually exclusive with
-request-defining flags; `--wait` and `--json` are invocation controls and never enter the immutable
-payload. Worker requests require explicit offering, effort, persona, and prompt. Specialist
+`effort`, `agent`, `specialist`, `prompt_file`, `cwd`, `duration_minutes`, and `keep_open`.
+Duration must be an integer from 1 through 120; omission uses the 60-minute public default.
+`keep_open` must be boolean, applies only to workers, and maps to the release-gated retained
+lifecycle. `--file` is mutually exclusive with request-defining flags; `--cockpit-pane`, `--wait`,
+and `--json` are invocation controls and never enter the immutable payload. Worker requests
+require explicit offering, effort, persona, and prompt. Specialist
 requests require a specialist and prompt and resolve that specialist's pinned offering. Unknown
 keys, types, offerings, efforts, personas, specialists, relative/unreadable paths, and incompatible
 flags fail before the ledger, manager, pane, or worker. There is no intake LLM, prose repair,
 arbitrary argument materialization, or empty-request acceptance on this path.
+
+`--cockpit-pane` is an invocation-only override for anchoring the order to the caller's own pane.
+It may accompany named flags or `--file`, but it is not a request-defining flag, does not enter the
+closed request object or immutable payload hash, and is not an allowed key inside a request file.
+When supplied, it must be a non-empty pane ID that a fresh pane listing proves live in the current
+Herdr session; otherwise submission fails before registration. When omitted, UpAgent preserves the
+existing service-pane resolution and on-demand creation behavior.
 
 A caller may supply one canonical lowercase hyphenated UUID or uppercase Crockford ULID; otherwise
 Python generates a UUID. UpAgent hashes the canonical immutable payload, including the resolved

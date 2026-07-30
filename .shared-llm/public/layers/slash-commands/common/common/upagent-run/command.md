@@ -2,6 +2,41 @@
 
 Use only the repository's canonical `just upagent` façade. Do not start another service, launch an exploration session, steer a live worker, or route silently by account/quota.
 
+## Mandatory caller-pane anchoring inside Herdr
+
+Before routing or submission, build the invocation-only cockpit arguments exactly once:
+
+```bash
+cockpit_args=()
+if [[ "${HERDR_ENV:-}" == "1" ]]; then
+  [[ -n "${HERDR_PANE_ID:-}" ]] || {
+    echo "ERROR: HERDR_ENV=1 but HERDR_PANE_ID is missing; refusing to infer the caller from UI focus." >&2
+    exit 1
+  }
+  pane_list_json="$(herdr pane list)" || {
+    echo "ERROR: could not list panes in the current Herdr session." >&2
+    exit 1
+  }
+  if ! HERDR_EXPECTED_PANE="$HERDR_PANE_ID" python3 -c '
+import json, os, sys
+response = json.load(sys.stdin)
+panes = response.get("result", {}).get("panes", [])
+expected = os.environ["HERDR_EXPECTED_PANE"]
+raise SystemExit(0 if any(isinstance(pane, dict) and pane.get("pane_id") == expected for pane in panes) else 1)
+' <<<"$pane_list_json"; then
+    echo "ERROR: HERDR_PANE_ID is not a live pane in the current Herdr session." >&2
+    exit 1
+  fi
+  cockpit_args=(--cockpit-pane "$HERDR_PANE_ID")
+fi
+```
+
+This is a hard routing boundary. `HERDR_PANE_ID` is the caller's environment-provided pane identity;
+UI focus can move, and the UpAgent services pointer can name a different or stale pane. Never use
+`herdr pane current`, focus inspection, or the services pointer to infer the caller. The public API
+repeats the live-pane check before registration. Outside Herdr, leave `cockpit_args` empty so the
+existing service-pane resolution/creation behavior remains unchanged.
+
 1. Parse optional leading controls from `$ARGUMENTS`: `--duration-minutes N` (integer 1–120; omitted keeps the 60-minute default) and `--keep-open`. Treat the remaining text as the complete bounded task. If no task remains, ask for one before launching. `--keep-open` is for a managed TUI controller or phase leader that will inspect checkpoints and explicitly continue or release the same worker; do not use it for an unattended ad-hoc request.
 2. Run `just upagent lists --type offerings --json`. Select one existing offering id and one effort that its `efforts` list permits. Honor an explicit user choice; otherwise make a task-based choice and state it. Do not invent an id or probe provider accounts.
 3. Select one existing persona appropriate to the task from the repository/home agent definitions. Honor an explicit persona; fail loud if it does not exist. Do not create a persona as part of this command.
@@ -18,7 +53,7 @@ Use only the repository's canonical `just upagent` façade. Do not start another
    if just upagent request --type worker --request-id "$request_id" \
      --offering "$offering" --effort "$effort" --agent "$persona" \
      --prompt-file "$run_dir/prompt.md" --cwd "$cwd" \
-     "${extra_args[@]}" --json >"$response"; then
+     "${cockpit_args[@]}" "${extra_args[@]}" --json >"$response"; then
      request_rc=0
    else
      request_rc=$?

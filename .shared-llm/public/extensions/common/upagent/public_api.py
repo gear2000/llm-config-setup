@@ -786,6 +786,25 @@ def _cockpit_pane() -> str:
     return pane
 
 
+def _request_cockpit_pane(value: object) -> str:
+    """Resolve an invocation-only caller pane or preserve service-pane fallback."""
+    if value is None:
+        return _cockpit_pane()
+    if not isinstance(value, str) or not value.strip():
+        raise PublicError("--cockpit-pane must be a non-empty live pane ID")
+    try:
+        herdr_session = recruiter._resolve_current_herdr_session_name()
+        live_panes = recruiter._live_pane_ids(herdr_session=herdr_session)
+    except recruiter.RecruiterError as error:
+        raise PublicError(f"could not validate --cockpit-pane: {error}") from error
+    if value not in live_panes:
+        raise PublicError(
+            f"--cockpit-pane {value!r} is not live in the current Herdr session "
+            f"{herdr_session!r}"
+        )
+    return value
+
+
 def _capture(
     call: Any,
     *args: object,
@@ -1642,8 +1661,9 @@ def _request(args: Any, cwd: Path) -> int:
         raise PublicError(
             "--keep-open is incompatible with --wait; submit asynchronously to receive the review control token"
         )
+    cockpit_pane = _request_cockpit_pane(args.cockpit_pane)
     store = PublicRequestStore()
-    registered = store.register(validated, _cockpit_pane())
+    registered = store.register(validated, cockpit_pane)
     code, submitted_now = _submit_registered(store, registered, wait=args.wait)
     status = _public_status(
         store,
