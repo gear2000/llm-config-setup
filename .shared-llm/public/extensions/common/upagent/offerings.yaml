@@ -10,9 +10,9 @@ offerings:
     harness: claude
     model: claude-sonnet-5
     efforts: [low, medium, high, xhigh, max]
-  claude-opus-4-6:
+  claude-opus-4-8:
     harness: claude
-    model: claude-opus-4-6
+    model: claude-opus-4-8
     efforts: [low, medium, high, xhigh, max]
   codex-gpt-5-6-sol:
     harness: codex

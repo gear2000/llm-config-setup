@@ -17,7 +17,7 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 APPROVED: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "claude-fable-5": ("claude", "claude-fable-5", EFFORTS),
     "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS),
-    "claude-opus-4-6": ("claude", "claude-opus-4-6", EFFORTS),
+    "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS),
     "pi-gpt-5-6-sol": ("pi", "openai-codex/gpt-5.6-sol", EFFORTS),
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS),
