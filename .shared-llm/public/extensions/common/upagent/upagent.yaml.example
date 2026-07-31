@@ -29,7 +29,7 @@
 #   {order_id}          exact order identity the worker MUST echo in result.json
 #
 # Model-id shapes differ per harness: claude takes an alias or full name (`opus`,
-# `claude-opus-5`) plus `--effort low|medium|high|xhigh|max`; Codex takes a bare model id
+# `claude-opus-4-6`) plus `--effort low|medium|high|xhigh|max`; Codex takes a bare model id
 # (`gpt-5.6-sol`) plus `-c model_reasoning_effort={effort}`; pi takes a provider-qualified
 # `provider/id` plus explicit `--thinking {effort}`.
 #

@@ -21,7 +21,7 @@ specialists:
   - name: reviewer
     location: .claude/agents/reviewer.md
     description: "Independent read-only review with concrete file and evidence citations."
-    offering: claude-opus-5
+    offering: claude-opus-4-6
     effort: high
     agent: reviewer
   - name: qa
