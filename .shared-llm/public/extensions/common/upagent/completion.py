@@ -47,11 +47,17 @@ class Artifact:
     staging_path: Path
     public_path: Path
     media_type: str
+    # An order may promote a normally-optional summary to required through its declared
+    # publication contract (`artifact_publication.required_artifacts`). Enforcement follows
+    # the declared contract: a review whose whole deliverable is its verdict document
+    # declares `compacted` required and can no longer publish "passed" without it, while
+    # ordinary workers keep the documented tolerance above.
+    declared_required: bool = False
 
     @property
     def required(self) -> bool:
-        """Derived from the kind so a manifest can never disagree with itself."""
-        return self.kind in MANDATORY_KINDS
+        """MANDATORY_KINDS are always required; the order's contract may add more."""
+        return self.kind in MANDATORY_KINDS or self.declared_required
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -122,6 +128,17 @@ def ensure_publication_contract(order: dict[str, Any]) -> dict[str, Any]:
             "handoff_path": str(handoff),
             "mandatory_consults": [],
         }
+        # A review's whole deliverable IS its verdict document: a "passed" with no
+        # compacted.md is unusable and forces the caller to re-run the entire review
+        # (observed in the field). Review-stage orders therefore default to declaring
+        # `compacted` required AND to the review result contract — the verdict document
+        # becomes a schema-validated result field the hub derives compacted.md from, so
+        # the model literally cannot finish a review without producing the document.
+        # Ordinary workers keep the module-docstring tolerance, and an order that spells
+        # out its own artifact_publication decides for itself.
+        if order.get("stage_id") == "stage-2-adversarial-audit":
+            raw["required_artifacts"] = ["compacted"]
+            order.setdefault("result_contract", "review")
         order["artifact_publication"] = raw
     return publication_contract(order)
 
@@ -142,12 +159,27 @@ def publication_contract(order: dict[str, Any]) -> dict[str, Any]:
         "consult_id",
         "consult_payload_sha256",
         "mandatory_consults",
+        "required_artifacts",
     }
     unknown = set(raw) - allowed
     if unknown:
         raise CompletionError(
             "artifact_publication has unknown keys: " + ", ".join(sorted(unknown))
         )
+    required_artifacts = raw.get("required_artifacts", [])
+    if not isinstance(required_artifacts, list) or len(required_artifacts) != len(
+        set(required_artifacts)
+    ):
+        raise CompletionError(
+            "artifact_publication.required_artifacts must be a list of unique kinds"
+        )
+    for kind in required_artifacts:
+        # result/answer are always mandatory — declaring them is meaningless, and only the
+        # schemaless summaries can be promoted; an unknown kind is a contract typo.
+        if kind not in ("compacted", "handoff"):
+            raise CompletionError(
+                "artifact_publication.required_artifacts may only name compacted or handoff"
+            )
     if raw.get("schema_version") != SCHEMA_VERSION:
         raise CompletionError(
             f"artifact_publication.schema_version must be {SCHEMA_VERSION}"
@@ -219,6 +251,7 @@ def build_manifest(
         public["answer"] = _absolute(
             contract["answer_path"], "artifact_publication.answer_path"
         )
+    declared_required = frozenset(contract.get("required_artifacts", []))
     artifacts = tuple(
         Artifact(
             kind,
@@ -232,6 +265,7 @@ def build_manifest(
             ),
             path,
             MEDIA_TYPES[kind],
+            declared_required=kind in declared_required,
         )
         for kind, path in public.items()
     )
@@ -299,10 +333,14 @@ def parse_manifest(text: str, expected: Manifest | None = None) -> dict[str, obj
             raise CompletionError(
                 "artifact manifest entry has an invalid kind or media type"
             )
-        if item.get("required") is not (kind in MANDATORY_KINDS):
-            raise CompletionError(
-                f"artifact {kind} required flag must be {kind in MANDATORY_KINDS}"
-            )
+        # MANDATORY_KINDS can never be demoted; a summary may be promoted by the order's
+        # declared contract, so its flag is a bool the lease-equality check (above, when
+        # `expected` is present) cross-validates against the order-derived manifest.
+        if kind in MANDATORY_KINDS:
+            if item.get("required") is not True:
+                raise CompletionError(f"artifact {kind} required flag must be True")
+        elif not isinstance(item.get("required"), bool):
+            raise CompletionError(f"artifact {kind} required flag must be a bool")
         _absolute(item.get("staging_path"), f"artifact {kind} staging_path")
         _absolute(item.get("public_path"), f"artifact {kind} public_path")
         kinds.append(str(kind))
@@ -315,6 +353,60 @@ def parse_manifest(text: str, expected: Manifest | None = None) -> dict[str, obj
             "a specialist manifest must include answer after the three lifecycle artifacts"
         )
     return value
+
+
+def derive_review_compacted(
+    order: dict[str, Any],
+    manifest: Manifest,
+    *,
+    load_result: Callable[..., dict[str, Any]],
+) -> None:
+    """Author staged compacted.md FROM a review result's validated `verdict_document`.
+
+    One source of truth: for a `result_contract: review` order the verdict document is a
+    schema-validated field of result.json, and the compacted artifact is DERIVED from it at
+    completion time instead of trusted as a separate free-form worker write — so the file
+    and the result can never diverge, and there is nothing for the worker to forget.
+
+    Deliberately quiet on absence: when the staged result is missing, unparseable, or has no
+    usable `verdict_document`, there is nothing to derive from and bundle validation (which
+    runs right after every call site) is the party that speaks. Idempotent: identical
+    content is never rewritten, so the completion monitor may call this every poll.
+    """
+    if order.get("result_contract") != "review":
+        return
+    try:
+        result = load_result(
+            manifest.artifact("result").staging_path, manifest.order_id
+        )
+    except (OSError, ValueError):
+        return
+    document = result.get("verdict_document")
+    if not isinstance(document, str) or not document.strip():
+        return
+    text = document if document.endswith("\n") else document + "\n"
+    target = manifest.artifact("compacted").staging_path
+    try:
+        if target.is_file() and target.read_text(encoding="utf-8") == text:
+            return
+    except OSError:
+        pass
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_text_atomic(target, text)
+
+
+def persist_normalized_result(manifest: Manifest, parsed: dict[str, Any]) -> None:
+    """Write the reader-repaired result back to the staged file before projection.
+
+    `contracts.parse_result` repairs harmless `revisit` shapes and records the repair as
+    `revisit_normalized` — but publication copies the staged BYTES. Without this write-back
+    the caller-visible result.json would keep the raw malformed field while every hub-side
+    reader saw the normalized view. The staged file is rewritten only when a repair actually
+    happened, so untouched results keep their original bytes.
+    """
+    if "revisit_normalized" not in parsed:
+        return
+    _write_json_atomic(manifest.artifact("result").staging_path, parsed)
 
 
 def skip_optional(artifact: Artifact, path: Path) -> bool:

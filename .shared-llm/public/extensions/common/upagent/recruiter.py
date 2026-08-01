@@ -244,9 +244,12 @@ def default_roster_path() -> str:
       1. $UPAGENT_CONFIG (explicit override);
       2. the repo-owned `this_repo` roster, if the enclosing repo has one — walk up from cwd for
          a `.shared-llm/` dir and look under `.shared-llm/this_repo/extensions/common/upagent/`;
-      3. `upagent.yaml` beside this engine (the kit's own adoption — editable in the kit source).
-    `load_roster` fails loud if the resolved path does not exist, so a destination that has done
-    neither (1) nor (2) gets a clear error rather than silently reading a kit-owned public file.
+      3. the kit-shipped default `upagent.yaml` beside this engine — the zero-setup fallback
+         that lets UpAgent run in a repo with no `.shared-llm` provisioning at all, exactly
+         like the shipped bases for offerings.yaml / pipelines.yaml / specialists.yaml.
+    Falling back to (3) is announced loudly on stderr: ad-hoc mode must be visible, never
+    silent. `HERE` resolves through the canonical repo root shared by linked worktrees, so
+    the fallback also holds inside phase worktrees that never contain `this_repo`.
     """
     env = command_runtime.getenv("UPAGENT_CONFIG")
     if env:
@@ -258,6 +261,40 @@ def default_roster_path() -> str:
         )
         if this_repo.is_file():
             return str(this_repo)
+    # A linked worktree never contains the gitignored `.shared-llm/this_repo`, and a worktree
+    # created OUTSIDE the main checkout walks up past nothing that has it. Ask git for the
+    # worktrees' shared common dir and honor the MAIN checkout's repo-owned roster before
+    # falling back to the kit default — where a leader happened to create the worktree must
+    # not decide which configuration a phase runs with.
+    try:
+        probe = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(cwd),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            main_root = Path(probe.stdout.strip()).parent
+            this_repo = (
+                main_root
+                / ".shared-llm/this_repo/extensions/common/upagent/upagent.yaml"
+            )
+            if this_repo.is_file():
+                return str(this_repo)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    command_runtime.write_stderr(
+        "upagent: no repo roster found; using kit-default roster "
+        f"({HERE / 'upagent.yaml'}). Override with $UPAGENT_CONFIG or "
+        ".shared-llm/this_repo/extensions/common/upagent/upagent.yaml.\n"
+    )
     return str(HERE / "upagent.yaml")
 
 
@@ -2223,9 +2260,11 @@ class JobLedger:
                     ),
                     failure_answer=contracts_consult.failure_answer,
                 )
+            completion.derive_review_compacted(order, manifest, load_result=load_result)
+            completion.persist_normalized_result(manifest, parsed)
             projected = completion.project_bundle(
                 manifest,
-                load_result=load_result,
+                load_result=contracts.result_loader(order),
                 load_answer=contracts_consult.load_answer,
             )
             if projected != parsed:
@@ -2241,6 +2280,12 @@ class JobLedger:
                 raise RecruiterError(
                     f"cleanup-failed order {order['order_id']} must publish a blocked result"
                 )
+            for item in manifest.artifacts:
+                if item.required and not item.public_path.is_file():
+                    raise CompletionError(
+                        f"required {item.kind} artifact vanished before receipt "
+                        f"publication: {item.public_path}"
+                    )
             terminal_at_ns = time.time_ns()
             receipt = {
                 "cleanup": cleanup,
@@ -2262,7 +2307,15 @@ class JobLedger:
                 # the worker made claims; absent means it recorded no `consults` key at all.
                 **resolve_consult_claims(order, parsed),
                 "artifact_manifest_path": str(manifest_path),
-                "artifacts": [item.as_dict() for item in manifest.artifacts],
+                # A receipt must never advertise a file that does not exist: every entry
+                # carries `present`, frozen by a stat at publication time. A required
+                # artifact can never be absent here (project_bundle revalidated the public
+                # bundle before this point) — enforce that invariant loudly anyway rather
+                # than freeze a lie into the commit marker.
+                "artifacts": [
+                    {**item.as_dict(), "present": item.public_path.is_file()}
+                    for item in manifest.artifacts
+                ],
                 **(
                     {
                         "cancelled": True,
@@ -3871,6 +3924,14 @@ def _write_worker_instructions(
         + f'- `order_id`: exactly "{order["order_id"]}"\n'
         + '- `verdict`: exactly one of "passed", "failed", or "blocked"\n'
         + "- `full_log`: a non-empty transcript path, session id, or worker-session description\n"
+        + (
+            "- `verdict_document`: the FULL review text (at least "
+            f"{contracts.REVIEW_VERDICT_MIN_CHARS} characters), ending with exactly "
+            "`VERDICT: CLEARED` or `VERDICT: VEERED` on its last line. The Recruiter "
+            "writes compacted.md FROM this field — do not write compacted.md yourself.\n"
+            if order.get("result_contract") == "review"
+            else ""
+        )
         + "Do not invent workflow stage names; omit `revisit` unless the assignment names one.\n"
         + (
             "Write answer.json as either a cited success object "
@@ -3881,6 +3942,14 @@ def _write_worker_instructions(
             else ""
         )
         + "Markdown artifacts must contain non-whitespace text. Do not write any public path.\n"
+        + (
+            ""
+            if retained
+            else "After writing every artifact, remain in your session and go idle. Do NOT "
+            "exit, close your pane, or clean anything up: the Recruiter validates these "
+            "files while you are still reachable, may send you one COMPLETION_REPAIR "
+            "instruction to fix them, and closes the pane itself after validation.\n"
+        )
     )
     suffix = (
         "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
@@ -3899,6 +3968,49 @@ def _write_worker_instructions(
         ) from e
 
 
+def _worker_pane_confirmed_gone(
+    worker_pane: str,
+    *,
+    herdr_session: str | None = None,
+    confirmations: int = 1,
+) -> bool:
+    """True only when herdr POSITIVELY answers that the pane does not exist.
+
+    Classification must come from a probe, never from an exit code or stderr text alone:
+    herdr exits 1 for both a server-side wait timeout and a vanished pane. A transport
+    fault (socket down, probe timeout) is NOT pane-gone — when herdr cannot be asked,
+    the caller keeps its original error path.
+    """
+    for attempt in range(max(1, confirmations)):
+        if attempt:
+            time.sleep(1)
+        try:
+            _herdr_json(
+                "pane",
+                "get",
+                worker_pane,
+                timeout_seconds=10,
+                herdr_session=herdr_session,
+            )
+            return False
+        except RecruiterError as error:
+            if "pane_not_found" not in str(error):
+                return False
+    return True
+
+
+# How often the agent-status wait independently probes the worker pane. Herdr 0.7.1's wait
+# subscription goes SILENT when the watched pane vanishes mid-wait (it reports nothing until
+# --timeout), so without this probe a dead worker holds the order for its entire remaining
+# budget — observed as ~2 h of discarded work.
+AGENT_WAIT_PANE_PROBE_SECONDS = 15.0
+
+# How long a staged result.json may sit invalid before the completion monitor wakes the job
+# runner to repair it with the worker still addressable. Long enough for a slow, non-atomic
+# writer to finish its bundle; short enough that a wedged order resolves in seconds.
+COMPLETION_IMPASSE_SETTLE_SECONDS = 10.0
+
+
 def _wait_for_agent_status(
     worker_pane: str,
     timeout_ms: int,
@@ -3910,7 +4022,21 @@ def _wait_for_agent_status(
 
     This opens one Herdr subscription for the whole worker lifetime. When the durable file wins,
     terminate that waiter promptly; do not create a new socket subscription every second.
+
+    A pane that is positively confirmed gone ends the wait with True — "the worker is finished
+    with its pane, inspect what it staged" — instead of an error. The completion reactor then
+    validates the staged bundle, preserves a terminal result, or deterministically blocks; a
+    dead pane must never classify the whole order as broken infrastructure.
     """
+
+    def _terminate(process: subprocess.Popen) -> None:
+        process.terminate()
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+
     _herdr_available()
     deadline = time.monotonic() + timeout_ms / 1000
     args = (
@@ -3926,26 +4052,27 @@ def _wait_for_agent_status(
     process = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
+    pane_missing_streak = 0
+    next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while process.poll() is None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            process.terminate()
-            try:
-                process.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
+            _terminate(process)
             raise AgentWaitTimeout(
                 f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms"
             )
+        if time.monotonic() >= next_pane_probe:
+            next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
+            if _worker_pane_confirmed_gone(worker_pane, herdr_session=herdr_session):
+                pane_missing_streak += 1
+                if pane_missing_streak >= 2:
+                    _terminate(process)
+                    return True
+            else:
+                pane_missing_streak = 0
         wait_seconds = min(COMPLETION_MONITOR_POLL_SECONDS, remaining)
         if monitor_finalized is not None and monitor_finalized.wait(wait_seconds):
-            process.terminate()
-            try:
-                process.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
+            _terminate(process)
             return False
         if monitor_finalized is None:
             time.sleep(wait_seconds)
@@ -3954,6 +4081,12 @@ def _wait_for_agent_status(
         return True
     if monitor_finalized is not None and monitor_finalized.is_set():
         return False
+    # A pane that was already gone when the wait started makes herdr fail fast with a decode
+    # error. Confirm with two positive probes and fall through to the completion reactor.
+    if _worker_pane_confirmed_gone(
+        worker_pane, herdr_session=herdr_session, confirmations=2
+    ):
+        return True
     raise RecruiterError(f"{' '.join(argv)} failed: {(stderr or stdout).strip()}")
 
 
@@ -4137,11 +4270,12 @@ def _complete_typed_bundle(
 
     def validate() -> dict:
         _normalize_public_result_revisit(order, manifest)
+        completion.derive_review_compacted(order, manifest, load_result=load_result)
         return cast(
             dict,
             completion.validate_bundle(
                 manifest,
-                load_result=load_result,
+                load_result=contracts.result_loader(order),
                 load_answer=contracts_consult.load_answer,
             ),
         )
@@ -4193,7 +4327,7 @@ def _complete_typed_bundle(
             )
             completion.validate_bundle(
                 manifest,
-                load_result=load_result,
+                load_result=contracts.result_loader(order),
                 load_answer=contracts_consult.load_answer,
             )
             ledger._event(key, "completion-repair-exhausted", reason=reason)
@@ -4215,7 +4349,7 @@ def _complete_typed_bundle(
         )
         completion.validate_bundle(
             manifest,
-            load_result=load_result,
+            load_result=contracts.result_loader(order),
             load_answer=contracts_consult.load_answer,
         )
         ledger._event(key, "mandatory-consult-blocked", reasons=consult_errors)
@@ -4369,6 +4503,22 @@ def _start_completion_monitor(
         check_number = 0
         retained = order.get("completion_policy") == "requester_release"
         review_dir = _review_dir(worker_result_path)
+        # The monitor finally has a clock. It must NOT exit at the deadline — the job runner
+        # may re-arm its own wait through requester-authorized extensions and still needs the
+        # durable-file accelerator — but a monitor with no notion of time once spun at 20 Hz
+        # on a stably-invalid bundle for 65+ minutes. Past the order's own deadline the poll
+        # cadence drops to a calm 1 s; correctness is owned by the job runner's wait, whose
+        # pane probe now ends the race when the worker is gone.
+        poll_deadline = time.monotonic() + timeout_ms / 1000
+        # Impasse wake: a worker that has WRITTEN result.json but whose bundle stays invalid
+        # is done trying — no future poll can fix the file, only the completion reactor's
+        # same-worker repair turn can (and it must reach the worker while the pane is alive,
+        # which is exactly what waiting for the full order timeout would squander). After the
+        # settle window, wake the job runner through `finalized`; the reactor revalidates
+        # authoritatively, so a wake is a request to act, never a claim that the bundle is
+        # valid. Retained review-loop workers and watchdogs keep their own protocols.
+        impasse_eligible = not retained and order.get("agent") not in WATCHDOG_AGENTS
+        first_invalid_with_result: float | None = None
         while not stop.is_set():
             if (
                 next_check is not None
@@ -4378,15 +4528,45 @@ def _start_completion_monitor(
                 check_number += 1
                 on_inactivity(check_number)
                 next_check = time.monotonic() + cast(int, inactivity_check_ms) / 1000
+            poll_seconds = (
+                COMPLETION_MONITOR_POLL_SECONDS
+                if time.monotonic() < poll_deadline
+                else 1.0
+            )
             try:
+                # Reviews: the compacted artifact is derived from the validated
+                # verdict_document, and the helper is idempotent, so deriving on every
+                # poll is a cheap no-op once written — the bundle then validates here
+                # without waiting for the impasse wake.
+                completion.derive_review_compacted(
+                    order, artifact_manifest, load_result=load_result
+                )
                 completion.validate_bundle(
                     artifact_manifest,
-                    load_result=load_result,
+                    load_result=contracts.result_loader(order),
                     load_answer=contracts_consult.load_answer,
                 )
             except CompletionError:
-                stop.wait(COMPLETION_MONITOR_POLL_SECONDS)
+                if impasse_eligible and worker_result_path.is_file():
+                    now = time.monotonic()
+                    if first_invalid_with_result is None:
+                        first_invalid_with_result = now
+                    elif (
+                        now - first_invalid_with_result
+                        >= COMPLETION_IMPASSE_SETTLE_SECONDS
+                    ):
+                        finalized.set()
+                        while finalized.is_set() and not stop.wait(
+                            COMPLETION_MONITOR_POLL_SECONDS
+                        ):
+                            pass
+                        first_invalid_with_result = None
+                        continue
+                else:
+                    first_invalid_with_result = None
+                stop.wait(poll_seconds)
                 continue
+            first_invalid_with_result = None
             if retained:
                 try:
                     release = _verified_delivered_review_release(
@@ -5333,7 +5513,10 @@ def _run_order(
         # A filesystem failure writing the fallback propagates.  Without a valid result, the
         # caller must not publish terminal state or DONE.
         try:
-            existing_result = load_result(
+            # The order's own result contract applies here too: preserving a review result
+            # that lacks its validated verdict_document would republish exactly the
+            # unusable "passed" this contract exists to prevent.
+            existing_result = contracts.result_loader(order)(
                 worker_result_path, expected_order_id=order_id
             )
         except ContractError:
@@ -5427,6 +5610,7 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "requester": ("requester",),
     "management": ("management",),
     "artifact_publication": ("artifact_publication",),
+    "result_contract": ("result_contract",),
     "mode": ("mode",),
     "plan_id": ("plan_id",),
     "step_id": ("step_id",),
@@ -5469,6 +5653,7 @@ ORDER_INTAKE_PROTECTED = (
     "requester",
     "management",
     "artifact_publication",
+    "result_contract",
     "mode",
     "plan_id",
     "step_id",
@@ -7337,7 +7522,7 @@ def _reconcile_claim(
         try:
             result = completion.validate_bundle(
                 manifest,
-                load_result=load_result,
+                load_result=contracts.result_loader(order),
                 load_answer=contracts_consult.load_answer,
             )
             if order.get("completion_policy") == "requester_release":
@@ -8082,12 +8267,19 @@ Write exactly one JSON object to `{verify_result_path}`:
   "order_id": "{verify_id}",
   "verdict": "passed",
   "full_log": "<your transcript path or session id>",
-  "reason": "one-line summary; on failed, the concrete findings worst-first"
+  "reason": "one-line summary; on failed, the concrete findings worst-first",
+  "verdict_document": "<the FULL review text; ends with `VERDICT: CLEARED` or `VERDICT: VEERED`>"
 }}
 ```
 
+`verdict_document` is schema-validated: the whole review (findings, evidence, reasoning),
+at least {contracts.REVIEW_VERDICT_MIN_CHARS} characters, its last line exactly
+`VERDICT: CLEARED` (claims hold) or `VERDICT: VEERED` (they do not). The Recruiter writes
+compacted.md from this field — do not write compacted.md yourself.
+
 Use `passed` when the original claims hold, `failed` when they do not (include
-`"revisit": ["{original["stage_id"]}"]`). Then exit the session.
+`"revisit": ["{original["stage_id"]}"]`). Then remain in your session and go idle —
+do NOT exit or close your pane; the Recruiter validates your files and closes the pane.
 """
     _write_text_atomic(instructions_path, brief)
     verify_order = {
@@ -8678,7 +8870,8 @@ def cmd_review_release(
         _submit_agent_prompt(
             worker_address,
             f"REVIEW_RELEASE: Checkpoint {checkpoint} is accepted. Run final checks, write the "
-            f"terminal artifacts below, then exit.\n{paths}",
+            f"terminal artifacts below, then go idle — do NOT exit or close your pane; the "
+            f"Recruiter validates the files and closes the pane.\n{paths}",
             idle_timeout_ms=60_000,
             herdr_session=herdr_session,
         )
@@ -9744,7 +9937,8 @@ def build_consult_brief(consult: dict, location: str, cwd: str) -> str:
         f'"citations": ["path/to/file:line", ...]. Every claim MUST carry a real file:line '
         f"citation into the repo. Write nothing outside that JSON file.\n"
         "After the cited answer is durable, satisfy the Recruiter delivery contract appended "
-        "to this brief and exit.\n"
+        "to this brief, then remain in your session and go idle — do NOT exit or close your "
+        "pane; the Recruiter validates your files and closes the pane.\n"
     )
 
 

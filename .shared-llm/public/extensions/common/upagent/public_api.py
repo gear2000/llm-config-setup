@@ -939,28 +939,30 @@ def _public_status(
         result = _read_json_optional(result_path, "published result")
     public_evidence = cast(dict[str, object], order["public_request"])
     publication = cast(dict[str, object], order["artifact_publication"])
+    # Every path-bearing entry carries `present`, recomputed by a stat at read time so a
+    # caller can gate on artifact completeness without stat-ing the ledger itself. The
+    # receipt's own artifact list keeps the authoritative `present` frozen at publication;
+    # this view answers "is it still there NOW" (pruning or external deletion may differ).
+    def _artifact(kind: str, path: object) -> dict[str, object]:
+        return {"kind": kind, "path": path, "present": Path(str(path)).is_file()}
+
     artifacts: list[dict[str, object]] = [
-        {"kind": "prompt", "path": registered.record["prompt_snapshot"]},
-        {"kind": "order", "path": str(registered.order_path)},
-        {"kind": "result", "path": order["result_path"]},
-        {"kind": "compacted", "path": publication["compacted_path"]},
-        {"kind": "handoff", "path": publication["handoff_path"]},
-        {"kind": "receipt", "path": str(receipt_path)},
+        _artifact("prompt", registered.record["prompt_snapshot"]),
+        _artifact("order", str(registered.order_path)),
+        _artifact("result", order["result_path"]),
+        _artifact("compacted", publication["compacted_path"]),
+        _artifact("handoff", publication["handoff_path"]),
+        _artifact("receipt", str(receipt_path)),
     ]
     if isinstance(result, dict) and isinstance(result.get("full_log"), str):
         full_log = cast(str, result["full_log"])
         artifacts.append(
-            {
-                "kind": "log",
-                **(
-                    {"path": full_log}
-                    if Path(full_log).is_absolute()
-                    else {"value": full_log}
-                ),
-            }
+            _artifact("log", full_log)
+            if Path(full_log).is_absolute()
+            else {"kind": "log", "value": full_log}
         )
     if isinstance(public_evidence.get("answer_path"), str):
-        artifacts.append({"kind": "answer", "path": public_evidence["answer_path"]})
+        artifacts.append(_artifact("answer", public_evidence["answer_path"]))
     review: dict[str, object] | None = None
     if order.get("completion_policy") == "requester_release":
         token = state.get("token")

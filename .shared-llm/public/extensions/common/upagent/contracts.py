@@ -140,6 +140,13 @@ def parse_order(text: str) -> dict:
             raise ContractError(
                 "order.json: `timeout_ms` must be a positive integer when present"
             )
+    # `result_contract` (optional) selects an extended result schema. Only "review" exists:
+    # the worker's result.json must then carry a validated `verdict_document`, and the hub
+    # derives compacted.md from that field at publication so file and result never diverge.
+    if "result_contract" in order and order["result_contract"] != "review":
+        raise ContractError(
+            'order.json: `result_contract` must be "review" when present'
+        )
     completion_policy = order.get("completion_policy")
     if completion_policy is not None and completion_policy not in COMPLETION_POLICIES:
         raise ContractError(
@@ -235,6 +242,7 @@ def parse_order(text: str) -> dict:
             "consult_id",
             "consult_payload_sha256",
             "mandatory_consults",
+            "required_artifacts",
         }
         unknown_artifacts = set(artifact_publication) - allowed_artifacts
         if unknown_artifacts:
@@ -280,6 +288,16 @@ def parse_order(text: str) -> dict:
         ):
             raise ContractError(
                 "order.json: `artifact_publication.consult_payload_sha256` must be a lowercase SHA-256 for a consult"
+            )
+        required_artifacts = artifact_publication.get("required_artifacts", [])
+        if (
+            not isinstance(required_artifacts, list)
+            or len(required_artifacts) != len(set(required_artifacts))
+            or any(kind not in ("compacted", "handoff") for kind in required_artifacts)
+        ):
+            raise ContractError(
+                "order.json: `artifact_publication.required_artifacts` must be a list of "
+                "unique kinds drawn from compacted, handoff"
             )
         mandatory = artifact_publication.get("mandatory_consults", [])
         if not isinstance(mandatory, list):
@@ -380,11 +398,27 @@ def parse_order(text: str) -> dict:
     return order
 
 
-def parse_result(text: str, expected_order_id: str | None = None) -> dict:
+# The smallest text that can plausibly carry a real review: shorter than this is a rubber
+# stamp, not a verdict document.
+REVIEW_VERDICT_MIN_CHARS = 80
+REVIEW_VERDICT_TAILS = ("VERDICT: CLEARED", "VERDICT: VEERED")
+
+
+def parse_result(
+    text: str,
+    expected_order_id: str | None = None,
+    *,
+    result_contract: str | None = None,
+) -> dict:
     """Validate + return a result dict from raw JSON text. Fail-loud on any problem.
 
     When `expected_order_id` is given, the result's order_id MUST match it — this catches a
     stale result.json left over from a prior try at the same path.
+
+    When `result_contract` is "review", the result must also carry `verdict_document` — the
+    full review text, ending with its verdict line. Schema-validated fields were never
+    missing across the field runs while prompt-requested files sometimes were, so a review's
+    deliverable lives HERE; the hub derives compacted.md from it at publication.
     """
     try:
         result = json.loads(text)
@@ -408,7 +442,27 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
 
     # `revisit` (optional) must be a list of recognized stage ids. Required to be non-empty
     # when the verdict is `failed` (a failure with nowhere to go back to is a contract bug).
+    #
+    # Workers hallucinate the SHAPE of this field more than any other (observed twice in one
+    # run: a bare string instead of a list), and a finished job must not wedge over a field
+    # nobody will read. So the reader repairs what is harmless before enforcing what is not:
+    # a bare string naming a recognized stage id becomes a one-element list on any verdict,
+    # and on verdicts that never consume `revisit` (anything but `failed`) unrecognized noise
+    # is dropped entirely. A `failed` verdict stays strict — that list steers backtracking.
+    # Repair is recorded in `revisit_normalized` so the published result shows what happened.
     revisit = result.get("revisit", [])
+    original_revisit = revisit
+    if isinstance(revisit, str) and revisit in RECOGNIZED_STAGE_IDS:
+        revisit = [revisit]
+    if result["verdict"] != "failed":
+        if isinstance(revisit, str):
+            revisit = []
+        elif isinstance(revisit, list):
+            revisit = [s for s in revisit if isinstance(s, str) and s in RECOGNIZED_STAGE_IDS]
+    if revisit != original_revisit:
+        result["revisit_normalized"] = original_revisit
+    if "revisit" in result:
+        result["revisit"] = revisit
     if not isinstance(revisit, list) or not all(isinstance(s, str) for s in revisit):
         raise ContractError("result.json: `revisit` must be a list of stage-id strings")
     for stage in revisit:
@@ -447,6 +501,39 @@ def parse_result(text: str, expected_order_id: str | None = None) -> dict:
         raise ContractError(
             f"result.json: decision {decision!r} must be one of {', '.join(ADVISOR_DECISIONS)}"
         )
+
+    # `blocked` is exempt: Python authors blocked terminals itself (repair exhausted, dead
+    # pane, cleanup failure) and a machine-written outcome cannot carry a review it never
+    # performed. A worker-earned verdict — passed or failed — must carry its document.
+    if result_contract == "review" and result["verdict"] in ("passed", "failed"):
+        document = result.get("verdict_document")
+        if (
+            not isinstance(document, str)
+            or len(document.strip()) < REVIEW_VERDICT_MIN_CHARS
+        ):
+            raise ContractError(
+                "result.json: a review result needs `verdict_document` — the full review "
+                f"text as a string of at least {REVIEW_VERDICT_MIN_CHARS} characters"
+            )
+        if not document.rstrip().endswith(REVIEW_VERDICT_TAILS):
+            raise ContractError(
+                "result.json: `verdict_document` must end with exactly "
+                "`VERDICT: CLEARED` or `VERDICT: VEERED`"
+            )
+        # The JSON verdict and the document's closing line are two spellings of ONE outcome
+        # and must agree: CLEARED means the claims held (passed), VEERED means they did not
+        # (failed). Accepting a passed/VEERED pair would let a receipt say one thing while
+        # the derived compacted.md says the opposite — exactly the divergence this contract
+        # exists to make impossible.
+        expected_tail = (
+            "VERDICT: CLEARED" if result["verdict"] == "passed" else "VERDICT: VEERED"
+        )
+        if not document.rstrip().endswith(expected_tail):
+            raise ContractError(
+                f"result.json: verdict {result['verdict']!r} contradicts the "
+                f"verdict_document ending — passed must end `VERDICT: CLEARED`, "
+                f"failed must end `VERDICT: VEERED`"
+            )
     return result
 
 
@@ -458,12 +545,32 @@ def load_order(path: str | Path) -> dict:
     return parse_order(p.read_text())
 
 
-def load_result(path: str | Path, expected_order_id: str | None = None) -> dict:
+def load_result(
+    path: str | Path,
+    expected_order_id: str | None = None,
+    *,
+    result_contract: str | None = None,
+) -> dict:
     """Read + validate a result.json file. Fail-loud if missing or malformed."""
     p = Path(path)
     if not p.is_file():
         raise ContractError(f"result.json not found: {p}")
-    return parse_result(p.read_text(), expected_order_id)
+    return parse_result(p.read_text(), expected_order_id, result_contract=result_contract)
+
+
+def result_loader(order: dict):
+    """A `load_result` bound to the order's declared result contract.
+
+    Every bundle validation site loads results through this, so a review order's
+    `verdict_document` requirement travels with the order instead of depending on each
+    call site remembering to ask.
+    """
+    contract = order.get("result_contract")
+
+    def load(path: str | Path, expected_order_id: str | None = None) -> dict:
+        return load_result(path, expected_order_id, result_contract=contract)
+
+    return load
 
 
 # ---------------------------------------------------------------------------

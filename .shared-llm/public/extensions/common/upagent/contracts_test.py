@@ -315,6 +315,135 @@ def test_revisit_unknown_stage_fails() -> None:
         contracts.parse_result(json.dumps(bad))
 
 
+def test_revisit_recognized_string_coerced_to_list() -> None:
+    # Observed in the field: a worker wrote the recognized stage id as a bare string on a
+    # `passed` verdict. The reader repairs the shape and records it.
+    r = _valid_result()
+    r["revisit"] = "stage-1-implementation"
+    parsed = contracts.parse_result(json.dumps(r))
+    assert parsed["revisit"] == ["stage-1-implementation"]
+    assert parsed["revisit_normalized"] == "stage-1-implementation"
+
+
+def test_revisit_recognized_string_coerced_on_failed_verdict() -> None:
+    r = _valid_result()
+    r["verdict"] = "failed"
+    r["revisit"] = "stage-1-implementation"
+    parsed = contracts.parse_result(json.dumps(r))
+    assert parsed["revisit"] == ["stage-1-implementation"]
+
+
+def test_revisit_prose_string_dropped_on_non_failed_verdict() -> None:
+    # Observed in the field: a prose paragraph as `revisit` on a `blocked` verdict.
+    # The field is unused off the `failed` path, so noise is dropped.
+    r = _valid_result()
+    r["verdict"] = "blocked"
+    r["revisit"] = "please revisit the implementation because the tests were flaky"
+    parsed = contracts.parse_result(json.dumps(r))
+    assert parsed["revisit"] == []
+    assert "revisit_normalized" in parsed
+
+
+def test_revisit_unrecognized_entries_dropped_on_non_failed_verdict() -> None:
+    r = _valid_result()
+    r["revisit"] = ["stage-1-implementation", "stage-42", 7]
+    parsed = contracts.parse_result(json.dumps(r))
+    assert parsed["revisit"] == ["stage-1-implementation"]
+
+
+def test_revisit_prose_string_still_fails_on_failed_verdict() -> None:
+    # A `failed` verdict's revisit list is load-bearing for backtracking: no repair.
+    bad = _valid_result()
+    bad["verdict"] = "failed"
+    bad["revisit"] = "go back and redo the implementation"
+    with pytest.raises(ContractError, match="revisit"):
+        contracts.parse_result(json.dumps(bad))
+
+
+_REVIEW_DOCUMENT = (
+    "## Adversarial review\n\n"
+    "Checked every claim in the result against the diff and the test output; the swallowed "
+    "exception reported earlier is fixed and the suite genuinely passes.\n\n"
+    "VERDICT: CLEARED"
+)
+
+
+def test_order_result_contract_accepts_only_review() -> None:
+    order = _valid_order()
+    order["result_contract"] = "review"
+    assert contracts.parse_order(json.dumps(order))["result_contract"] == "review"
+    order["result_contract"] = "audit"
+    with pytest.raises(ContractError, match="result_contract"):
+        contracts.parse_order(json.dumps(order))
+
+
+def test_review_result_requires_verdict_document() -> None:
+    result = _valid_result()
+    with pytest.raises(ContractError, match="verdict_document"):
+        contracts.parse_result(json.dumps(result), result_contract="review")
+
+
+def test_review_result_with_valid_document_passes() -> None:
+    result = _valid_result()
+    result["verdict_document"] = _REVIEW_DOCUMENT
+    parsed = contracts.parse_result(json.dumps(result), result_contract="review")
+    assert parsed["verdict_document"].endswith("VERDICT: CLEARED")
+
+
+def test_review_result_rejects_short_or_untailed_documents() -> None:
+    result = _valid_result()
+    result["verdict_document"] = "Looks fine. VERDICT: CLEARED"
+    with pytest.raises(ContractError, match="verdict_document"):
+        contracts.parse_result(json.dumps(result), result_contract="review")
+    result["verdict_document"] = _REVIEW_DOCUMENT.replace(
+        "VERDICT: CLEARED", "Everything held up."
+    )
+    with pytest.raises(ContractError, match="CLEARED"):
+        contracts.parse_result(json.dumps(result), result_contract="review")
+
+
+def test_review_verdict_must_match_the_document_tail() -> None:
+    # passed/VEERED and failed/CLEARED are contradictions, not verdicts: the receipt would
+    # say one thing while the derived compacted.md said the opposite.
+    result = _valid_result()
+    result["verdict_document"] = _REVIEW_DOCUMENT.replace(
+        "VERDICT: CLEARED", "VERDICT: VEERED"
+    )
+    with pytest.raises(ContractError, match="contradicts"):
+        contracts.parse_result(json.dumps(result), result_contract="review")
+
+    failed = _valid_result()
+    failed["verdict"] = "failed"
+    failed["revisit"] = ["stage-1-implementation"]
+    failed["verdict_document"] = _REVIEW_DOCUMENT
+    with pytest.raises(ContractError, match="contradicts"):
+        contracts.parse_result(json.dumps(failed), result_contract="review")
+
+    failed["verdict_document"] = _REVIEW_DOCUMENT.replace(
+        "VERDICT: CLEARED", "VERDICT: VEERED"
+    )
+    parsed = contracts.parse_result(json.dumps(failed), result_contract="review")
+    assert parsed["verdict"] == "failed"
+
+
+def test_review_contract_exempts_blocked_verdicts() -> None:
+    # Python authors blocked terminals itself (repair exhausted, dead pane); a machine-written
+    # outcome cannot carry a review it never performed.
+    result = _valid_result()
+    result["verdict"] = "blocked"
+    assert contracts.parse_result(json.dumps(result), result_contract="review")
+
+
+def test_result_loader_binds_the_order_contract(tmp_path) -> None:
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps(_valid_result()))
+    plain = contracts.result_loader({"order_id": "x"})
+    assert plain(path)["verdict"] == "passed"
+    review = contracts.result_loader({"order_id": "x", "result_contract": "review"})
+    with pytest.raises(ContractError, match="verdict_document"):
+        review(path)
+
+
 def test_advisor_decision_valid() -> None:
     r = _valid_result()
     r["decision"] = "stop-ask-human"

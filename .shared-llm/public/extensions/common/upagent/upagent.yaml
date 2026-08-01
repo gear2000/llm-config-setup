@@ -1,9 +1,13 @@
-# UpAgent Recruiter launch templates — PUBLIC TEMPLATE.
+# UpAgent Recruiter launch templates — KIT-SHIPPED DEFAULT (last-resort fallback).
 #
-# Copy to `.shared-llm/this_repo/extensions/common/upagent/upagent.yaml` only when a destination
-# still has legacy route/controller launch profiles, then adapt those explicitly non-public
-# commands. The filled roster is repo-owned and never overwritten by `just update`; this example
-# ships from the kit only as its starting point.
+# This file makes UpAgent work in a repo with NO setup at all. Roster resolution order:
+#   1. $UPAGENT_CONFIG                                             (explicit override)
+#   2. .shared-llm/this_repo/extensions/common/upagent/upagent.yaml (repo-owned roster)
+#   3. THIS FILE, beside the engine                                 (kit default)
+# When this file is the one resolved, the client prints a loud "using kit-default roster"
+# notice so ad-hoc mode is visible, never silent. Do not hand-edit this file in a destination:
+# override it with (1) or (2) instead. Keep it in sync with upagent.yaml.example, which is the
+# documented starting point for repo-owned rosters.
 #
 # The roster is keyed by HARNESS, not by worker type or persona. route.yaml is authoritative
 # for which harness/model/agent runs each stage; the Recruiter only knows HOW to launch each

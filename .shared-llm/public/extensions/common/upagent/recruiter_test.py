@@ -1145,6 +1145,182 @@ def _result(order_id: str, verdict: str = "passed") -> dict:
     return result
 
 
+def test_receipt_artifacts_carry_frozen_present_flags(tmp_path: Path) -> None:
+    """Every receipt artifact entry records `present`, stat-frozen at publication.
+
+    A receipt must never advertise a file that does not exist: a skipped optional summary is
+    listed (the path stays known) but marked present=false, and required artifacts are always
+    present=true — the field failure was a review receipt vouching for a compacted.md that
+    was never written.
+    """
+    root = tmp_path / "upagent-hub"
+    ledger = recruiter.JobLedger(root)
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    recruiter.completion.ensure_publication_contract(order)
+    manifest = recruiter.completion.build_manifest(
+        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+    )
+    result = _result(order["order_id"])
+    recruiter.JobLedger._write_json(manifest.artifact("result").staging_path, result)
+    manifest.artifact("handoff").staging_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
+    # compacted is deliberately never staged: optional here, so the job still publishes.
+    assert ledger.finalize(
+        key, token, order, result, cleanup=_cleanup(), exit_code=0
+    )
+    receipt = json.loads((ledger.request_dir(key) / "receipt.json").read_text())
+    by_kind = {item["kind"]: item for item in receipt["artifacts"]}
+    assert by_kind["result"]["present"] is True
+    assert by_kind["result"]["required"] is True
+    assert by_kind["handoff"]["present"] is True
+    assert by_kind["compacted"]["present"] is False
+    assert by_kind["compacted"]["required"] is False
+
+
+def test_finalize_publishes_the_normalized_result_bytes(tmp_path: Path) -> None:
+    """The reader repairs a string `revisit`; publication must ship the REPAIRED bytes.
+
+    Without the write-back, every hub-side reader saw the normalized list while the
+    caller-visible result.json kept the raw malformed string — two contradictory records
+    of the same result.
+    """
+    root = tmp_path / "upagent-hub"
+    ledger = recruiter.JobLedger(root)
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    recruiter.completion.ensure_publication_contract(order)
+    manifest = recruiter.completion.build_manifest(
+        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+    )
+    raw = {
+        "order_id": order["order_id"],
+        "verdict": "passed",
+        "revisit": "stage-1-implementation",
+        "full_log": "/tmp/worker.log",
+    }
+    recruiter.JobLedger._write_json(manifest.artifact("result").staging_path, raw)
+    manifest.artifact("compacted").staging_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.artifact("compacted").staging_path.write_text("# Compact\n")
+    manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
+    parsed = recruiter.load_result(
+        manifest.artifact("result").staging_path, expected_order_id=order["order_id"]
+    )
+    assert parsed["revisit"] == ["stage-1-implementation"]
+
+    assert ledger.finalize(key, token, order, parsed, cleanup=_cleanup(), exit_code=0)
+
+    published = json.loads(Path(order["result_path"]).read_text())
+    assert published["revisit"] == ["stage-1-implementation"]
+    assert published["revisit_normalized"] == "stage-1-implementation"
+    staged = json.loads(manifest.artifact("result").staging_path.read_text())
+    assert staged["revisit"] == ["stage-1-implementation"]
+
+
+def test_default_roster_precedence_repo_then_common_dir_then_kit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Roster resolution: repo-owned roster by walk-up, then the git common dir's main
+    checkout (worktrees never contain the gitignored this_repo), then the kit default."""
+    import subprocess as sp
+
+    monkeypatch.delenv("UPAGENT_CONFIG", raising=False)
+    main = tmp_path / "main"
+    roster = main / ".shared-llm/this_repo/extensions/common/upagent/upagent.yaml"
+    roster.parent.mkdir(parents=True)
+    roster.write_text('harnesses:\n  claude: "claude {model}"\n')
+
+    # 1. Walk-up from a subdirectory of the main checkout.
+    sub = main / "src"
+    sub.mkdir()
+    monkeypatch.setattr(recruiter.command_runtime, "current_cwd", lambda: sub)
+    assert recruiter.default_roster_path() == str(roster)
+
+    # 2. A linked worktree OUTSIDE the main checkout resolves the main checkout's roster.
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin",
+    }
+    sp.run(["git", "init", "-q", str(main)], check=True, env=env)
+    sp.run(
+        ["git", "-C", str(main), "commit", "-q", "--allow-empty", "-m", "x"],
+        check=True,
+        env=env,
+    )
+    worktree = tmp_path / "wt"
+    sp.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", str(worktree)],
+        check=True,
+        env=env,
+    )
+    monkeypatch.setattr(recruiter.command_runtime, "current_cwd", lambda: worktree)
+    assert recruiter.default_roster_path() == str(roster)
+
+    # 3. No repo config anywhere: the kit-shipped default beside the engine.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setattr(recruiter.command_runtime, "current_cwd", lambda: plain)
+    assert recruiter.default_roster_path() == str(recruiter.HERE / "upagent.yaml")
+    assert (recruiter.HERE / "upagent.yaml").is_file()
+
+
+def test_consult_receipt_publication_is_atomic_and_idempotent_under_concurrency(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Repro for the reported consult-inside-review 'receipt-publication path collision'.
+
+    A parent request's consult receipt and a retried publication of the same receipt may land
+    near-simultaneously. Publication is temp-file + atomic rename at both the sidecar and the
+    requester-keyed index, so every concurrent writer must leave only complete, parseable
+    records — never a partial file, never an exception.
+    """
+    import threading
+
+    monkeypatch.setattr(
+        recruiter,
+        "consult_index_entry_path",
+        lambda requested_by, consult_id: tmp_path
+        / "index"
+        / requested_by
+        / f"{consult_id}.json",
+    )
+    receipt = {
+        "consult_id": "consult-race-1",
+        "order_receipt_state": "finished",
+        "requested_by": "worker-parent",
+        "answer_verdict": "cited",
+    }
+    sidecar = tmp_path / "consult" / "consult-receipt.json"
+    errors: list[BaseException] = []
+
+    def publish() -> None:
+        try:
+            recruiter._publish_consult_receipt(dict(receipt), sidecar)
+        except BaseException as error:  # noqa: BLE001 - the test asserts none occur
+            errors.append(error)
+
+    threads = [threading.Thread(target=publish) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    published = json.loads(sidecar.read_text())
+    assert published["consult_id"] == "consult-race-1"
+    index_entry = tmp_path / "index" / "worker-parent" / "consult-race-1.json"
+    assert json.loads(index_entry.read_text())["consult_id"] == "consult-race-1"
+    assert not list(sidecar.parent.glob("*.tmp"))
+    assert not list(index_entry.parent.glob("*.tmp"))
+
+
 def _cleanup(worker_pane: str | None = "worker-pane") -> dict:
     return {
         "status": "closed" if worker_pane else "not-created",
@@ -8582,3 +8758,121 @@ def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(
     assert cleanup["verified_absent"] is False
     assert "identity-verified" in cleanup["reason"]
     assert closed == []
+
+
+# --- pane-gone classification in the agent-status wait (A3) --------------------
+
+
+class _FakeWaitProcess:
+    """Stands in for the `herdr wait agent-status` subprocess."""
+
+    def __init__(self, returncode: int | None = None, stderr: str = "") -> None:
+        self.returncode = returncode
+        self._stderr = stderr
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        if self.terminated:
+            self.returncode = -15
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.terminated = True
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        return ("", self._stderr)
+
+
+def _patch_wait_plumbing(monkeypatch, process: _FakeWaitProcess) -> None:
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_argv",
+        lambda args, session: (session, ["herdr", *args]),
+    )
+    monkeypatch.setattr(
+        recruiter.subprocess, "Popen", lambda *args, **kwargs: process
+    )
+
+
+def test_wait_falls_through_when_pane_already_gone(monkeypatch) -> None:
+    """Pane gone at wait start: herdr fails fast with a decode error, and a positive pane
+    probe turns that into 'inspect the staged result' instead of blocked infrastructure."""
+    process = _FakeWaitProcess(returncode=1, stderr="internal_error decoding pane get")
+    _patch_wait_plumbing(monkeypatch, process)
+    monkeypatch.setattr(
+        recruiter,
+        "_worker_pane_confirmed_gone",
+        lambda pane, herdr_session=None, confirmations=1: True,
+    )
+    assert recruiter._wait_for_agent_status("w1:p1", 5_000, None) is True
+
+
+def test_wait_still_raises_when_pane_probe_says_alive(monkeypatch) -> None:
+    """A non-zero herdr exit with the pane still present stays a loud RecruiterError —
+    classification comes from the probe, never from the exit code alone."""
+    process = _FakeWaitProcess(returncode=1, stderr="internal_error decoding pane get")
+    _patch_wait_plumbing(monkeypatch, process)
+    monkeypatch.setattr(
+        recruiter,
+        "_worker_pane_confirmed_gone",
+        lambda pane, herdr_session=None, confirmations=1: False,
+    )
+    with pytest.raises(recruiter.RecruiterError, match="failed"):
+        recruiter._wait_for_agent_status("w1:p1", 5_000, None)
+
+
+def test_wait_probe_ends_mid_wait_silence(monkeypatch) -> None:
+    """Herdr 0.7.1 goes silent when the pane vanishes mid-wait; two consecutive positive
+    probes end the wait instead of burning the remaining order budget (the ~2 h loss)."""
+    process = _FakeWaitProcess(returncode=None)
+    _patch_wait_plumbing(monkeypatch, process)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.01)
+    probes: list[str] = []
+
+    def gone(pane, herdr_session=None, confirmations=1):
+        probes.append(pane)
+        return True
+
+    monkeypatch.setattr(recruiter, "_worker_pane_confirmed_gone", gone)
+    assert recruiter._wait_for_agent_status("w1:p2", 60_000, None) is True
+    assert len(probes) >= 2
+    assert process.terminated
+
+
+def test_pane_confirmed_gone_trusts_only_positive_answers(monkeypatch) -> None:
+    responses: list[object] = []
+
+    def fake_herdr_json(*args, timeout_seconds=None, herdr_session=None):
+        answer = responses.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+
+    responses[:] = [recruiter.RecruiterError("pane get w1:p1 failed: pane_not_found")]
+    assert recruiter._worker_pane_confirmed_gone("w1:p1") is True
+
+    # A transport fault is NOT pane-gone.
+    responses[:] = [recruiter.RecruiterError("herdr pane get timed out after 10 seconds")]
+    assert recruiter._worker_pane_confirmed_gone("w1:p1") is False
+
+    # A live pane answers normally.
+    responses[:] = [{"result": {"pane": {}}}]
+    assert recruiter._worker_pane_confirmed_gone("w1:p1") is False
+
+    # Two confirmations require two consecutive positive answers.
+    responses[:] = [
+        recruiter.RecruiterError("pane_not_found"),
+        recruiter.RecruiterError("pane_not_found"),
+    ]
+    assert recruiter._worker_pane_confirmed_gone("w1:p1", confirmations=2) is True
+    responses[:] = [
+        recruiter.RecruiterError("pane_not_found"),
+        {"result": {"pane": {}}},
+    ]
+    assert recruiter._worker_pane_confirmed_gone("w1:p1", confirmations=2) is False

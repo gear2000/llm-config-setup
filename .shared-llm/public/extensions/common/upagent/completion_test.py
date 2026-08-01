@@ -167,6 +167,173 @@ def test_optional_summaries_never_fail_a_finished_job(
     assert manifest.artifact("result").public_path.is_file()
 
 
+def _review_order(tmp_path: Path) -> dict[str, object]:
+    order = _order(tmp_path)
+    publication = order["artifact_publication"]
+    assert isinstance(publication, dict)
+    publication["required_artifacts"] = ["compacted"]
+    return order
+
+
+@pytest.mark.parametrize("failure", ["missing", "blank"])
+def test_declared_required_compacted_fails_the_bundle(
+    tmp_path: Path, failure: str
+) -> None:
+    """An order that declared `compacted` required can no longer pass without it.
+
+    Enforcement follows the DECLARED contract: this is the field failure where a review
+    published "passed" while its verdict document did not exist, forcing a full re-run.
+    """
+    manifest = completion.build_manifest(
+        _review_order(tmp_path), tmp_path / "request", "lease-token", "request-1"
+    )
+    _write_valid(manifest)
+    artifact = manifest.artifact("compacted")
+    assert artifact.required
+    assert not completion.skip_optional(artifact, artifact.staging_path)
+    if failure == "missing":
+        artifact.staging_path.unlink()
+    else:
+        artifact.staging_path.write_text(" \n")
+
+    with pytest.raises(completion.CompletionError, match="compacted"):
+        completion.validate_bundle(
+            manifest,
+            load_result=contracts.load_result,
+            load_answer=consults.load_answer,
+        )
+
+
+def test_declared_required_compacted_present_still_publishes(tmp_path: Path) -> None:
+    manifest = completion.build_manifest(
+        _review_order(tmp_path), tmp_path / "request", "lease-token", "request-1"
+    )
+    _write_valid(manifest)
+    projected = completion.project_bundle(
+        manifest, load_result=contracts.load_result, load_answer=consults.load_answer
+    )
+    assert projected["verdict"] == "passed"
+    assert manifest.artifact("compacted").public_path.is_file()
+
+
+def test_review_stage_orders_default_to_required_compacted(tmp_path: Path) -> None:
+    """stage-2-adversarial-audit orders declare compacted required when they spell nothing out."""
+    order = _order(tmp_path)
+    del order["artifact_publication"]
+    order["stage_id"] = "stage-2-adversarial-audit"
+    contract = completion.ensure_publication_contract(order)
+    assert contract["required_artifacts"] == ["compacted"]
+
+    ordinary = _order(tmp_path)
+    del ordinary["artifact_publication"]
+    ordinary["stage_id"] = "stage-1-implementation"
+    assert "required_artifacts" not in completion.ensure_publication_contract(ordinary)
+
+
+def test_required_artifacts_rejects_unknown_and_duplicate_kinds(tmp_path: Path) -> None:
+    for bad in (["result"], ["verdict"], ["compacted", "compacted"], "compacted"):
+        order = _order(tmp_path)
+        publication = order["artifact_publication"]
+        assert isinstance(publication, dict)
+        publication["required_artifacts"] = bad
+        with pytest.raises(completion.CompletionError, match="required_artifacts"):
+            completion.publication_contract(order)
+
+
+_REVIEW_DOCUMENT = (
+    "## Adversarial review\n\n"
+    "Every claim in the result was checked against the diff and the captured test output; "
+    "nothing was half-done and no silent failure survived a re-run.\n\n"
+    "VERDICT: CLEARED"
+)
+
+
+def _review_contract_order(tmp_path: Path) -> dict[str, object]:
+    order = _review_order(tmp_path)
+    order["result_contract"] = "review"
+    return order
+
+
+def test_review_compacted_is_derived_from_the_validated_verdict_document(
+    tmp_path: Path,
+) -> None:
+    """The worker writes ONLY result.json; the hub authors compacted.md from its
+    verdict_document, the declared-required compacted gate passes, and file content can
+    never diverge from the validated field."""
+    order = _review_contract_order(tmp_path)
+    manifest = completion.build_manifest(
+        order, tmp_path / "request", "lease-token", "request-1"
+    )
+    _write_valid(manifest)
+    manifest.artifact("compacted").staging_path.unlink()
+    result_path = manifest.artifact("result").staging_path
+    staged = json.loads(result_path.read_text())
+    staged["verdict_document"] = _REVIEW_DOCUMENT
+    result_path.write_text(json.dumps(staged))
+
+    completion.derive_review_compacted(order, manifest, load_result=contracts.load_result)
+    derived = manifest.artifact("compacted").staging_path
+    assert derived.read_text() == _REVIEW_DOCUMENT + "\n"
+
+    loader = contracts.result_loader(order)
+    validated = completion.validate_bundle(
+        manifest, load_result=loader, load_answer=consults.load_answer
+    )
+    assert validated["verdict"] == "passed"
+
+    # Idempotent: identical content is never rewritten (mtime unchanged).
+    before = derived.stat().st_mtime_ns
+    completion.derive_review_compacted(order, manifest, load_result=contracts.load_result)
+    assert derived.stat().st_mtime_ns == before
+
+
+def test_review_bundle_without_verdict_document_stays_invalid(tmp_path: Path) -> None:
+    order = _review_contract_order(tmp_path)
+    manifest = completion.build_manifest(
+        order, tmp_path / "request", "lease-token", "request-1"
+    )
+    _write_valid(manifest)
+    completion.derive_review_compacted(order, manifest, load_result=contracts.load_result)
+    with pytest.raises(completion.CompletionError, match="result"):
+        completion.validate_bundle(
+            manifest,
+            load_result=contracts.result_loader(order),
+            load_answer=consults.load_answer,
+        )
+
+
+def test_derive_review_compacted_is_a_noop_for_ordinary_orders(tmp_path: Path) -> None:
+    order = _order(tmp_path)
+    manifest = completion.build_manifest(
+        order, tmp_path / "request", "lease-token", "request-1"
+    )
+    _write_valid(manifest)
+    manifest.artifact("compacted").staging_path.unlink()
+    completion.derive_review_compacted(order, manifest, load_result=contracts.load_result)
+    assert not manifest.artifact("compacted").staging_path.exists()
+
+
+def test_manifest_roundtrip_preserves_promoted_summary(tmp_path: Path) -> None:
+    """write_manifest -> parse_manifest accepts a promoted compacted and never a demoted result."""
+    manifest = completion.build_manifest(
+        _review_order(tmp_path), tmp_path / "request", "lease-token", "request-1"
+    )
+    path = tmp_path / "request" / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    completion.write_manifest(path, manifest)
+    parsed = completion.parse_manifest(path.read_text(), manifest)
+    by_kind = {item["kind"]: item for item in parsed["artifacts"]}
+    assert by_kind["compacted"]["required"] is True
+    assert by_kind["handoff"]["required"] is False
+
+    demoted = json.loads(path.read_text())
+    for item in demoted["artifacts"]:
+        if item["kind"] == "result":
+            item["required"] = False
+    with pytest.raises(completion.CompletionError, match="required flag must be True"):
+        completion.parse_manifest(json.dumps(demoted))
+
+
 def test_blocked_bundle_is_schema_valid_including_specialist_failure(
     tmp_path: Path,
 ) -> None:

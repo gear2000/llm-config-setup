@@ -7,26 +7,37 @@
 #
 # Paths anchor on `{{justfile_directory()}}` to find the client. It resolves the main checkout
 # through git's common directory so every checkout/worktree shares one machine-local ledger.
+#
+# Every recipe is `[no-cd]`: under `import`, just would otherwise run recipes with
+# cwd = the ROOT justfile's directory (the kit), so a relative order path typed in a
+# destination repo resolved against the kit, `upagent-phase-start` recorded the kit as the
+# leader's cwd, and roster/status discovery walked the wrong tree. With `[no-cd]` the process
+# keeps the invoker's cwd; only `_UPAGENT_CLIENT` needs an absolute anchor, which
+# `justfile_directory()` provides.
 
 _UPAGENT_CLIENT := justfile_directory() + "/.shared-llm/public/extensions/common/upagent/client.py"
 
 # One public grammar for local users and agents. With no args, print complete help.
+[no-cd]
 upagent *args:
     @${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" {{args}}
 
 # Ensure the optional services workspace + UpAgent status pane (unified `upagent` workspace by
 # default; pass --separate-workspaces for `shared-services`). No daemon is started.
+[no-cd]
 upagent-up *FLAGS:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" up {{FLAGS}}
     @{{just_executable()}} --justfile "{{justfile()}}" upagent-status
 
 # Main checkouts and worktrees resolve the same repository-scoped machine-local state.
+[no-cd]
 upagent-status:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" status
 
 # Tear down the shared services. The Recruiter first terminalizes every durably owned active
 # worker and verifies pane cleanup; it never closes a foreign or unrecorded pane. Teardown and
 # its final status report remain fail-tolerant so cleanup can continue after a partial failure.
+[no-cd]
 upagent-down:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -36,84 +47,103 @@ upagent-down:
 # Hire one worker for one order.json. This is a blocking dispatch: it returns only after the
 # Recruiter has published a durable ORDER_RECEIPT (including verified pane cleanup). Never send
 # recruit commands into the shared Recruiter shell; terminal input is not a message queue.
+[no-cd]
 upagent-recruit order:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter dispatch "{{order}}"
 
 # Submit one worker asynchronously, returning after Python verifies worker startup. A healthy
 # Dedicated Account Manager address is included when available; manager startup or assessment
 # failure is reported as degraded supervision while the Python-owned worker lifecycle continues.
+[no-cd]
 upagent-request order:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter request "{{order}}"
 
 # Start one phase transaction. The phase leader remains behind a filesystem gate until
 # its durable receipt records the leader identity; coordination v2 creates no standing watchdog.
+[no-cd]
 upagent-phase-start route run_root phase pass_number:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-controller "{{route}}" "{{run_root}}" "{{phase}}" "{{pass_number}}"
 
 # Block until one typed phase event is available for the owner. Re-run with after=<last sequence>.
+[no-cd]
 upagent-phase-await receipt after='0' timeout_ms='600000':
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await wait --receipt "{{receipt}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
 
 # Acknowledge one delivered phase event.
+[no-cd]
 upagent-phase-ack receipt event_id state='acknowledged':
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await ack --receipt "{{receipt}}" --event-id "{{event_id}}" --state "{{state}}"
 
 # Publish a typed phase event into the owner journal.
+[no-cd]
 upagent-phase-publish receipt kind summary:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await publish --receipt "{{receipt}}" --kind "{{kind}}" --summary "{{summary}}"
 
 # Direct plans have no phase leader; the caller sequences ready steps and human approval.
+[no-cd]
 upagent-direct-steps route:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller steps --route "{{route}}"
 
+[no-cd]
 upagent-direct-order route plan_id step_id cwd run_root tui_pane:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}"
 
+[no-cd]
 upagent-direct-apply-order route plan_id step_id cwd run_root tui_pane approval plan_artifact:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller apply-order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}" --approval "{{approval}}" --plan-artifact "{{plan_artifact}}"
 
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
 # Waits past notify_after_ms also ping the human via herdr notification (0 disables).
+[no-cd]
 upagent-await order notify_after_ms='600000':
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter await "{{order}}" --notify-after-ms "{{notify_after_ms}}"
 
 # Optional second opinion on a finished one-shot: hire one independent reviewer against
 # its result. Off by default — nothing runs this automatically.
+[no-cd]
 upagent-verify order *args:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter verify "{{order}}" {{args}}
 
 # Block until any watched request moves; prints one AWAIT_EVENT tagged with request_id.
+[no-cd]
 upagent-await-any timeout_ms cursor +orders:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter await-any --timeout-ms "{{timeout_ms}}" --cursor "{{cursor}}" {{orders}}
 
 # Answer the current timeout decision. Use extension_ms=0 with cancel.
+[no-cd]
 upagent-respond order control_token nonce action extension_ms:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"
 
 # Managed phase-leader retained-worker review loop. These operate on the same strict order and
 # current requester control token returned by upagent-request; no second worker is launched.
+[no-cd]
 upagent-review-await order after='0' timeout_ms='600000':
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter review-await "{{order}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
 
+[no-cd]
 upagent-review-continue order control_token checkpoint checkpoint_sha256 feedback_path:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter review-continue "{{order}}" "{{control_token}}" "{{checkpoint}}" "{{checkpoint_sha256}}" "{{feedback_path}}"
 
+[no-cd]
 upagent-review-release order control_token checkpoint checkpoint_sha256:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter review-release "{{order}}" "{{control_token}}" "{{checkpoint}}" "{{checkpoint_sha256}}"
 
 # Print the merged specialist roster (kit base UNION this repo's overlay) as the paste-ready
 # phone book a phase leader embeds VERBATIM in every stage brief. `--json` prints the raw index.
+[no-cd]
 upagent-specialists *args:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter specialists {{args}}
 
 # Ask one specialist one question. Blocking: returns only after the consult is terminal, having
 # written an answer.json (real or failure) at the consult's answer_path plus a sidecar receipt.
 # The consult runs as an ordinary UpAgent order — same ledger, same worker lifecycle.
+[no-cd]
 upagent-consult consult:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter consult "{{consult}}"
 
 # Print the validated pipeline registry — the named work shapes `/upagent-pipeline` can run.
 # Default is a table (id, stages, description); `--json` prints the raw validated index.
+[no-cd]
 upagent-list-pipelines *args:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target pipelines list {{args}}
 
@@ -128,9 +158,11 @@ upagent-list-pipelines *args:
 #
 #   just upagent-pipeline rpi docs/issues/dry-run-flag.md
 #   just upagent-pipeline rpi --skip-research https://github.com/org/repo/issues/42
+[no-cd]
 upagent-pipeline name *args:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target pipelines launch --repo "{{invocation_directory()}}" "{{name}}" {{args}}
 
 # Reconcile dead/expired runners using their durable lease ownership records.
+[no-cd]
 upagent-reconcile:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter reconcile
