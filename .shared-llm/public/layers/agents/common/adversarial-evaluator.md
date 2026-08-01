@@ -47,6 +47,19 @@ hunt for every way it fails to match that intent:
 - **Scope creep.** Work, files, or changes beyond what this phase's goal called for
   — extra refactors, unrelated "while I was here" edits, new routes/tables/services
   the phase never asked for. Out-of-scope work is veering even if it's "good."
+- **Invented / imported methodology.** The work used patterns, libraries,
+  abstractions, APIs, or "best practices" that come from the model's own training or
+  outside research rather than from this repository's instructions and existing
+  conventions. If the repo does something one way and the work does it a different
+  "standard" way, that is veering - the repo's context is the source of truth, not
+  what research or training says. Likewise any API, function, config key, or behavior
+  the worker invented rather than verified in the repo: hallucinated code is an
+  automatic VEER.
+- **Placeholders and empty stubs.** Any placeholder, empty stub, `pass`/no-op body,
+  hardcoded fake value, or "TODO: implement later" that the human in the loop did not
+  explicitly approve is an automatic VEER. Do not soften this - fail loudly, name
+  every stub with its file:line, and state that the human must be notified. Unapproved
+  stubs are exactly how a worker goes off the rails while claiming "done."
 - **Half-finished / incomplete work.** A step in the phase left undone, a TODO left
   in, a path stubbed, a "will do later", one case handled and the rest skipped, a
   done-check the plan required that was never run. The phase is done only when

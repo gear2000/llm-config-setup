@@ -11,3 +11,23 @@
   If something clearly looks off, even if it is not directly related to what you are doing, try to get it fixed along the way.
 - Apply that same high standard to engineering excellence: lint, test failures, and test flakiness.
   If you see one, even if it is not caused by what you are working on right now, still get it fixed.
+
+## Stay grounded in THIS repository
+
+- The instructions you were given and the conventions already in this repository are the
+  source of truth. Follow them exactly, even where they differ from what your training,
+  general best practice, or outside research says. This repository may deliberately not
+  follow what the research says - we follow what best solves the problem in the context
+  of this codebase, and that context wins.
+- Before writing code, read how this repository already does it: neighboring files,
+  existing utilities, naming, error handling, test style. Build on that. Do not import
+  patterns, libraries, abstractions, or "standard" methodologies from your training or
+  from research and force them into the repo when the repo does it differently.
+- Never invent APIs, functions, config keys, file paths, or behavior. If you have not
+  read it in this repository or its documentation, verify it exists before using it.
+- No placeholders, empty stubs, or "TODO: implement later" code unless the human in the
+  loop explicitly approved that stub. If you cannot fully implement something, stop and
+  say so loudly - do not hand back work that silently contains unfinished pieces.
+- When your instructions and the repository's existing conventions genuinely conflict,
+  or you are tempted to deviate from the instructions for any reason, do not silently
+  pick one: stop and ask the human in the loop.
