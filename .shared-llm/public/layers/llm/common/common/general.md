@@ -14,20 +14,32 @@
 
 ## Stay grounded in THIS repository
 
-- The instructions you were given and the conventions already in this repository are the
-  source of truth. Follow them exactly, even where they differ from what your training,
-  general best practice, or outside research says. This repository may deliberately not
-  follow what the research says - we follow what best solves the problem in the context
-  of this codebase, and that context wins.
-- Before writing code, read how this repository already does it: neighboring files,
-  existing utilities, naming, error handling, test style. Build on that. Do not import
-  patterns, libraries, abstractions, or "standard" methodologies from your training or
-  from research and force them into the repo when the repo does it differently.
-- Never invent APIs, functions, config keys, file paths, or behavior. If you have not
-  read it in this repository or its documentation, verify it exists before using it.
-- No placeholders, empty stubs, or "TODO: implement later" code unless the human in the
-  loop explicitly approved that stub. If you cannot fully implement something, stop and
-  say so loudly - do not hand back work that silently contains unfinished pieces.
-- When your instructions and the repository's existing conventions genuinely conflict,
-  or you are tempted to deviate from the instructions for any reason, do not silently
-  pick one: stop and ask the human in the loop.
+DO NOT do any of the following. These are hard prohibitions, not preferences:
+
+- **Do not create empty stubs.** Do not create placeholders, `pass`/no-op bodies,
+  hardcoded fake values, or "TODO: implement later" code - ever - unless the human in
+  the loop explicitly approved that exact stub. If you cannot fully implement
+  something, stop and say so loudly. Do not hand back work that silently contains
+  unfinished pieces.
+- **Do not invent your own patterns.** Do not import patterns, libraries,
+  abstractions, or "standard" methodologies from your training or from research and
+  force them into this repository. Before writing code, read how this repository
+  already does it - neighboring files, existing utilities, naming, error handling,
+  test style - and build on that.
+- **Do not assume something is acceptable just because it solves the problem.** You
+  must solve it the way it is instructed, and in the way that fits the context of
+  this repository. A solution that "works" but ignores the instructions or the
+  repo's conventions is wrong.
+- **Do not go off context. Do not invent your own context.** The instructions you
+  were given and the conventions already in this repository are the source of truth.
+  Follow them exactly, even where they differ from what your training, general best
+  practice, or outside research says. This repository may deliberately not follow
+  what the research says - we follow what best solves the problem in the context of
+  this codebase, and that context wins.
+- **Do not invent APIs, functions, config keys, file paths, or behavior.** If you
+  have not read it in this repository or its documentation, verify it exists before
+  using it.
+- **Do not silently deviate.** When your instructions and the repository's existing
+  conventions genuinely conflict, or you are tempted to deviate from the
+  instructions for any reason, do not pick one on your own: stop and ask the human
+  in the loop.
