@@ -401,12 +401,15 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
         recruiter._wait_for_worker_health("worker-pane", _order(), 100)
 
 
-def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
+def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         assert kwargs == {"herdr_session": "llm-lab-test"}
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
             return {
                 "result": {"pane": {"tab_id": "tab-1", "workspace_id": "workspace-1"}}
@@ -433,18 +436,21 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch) -> None:
         "workspace-1",
         "upagent-req-abc-g1",
     )
-    start = calls[1]
+    start = calls[2]
     assert start[:4] == ("agent", "start", "upagent-req-abc-g1", "--cwd")
     assert "--" in start
     assert start[-3:] == ("bash", "-lc", "claude --model some-model")
 
 
-def test_start_herdr_agent_honors_downward_role_placement(monkeypatch) -> None:
+def test_start_herdr_agent_honors_downward_role_placement(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
         assert kwargs == {"herdr_session": "llm-lab-test"}
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
             return {"result": {"pane": {"tab_id": "tab-1"}}}
         return {
@@ -467,9 +473,97 @@ def test_start_herdr_agent_honors_downward_role_placement(monkeypatch) -> None:
         herdr_session="llm-lab-test",
     )
 
-    start = calls[1]
+    start = calls[2]
     split_index = start.index("--split")
     assert start[split_index + 1] == "down"
+
+
+def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
+    shared = "run-p01/phase-1/pass-1/stage-2-adversarial-audit"
+    first = recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 1)
+    second = recruiter._safe_agent_name("upagent", f"{shared}-try2-second", 1)
+    assert first != second
+    assert first.startswith("upagent-") and first.endswith("-g1")
+    # Deterministic for the same id, and shell/Herdr-safe.
+    assert first == recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 1)
+    assert all(c.isalnum() or c in "-_" for c in first)
+
+
+def test_start_herdr_agent_refuses_duplicate_agent_name(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            return {
+                "result": {"agent": {"name": "worker", "pane_id": "other-pane"}}
+            }
+        raise AssertionError(f"launch must not proceed past the name check: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    with pytest.raises(RecruiterError, match="already exists in Herdr"):
+        recruiter._start_herdr_agent(
+            "worker",
+            _order(cockpit_pane="leader-pane"),
+            "claude",
+            herdr_session="llm-lab-test",
+        )
+
+
+def test_concurrent_same_name_launches_start_exactly_one_agent(
+    monkeypatch, tmp_path
+) -> None:
+    """Two simultaneous launches of one name: the lock lets exactly one start."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    state = {"started": False}
+    start_calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            if state["started"]:
+                return {
+                    "result": {"agent": {"name": args[2], "pane_id": "pane-first"}}
+                }
+            time.sleep(0.05)  # widen the check-then-act window
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "get"):
+            return {"result": {"pane": {"tab_id": "tab-1"}}}
+        if args[:2] == ("agent", "start"):
+            assert not state["started"], "second start raced past the name lock"
+            state["started"] = True
+            start_calls.append(args)
+            return {
+                "result": {
+                    "agent": {
+                        "name": args[2],
+                        "pane_id": "pane-first",
+                        "workspace_id": "workspace-1",
+                    }
+                }
+            }
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    errors: list[BaseException] = []
+
+    def launch() -> None:
+        try:
+            recruiter._start_herdr_agent(
+                "worker",
+                _order(cockpit_pane="leader-pane"),
+                "claude",
+                herdr_session="llm-lab-test",
+            )
+        except RecruiterError as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=launch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(start_calls) == 1
+    assert len(errors) == 1
+    assert "already exists in Herdr" in str(errors[0])
 
 
 def test_start_herdr_agent_rejects_unknown_split_direction() -> None:
@@ -612,13 +706,16 @@ def test_place_started_agent_joins_existing_role_tab(monkeypatch) -> None:
 
 
 def test_tab_placement_failure_keeps_the_started_agent_alive(
-    monkeypatch, capsys
+    monkeypatch, capsys, tmp_path
 ) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls: list[tuple[str, ...]] = []
     closed: list[str] = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
             return {
                 "result": {

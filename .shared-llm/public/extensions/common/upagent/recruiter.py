@@ -3068,11 +3068,46 @@ def _pane_recent_output(
 
 
 def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
+    """Derive a Herdr agent name that stays unique even for ids sharing a long prefix.
+
+    Sibling request ids (e.g. two stage-2 audit orders of the same phase) can be identical
+    for far more than 40 characters and differ only in a trailing suffix. A digest of the
+    FULL id keeps the name unique after truncation; a bare prefix truncation once caused two
+    concurrent requests to share one agent name, letting the second launch adopt — and its
+    failure reconciliation close — the first request's live worker pane.
+    """
     compact = "".join(
         character if character.isalnum() or character in "-_" else "-"
         for character in request_id
     )
-    return f"{prefix}-{compact[:40]}-g{generation}"
+    digest = hashlib.sha256(request_id.encode()).hexdigest()[:10]
+    return f"{prefix}-{compact[:28]}-{digest}-g{generation}"
+
+
+@contextmanager
+def _exclusive_agent_name(name: str) -> Iterator[None]:
+    """Hold a machine-local lock on one agent name across the duplicate check and launch.
+
+    The duplicate-name check in _start_herdr_agent is check-then-act against Herdr; without
+    this lock two concurrent launches of the same name could both pass the check and the
+    second would adopt the first's pane. One Recruiter runs per machine, so a file lock
+    keyed by the agent name makes the check-and-launch pair atomic.
+    """
+    key = hashlib.sha256(name.encode()).hexdigest()
+    lock_path = JobLedger().root / "agent-name-locks" / f"{key}.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stream = lock_path.open("a+", encoding="utf-8")
+    except OSError as error:
+        raise RecruiterError(
+            f"could not open agent name lock for {name!r}: {error}"
+        ) from error
+    with stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 @contextmanager
@@ -3253,30 +3288,52 @@ def _start_herdr_agent(
             f"agent split direction must be right or down, got {split_direction!r}"
         )
     session = _recorded_herdr_session(herdr_session, "agent startup")
-    cockpit = (
-        _herdr_json("pane", "get", order["cockpit_pane"], herdr_session=session)
-        .get("result", {})
-        .get("pane", {})
-    )
-    tab_id = cockpit.get("tab_id") if isinstance(cockpit, dict) else None
-    if not isinstance(tab_id, str) or not tab_id:
-        raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
-    args = [
-        "agent",
-        "start",
-        name,
-        "--cwd",
-        order["cwd"],
-        "--tab",
-        tab_id,
-        "--split",
-        split_direction,
-        "--no-focus",
-    ]
-    for key, value in (order.get("env") or {}).items():
-        args.extend(("--env", f"{key}={value}"))
-    args.extend(("--", "bash", "-lc", launch))
-    response = _herdr_json(*args, herdr_session=session)
+    # The name lock makes the duplicate check and the launch one atomic step: without it two
+    # concurrent launches of the same name could both pass the check before either starts.
+    with _exclusive_agent_name(name):
+        # A duplicate agent name must fail loudly BEFORE launch: Herdr resolves agents by
+        # name, so starting a second agent under an existing name can hand this request
+        # another live request's pane — which a later failure reconciliation would then close.
+        try:
+            existing = (
+                _herdr_json("agent", "get", name, herdr_session=session)
+                .get("result", {})
+                .get("agent")
+            )
+        except RecruiterError as error:
+            if "agent_not_found" not in str(error):
+                raise
+            existing = None
+        if isinstance(existing, dict) and existing:
+            raise RecruiterError(
+                f"agent name {name!r} already exists in Herdr "
+                f"(pane {existing.get('pane_id')}); refusing to launch a duplicate — "
+                "it would adopt another request's pane"
+            )
+        cockpit = (
+            _herdr_json("pane", "get", order["cockpit_pane"], herdr_session=session)
+            .get("result", {})
+            .get("pane", {})
+        )
+        tab_id = cockpit.get("tab_id") if isinstance(cockpit, dict) else None
+        if not isinstance(tab_id, str) or not tab_id:
+            raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
+        args = [
+            "agent",
+            "start",
+            name,
+            "--cwd",
+            order["cwd"],
+            "--tab",
+            tab_id,
+            "--split",
+            split_direction,
+            "--no-focus",
+        ]
+        for key, value in (order.get("env") or {}).items():
+            args.extend(("--env", f"{key}={value}"))
+        args.extend(("--", "bash", "-lc", launch))
+        response = _herdr_json(*args, herdr_session=session)
     agent = response.get("result", {}).get("agent", {})
     pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
