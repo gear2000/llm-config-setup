@@ -4264,9 +4264,18 @@ def _landed_commits_since(worktree: str, since_ns: int) -> list[dict[str, object
 
     A git failure inside a known repository raises rather than reading as "no commits" — a
     salvage decision is never made over history Python could not read.
+
+    This counts every commit that landed at the worktree tip in the window, not commits
+    authored by the order's worker specifically — in a checkout shared with other agents
+    (i.e. not worktree-private), a concurrent commit lands here too. Full authorship
+    attribution is out of scope; each commit's author name/email is recorded instead so the
+    evidence stays honest about what was and was not verified.
     """
     completed = subprocess.run(
-        ["git", "-C", worktree, "log", "-n", str(SALVAGE_GIT_LOG_LIMIT), "--format=%H %ct"],
+        [
+            "git", "-C", worktree, "log", "-n", str(SALVAGE_GIT_LOG_LIMIT),
+            "--format=%H%x1f%ct%x1f%an%x1f%ae",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -4279,11 +4288,21 @@ def _landed_commits_since(worktree: str, since_ns: int) -> list[dict[str, object
     since_seconds = since_ns // 1_000_000_000
     landed: list[dict[str, object]] = []
     for line in completed.stdout.splitlines():
-        sha, _, when = line.partition(" ")
+        fields = line.split("\x1f")
+        if len(fields) != 4:
+            continue
+        sha, when, author_name, author_email = fields
         if not sha or not when.strip().isdigit():
             continue
         if int(when) >= since_seconds:
-            landed.append({"sha": sha, "committed_at": int(when)})
+            landed.append(
+                {
+                    "sha": sha,
+                    "committed_at": int(when),
+                    "author_name": author_name,
+                    "author_email": author_email,
+                }
+            )
     return landed
 
 
@@ -4363,8 +4382,12 @@ def _salvage_reason(evidence: dict) -> str:
     if commits:
         parts.append(
             "commits landed in "
-            f"{evidence['git_worktree']} after the order started: "
-            + ", ".join(cast(str, item["sha"]) for item in commits)
+            f"{evidence['git_worktree']} after the order started (authorship not verified — "
+            "a shared checkout can carry a concurrent agent's commits): "
+            + ", ".join(
+                f"{item['sha']} by {item['author_name']} <{item['author_email']}>"
+                for item in commits
+            )
         )
     if evidence["staged_result_state"] == "valid":
         parts.append(f"a valid staged result at {evidence['staged_result_path']}")
@@ -4591,8 +4614,13 @@ def _complete_typed_bundle(
             # overwrite the very staging directory the inspection reads.
             triaged = _salvage_or_blocked(ledger, key, order, manifest, reason)
             result = triaged["result"]
-            if triaged["finalize_kwargs"].get("allow_synthesized") is True:
-                salvage = triaged
+            # Carry the salvage record whether the order was salvaged or remained blocked
+            # after inspection — `_salvage_or_blocked` always returns finalize_kwargs worth
+            # keeping (salvage_evidence at minimum), and dropping it here would lose the
+            # only evidence the receipt gets to cite. This never flips the verdict or
+            # `allow_synthesized`: those live in `triaged["finalize_kwargs"]` and are set
+            # only when `_salvage_or_blocked` actually salvaged the order.
+            salvage = triaged
             completion.validate_bundle(
                 manifest,
                 load_result=contracts.result_loader(
@@ -7770,6 +7798,12 @@ def cmd_leader_restamp(phase_start_path: str, pane: str) -> int:
     Fail-loud by design: the replacement pane is verified with herdr FIRST, and a pane that
     cannot be positively confirmed live refuses the restamp rather than writing an id that
     would strand the run exactly the same way.
+
+    Identity: herdr's pane record proves the given pane is LIVE, not that it belongs to this
+    leader — herdr does not expose leader ownership on a pane record, so there is no cheap
+    field to check that against. This command trusts the operator's pane id once liveness is
+    confirmed, and stamps the CANONICAL id the record itself returned rather than whatever
+    alias string the caller passed in.
     """
     path = Path(phase_start_path)
     try:
@@ -7795,16 +7829,26 @@ def cmd_leader_restamp(phase_start_path: str, pane: str) -> int:
         raise RecruiterError(
             f"leader restamp refused: pane {pane} could not be verified: {error}"
         ) from error
-    if not isinstance(live, dict) or not live.get("id") and not live.get("pane_id"):
+    if not isinstance(live, dict) or (not live.get("pane_id") and not live.get("id")):
         raise RecruiterError(
             f"leader restamp refused: herdr returned no pane record for {pane}"
         )
-    if previous == pane:
+    # herdr's pane record is the only identity check available here: it confirms the id the
+    # operator gave IS live, but not that it belongs to THIS leader — herdr does not expose
+    # leader ownership on a pane record. Store the CANONICAL id the record itself returned
+    # (never the caller's alias string) so the receipt names what herdr actually confirmed;
+    # beyond that, this command trusts the operator's pane id after liveness verification.
+    canonical_pane = live.get("pane_id") or live.get("id")
+    if not isinstance(canonical_pane, str) or not canonical_pane:
+        raise RecruiterError(
+            f"leader restamp refused: herdr pane record for {pane} has no usable id"
+        )
+    if previous == canonical_pane:
         command_runtime.write_stderr(
-            f"leader restamp: {path} already names {pane}; nothing to do\n"
+            f"leader restamp: {path} already names {canonical_pane}; nothing to do\n"
         )
         return 0
-    JobLedger._write_json(path, {**receipt, "leader_pane": pane})
+    JobLedger._write_json(path, {**receipt, "leader_pane": canonical_pane})
     # Durable old -> new record. A restamp silently rewriting the run's anchor would be
     # indistinguishable later from the drift it exists to correct.
     ledger_root = JobLedger().root
@@ -7814,7 +7858,7 @@ def cmd_leader_restamp(phase_start_path: str, pane: str) -> int:
             json.dumps(
                 {
                     "at_ns": time.time_ns(),
-                    "current": pane,
+                    "current": canonical_pane,
                     "phase_start_path": str(path),
                     "previous": previous,
                 },
@@ -7823,7 +7867,7 @@ def cmd_leader_restamp(phase_start_path: str, pane: str) -> int:
             + "\n"
         )
     print(
-        f"LEADER_RESTAMPED {json.dumps({'path': str(path), 'previous': previous, 'current': pane}, sort_keys=True)}",
+        f"LEADER_RESTAMPED {json.dumps({'path': str(path), 'previous': previous, 'current': canonical_pane}, sort_keys=True)}",
         flush=True,
     )
     return 0
@@ -7919,15 +7963,26 @@ def _rescuer_evidence_bundle(
     }
 
 
+def _path_within(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def _corroborate_rescuer_citations(
-    verdict: dict, worktree: str | None
+    verdict: dict, worktree: str | None, staging_dir: Path | None
 ) -> tuple[list[str], list[str]]:
     """Mechanically re-verify every fact the Rescuer cited.
 
     Returns (corroborated, uncorroborated). A commit counts only when it resolves to a real
-    commit object in THAT worktree; a file counts only when it exists and actually parses as
-    JSON. Nothing here trusts the Rescuer's prose — this is the whole reason the role is safe
-    to hire at all.
+    commit object in THAT worktree; a file counts only when it exists, parses as JSON, AND
+    sits outside the order's own staging directory. A file inside staging is worker-authored
+    bytes — the very artifact the worker failed to publish, or something else it wrote there —
+    so a Rescuer citing it back would be corroborating the worker's own claim with the worker's
+    own output. That is never allowed to count, no matter how cleanly it parses. Nothing here
+    trusts the Rescuer's prose — this is the whole reason the role is safe to hire at all.
     """
     corroborated: list[str] = []
     uncorroborated: list[str] = []
@@ -7938,6 +7993,12 @@ def _corroborate_rescuer_citations(
             uncorroborated.append(f"commit {sha} does not resolve in {worktree!r}")
     for cited in verdict["cited_files"]:
         path = Path(cited)
+        if staging_dir is not None and _path_within(path, staging_dir):
+            uncorroborated.append(
+                f"cited file {cited} is inside the order's own staging directory "
+                f"{staging_dir} — worker-authored bytes can never corroborate a rescuer claim"
+            )
+            continue
         if not path.is_file():
             uncorroborated.append(f"cited file {cited} does not exist")
             continue
@@ -8009,9 +8070,12 @@ def _rescue_ambiguous_salvage(
 
     Returns the evidence dict with its `outcome` (and, on acceptance, `synthesis_path`)
     updated. `salvageable-done` becomes `salvageable` ONLY when every cited fact re-verifies
-    mechanically; anything else — a refusal, an unparseable verdict, a citation that does not
-    check out, or a role that will not run — leaves the outcome `ambiguous`, which the caller
-    terminalizes as `blocked`. An LLM never marks work done here.
+    mechanically AND at least one corroborated citation is a COMMIT — corroborated files
+    alone are insufficient, and a file inside the order's own staging directory never
+    corroborates regardless. Anything else — a refusal, an unparseable verdict, a citation
+    that does not check out, a file-only verdict, or a role that will not run — leaves the
+    outcome `ambiguous`, which the caller terminalizes as `blocked`. An LLM never marks work
+    done here.
     """
     request_id = lifecycle.request_identity(order)
     directory = ledger.request_dir(key) / "salvage-rescue"
@@ -8049,10 +8113,14 @@ def _rescue_ambiguous_salvage(
         ledger._event(key, "salvage-rescuer-unavailable", reason=str(error))
         return {**evidence, "rescuer_unavailable": str(error)}
 
-    corroborated, uncorroborated = _corroborate_rescuer_citations(verdict, worktree)
+    staging_dir = Path(cast(str, evidence["staged_result_path"])).parent
+    corroborated, uncorroborated = _corroborate_rescuer_citations(
+        verdict, worktree, staging_dir
+    )
+    corroborated_commits = [fact for fact in corroborated if fact.startswith("commit ")]
     accepted = (
         verdict["verdict"] == "salvageable-done"
-        and bool(corroborated)
+        and bool(corroborated_commits)
         and not uncorroborated
     )
     rescued = {

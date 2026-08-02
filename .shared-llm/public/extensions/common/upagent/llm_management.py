@@ -332,7 +332,10 @@ def rescuer_brief(
     Reached only when Python's mechanical inspection could not decide. Everything this role
     says is advisory: the runner re-verifies every cited commit and file before a
     `salvageable-done` may become a terminal, and an uncorroborated citation is downgraded to
-    `truly-blocked`.
+    `truly-blocked`. Acceptance requires at least one corroborated COMMIT — a corroborated
+    file alone is never enough, and a cited file inside the order's own staging directory
+    never corroborates at all, since that is worker-authored bytes the Rescuer would be
+    citing right back at the runner.
     """
     return f"""# One-shot UpAgent salvage assessment
 
@@ -350,10 +353,13 @@ Do not run the worker's task yourself.
 You are reading evidence that already exists and saying what it shows.
 
 You cannot mark work done. Python re-verifies every fact you cite — a commit SHA must resolve
-to a real commit in that exact worktree, and a cited file must exist and parse. A citation
-Python cannot corroborate is discarded and your verdict is recorded as `truly-blocked`. So
-cite only what you actually observed in the bundle, and never invent, guess, complete, or
-round a SHA or a path.
+to a real commit in that exact worktree, and a cited file must exist and parse. A file inside
+the order's own staging directory (where the worker itself wrote) can never corroborate,
+however cleanly it parses — that is worker-authored evidence, not independent proof. A
+citation Python cannot corroborate is discarded, and `salvageable-done` is accepted only when
+at least one cited COMMIT corroborates; citing files alone, however many, is never enough. An
+uncorroborated or file-only verdict is recorded as `truly-blocked`. So cite only what you
+actually observed in the bundle, and never invent, guess, complete, or round a SHA or a path.
 
 The literal request id is `{request_id}` and the literal order id is `{order_id}`. Copy those
 values exactly into the response. Directory names, path components, pane names, and evidence

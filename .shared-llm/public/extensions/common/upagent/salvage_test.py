@@ -150,10 +150,13 @@ def test_reconciliation_salvages_an_order_whose_commit_landed(
     assert evidence["outcome"] == "salvageable"
     assert evidence["staged_result_state"] == "absent"
     assert [item["sha"] for item in evidence["landed_commits"]] == [sha]
+    assert evidence["landed_commits"][0]["author_name"] == "Salvage Test"
+    assert evidence["landed_commits"][0]["author_email"] == "test@example.invalid"
     published = json.loads(Path(receipt["published_result_path"]).read_text())
     assert published["verdict"] == "salvaged-done"
     assert published["confirmation"] == "unconfirmed"
     assert sha in published["reason"]
+    assert "authorship not verified" in published["reason"]
 
 
 def test_reconciliation_blocks_when_nothing_reached_disk(
@@ -266,8 +269,56 @@ def test_the_live_reactor_still_blocks_when_no_work_survives(
     )
 
     assert blocked is True
-    assert salvage is None
+    # No mechanical evidence survived, so the order stays blocked — but the inspection still
+    # ran, and its evidence rides along on `salvage` so the receipt can cite what was checked.
+    assert salvage is not None
+    assert set(salvage["finalize_kwargs"]) == {"salvage_evidence"}
+    assert salvage["finalize_kwargs"]["salvage_evidence"]["outcome"] != "salvageable"
     assert json.loads(staging.read_text())["verdict"] == "blocked"
+
+
+def test_live_path_blocked_receipt_after_inspection_carries_salvage_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The published receipt, not just `_complete_typed_bundle`'s return, keeps the evidence.
+
+    Reproduces the exact finalize fork `cmd_run_job` uses: `salvage["result"]` is published
+    when the reactor already authored a bundle from inspection, and `salvage["finalize_kwargs"]`
+    (here just `salvage_evidence`, since nothing was actually salvaged) rides along. Before the
+    fix this order's `salvage` was `None` here, so those kwargs never reached `finalize`.
+    """
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _dead_runner_claim(tmp_path, ledger, "reactor-empty-live")
+    manifest = _manifest(ledger, key, order)
+    staging = manifest.artifact("result").staging_path
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    token = json.loads((ledger.active / "requests" / key / "lease.json").read_text())["token"]
+
+    blocked, salvage = recruiter._complete_typed_bundle(
+        ledger, key, order, manifest, None, herdr_session="test-session"
+    )
+    assert blocked is True
+    assert salvage is not None
+
+    # Same fork `cmd_run_job` runs right before its `ledger.finalize` call.
+    result = salvage["result"] if salvage is not None else json.loads(staging.read_text())
+    finalized = ledger.finalize(
+        key,
+        token,
+        order,
+        result,
+        cleanup={"verified_absent": True},
+        defer_runner_completion=True,
+        exit_code=1,
+        completion_source="result-or-agent-status",
+        **({} if salvage is None else salvage["finalize_kwargs"]),
+    )
+    assert finalized is True
+
+    receipt = json.loads((ledger.request_dir(key) / "receipt.json").read_text())
+    assert receipt["verdict"] == "blocked"
+    assert receipt["salvage_evidence"]["outcome"] != "salvageable"
 
 
 # --- Phase 2: on-demand Rescuer ----------------------------------------------
@@ -359,6 +410,97 @@ def test_rescuer_salvage_is_accepted_only_after_every_citation_re_verifies(
     assert rescued["outcome"] == "salvageable"
     assert rescued["synthesis_path"] == "salvaged-rescuer"
     assert rescued["rescuer_uncorroborated"] == []
+    assert any(sha in fact for fact in rescued["rescuer_corroborated"])
+
+
+def test_file_only_citation_is_never_sufficient_to_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corroborated file with no corroborated commit must still be rejected.
+
+    Otherwise a worker that writes a contract-invalid-but-parseable result.json forces this
+    `ambiguous` path, and any file the Rescuer can point at (even one it did not write) would
+    be enough to mark the order done without a single commit ever having landed.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    _git_repo(work)
+    _commit(work, "unrelated.txt")
+    cited_file = work / "artifact.json"
+    cited_file.write_text(json.dumps({"ok": True}))
+    order = _rescuer_order(tmp_path)
+
+    rescued = _rescued(
+        tmp_path,
+        monkeypatch,
+        {
+            "request_id": recruiter.lifecycle.request_identity(order),
+            "order_id": order["order_id"],
+            "verdict": "salvageable-done",
+            "cited_commits": [],
+            "cited_files": [str(cited_file)],
+            "message": "the artifact parses, no commit was cited",
+        },
+        worktree=str(work),
+    )
+
+    assert rescued["outcome"] == "ambiguous"
+    assert rescued["synthesis_path"] == "salvaged-mechanical"
+    assert rescued["rescuer_uncorroborated"] == []
+    assert any("artifact.json" in fact for fact in rescued["rescuer_corroborated"])
+
+
+def test_citing_the_order_own_staging_file_never_corroborates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cited file inside the order's staging directory is worker-authored bytes.
+
+    Without this, a worker that writes a contract-invalid-but-parseable result.json into its
+    own staging directory forces the `ambiguous` path, and a Rescuer could then cite that very
+    staged file to satisfy the corroboration gate with the worker's own output. Even with a
+    real corroborated commit also cited, the staging-dir citation keeps the order `ambiguous`
+    — the gate rejects the WHOLE verdict when any citation fails to corroborate.
+    """
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _ambiguous_claim(tmp_path, ledger, "staging-cite")
+    staging_file = _staging_result_path(ledger, key, order)
+    _git_repo(tmp_path)
+    sha = _commit(tmp_path, "rescued.txt")
+
+    def fake_run(_config: Any, _brief: Path, _cwd: str, output_path: Path) -> None:
+        output_path.write_text(
+            json.dumps(
+                {
+                    "request_id": recruiter.lifecycle.request_identity(order),
+                    "order_id": order["order_id"],
+                    "verdict": "salvageable-done",
+                    "cited_commits": [sha],
+                    "cited_files": [str(staging_file)],
+                    "message": "the staged result.json holds the answer",
+                }
+            )
+        )
+
+    monkeypatch.setattr(recruiter, "_run_rescuer", fake_run)
+    evidence = {
+        "outcome": "ambiguous",
+        "synthesis_path": "salvaged-mechanical",
+        "staged_result_path": str(staging_file),
+        "staged_result_state": "invalid",
+        "git_worktree": str(tmp_path),
+        "landed_commits": [],
+        "ledger_artifacts_written": [],
+        "order_started_at_ns": 1,
+    }
+
+    rescued = recruiter._rescue_ambiguous_salvage(ledger, key, order, evidence)
+
+    assert rescued["outcome"] == "ambiguous"
+    assert rescued["synthesis_path"] == "salvaged-mechanical"
+    assert any(
+        "own staging directory" in fact for fact in rescued["rescuer_uncorroborated"]
+    )
     assert any(sha in fact for fact in rescued["rescuer_corroborated"])
 
 

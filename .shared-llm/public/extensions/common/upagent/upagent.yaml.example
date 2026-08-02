@@ -135,7 +135,10 @@ management:
 # verified with herdr BEFORE anything is launched. A missing pane is refused immediately with
 # `cockpit_pane_not_found: <pane>` instead of surfacing later as a generic invalid-artifact
 # blocked verdict. Relaunching a phase leader changes its pane id — re-point the run's
-# phase-start.json with `just leader-restamp <phase-start.json> <new-pane>`.
+# phase-start.json with `just leader-restamp <phase-start.json> <new-pane>`. The restamp only
+# verifies the given pane is LIVE with herdr and stamps herdr's own canonical id for it; herdr
+# exposes no leader-ownership field on a pane record, so it cannot also prove the pane belongs
+# to THIS leader — the command trusts the operator's pane id once liveness is confirmed.
 #
 # Optional process-detector overrides. Use these when a harness wrapper changes what Herdr reports.
 # A mismatch fails startup; the Hub never guesses that some unrelated foreground process is healthy.

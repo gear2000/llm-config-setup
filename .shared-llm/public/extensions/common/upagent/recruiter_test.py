@@ -8766,7 +8766,7 @@ def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(
     assert closed == []
 
 
-# --- pane-gone classification in the agent-status wait (A3) --------------------
+# --- pane-gone classification in the agent-status wait --------------------
 
 
 class _FakeWaitProcess:
