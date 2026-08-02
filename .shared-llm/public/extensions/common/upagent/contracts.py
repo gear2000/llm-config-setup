@@ -390,6 +390,13 @@ def parse_order(text: str) -> dict:
                 f"{('plan_id' if kind == 'plan' else 'phase_id')}"
             )
     if operation == "apply":
+        if mode != "direct":
+            raise ContractError(
+                "order.json: saved-plan-artifact apply is banned for the TUI-driven "
+                "phase system (mode: phase) — apply always re-plans fresh in the TUI; "
+                "only the separate mode: direct controller may bind an approval to a "
+                "plan_artifact"
+            )
         approval, artifact = order.get("approval"), order.get("plan_artifact")
         if not isinstance(approval, dict):
             raise ContractError(

@@ -164,6 +164,29 @@ def test_order_env_optional_absent_ok() -> None:
     contracts.parse_order(json.dumps(_valid_order()))  # no env key → fine
 
 
+def test_order_rejects_saved_plan_apply_for_phase_mode() -> None:
+    """Saved-plan-artifact apply is banned for the TUI-driven phase system.
+
+    Only the separate `mode: direct` controller may bind an approval to a plan_artifact;
+    the phase-leader/tui-control system always re-plans fresh at apply time.
+    """
+    bad = _valid_order()
+    bad["operation"] = "apply"
+    bad["approval"] = {
+        "approved_by": "human",
+        "approved_at": "2026-01-01T00:00:00Z",
+        "nonce": "nonce-1",
+        "plan_sha256": "a" * 64,
+    }
+    bad["plan_artifact"] = {"path": "/tmp/plan.tfplan", "sha256": "a" * 64}
+    with pytest.raises(ContractError, match="banned for the TUI-driven phase system"):
+        contracts.parse_order(json.dumps(bad))
+
+    bad["mode"] = "phase"
+    with pytest.raises(ContractError, match="banned for the TUI-driven phase system"):
+        contracts.parse_order(json.dumps(bad))
+
+
 def test_order_effort_optional_absent_ok() -> None:
     contracts.parse_order(json.dumps(_valid_order()))  # no effort key → fine
 
