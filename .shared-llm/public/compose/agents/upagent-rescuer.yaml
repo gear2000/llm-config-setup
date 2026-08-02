@@ -1,0 +1,8 @@
+type: agent
+name: upagent-rescuer
+model: sonnet
+color: yellow
+description: .shared-llm/public/layers/agents/common/upagent-rescuer.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/upagent-rescuer.md
+output: .claude/agents/upagent-rescuer.md

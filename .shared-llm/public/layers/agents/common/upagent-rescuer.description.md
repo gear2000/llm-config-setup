@@ -1,0 +1,1 @@
+Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished UpAgent worker; reads a bounded evidence bundle and returns one typed verdict whose every citation Python re-verifies before it can count.
