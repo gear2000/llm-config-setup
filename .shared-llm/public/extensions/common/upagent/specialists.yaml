@@ -4,6 +4,14 @@
 #   .shared-llm/this_repo/extensions/common/upagent/specialists.yaml
 # merges by specialist name on top of this base. Every specialist pins one approved public
 # offering and allowed effort; raw harness/model tuples are deliberately not accepted.
+#
+# That overlay may also carry a top-level `include:` — a list of ABSOLUTE paths to other repos'
+# specialists.yaml files. Merge order is: this kit base -> each include in list order -> the
+# overlay's own `specialists:` entries, all merged BY NAME with each later source clobbering a
+# same-named earlier one. Each included file keeps its own repo's anchoring (`location` paths and
+# launch cwd resolve against the repo that contains it). Includes are one level deep — an included
+# file may not itself carry `include:` — and this kit base file may never carry one. See
+# specialists.yml.sample for the overlay-side example.
 
 specialists:
   - name: backend

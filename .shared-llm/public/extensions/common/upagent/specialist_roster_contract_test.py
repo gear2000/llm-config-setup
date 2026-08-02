@@ -350,6 +350,280 @@ def test_the_phone_book_caps_an_essay_description_to_one_bounded_line(
     assert "second line that must never appear" not in book
 
 
+# --- the include chain ---------------------------------------------------------
+
+
+def _write_roster(
+    path: Path, specialists: list[dict], *, include: list[str] | None = None
+) -> None:
+    """One roster document, written directly (not via the fixture's fixed shape) so include
+    tests can compose arbitrary chains."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc: dict = {"specialists": specialists}
+    if include is not None:
+        doc["include"] = include
+    path.write_text(_owner.yaml.safe_dump(doc))
+
+
+def _entry(name: str, **overrides: object) -> dict:
+    entry = {
+        "name": name,
+        "description": f"{name} specialist",
+        "offering": "claude-sonnet-5",
+        "effort": "medium",
+        "agent": name,
+    }
+    entry.update(overrides)
+    return entry
+
+
+@pytest.fixture
+def include_chain_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """kit base (docs, reviewer) -> included repo A (reviewer, payments) -> included repo B
+    (payments) -> the primary overlay's own entries (payments). Every name but `docs` is
+    redefined at least once, so the merge order is only provable if clobber precedence holds."""
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)  # docs, reviewer, database, security
+
+    repo_a = tmp_path / "repo-a"
+    (repo_a / ".git").mkdir(parents=True)
+    roster_a = repo_a / OVERLAY_PATH
+    _write_roster(
+        roster_a,
+        [
+            _entry("reviewer", description="repo-a reviewer"),
+            _entry("payments", description="repo-a payments"),
+        ],
+    )
+
+    repo_b = tmp_path / "repo-b"
+    (repo_b / ".git").mkdir(parents=True)
+    roster_b = repo_b / OVERLAY_PATH
+    _write_roster(roster_b, [_entry("payments", description="repo-b payments")])
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    _write_roster(
+        overlay,
+        [_entry("payments", description="primary payments")],
+        include=[str(roster_a), str(roster_b)],
+    )
+
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+    return {"repo_a": repo_a, "repo_b": repo_b, "repo_root": repo_root}
+
+
+def test_include_chain_merges_base_then_includes_in_order_then_primary(
+    include_chain_world: dict,
+) -> None:
+    """Merge order: kit base -> each include in list order -> the overlay's own entries. The
+    primary overlay's own `payments` must win over both included repos' `payments`, and repo-b's
+    `reviewer`-free chain must still leave repo-a's `reviewer` clobbering the kit base one."""
+    merged = _merged_specialists()
+
+    assert set(merged) == {"docs", "reviewer", "database", "security", "payments"}
+    assert merged["reviewer"]["description"] == "repo-a reviewer"
+    assert merged["payments"]["description"] == "primary payments"
+
+
+def test_include_chain_reports_every_clobbered_name(include_chain_world: dict) -> None:
+    assert set(_roster_metadata()["overridden"]) == {"reviewer", "payments"}
+
+
+def test_an_included_rosters_specialist_is_anchored_to_its_own_repo(
+    include_chain_world: dict,
+) -> None:
+    """`reviewer` came from repo-a's included roster and must resolve `location`/launch cwd
+    against repo-a, never the primary overlay's repo — the per-file anchoring this chain must
+    preserve."""
+    index = _owner._specialist_index(_roster_metadata())
+
+    assert index["reviewer"]["repo_root"] == include_chain_world["repo_a"]
+    assert index["payments"]["repo_root"] == include_chain_world["repo_root"]
+    assert index["docs"]["repo_root"] == include_chain_world["repo_root"]
+
+
+def test_a_relative_include_path_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    _write_roster(overlay, [_entry("payments")], include=["../elsewhere/specialists.yaml"])
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    with pytest.raises(_owner.RecruiterError, match="must be absolute"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
+def test_a_missing_include_path_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    missing = tmp_path / "nowhere" / "specialists.yaml"
+    _write_roster(overlay, [_entry("payments")], include=[str(missing)])
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    with pytest.raises(_owner.RecruiterError, match="does not exist"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
+def test_a_nested_include_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Includes are one level deep: an included file that itself carries `include:` fails loud
+    rather than being silently flattened or silently ignored."""
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+
+    repo_a = tmp_path / "repo-a"
+    (repo_a / ".git").mkdir(parents=True)
+    roster_a = repo_a / OVERLAY_PATH
+    nested_target = repo_a / "nested-specialists.yaml"
+    _write_roster(nested_target, [_entry("nested")])
+    _write_roster(roster_a, [_entry("payments")], include=[str(nested_target)])
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    _write_roster(overlay, [_entry("local")], include=[str(roster_a)])
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    with pytest.raises(_owner.RecruiterError, match="include"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
+def test_an_include_naming_itself_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    _write_roster(overlay, [_entry("payments")], include=[str(overlay)])
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    with pytest.raises(_owner.RecruiterError, match="itself"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
+def test_a_duplicate_include_path_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+
+    repo_a = tmp_path / "repo-a"
+    (repo_a / ".git").mkdir(parents=True)
+    roster_a = repo_a / OVERLAY_PATH
+    _write_roster(roster_a, [_entry("payments")])
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    _write_roster(overlay, [_entry("local")], include=[str(roster_a), str(roster_a)])
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    with pytest.raises(_owner.RecruiterError, match="more than once"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
+def test_an_aggregator_only_overlay_with_no_local_specialists_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`include:` with entries but no local `specialists:` list is legitimate — a repo that only
+    aggregates other repos' rosters."""
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+
+    repo_a = tmp_path / "repo-a"
+    (repo_a / ".git").mkdir(parents=True)
+    roster_a = repo_a / OVERLAY_PATH
+    _write_roster(roster_a, [_entry("payments")])
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(_owner.yaml.safe_dump({"include": [str(roster_a)]}))
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    merged = _merged_specialists()
+
+    assert "payments" in merged
+    assert "docs" in merged
+
+
+def test_an_included_roster_with_no_local_specialists_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The aggregator relaxation applies only to the overlay that carries `include:`; every file
+    it includes still needs a non-empty `specialists:` list."""
+    engine_dir = tmp_path / "kit"
+    _write_kit_base_roster(engine_dir)
+
+    repo_a = tmp_path / "repo-a"
+    (repo_a / ".git").mkdir(parents=True)
+    roster_a = repo_a / OVERLAY_PATH
+    roster_a.parent.mkdir(parents=True, exist_ok=True)
+    roster_a.write_text(_owner.yaml.safe_dump({"specialists": []}))
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    overlay = repo_root / OVERLAY_PATH
+    _write_roster(overlay, [_entry("local")], include=[str(roster_a)])
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(repo_root)
+
+    with pytest.raises(_owner.RecruiterError, match="non-empty"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
+def test_the_kit_base_roster_may_not_define_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the discovered this_repo overlay may carry `include:`. If the kit base itself names
+    one it is rejected, whether or not any overlay is present."""
+    engine_dir = tmp_path / "kit"
+    (engine_dir / ".git").mkdir(parents=True)
+    other = tmp_path / "other-repo-specialists.yaml"
+    _write_roster(other, [_entry("payments")])
+    _write_roster(
+        engine_dir / KIT_BASE_FILE, [_entry("docs")], include=[str(other)]
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.delenv(SINGLE_FILE_ENV, raising=False)
+    monkeypatch.setattr(_owner, ENGINE_DIR_ATTR, engine_dir)
+    monkeypatch.chdir(elsewhere)
+
+    with pytest.raises(_owner.RecruiterError, match="include"):
+        getattr(_owner, LOAD_ROSTER)()
+
+
 def test_every_command_the_phone_book_names_resolves_to_a_real_recipe(
     kit_base_plus_repo_overlay: None,
     monkeypatch: pytest.MonkeyPatch,

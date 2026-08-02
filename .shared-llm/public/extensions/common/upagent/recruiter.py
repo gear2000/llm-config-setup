@@ -2495,6 +2495,16 @@ def load_roster(path: str | Path) -> dict:
 # kit ships. Forcing either rule onto the other file breaks something, and the specialist
 # direction breaks silently — the phone book just gets shorter, which reads to a worker as "no
 # specialist owns this area" rather than as an error.
+#
+# The this_repo overlay may extend the merge into a CHAIN via a top-level `include:` — a list of
+# absolute paths to other repos' specialists.yaml files. Merge order is kit base -> each include
+# in list order -> the overlay's own entries, still BY NAME with each later source clobbering a
+# same-named earlier one. Each source keeps its own repo's anchoring through the merge (an
+# included roster's `location` paths and launch cwd resolve against ITS repo, never the primary
+# overlay's) — `_named_specialists` stamps every entry with the `repo_root` its own file was
+# found in, so flattening the chain into one list never collapses the anchors. Includes are one
+# level deep (an included file may not itself carry `include:`) and only the discovered this_repo
+# overlay may carry one at all — the kit base never does.
 
 SPECIALIST_ROSTER_FILE = "specialists.yaml"
 SPECIALIST_OVERLAY_REL = (
@@ -2545,24 +2555,46 @@ def _repo_root_from_roster(path: Path) -> Path:
     )
 
 
-def _read_specialist_file(path: Path) -> dict:
+def _read_specialist_file(path: Path, *, allow_include: bool = False) -> dict:
     """One roster document: a YAML object with a non-empty `specialists:` list. Fail-loud per
-    file, so a broken overlay names itself rather than shrinking the merge."""
+    file, so a broken overlay names itself rather than shrinking the merge.
+
+    `include:` is only legal when `allow_include` is set — the discovered this_repo overlay,
+    and no one else. Every other caller (the kit base, and every included file itself) rejects
+    the key outright, which is what keeps the include chain exactly one level deep.
+    """
     try:
         data = yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError) as e:
         raise RecruiterError(f"{path} is unreadable or invalid YAML: {e}") from e
     if not isinstance(data, dict):
         raise RecruiterError(f"{path} must be a YAML object with a `specialists:` list")
+    include = data.get("include")
+    if include is not None and not allow_include:
+        raise RecruiterError(
+            f"{path} may not define `include:`; only the discovered this_repo overlay may "
+            "include other rosters, and includes are one level deep"
+        )
     specialists = data.get("specialists")
+    has_aggregator_include = allow_include and isinstance(include, list) and include
     if not isinstance(specialists, list) or not specialists:
-        raise RecruiterError(f"{path} must have a non-empty `specialists:` list")
+        if not has_aggregator_include:
+            raise RecruiterError(f"{path} must have a non-empty `specialists:` list")
+        specialists = specialists if isinstance(specialists, list) else []
+    data["specialists"] = specialists
     return data
 
 
-def _named_specialists(entries: list, origin: str, path: Path) -> dict[str, dict]:
-    """Ordered name -> entry copies tagged with their roster of origin. Merging is BY NAME, so
-    an unnamed entry is unmergeable and fails loud here with its source file.
+def _named_specialists(
+    entries: list, origin: str, path: Path, repo_root: Path
+) -> dict[str, dict]:
+    """Ordered name -> entry copies tagged with their roster of origin and the repository that
+    roster describes. Merging is BY NAME, so an unnamed entry is unmergeable and fails loud here
+    with its source file.
+
+    `repo_root` travels WITH the entry rather than being read off the merged roster later: an
+    included roster keeps its own repo's anchoring (`location` paths, launch cwd) through the
+    merge, never the primary overlay's.
 
     A name defined twice WITHIN one file is ambiguous and fails loud too: base-under-overlay
     replacement happens BETWEEN files, so silently keeping the last same-named entry within a
@@ -2583,8 +2615,48 @@ def _named_specialists(entries: list, origin: str, path: Path) -> dict[str, dict
                 f"specialist {name!r} is defined more than once in {path}; base-under-overlay "
                 "replacement happens between files, never within one"
             )
-        named[name] = {**entry, "origin": origin}
+        named[name] = {**entry, "origin": origin, "repo_root": repo_root}
     return named
+
+
+def _resolve_include_paths(includes: object, primary_path: Path) -> list[Path]:
+    """Validate and resolve an overlay's `include:` list. Fail-loud: a relative path, a missing
+    file, a self-reference, or a duplicate is an error naming the include and the overlay that
+    named it — never a silent skip. This is the same phone-book-shrinking trap the base/overlay
+    merge guards against, reached this time through an include chain instead of a missing file.
+    """
+    if not isinstance(includes, list) or not includes:
+        raise RecruiterError(
+            f"{primary_path} `include:` must be a non-empty list of absolute paths"
+        )
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for value in includes:
+        if not isinstance(value, str) or not value:
+            raise RecruiterError(
+                f"{primary_path} `include:` entries must be non-empty strings (got {value!r})"
+            )
+        path = Path(value)
+        if not path.is_absolute():
+            raise RecruiterError(
+                f"{primary_path} `include:` path {value!r} must be absolute"
+            )
+        path = path.resolve()
+        if path == primary_path.resolve():
+            raise RecruiterError(
+                f"{primary_path} `include:` may not name itself ({value!r})"
+            )
+        if path in seen:
+            raise RecruiterError(
+                f"{primary_path} `include:` lists {value!r} more than once"
+            )
+        if not path.is_file():
+            raise RecruiterError(
+                f"{primary_path} `include:` names {value!r}, which does not exist"
+            )
+        seen.add(path)
+        resolved.append(path)
+    return resolved
 
 
 def _validate_specialist(entry: dict) -> None:
@@ -2601,12 +2673,22 @@ def _validate_specialist(entry: dict) -> None:
 
 
 def load_specialist_roster() -> dict:
-    """Read + validate + MERGE the specialist rosters (kit base under the repo overlay).
+    """Read + validate + MERGE the specialist rosters: kit base, then each roster the overlay
+    `include:`s (in list order), then the overlay's own entries — a chain, not just a pair.
 
-    Returns the merged list plus the merge's own audit trail: which base names the overlay
-    replaced, and the repository the roster describes. Fail-loud (`RecruiterError`) on any
-    problem — the consult door catches it inside its recoverable block so a bad roster still
-    leaves the caller a legible failure answer.
+    Merging is BY NAME throughout: a later source in the chain always clobbers a same-named
+    earlier one, base-under-overlay extended across the whole chain. Each source keeps its OWN
+    repository's anchoring — an included roster's `location` paths and launch cwd resolve
+    against the repo that contains it, never the primary overlay's — because `_named_specialists`
+    stamps every entry with the `repo_root` its own file was found in.
+
+    Only the discovered this_repo overlay may carry `include:`; the kit base never does, and
+    neither does anything an overlay includes — the chain is exactly one level deep.
+
+    Returns the merged list plus the merge's own audit trail: which earlier names a later
+    source replaced, and the repository the primary roster describes. Fail-loud (`RecruiterError`)
+    on any problem — the consult door catches it inside its recoverable block so a bad roster
+    still leaves the caller a legible failure answer.
     """
     base_path, primary_path, primary_origin = specialist_roster_paths()
     if not primary_path.is_file():
@@ -2614,18 +2696,46 @@ def load_specialist_roster() -> dict:
             f"specialist roster not found: {primary_path} "
             "(template: specialists.yml.sample, beside this engine)"
         )
-    primary = _read_specialist_file(primary_path)
+    allow_include = primary_origin == "this-repo"
+    primary = _read_specialist_file(primary_path, allow_include=allow_include)
     base = _read_specialist_file(base_path) if base_path is not None else None
 
-    named = _named_specialists(primary["specialists"], primary_origin, primary_path)
-    overridden: list[str] = []
+    # The kit base ships beside the engine, not inside any repo — it has never needed its own
+    # `.git` marker, and its entries anchor on the PRIMARY overlay's repo, same as before this
+    # chain existed. Only an INCLUDED roster (which does live in its own repo) gets its own
+    # anchor, resolved lazily per file inside `_named_specialists`'s call so a duplicate-name
+    # error in that file still surfaces before an unrelated missing-`.git` would.
+    primary_repo_root = _repo_root_from_roster(primary_path)
+
+    chain: list[dict[str, dict]] = []
     if base is not None and base_path is not None:
-        base_named = _named_specialists(base["specialists"], "kit-base", base_path)
-        overridden = sorted(set(base_named) & set(named))
-        # The overlay clobbers same-named base entries wholesale and appends its new ones; base
-        # order is preserved, so an override keeps the position a worker already knows it by.
-        base_named.update(named)
-        named = base_named
+        chain.append(
+            _named_specialists(base["specialists"], "kit-base", base_path, primary_repo_root)
+        )
+    includes = primary.get("include")
+    if includes is not None:
+        for include_path in _resolve_include_paths(includes, primary_path):
+            included = _read_specialist_file(include_path, allow_include=False)
+            chain.append(
+                _named_specialists(
+                    included["specialists"],
+                    "include",
+                    include_path,
+                    _repo_root_from_roster(include_path),
+                )
+            )
+    chain.append(
+        _named_specialists(primary["specialists"], primary_origin, primary_path, primary_repo_root)
+    )
+
+    named: dict[str, dict] = {}
+    overridden: set[str] = set()
+    for source in chain:
+        # Each later source clobbers same-named earlier entries wholesale; earlier order is
+        # preserved for names it doesn't touch, so an override keeps the position a worker
+        # already knows it by.
+        overridden |= set(named) & set(source)
+        named.update(source)
     specialists = list(named.values())
     for entry in specialists:
         _validate_specialist(entry)
@@ -2633,7 +2743,7 @@ def load_specialist_roster() -> dict:
     config_path = primary_path.resolve()
     return {
         "specialists": specialists,
-        "overridden": overridden,
+        "overridden": sorted(overridden),
         # Anchored on the roster this call actually resolved, never on a recorded path: a
         # consult runs in the repository its roster describes.
         "repo_root": _repo_root_from_roster(config_path),
@@ -2652,7 +2762,7 @@ def _specialist_description(roster: dict, entry: dict) -> str:
     if not location:
         return ""
     path = _resolve_specialist_path(
-        location, roster["repo_root"], "specialist location"
+        location, entry.get("repo_root", roster["repo_root"]), "specialist location"
     )
     if not path.is_file():
         return ""
@@ -2687,6 +2797,10 @@ def _specialist_index(roster: dict) -> dict[str, dict]:
                 entry["offering"], entry["effort"]
             ),
             "origin": entry.get("origin", ""),
+            # Kept as a Path (not stringified) — `_resolve_consult_cwd` and the location
+            # resolver both use it as a path directly. `cmd_specialists --json` stringifies its
+            # own copy at print time instead of forcing every internal consumer to re-wrap it.
+            "repo_root": entry.get("repo_root", roster["repo_root"]),
         }
         for entry in roster["specialists"]
     }
@@ -10546,7 +10660,11 @@ def cmd_specialists(as_json: bool = False) -> int:
     roster = load_specialist_roster()
     index = _specialist_index(roster)
     if as_json:
-        print(json.dumps(index, indent=2))
+        json_index = {
+            name: {**entry, "repo_root": str(entry["repo_root"])}
+            for name, entry in index.items()
+        }
+        print(json.dumps(json_index, indent=2))
         return 0
     lines = [
         "## Repo specialists — consult before deciding (MANDATORY where a specialist owns the area)",
@@ -10633,12 +10751,14 @@ def _resolve_specialist_name(
     return None, None
 
 
-def _resolve_consult_cwd(roster: dict, consult: dict, consult_id: str) -> str:
+def _resolve_consult_cwd(entry: dict, consult: dict, consult_id: str) -> str:
     """Pick a directory the specialist can actually be started in.
 
-    The rule is deliberately dull: run in the repository the roster came from, unless the caller
-    named a directory that exists. `roster["repo_root"]` is re-derived on every load from the
-    roster file this call resolved, so it is live by construction.
+    The rule is deliberately dull: run in the repository the resolved specialist's OWN roster
+    came from, unless the caller named a directory that exists. That repo_root travels with the
+    entry (stamped by `_named_specialists` when its source file was read), so an included
+    roster's specialists still launch anchored to the repo that defines them, not the primary
+    overlay's — re-derived on every load, so it is live by construction.
 
     What this replaces: the hub used to inherit a repo_root frozen into services state at `up`
     time. Bring services up inside a throwaway worktree, delete the worktree, and every consult
@@ -10648,7 +10768,7 @@ def _resolve_consult_cwd(roster: dict, consult: dict, consult_id: str) -> str:
     requested = consult.get("cwd")
     if requested and Path(requested).is_dir():
         return str(requested)
-    root = str(roster["repo_root"])
+    root = str(entry["repo_root"])
     if requested:
         command_runtime.write_stderr(
             f"upagent-consult: consult {consult_id}: requested cwd {requested} does not "
@@ -11045,13 +11165,13 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
                 f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
                 "run `just upagent-up` first"
             )
-        cwd = _resolve_consult_cwd(roster, consult, consult_id)
+        cwd = _resolve_consult_cwd(entry, consult, consult_id)
         receipt["cwd"] = cwd
         location = "(no definition file)"
         if entry.get("location"):
             location = str(
                 _resolve_specialist_path(
-                    entry["location"], roster["repo_root"], "specialist location"
+                    entry["location"], entry["repo_root"], "specialist location"
                 )
             )
 

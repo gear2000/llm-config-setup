@@ -2,6 +2,17 @@
 # Copy to .shared-llm/this_repo/extensions/common/upagent/specialists.yaml.
 # Entries merge by name over the kit base. Every entry must pin one id from offerings.yaml and
 # an effort allowed by that offering; raw harness/model/command fields are rejected.
+#
+# Optional: `include:` names other repos' specialists.yaml files (ABSOLUTE paths only) to fold
+# into this destination's roster. Merge order is kit base -> each include in list order -> this
+# file's own `specialists:` — by name, later always clobbers earlier. Each included file keeps
+# its own repo's anchoring: its `location` paths and launch cwd resolve against the repo that
+# contains it, not this repo. Includes are one level deep (an included file may not itself
+# include), and it may not name itself or a duplicate path. A file that only aggregates others
+# may omit `specialists:` entirely, but every file it includes still needs a non-empty one.
+#
+# include:
+#   - /home/you/other-repo/.shared-llm/this_repo/extensions/common/upagent/specialists.yaml
 
 specialists:
   - name: backend
