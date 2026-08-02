@@ -498,6 +498,38 @@ def mandatory_consult_errors(
     return errors
 
 
+def _write_terminal_bundle(
+    manifest: Manifest,
+    reason: str,
+    *,
+    write_result: Callable[[Path, str], dict[str, Any]],
+    failure_answer: Callable[[str, str], dict[str, Any]],
+    heading: str,
+    handoff_body: str,
+    answer_prefix: str,
+) -> dict[str, Any]:
+    """Author every required staged artifact from ONE reason string.
+
+    Shared by the blocked and salvaged terminals so a reader can never find a compacted.md
+    that disagrees with the result.json beside it.
+    """
+    result = write_result(manifest.artifact("result").staging_path, reason)
+    _write_text_atomic(
+        manifest.artifact("compacted").staging_path,
+        f"# {heading}\n\n{reason}\n",
+    )
+    _write_text_atomic(
+        manifest.artifact("handoff").staging_path,
+        f"# Handoff\n\n{handoff_body}\n\nReason: {reason}\n",
+    )
+    if manifest.consult_id is not None:
+        _write_json_atomic(
+            manifest.artifact("answer").staging_path,
+            failure_answer(manifest.consult_id, f"{answer_prefix}: {reason}"),
+        )
+    return result
+
+
 def write_blocked_bundle(
     manifest: Manifest,
     reason: str,
@@ -505,24 +537,46 @@ def write_blocked_bundle(
     write_result: Callable[[Path, str], dict[str, Any]],
     failure_answer: Callable[[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
-    result = write_result(manifest.artifact("result").staging_path, reason)
-    _write_text_atomic(
-        manifest.artifact("compacted").staging_path,
-        f"# Blocked completion\n\n{reason}\n",
+    return _write_terminal_bundle(
+        manifest,
+        reason,
+        write_result=write_result,
+        failure_answer=failure_answer,
+        heading="Blocked completion",
+        handoff_body=(
+            "Python blocked this request because its required completion bundle "
+            "could not be validated."
+        ),
+        answer_prefix="upagent completion blocked",
     )
-    _write_text_atomic(
-        manifest.artifact("handoff").staging_path,
-        "# Handoff\n\nPython blocked this request because its required completion bundle "
-        f"could not be validated.\n\nReason: {reason}\n",
+
+
+def write_salvaged_bundle(
+    manifest: Manifest,
+    reason: str,
+    *,
+    write_result: Callable[[Path, str], dict[str, Any]],
+    failure_answer: Callable[[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Author the bundle for a terminal Python reconstructed from mechanical evidence.
+
+    The worker's own self-report was lost, so no artifact here is the worker's word: every
+    file says so, and the verdict it carries is `salvaged-done`, never `passed`. A consult
+    still gets a failure answer — a salvage proves work happened, never what the answer was.
+    """
+    return _write_terminal_bundle(
+        manifest,
+        reason,
+        write_result=write_result,
+        failure_answer=failure_answer,
+        heading="Salvaged completion (unconfirmed)",
+        handoff_body=(
+            "The worker's self-report was lost, but mechanical evidence shows its work "
+            "reached disk. This terminal was reconstructed by Python and is UNCONFIRMED: "
+            "verify the cited evidence before treating the work as accepted."
+        ),
+        answer_prefix="upagent completion salvaged without an answer",
     )
-    if manifest.consult_id is not None:
-        _write_json_atomic(
-            manifest.artifact("answer").staging_path,
-            failure_answer(
-                manifest.consult_id, f"upagent completion blocked: {reason}"
-            ),
-        )
-    return result
 
 
 def project_bundle(

@@ -166,3 +166,16 @@ upagent-pipeline name *args:
 [no-cd]
 upagent-reconcile:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter reconcile
+
+# Re-point a run's phase-start.json at the phase leader's CURRENT pane.
+#
+# Exiting and restarting a leader's harness session gives it a NEW herdr pane id, while the
+# durable phase-start.json keeps naming the old one — after which every order it places is
+# accepted only degraded, or refused with `cockpit_pane_not_found`. Run this from the
+# relaunched leader with its own pane id; the pane is verified with herdr before anything is
+# rewritten, and an unverifiable pane refuses the restamp. The old -> new change is logged.
+#
+#   just leader-restamp work-log/2026-08-01/my-run/control/phase-start.json w1:p2
+[no-cd]
+leader-restamp phase_start pane:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter leader-restamp "{{phase_start}}" --pane "{{pane}}"

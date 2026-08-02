@@ -163,3 +163,58 @@ def test_checker_brief_forbids_authoritative_actions(tmp_path: Path) -> None:
     assert "Do not create, close, interrupt, or kill" in text
     assert "The literal request id is `req-abc`" in text
     assert "never derive or substitute an identity" in text
+
+
+def test_rescuer_role_is_configured_like_every_other_management_role() -> None:
+    config = management.load_management_config({"harnesses": {"claude": "claude {model}"}})
+    assert config.rescuer.timeout_ms > 0
+    assert "upagent-rescuer" in config.rescuer.command
+    assert "--effort low" in config.rescuer.command
+    assert "{brief_path}" in config.rescuer.command
+    assert "{output_path}" in config.rescuer.command
+
+    overridden = management.load_management_config(
+        {"management": {"rescuer": {"timeout_ms": 60_000, "expected_agent": "codex"}}}
+    )
+    assert overridden.rescuer.timeout_ms == 60_000
+    assert overridden.rescuer.expected_agent == "codex"
+
+    with pytest.raises(management.ManagementConfigError, match="not_allowed"):
+        management.load_management_config(
+            {"management": {"rescuer": {"command": "claude {not_allowed}"}}}
+        )
+
+
+def test_rescuer_brief_carries_the_evidence_bundle_and_one_typed_verdict(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(json.dumps({"kind": "salvage-rescue"}))
+    output = tmp_path / "verdict.json"
+
+    text = management.rescuer_brief("req-abc", "order-1", evidence, output)
+
+    assert str(evidence) in text and str(output) in text
+    for source in ("ledger tail", "staging directory listing", "git log", "pane capture"):
+        assert source in text
+    for verdict in management.RESCUER_VERDICTS:
+        assert verdict in text
+    assert '"cited_commits"' in text and '"cited_files"' in text
+
+
+def test_rescuer_brief_forbids_authoritative_actions(tmp_path: Path) -> None:
+    """Same fence as the checker: this role reads evidence, it never acts on the request."""
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(json.dumps({"kind": "salvage-rescue"}))
+    text = management.rescuer_brief(
+        "req-abc", "order-1", evidence, tmp_path / "verdict.json"
+    )
+
+    assert "advisory" in text.lower()
+    assert "Do not create, close, interrupt, or kill" in text
+    assert "Do not launch, delegate to, or resume a worker" in text
+    assert "Do not write, repair, move, or delete any artifact" in text
+    assert "You cannot mark work done" in text
+    assert "Python re-verifies every fact you cite" in text
+    assert "The literal request id is `req-abc`" in text
+    assert "never derive or substitute an identity" in text

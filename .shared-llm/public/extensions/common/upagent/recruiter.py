@@ -484,6 +484,34 @@ class JobLedger:
         )
         self._write_json(event_path, payload)
 
+    def events(self, key: str) -> list[dict]:
+        """Every recorded event for one request, oldest first.
+
+        A corrupt event file raises: the salvage inspection reads this to decide whether a
+        worker's lost work is recoverable, and a decision made over silently-skipped records
+        would be exactly the kind of quiet wrong answer this ledger exists to prevent.
+        """
+        directory = self.request_dir(key) / "events"
+        if not directory.is_dir():
+            return []
+        events: list[dict] = []
+        for path in sorted(directory.iterdir()):
+            if path.suffix != ".json":
+                continue
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"ledger event {path} is unreadable: {error}"
+                ) from error
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("at_ns"), int
+            ):
+                raise RecruiterError(f"ledger event {path} has no integer at_ns")
+            events.append(payload)
+        events.sort(key=lambda item: item["at_ns"])
+        return events
+
     def _snapshot(self, key: str, state: str, **detail: object) -> None:
         payload = {"state": state, "at_ns": time.time_ns(), **detail}
         self._write_json(self.request_dir(key) / "state" / "latest.json", payload)
@@ -2200,6 +2228,16 @@ class JobLedger:
         cleanup: dict[str, object],
         allow_expired: bool = False,
         defer_runner_completion: bool = False,
+        # Salvage provenance. `allow_synthesized` is the only way a `salvaged-done` verdict
+        # can pass validation, and only the Recruiter's own salvage callers set it — a worker
+        # that writes that verdict into its own result.json is still rejected here.
+        allow_synthesized: bool = False,
+        synthesis_path: str = contracts.DEFAULT_SYNTHESIS_PATH,
+        confirmation: str = "confirmed",
+        salvage_evidence: dict | None = None,
+        # The ordered root-cause chain behind a launch or reconciliation failure. Frozen onto
+        # the receipt so a requester reading only the terminal record still sees why.
+        error_chain: list[str] | None = None,
         **detail: object,
     ) -> bool:
         """Atomically publish a valid result and terminal state iff ``token`` still owns ``key``.
@@ -2222,8 +2260,11 @@ class JobLedger:
             verified_absent = cleanup.get("verified_absent") is True
             # Revalidate immediately before the durable public write. A terminal ledger state
             # and receipt are never published without the result file that makes them meaningful.
+            contracts.validate_receipt_synthesis(synthesis_path, confirmation)
             parsed = parse_result(
-                json.dumps(result), expected_order_id=order["order_id"]
+                json.dumps(result),
+                expected_order_id=order["order_id"],
+                allow_synthesized=allow_synthesized,
             )
             if (
                 order.get("completion_policy") == "requester_release"
@@ -2264,7 +2305,9 @@ class JobLedger:
             completion.persist_normalized_result(manifest, parsed)
             projected = completion.project_bundle(
                 manifest,
-                load_result=contracts.result_loader(order),
+                load_result=contracts.result_loader(
+                    order, allow_synthesized=allow_synthesized
+                ),
                 load_answer=contracts_consult.load_answer,
             )
             if projected != parsed:
@@ -2301,6 +2344,17 @@ class JobLedger:
                 "state": terminal_state,
                 "terminal_at_ns": terminal_at_ns,
                 "verdict": parsed["verdict"],
+                # How this verdict came to be, and whether a validated worker artifact backs
+                # it. A reader must never have to guess whether `salvaged-done` came from
+                # mechanical evidence or a corroborated rescuer citation.
+                "synthesis_path": synthesis_path,
+                "confirmation": confirmation,
+                **(
+                    {"salvage_evidence": salvage_evidence}
+                    if salvage_evidence is not None
+                    else {}
+                ),
+                **({"error_chain": error_chain} if error_chain else {}),
                 # A worker's `consults` list is its own account of its own diligence. Resolve it
                 # against the Recruiter's record of what it actually brokered, so the Stage 2 auditor
                 # reads a Python-checked fact instead of the worker's prose. Present only when
@@ -4150,6 +4204,218 @@ def _write_blocked_result(
     return load_result(path, expected_order_id=order["order_id"])
 
 
+# --- mechanical salvage ------------------------------------------------------
+#
+# A worker whose pane vanished before it could publish leaves its work on disk anyway: a
+# commit in its worktree, or a staged bundle Python already read once. Before this, every such
+# order terminalized `blocked` with no artifacts, and a human had to escalate to an advisor to
+# accept work whose fix commit had already landed — the self-report was the only thing lost.
+# The inspection below is mechanical only — it reads the filesystem and the ledger, never a claim.
+
+# Ledger events Python emits only AFTER reading a staged result.json off disk. Their presence
+# is durable proof the worker reached its artifact-writing step even when the bytes are gone.
+ARTIFACTS_WRITTEN_EVENTS = ("completion-artifact-invalid", "completion-repair-exhausted")
+
+# How far back the salvage inspection reads. A worker's landed work is at the worktree tip.
+SALVAGE_GIT_LOG_LIMIT = 50
+
+SALVAGE_OUTCOMES = ("salvageable", "ambiguous", "empty")
+
+
+def _salvage_staged_result_state(staging_path: Path, order: dict) -> str:
+    """Classify the staged result.json as absent, unparseable, invalid, or valid.
+
+    An unreadable staging directory is a real fault and propagates: `absent` must mean the
+    file is not there, never that Python could not look.
+    """
+    if not staging_path.is_file():
+        return "absent"
+    text = staging_path.read_text()
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return "unparseable"
+    try:
+        parse_result(text, expected_order_id=order["order_id"])
+    except ContractError:
+        return "invalid"
+    return "valid"
+
+
+def _git_worktree_root(cwd: str) -> str | None:
+    """The worktree root containing `cwd`, or None when `cwd` is not inside a repository.
+
+    None is a FACT about the order's cwd, not a swallowed failure: an order may legitimately
+    run somewhere ungoverned by git, and the inspection records that in its evidence.
+    """
+    completed = subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def _landed_commits_since(worktree: str, since_ns: int) -> list[dict[str, object]]:
+    """Commits at the tip of `worktree` whose commit time is at or after `since_ns`.
+
+    A git failure inside a known repository raises rather than reading as "no commits" — a
+    salvage decision is never made over history Python could not read.
+    """
+    completed = subprocess.run(
+        ["git", "-C", worktree, "log", "-n", str(SALVAGE_GIT_LOG_LIMIT), "--format=%H %ct"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RecruiterError(
+            f"salvage inspection could not read git history in {worktree}: "
+            f"{(completed.stderr or completed.stdout).strip()}"
+        )
+    since_seconds = since_ns // 1_000_000_000
+    landed: list[dict[str, object]] = []
+    for line in completed.stdout.splitlines():
+        sha, _, when = line.partition(" ")
+        if not sha or not when.strip().isdigit():
+            continue
+        if int(when) >= since_seconds:
+            landed.append({"sha": sha, "committed_at": int(when)})
+    return landed
+
+
+def commit_exists_in_worktree(worktree: str, sha: str) -> bool:
+    """True only when `sha` resolves to a commit object in `worktree`.
+
+    The corroboration primitive: an LLM rescuer may cite any SHA it likes, and this is how the
+    runner finds out whether that SHA is real before letting the citation mark work done.
+    """
+    completed = subprocess.run(
+        ["git", "-C", worktree, "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> dict:
+    """Look for mechanical proof that a worker's work reached disk before blocking it.
+
+    `outcome` is one of:
+      - `salvageable` — a positive finding (a commit landed after the order started, or a
+        staged result.json that actually validates). Terminalize `salvaged-done`.
+      - `ambiguous` — the evidence contradicts itself: a staged result.json that will not
+        validate, or a ledger that recorded artifacts while staging is empty. ONLY this
+        outcome may hire the Rescuer.
+      - `empty` — nothing on disk, nothing in the ledger. Block exactly as before.
+
+    Every branch returns the concrete evidence (paths, SHAs, event names) so a receipt can
+    cite what was actually observed instead of asserting a conclusion.
+    """
+    staging_path = manifest.artifact("result").staging_path
+    staged_state = _salvage_staged_result_state(staging_path, order)
+    events = ledger.events(key)
+    artifacts_written = sorted(
+        {
+            cast(str, item["event"])
+            for item in events
+            if item.get("event") in ARTIFACTS_WRITTEN_EVENTS
+        }
+    )
+    # Without a recorded start there is no window to ask git about, and an unbounded window
+    # would count every commit in the repository's history as this worker's work. An unknown
+    # start therefore yields NO commit evidence rather than all of it.
+    started_at_ns = min((item["at_ns"] for item in events), default=None)
+    worktree = _git_worktree_root(order["cwd"])
+    landed = (
+        _landed_commits_since(worktree, started_at_ns)
+        if worktree is not None and started_at_ns is not None
+        else []
+    )
+
+    if landed or staged_state == "valid":
+        outcome = "salvageable"
+    elif staged_state in ("unparseable", "invalid") or artifacts_written:
+        outcome = "ambiguous"
+    else:
+        outcome = "empty"
+
+    return {
+        "outcome": outcome,
+        "synthesis_path": "salvaged-mechanical",
+        "staged_result_path": str(staging_path),
+        "staged_result_state": staged_state,
+        "git_worktree": worktree,
+        "landed_commits": landed,
+        "ledger_artifacts_written": artifacts_written,
+        "order_started_at_ns": started_at_ns,
+    }
+
+
+def _salvage_reason(evidence: dict) -> str:
+    """One human-readable sentence naming exactly what was found — never a vague summary."""
+    parts = []
+    commits = cast(list, evidence["landed_commits"])
+    if commits:
+        parts.append(
+            "commits landed in "
+            f"{evidence['git_worktree']} after the order started: "
+            + ", ".join(cast(str, item["sha"]) for item in commits)
+        )
+    if evidence["staged_result_state"] == "valid":
+        parts.append(f"a valid staged result at {evidence['staged_result_path']}")
+    if evidence["ledger_artifacts_written"]:
+        parts.append(
+            "the ledger recorded "
+            + ", ".join(cast(list, evidence["ledger_artifacts_written"]))
+        )
+    for fact in cast(list, evidence.get("rescuer_corroborated") or []):
+        parts.append(f"a rescuer citation Python re-verified — {fact}")
+    if not parts:
+        raise RecruiterError(
+            "salvage was declared without a single positive finding to cite"
+        )
+    return (
+        "mechanical salvage: the worker's self-report was lost but its work reached disk — "
+        + "; ".join(parts)
+        + ". This verdict is UNCONFIRMED: verify the cited evidence before accepting the work."
+    )
+
+
+def _write_salvaged_result(order: dict, reason: str, result_path: str | Path) -> dict:
+    """Author the Python-owned `salvaged-done` result. Filesystem failures propagate."""
+    path = Path(result_path)
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "salvaged-done",
+        "revisit": [],
+        "reason": f"recruiter: {reason}",
+        "full_log": "(none — worker self-report lost; verdict reconstructed from disk)",
+        "confirmation": "unconfirmed",
+    }
+    JobLedger._write_json(path, result)
+    return load_result(
+        path, expected_order_id=order["order_id"], allow_synthesized=True
+    )
+
+
+def _write_salvaged_bundle(order: dict, manifest: Any, reason: str) -> dict:
+    """Regenerate every required staged artifact for a mechanically-salvaged terminal."""
+    return cast(
+        dict,
+        completion.write_salvaged_bundle(
+            manifest,
+            reason,
+            write_result=lambda path, why: _write_salvaged_result(order, why, path),
+            failure_answer=contracts_consult.failure_answer,
+        ),
+    )
+
+
 def _watchdog_terminal_reason(order: dict, result: dict) -> str | None:
     """Return why a watchdog result is premature, or None when its durable gate is terminal."""
     if order.get("agent") not in WATCHDOG_AGENTS:
@@ -4242,7 +4508,7 @@ def _normalize_public_result_revisit(order: dict, manifest: Any) -> None:
     if not isinstance(value, dict):
         return
     verdict = value.get("verdict")
-    if verdict in ("passed", "blocked"):
+    if verdict in ("passed", "blocked", "salvaged-done"):
         revisit: list[str] = []
     elif verdict == "failed":
         revisit = [order["stage_id"]]
@@ -4261,12 +4527,16 @@ def _complete_typed_bundle(
     worker_address: str | None,
     *,
     herdr_session: str,
-) -> bool:
+) -> tuple[bool, dict | None]:
     """Validate once, request one same-worker repair, then deterministically block if needed.
 
-    Return whether Python had to author a blocked bundle.
+    Returns whether Python had to author a bundle, plus the salvage record when the exhausted
+    repair was rescued from mechanical evidence instead of blocked. This is the LIVE path a
+    worker whose pane died mid-wait actually terminalizes through — the reconciler's salvage
+    never sees it — so a worker whose commit landed before its pane died is triaged here too.
     """
     python_blocked = False
+    salvage: dict | None = None
 
     def validate() -> dict:
         _normalize_public_result_revisit(order, manifest)
@@ -4317,17 +4587,17 @@ def _complete_typed_bundle(
                 f"completion artifacts remained invalid after exactly one same-worker repair: "
                 f"{repair_error}"
             )
-            result = completion.write_blocked_bundle(
-                manifest,
-                reason,
-                write_result=lambda path, why: _write_blocked_result(
-                    order, why, path, preserve_valid=False
-                ),
-                failure_answer=contracts_consult.failure_answer,
-            )
+            # Inspect for salvageable work BEFORE authoring anything: both terminal bundles
+            # overwrite the very staging directory the inspection reads.
+            triaged = _salvage_or_blocked(ledger, key, order, manifest, reason)
+            result = triaged["result"]
+            if triaged["finalize_kwargs"].get("allow_synthesized") is True:
+                salvage = triaged
             completion.validate_bundle(
                 manifest,
-                load_result=contracts.result_loader(order),
+                load_result=contracts.result_loader(
+                    order, allow_synthesized=salvage is not None
+                ),
                 load_answer=contracts_consult.load_answer,
             )
             ledger._event(key, "completion-repair-exhausted", reason=reason)
@@ -4354,7 +4624,8 @@ def _complete_typed_bundle(
         )
         ledger._event(key, "mandatory-consult-blocked", reasons=consult_errors)
         python_blocked = True
-    return python_blocked
+        salvage = None
+    return python_blocked, salvage
 
 
 def _review_dir(worker_result_path: Path) -> Path:
@@ -5571,7 +5842,14 @@ def _run_order(
     cleanup["startup_rejected"] = startup_rejected
     # The completion reactor may have repaired or deterministically replaced the staged result
     # while the original worker was still addressable. Return that authoritative staged value.
-    result = load_result(worker_result_path, expected_order_id=order_id)
+    # `allow_synthesized` here reads back what the completion reactor may just have authored:
+    # a `salvaged-done` bundle Python itself wrote after the strict validation above already
+    # rejected the worker's own bytes. A worker cannot smuggle the verdict through — its
+    # result is measured strictly by `validate()` before this line is ever reached, and any
+    # value that reaches `finalize` without a salvage record is re-checked strictly there.
+    result = load_result(
+        worker_result_path, expected_order_id=order_id, allow_synthesized=True
+    )
     final_label = "blocked" if fell_back else "done"
     _report_state(
         my_pane,
@@ -7406,6 +7684,43 @@ def _write_required_blocked_bundle(order: dict, manifest: Any, reason: str) -> d
     )
 
 
+def error_chain(error: BaseException) -> list[str]:
+    """The ordered root-cause chain behind one failure, terminal message first.
+
+    A requester who sees only the terminal message ("staged result artifact is invalid")
+    cannot tell a genuine artifact bug from a stale cockpit pane four frames underneath it —
+    exactly the diagnosis that otherwise costs an operator a dig through the supervisor log.
+    Every link travels with the failure.
+    """
+    chain: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def verify_cockpit_pane(order: dict, *, herdr_session: str | None = None) -> None:
+    """Reject a REQUEST at intake when its cockpit pane no longer exists.
+
+    A relaunched phase leader gets a NEW pane id, and orders still naming the old one
+    used to fail deep inside the launch — reaching the requester as a generic blocked verdict
+    with the real cause buried in the supervisor log. The probe is the same two-confirmation
+    one the agent-status wait uses, so a transport fault never reads as a missing pane.
+    """
+    pane = order.get("cockpit_pane")
+    if not isinstance(pane, str) or not pane:
+        return
+    if _worker_pane_confirmed_gone(pane, herdr_session=herdr_session, confirmations=2):
+        raise RecruiterError(
+            f"cockpit_pane_not_found: {pane} — the requesting pane does not exist, so this "
+            "request is refused before any worker is launched. A relaunched leader gets a "
+            "new pane id: re-stamp phase-start.json with `just leader-restamp`."
+        )
+
+
 def _terminalize_start_failure(
     ledger: JobLedger,
     key: str,
@@ -7422,7 +7737,10 @@ def _terminalize_start_failure(
     manifest = completion.build_manifest(
         order, ledger.request_dir(key), token, lifecycle.request_identity(order)
     )
-    reason = f"could not start job runner: {error}"
+    # The chain travels in the reason itself, so it reaches the requester through the result's
+    # `reason` AND a consult's answer.json `error` — not just the terminal frame.
+    chain = error_chain(error)
+    reason = "could not start job runner: " + " <- ".join(chain)
     result = _write_required_blocked_bundle(order, manifest, reason)
     cleanup = {
         "status": "not-created",
@@ -7435,10 +7753,80 @@ def _terminalize_start_failure(
         order,
         result,
         cleanup=cleanup,
+        error_chain=chain,
         reason=str(error),
         exit_code=1,
         completion_source="runner-start-failure",
     )
+
+
+def cmd_leader_restamp(phase_start_path: str, pane: str) -> int:
+    """Re-point one phase-start receipt at the leader's CURRENT live pane.
+
+    Exiting and restarting a phase leader's harness session changes its pane id, and the
+    durable `phase-start.json` keeps naming the old one — so every later order is accepted
+    only degraded, or refused outright. This is the supported way to correct it.
+
+    Fail-loud by design: the replacement pane is verified with herdr FIRST, and a pane that
+    cannot be positively confirmed live refuses the restamp rather than writing an id that
+    would strand the run exactly the same way.
+    """
+    path = Path(phase_start_path)
+    try:
+        receipt = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"phase-start receipt {path} is unreadable: {error}"
+        ) from error
+    if not isinstance(receipt, dict):
+        raise RecruiterError(f"phase-start receipt {path} is not an object")
+    previous = receipt.get("leader_pane")
+    if not isinstance(previous, str) or not previous:
+        raise RecruiterError(
+            f"phase-start receipt {path} has no leader_pane to restamp"
+        )
+    # A positive answer, not the absence of an error: `_worker_pane_confirmed_gone` reports
+    # "gone" only when herdr says so, so ask for the pane itself and require a real record.
+    try:
+        live = (
+            _herdr_json("pane", "get", pane).get("result", {}).get("pane", {})
+        )
+    except RecruiterError as error:
+        raise RecruiterError(
+            f"leader restamp refused: pane {pane} could not be verified: {error}"
+        ) from error
+    if not isinstance(live, dict) or not live.get("id") and not live.get("pane_id"):
+        raise RecruiterError(
+            f"leader restamp refused: herdr returned no pane record for {pane}"
+        )
+    if previous == pane:
+        command_runtime.write_stderr(
+            f"leader restamp: {path} already names {pane}; nothing to do\n"
+        )
+        return 0
+    JobLedger._write_json(path, {**receipt, "leader_pane": pane})
+    # Durable old -> new record. A restamp silently rewriting the run's anchor would be
+    # indistinguishable later from the drift it exists to correct.
+    ledger_root = JobLedger().root
+    ledger_root.mkdir(parents=True, exist_ok=True)
+    with (ledger_root / "leader-restamp.log").open("a", encoding="utf-8") as log:
+        log.write(
+            json.dumps(
+                {
+                    "at_ns": time.time_ns(),
+                    "current": pane,
+                    "phase_start_path": str(path),
+                    "previous": previous,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    print(
+        f"LEADER_RESTAMPED {json.dumps({'path': str(path), 'previous': previous, 'current': pane}, sort_keys=True)}",
+        flush=True,
+    )
+    return 0
 
 
 def _launch_receipt_evidence(ledger: JobLedger, key: str) -> list[dict[str, object]]:
@@ -7477,6 +7865,265 @@ def _launch_receipt_evidence(ledger: JobLedger, key: str) -> list[dict[str, obje
         }
         for journal in sorted(journals, key=lambda item: str(item.get("launch_id")))
     ]
+
+
+RESCUER_LEDGER_TAIL_EVENTS = 40
+RESCUER_PANE_CAPTURE_CHARS = 8000
+
+
+def _rescuer_evidence_bundle(
+    ledger: JobLedger, key: str, order: dict, evidence: dict
+) -> dict:
+    """Everything the Rescuer is allowed to reason over, gathered mechanically."""
+    staging_dir = Path(cast(str, evidence["staged_result_path"])).parent
+    listing = (
+        sorted(
+            f"{item.name} ({item.stat().st_size} bytes)"
+            for item in staging_dir.iterdir()
+        )
+        if staging_dir.is_dir()
+        else []
+    )
+    worktree = cast(str | None, evidence["git_worktree"])
+    if worktree is None:
+        git_log = "(the order cwd is not inside a git worktree)"
+    else:
+        completed = subprocess.run(
+            ["git", "-C", worktree, "log", "-n", str(SALVAGE_GIT_LOG_LIMIT),
+             "--format=%H %ct %s"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RecruiterError(
+                f"rescuer evidence could not read git history in {worktree}: "
+                f"{(completed.stderr or completed.stdout).strip()}"
+            )
+        git_log = completed.stdout
+    # Reconciliation only reaches a salvage after the worker pane was VERIFIED absent, so
+    # there is nothing left to capture. Say so rather than leave the Rescuer to wonder.
+    pane_capture = "(the worker pane was verified absent; no capture survives)"
+    return {
+        "kind": "salvage-rescue",
+        "mechanical_inspection": evidence,
+        "order": {
+            field: order.get(field)
+            for field in ("order_id", "harness", "model", "agent", "cwd", "result_path")
+        },
+        "ledger_tail": ledger.events(key)[-RESCUER_LEDGER_TAIL_EVENTS:],
+        "staging_listing": listing,
+        "staging_dir": str(staging_dir),
+        "git_log": git_log,
+        "pane_capture": pane_capture,
+    }
+
+
+def _corroborate_rescuer_citations(
+    verdict: dict, worktree: str | None
+) -> tuple[list[str], list[str]]:
+    """Mechanically re-verify every fact the Rescuer cited.
+
+    Returns (corroborated, uncorroborated). A commit counts only when it resolves to a real
+    commit object in THAT worktree; a file counts only when it exists and actually parses as
+    JSON. Nothing here trusts the Rescuer's prose — this is the whole reason the role is safe
+    to hire at all.
+    """
+    corroborated: list[str] = []
+    uncorroborated: list[str] = []
+    for sha in verdict["cited_commits"]:
+        if worktree is not None and commit_exists_in_worktree(worktree, sha):
+            corroborated.append(f"commit {sha} exists in {worktree}")
+        else:
+            uncorroborated.append(f"commit {sha} does not resolve in {worktree!r}")
+    for cited in verdict["cited_files"]:
+        path = Path(cited)
+        if not path.is_file():
+            uncorroborated.append(f"cited file {cited} does not exist")
+            continue
+        try:
+            json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            uncorroborated.append(f"cited file {cited} does not parse: {error}")
+        else:
+            corroborated.append(f"file {cited} exists and parses")
+    return corroborated, uncorroborated
+
+
+def parse_rescuer_verdict(text: str, request_id: str, order_id: str) -> dict:
+    """Validate the Rescuer's one typed JSON verdict. Fail-loud on any deviation."""
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ContractError(f"rescuer verdict is not valid JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ContractError("rescuer verdict must be a JSON object")
+    if value.get("request_id") != request_id or value.get("order_id") != order_id:
+        raise ContractError(
+            f"rescuer verdict identity {value.get('request_id')!r}/"
+            f"{value.get('order_id')!r} does not match {request_id!r}/{order_id!r}"
+        )
+    if value.get("verdict") not in llm_management.RESCUER_VERDICTS:
+        raise ContractError(
+            f"rescuer verdict {value.get('verdict')!r} must be one of "
+            + ", ".join(llm_management.RESCUER_VERDICTS)
+        )
+    for field in ("cited_commits", "cited_files"):
+        cited = value.get(field, [])
+        if not isinstance(cited, list) or not all(
+            isinstance(item, str) and item for item in cited
+        ):
+            raise ContractError(
+                f"rescuer verdict `{field}` must be a list of non-empty strings"
+            )
+        value[field] = cited
+    message = value.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise ContractError("rescuer verdict needs a non-empty `message`")
+    return value
+
+
+def _run_rescuer(config: Any, brief_path: Path, cwd: str, output_path: Path) -> None:
+    """Run the configured Rescuer command to completion, bounded by its own timeout."""
+    command = llm_management.render_role_command(
+        config.rescuer, brief_path, cwd, output_path
+    )
+    completed = subprocess.run(
+        ["bash", "-lc", command],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=config.rescuer.timeout_ms / 1000,
+    )
+    if completed.returncode != 0:
+        raise RecruiterError(
+            f"rescuer command exited {completed.returncode}: "
+            f"{(completed.stderr or completed.stdout).strip()}"
+        )
+
+
+def _rescue_ambiguous_salvage(
+    ledger: JobLedger, key: str, order: dict, evidence: dict
+) -> dict:
+    """Hire the Rescuer for contradictory evidence and accept it only if it corroborates.
+
+    Returns the evidence dict with its `outcome` (and, on acceptance, `synthesis_path`)
+    updated. `salvageable-done` becomes `salvageable` ONLY when every cited fact re-verifies
+    mechanically; anything else — a refusal, an unparseable verdict, a citation that does not
+    check out, or a role that will not run — leaves the outcome `ambiguous`, which the caller
+    terminalizes as `blocked`. An LLM never marks work done here.
+    """
+    request_id = lifecycle.request_identity(order)
+    directory = ledger.request_dir(key) / "salvage-rescue"
+    evidence_path = directory / "evidence.json"
+    output_path = directory / "verdict.json"
+    brief_path = directory / "brief.md"
+    worktree = cast(str | None, evidence["git_worktree"])
+    try:
+        config = llm_management.load_management_config(
+            load_roster(default_roster_path())
+        )
+        JobLedger._write_json(
+            evidence_path, _rescuer_evidence_bundle(ledger, key, order, evidence)
+        )
+        _write_text_atomic(
+            brief_path,
+            llm_management.rescuer_brief(
+                request_id, order["order_id"], evidence_path, output_path
+            ),
+        )
+        output_path.unlink(missing_ok=True)
+        _run_rescuer(config, brief_path, order["cwd"], output_path)
+        verdict = parse_rescuer_verdict(
+            output_path.read_text(), request_id, order["order_id"]
+        )
+    except (
+        RecruiterError,
+        ContractError,
+        ManagementConfigError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
+        # Naming the exact failure is the point: a rescuer that cannot run must leave a
+        # readable reason in the ledger, never a silently-blocked order.
+        ledger._event(key, "salvage-rescuer-unavailable", reason=str(error))
+        return {**evidence, "rescuer_unavailable": str(error)}
+
+    corroborated, uncorroborated = _corroborate_rescuer_citations(verdict, worktree)
+    accepted = (
+        verdict["verdict"] == "salvageable-done"
+        and bool(corroborated)
+        and not uncorroborated
+    )
+    rescued = {
+        **evidence,
+        "rescuer_verdict": verdict["verdict"],
+        "rescuer_message": verdict["message"],
+        "rescuer_corroborated": corroborated,
+        "rescuer_uncorroborated": uncorroborated,
+    }
+    if accepted:
+        return {
+            **rescued,
+            "outcome": "salvageable",
+            "synthesis_path": "salvaged-rescuer",
+        }
+    ledger._event(
+        key,
+        "salvage-rescuer-rejected",
+        rescuer_verdict=verdict["verdict"],
+        rescuer_uncorroborated=uncorroborated,
+    )
+    return rescued
+
+
+def _salvage_or_blocked(
+    ledger: JobLedger,
+    key: str,
+    order: dict,
+    manifest: Any,
+    reason: str,
+) -> dict:
+    """Decide a terminal for an order whose staged bundle would not validate.
+
+    Returns the authored `result` plus the provenance kwargs `finalize` needs. Three outcomes:
+
+    - mechanical evidence of landed work -> `salvaged-done`, `salvaged-mechanical`, unconfirmed
+    - contradictory evidence             -> hire the Rescuer; its verdict is advisory and is
+                                            accepted only after corroboration
+    - nothing at all                     -> `blocked`, exactly as before
+
+    A retained review order is never salvaged: its signed requester release is the authority
+    on whether that work may be accepted, and a salvage would route around it.
+    """
+    # Order matters: both terminal bundles OVERWRITE the staged artifacts, so the inspection
+    # must read the worker's leftovers before Python authors anything over them.
+    if order.get("completion_policy") == "requester_release":
+        ledger._event(key, "salvage-skipped-retained-order", reason=reason)
+        return {
+            "result": _write_required_blocked_bundle(order, manifest, reason),
+            "finalize_kwargs": {},
+        }
+
+    evidence = inspect_salvage(ledger, key, order, manifest)
+    if evidence["outcome"] == "ambiguous":
+        evidence = _rescue_ambiguous_salvage(ledger, key, order, evidence)
+    ledger._event(key, "salvage-inspected", evidence=evidence, reason=reason)
+    if evidence["outcome"] != "salvageable":
+        return {
+            "result": _write_required_blocked_bundle(order, manifest, reason),
+            "finalize_kwargs": {"salvage_evidence": evidence},
+        }
+    salvaged_reason = _salvage_reason(evidence)
+    return {
+        "result": _write_salvaged_bundle(order, manifest, salvaged_reason),
+        "finalize_kwargs": {
+            "allow_synthesized": True,
+            "synthesis_path": cast(str, evidence["synthesis_path"]),
+            "confirmation": "unconfirmed",
+            "salvage_evidence": evidence,
+        },
+    }
 
 
 def _reconcile_claim(
@@ -7518,6 +8165,8 @@ def _reconcile_claim(
         # The manifest is Python-owned lease metadata. Recreate it deterministically before
         # authoring a recovery bundle when the runner crashed before (or during) staging.
         completion.write_manifest(manifest_path, manifest)
+    # Salvage provenance for finalize, set only when the salvage inspection actually ran.
+    salvage: dict | None = None
     if cleanup["verified_absent"]:
         try:
             result = completion.validate_bundle(
@@ -7548,15 +8197,18 @@ def _reconcile_claim(
                         + release_error,
                     )
         except CompletionError as error:
-            result = _write_required_blocked_bundle(
-                order, manifest, f"runner reconciliation: {error}"
+            salvage = _salvage_or_blocked(
+                ledger, key, order, manifest, f"runner reconciliation: {error}"
             )
+            result = salvage["result"]
     else:
         result = _write_required_blocked_bundle(
             order,
             manifest,
             f"runner reconciliation could not close worker pane {worker_pane}",
         )
+    if salvage is not None:
+        result = salvage["result"]
     finalized = ledger.finalize(
         key,
         lease["token"],
@@ -7567,6 +8219,7 @@ def _reconcile_claim(
         defer_runner_completion=True,
         exit_code=1,
         completion_source="reconciler",
+        **({} if salvage is None else salvage["finalize_kwargs"]),
     )
     if finalized:
         ledger.mark_runner_completed(key, source="reconciler", require_dead=True)
@@ -7989,6 +8642,9 @@ def cmd_request_strict(order_path: str, roster_path: str) -> int:
 def _request_order(order: dict, roster_path: str) -> int:
     """Submit one already-valid order and return after worker health or rejection."""
     _log_request_event("REQUEST_START", _order_log_payload(order))
+    # Before the ledger, before any launch: a request anchored to a pane that no longer
+    # exists is refused here, naming the pane, instead of failing four frames deep.
+    verify_cockpit_pane(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
@@ -9211,6 +9867,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             finalized,
         )
 
+    # The reactor runs deep inside `_run_order`, which returns only (code, result, cleanup).
+    # A salvage's provenance has to reach `finalize`, so the reactor's callback parks it here
+    # for the finalize below instead of widening that tuple through every caller.
+    completion_salvage: dict[str, dict] = {}
+
     def finish_monitor_before_cleanup() -> bool | None:
         if monitor is not None:
             monitor[0].set()
@@ -9219,7 +9880,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             with inactivity_lock:
                 pass
             monitor[2].join()
-        return _complete_typed_bundle(
+        blocked, salvaged = _complete_typed_bundle(
             ledger,
             key,
             order,
@@ -9227,6 +9888,9 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             owned_worker_address,
             herdr_session=herdr_session,
         )
+        if salvaged is not None:
+            completion_salvage["salvage"] = salvaged
+        return blocked
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
@@ -9411,7 +10075,12 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     launch_evidence = _launch_receipt_evidence(ledger, key)
     if launch_evidence:
         cleanup["launches"] = launch_evidence
-    if result.get("verdict") == "blocked":
+    salvage = completion_salvage.get("salvage")
+    if salvage is not None:
+        # The reactor already authored and validated this bundle from mechanical evidence.
+        # Rewriting it as blocked here would throw the salvage away.
+        result = salvage["result"]
+    elif result.get("verdict") == "blocked":
         result = _write_required_blocked_bundle(
             order,
             artifact_manifest,
@@ -9426,6 +10095,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         defer_runner_completion=True,
         exit_code=result_code,
         completion_source="result-or-agent-status",
+        **({} if salvage is None else salvage["finalize_kwargs"]),
     )
     if not finalized:
         return 1
@@ -10532,6 +11202,14 @@ def main(argv: list[str] | None = None) -> int:
         "consult", help="ask one specialist one question; blocks for the cited answer"
     )
     p_consult.add_argument("consult", help="path to the consult.json to answer")
+    p_restamp = sub.add_parser(
+        "leader-restamp",
+        help="re-point a phase-start receipt at the leader's current live pane",
+    )
+    p_restamp.add_argument("phase_start", help="path to the run's phase-start.json")
+    p_restamp.add_argument(
+        "--pane", required=True, help="the leader's CURRENT herdr pane id"
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -10546,6 +11224,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_recruit(args.order, args.roster)
         if args.command == "dispatch":
             return cmd_dispatch(args.order, args.roster)
+        if args.command == "leader-restamp":
+            return cmd_leader_restamp(args.phase_start, args.pane)
         if args.command == "request":
             return cmd_request(args.order, args.roster)
         if args.command == "await":

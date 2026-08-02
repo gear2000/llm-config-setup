@@ -462,7 +462,7 @@ def test_public_reactor_owns_internal_revisit_instead_of_rejecting_worker_stage_
             None,
             herdr_session="test-session",
         )
-        is False
+        == (False, None)
     )
     assert json.loads(result_path.read_text())["revisit"] == []
 
@@ -510,7 +510,7 @@ def test_reactor_sends_exactly_one_repair_to_the_original_worker(
             "worker-address",
             herdr_session="test-session",
         )
-        is False
+        == (False, None)
     )
     assert calls == ["worker-address"]
 

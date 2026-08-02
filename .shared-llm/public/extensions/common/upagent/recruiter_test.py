@@ -41,6 +41,10 @@ def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch) -> None:
         recruiter, "_herdr_owner_record", lambda: {"herdr_session": "llm-lab-test"}
     )
     monkeypatch.setattr(recruiter, "_require_hub_authority", lambda: None)
+    # Request intake probes the cockpit pane through herdr. These tests use fictional pane
+    # ids and must not depend on whether a herdr server happens to be running on the machine,
+    # so the probe is neutralized here. `salvage_test.py` exercises the real check.
+    monkeypatch.setattr(recruiter, "verify_cockpit_pane", lambda *a, **k: None)
 
 
 # Every submission door now hires a fresh intake clerk, so the real launcher is captured here for
@@ -3482,6 +3486,8 @@ def test_run_order_repairs_a_malformed_finished_worker_bundle_before_cleanup(
         str(order_path),
         str(roster_path),
         private_result,
+        # The reactor now also reports salvage provenance; this callback wants only the
+        # "Python authored a bundle" flag.
         before_worker_cleanup=lambda: recruiter._complete_typed_bundle(
             ledger,
             key,
@@ -3489,7 +3495,7 @@ def test_run_order_repairs_a_malformed_finished_worker_bundle_before_cleanup(
             manifest,
             "worker-address",
             herdr_session="llm-lab-test",
-        ),
+        )[0],
         herdr_session="llm-lab-test",
         artifact_manifest=manifest,
     )

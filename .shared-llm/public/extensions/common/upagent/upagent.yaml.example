@@ -106,6 +106,37 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
+  # Hired ONLY when a vanished worker leaves CONTRADICTORY evidence — a staged result.json
+  # that will not validate, or a ledger recording artifacts while staging is empty. Python
+  # decides clean hits (a commit landed after the order started) and clean misses (nothing on
+  # disk) by itself and never spends a model on them.
+  #
+  # The Rescuer is advisory: it reads a bounded evidence bundle (ledger tail, staging listing,
+  # git log of the order worktree) and returns one typed JSON verdict —
+  # salvageable-done | truly-blocked | rerun — plus cited commits and files. The runner accepts
+  # `salvageable-done` only after mechanically re-verifying EVERY citation (the SHA must resolve
+  # in that worktree, the file must exist and parse). An uncorroborated citation is discarded,
+  # the order stays blocked, and the receipt records `rescuer_uncorroborated`. An LLM claim can
+  # never mark work done here.
+  #
+  # A salvaged terminal publishes verdict `salvaged-done`, never `passed`, with
+  # `confirmation: unconfirmed`; the receipt's `synthesis_path` says which route produced it
+  # (clean | salvaged-mechanical | salvaged-rescuer).
+  rescuer:
+    command: >-
+      claude --dangerously-skip-permissions --agent upagent-rescuer
+      --model claude-sonnet-5 --effort low
+      "Read {brief_path}, perform that one bounded salvage assessment, write {output_path},
+      then exit."
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
+# Request intake (no configuration): every REQUEST carrying a `cockpit_pane` now has that pane
+# verified with herdr BEFORE anything is launched. A missing pane is refused immediately with
+# `cockpit_pane_not_found: <pane>` instead of surfacing later as a generic invalid-artifact
+# blocked verdict. Relaunching a phase leader changes its pane id — re-point the run's
+# phase-start.json with `just leader-restamp <phase-start.json> <new-pane>`.
+#
 # Optional process-detector overrides. Use these when a harness wrapper changes what Herdr reports.
 # A mismatch fails startup; the Hub never guesses that some unrelated foreground process is healthy.
 health:

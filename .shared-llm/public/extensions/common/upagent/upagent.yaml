@@ -110,6 +110,25 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
+  # Hired ONLY for contradictory salvage evidence after a worker's pane vanished. Clean hits
+  # (a commit landed after the order started) and clean misses (nothing on disk) are decided
+  # in Python and never spawn it. Its verdict is advisory: `salvageable-done` is accepted only
+  # after every cited commit/file re-verifies mechanically, otherwise the order stays blocked
+  # and the receipt records `rescuer_uncorroborated`. See upagent.yaml.example for the full
+  # contract, the `salvaged-done` verdict, and `synthesis_path` on the receipt.
+  rescuer:
+    command: >-
+      claude --dangerously-skip-permissions --agent upagent-rescuer
+      --model claude-sonnet-5 --effort low
+      "Read {brief_path}, perform that one bounded salvage assessment, write {output_path},
+      then exit."
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
+# Request intake (no configuration): a REQUEST whose `cockpit_pane` no longer exists is refused
+# with `cockpit_pane_not_found: <pane>` before any launch. Re-point a relaunched leader's
+# phase-start.json with `just leader-restamp <phase-start.json> <new-pane>`.
+#
 # Optional process-detector overrides. Use these when a harness wrapper changes what Herdr reports.
 # A mismatch fails startup; the Hub never guesses that some unrelated foreground process is healthy.
 health:

@@ -25,6 +25,24 @@ from pathlib import Path
 # `blocked` means the worker could not proceed and needs the leader/human.
 VERDICTS = ("passed", "failed", "blocked")
 
+# Verdicts Python SYNTHESIZES on a salvage path, never a vocabulary a worker may use.
+# `salvaged-done` says: the worker's self-report was lost, but mechanical evidence (a landed
+# commit, a staged artifact) shows work reached disk. It is deliberately NOT `passed` — every
+# consumer dispatches on `verdict == "passed"`, so a salvage routes to attention-with-evidence
+# rather than a silent merge. `parse_result` accepts one only when the caller explicitly opts
+# in, and the only opt-in callers are the Recruiter's own salvage writers: a worker that types
+# `salvaged-done` into its own result.json is still rejected on the strict path.
+SYNTHESIZED_VERDICTS = ("salvaged-done",)
+
+# How a terminal verdict came to be. Recorded on every receipt so a reader can tell a
+# validated worker bundle from one Python reconstructed out of leftovers.
+SYNTHESIS_PATHS = ("clean", "salvaged-mechanical", "salvaged-rescuer")
+DEFAULT_SYNTHESIS_PATH = "clean"
+
+# Whether the verdict is backed by a validated worker artifact (`confirmed`) or only by
+# mechanical circumstantial evidence (`unconfirmed`).
+CONFIRMATIONS = ("confirmed", "unconfirmed")
+
 # The rulings an ADVISOR order may add via the optional `decision` field (an advisor is hired
 # like any worker on budget exhaustion; it reports verdict `passed` plus its ruling here). The
 # controller reads `decision` to decide whether to keep going, keep looping, or stop for a human.
@@ -409,6 +427,7 @@ def parse_result(
     expected_order_id: str | None = None,
     *,
     result_contract: str | None = None,
+    allow_synthesized: bool = False,
 ) -> dict:
     """Validate + return a result dict from raw JSON text. Fail-loud on any problem.
 
@@ -430,9 +449,12 @@ def parse_result(
     for key in RESULT_REQUIRED:
         _require_str(result, key, "result.json")
 
-    if result["verdict"] not in VERDICTS:
+    # `allow_synthesized` is the forgery fence: only a Recruiter salvage writer passes it, so
+    # worker-authored bytes are always measured against the three earned verdicts.
+    accepted = VERDICTS + (SYNTHESIZED_VERDICTS if allow_synthesized else ())
+    if result["verdict"] not in accepted:
         raise ContractError(
-            f"result.json: verdict {result['verdict']!r} must be one of {', '.join(VERDICTS)}"
+            f"result.json: verdict {result['verdict']!r} must be one of {', '.join(accepted)}"
         )
     if expected_order_id is not None and result["order_id"] != expected_order_id:
         raise ContractError(
@@ -550,15 +572,39 @@ def load_result(
     expected_order_id: str | None = None,
     *,
     result_contract: str | None = None,
+    allow_synthesized: bool = False,
 ) -> dict:
     """Read + validate a result.json file. Fail-loud if missing or malformed."""
     p = Path(path)
     if not p.is_file():
         raise ContractError(f"result.json not found: {p}")
-    return parse_result(p.read_text(), expected_order_id, result_contract=result_contract)
+    return parse_result(
+        p.read_text(),
+        expected_order_id,
+        result_contract=result_contract,
+        allow_synthesized=allow_synthesized,
+    )
 
 
-def result_loader(order: dict):
+def validate_receipt_synthesis(synthesis_path: object, confirmation: object) -> None:
+    """Fail loud when a receipt would record an unrecognized provenance for its verdict.
+
+    Every synthesized verdict carries both fields, so `just upagent-get` and the Stage 2 audit
+    can distinguish a validated bundle from a reconstruction without re-deriving the evidence.
+    """
+    if synthesis_path not in SYNTHESIS_PATHS:
+        raise ContractError(
+            f"receipt.json: synthesis_path {synthesis_path!r} must be one of "
+            + ", ".join(SYNTHESIS_PATHS)
+        )
+    if confirmation not in CONFIRMATIONS:
+        raise ContractError(
+            f"receipt.json: confirmation {confirmation!r} must be one of "
+            + ", ".join(CONFIRMATIONS)
+        )
+
+
+def result_loader(order: dict, *, allow_synthesized: bool = False):
     """A `load_result` bound to the order's declared result contract.
 
     Every bundle validation site loads results through this, so a review order's
@@ -568,7 +614,12 @@ def result_loader(order: dict):
     contract = order.get("result_contract")
 
     def load(path: str | Path, expected_order_id: str | None = None) -> dict:
-        return load_result(path, expected_order_id, result_contract=contract)
+        return load_result(
+            path,
+            expected_order_id,
+            result_contract=contract,
+            allow_synthesized=allow_synthesized,
+        )
 
     return load
 

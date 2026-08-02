@@ -21,6 +21,10 @@ DEFAULT_CHECKER_COMMAND = (
     "claude --dangerously-skip-permissions --agent upagent-checker --model haiku --effort low "
     '"Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."'
 )
+DEFAULT_RESCUER_COMMAND = (
+    "claude --dangerously-skip-permissions --agent upagent-rescuer --model claude-sonnet-5 --effort low "
+    '"Read {brief_path}, perform that one bounded salvage assessment, write {output_path}, then exit."'
+)
 DEFAULT_INTAKE_CLERK_COMMAND = (
     'claude --print --output-format text --tools "" --agent intake-clerk '
     "--model sonnet --effort low < {brief_path}"
@@ -48,6 +52,10 @@ MANAGEMENT_MODES = ("direct", "dedicated")
 class ManagementConfig:
     account_manager: ManagementRole
     checker: ManagementRole
+    # Hired ONLY when the Recruiter's mechanical salvage inspection finds contradictory
+    # evidence about a vanished worker. A clean hit and a clean miss are both decided in
+    # Python and never spawn this role.
+    rescuer: ManagementRole
     intake_clerk: ManagementRole
     startup_timeout_ms: int
     inactivity_check_ms: int
@@ -130,6 +138,7 @@ def load_management_config(roster: dict) -> ManagementConfig:
             DEFAULT_ACCOUNT_MANAGER_COMMAND,
         ),
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
+        rescuer=_role(raw.get("rescuer"), "rescuer", DEFAULT_RESCUER_COMMAND),
         intake_clerk=_role(
             raw.get("intake_clerk"),
             "intake_clerk",
@@ -307,6 +316,65 @@ Write exactly one JSON object to `{output_path}`:
   "decision": "approved|needs-requester|blocked",
   "message": "concise explanation for the requester",
   "requested_changes": ["optional concrete correction or clarification"]
+}}
+```
+"""
+
+
+RESCUER_VERDICTS = ("salvageable-done", "truly-blocked", "rerun")
+
+
+def rescuer_brief(
+    request_id: str, order_id: str, evidence_path: Path, output_path: Path
+) -> str:
+    """One bounded salvage assessment of contradictory artifact evidence.
+
+    Reached only when Python's mechanical inspection could not decide. Everything this role
+    says is advisory: the runner re-verifies every cited commit and file before a
+    `salvageable-done` may become a terminal, and an uncorroborated citation is downgraded to
+    `truly-blocked`.
+    """
+    return f"""# One-shot UpAgent salvage assessment
+
+This assessment is advisory. A worker's pane vanished and Python's mechanical salvage
+inspection found CONTRADICTORY evidence — artifacts that partly exist, or a ledger that
+disagrees with what is on disk. Python supplied the bounded evidence bundle at
+`{evidence_path}`: the ledger tail, the staging directory listing, the git log of the order's
+worktree, and the last pane capture when one survived. Read it and, only when useful, read a
+file it names.
+
+Do not create, close, interrupt, or kill any pane.
+Do not launch, delegate to, or resume a worker.
+Do not write, repair, move, or delete any artifact, result, or commit.
+Do not run the worker's task yourself.
+You are reading evidence that already exists and saying what it shows.
+
+You cannot mark work done. Python re-verifies every fact you cite — a commit SHA must resolve
+to a real commit in that exact worktree, and a cited file must exist and parse. A citation
+Python cannot corroborate is discarded and your verdict is recorded as `truly-blocked`. So
+cite only what you actually observed in the bundle, and never invent, guess, complete, or
+round a SHA or a path.
+
+The literal request id is `{request_id}` and the literal order id is `{order_id}`. Copy those
+values exactly into the response. Directory names, path components, pane names, and evidence
+fields are not request ids; never derive or substitute an identity from them.
+
+Choose exactly one verdict:
+- `salvageable-done` — the evidence shows the worker's work reached disk (a commit landed, or
+  a readable artifact holds its output). Cite it.
+- `truly-blocked` — the evidence shows no work survived.
+- `rerun` — the evidence is genuinely undecidable from what is here.
+
+Write exactly one JSON object to `{output_path}`:
+
+```json
+{{
+  "request_id": "{request_id}",
+  "order_id": "{order_id}",
+  "verdict": "{'|'.join(RESCUER_VERDICTS)}",
+  "cited_commits": ["full 40-character SHA observed in the evidence bundle"],
+  "cited_files": ["absolute path observed in the evidence bundle"],
+  "message": "concise explanation naming the evidence you relied on"
 }}
 ```
 """

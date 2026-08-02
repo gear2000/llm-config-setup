@@ -614,3 +614,50 @@ def test_ack_transitions_move_forward_only() -> None:
     assert contracts.validate_ack_transition("published", "resolved") == "resolved"
     with pytest.raises(ContractError, match="regress"):
         contracts.validate_ack_transition("resolved", "acknowledged")
+
+
+def _salvaged_result() -> str:
+    return json.dumps(
+        {
+            "order_id": "order-1",
+            "verdict": "salvaged-done",
+            "reason": "recruiter: mechanical salvage",
+            "full_log": "(none)",
+        }
+    )
+
+
+def test_synthesized_verdicts_are_rejected_unless_the_caller_opts_in() -> None:
+    """Only a Recruiter salvage writer may pass `allow_synthesized`; workers never can."""
+    with pytest.raises(ContractError, match="must be one of passed, failed, blocked"):
+        contracts.parse_result(_salvaged_result(), "order-1")
+
+    parsed = contracts.parse_result(
+        _salvaged_result(), "order-1", allow_synthesized=True
+    )
+    assert parsed["verdict"] == "salvaged-done"
+    assert parsed["verdict"] not in contracts.VERDICTS
+    assert parsed["verdict"] in contracts.SYNTHESIZED_VERDICTS
+
+
+def test_result_loader_propagates_the_synthesis_opt_in(tmp_path: Path) -> None:
+    path = tmp_path / "result.json"
+    path.write_text(_salvaged_result())
+    order = {"order_id": "order-1"}
+
+    with pytest.raises(ContractError, match="must be one of passed, failed, blocked"):
+        contracts.result_loader(order)(path, "order-1")
+
+    loaded = contracts.result_loader(order, allow_synthesized=True)(path, "order-1")
+    assert loaded["verdict"] == "salvaged-done"
+
+
+def test_receipt_synthesis_provenance_must_be_recognized() -> None:
+    for synthesis_path in contracts.SYNTHESIS_PATHS:
+        contracts.validate_receipt_synthesis(synthesis_path, "unconfirmed")
+    contracts.validate_receipt_synthesis(contracts.DEFAULT_SYNTHESIS_PATH, "confirmed")
+
+    with pytest.raises(ContractError, match="synthesis_path"):
+        contracts.validate_receipt_synthesis("salvaged-somehow", "confirmed")
+    with pytest.raises(ContractError, match="confirmation"):
+        contracts.validate_receipt_synthesis("clean", "probably")
