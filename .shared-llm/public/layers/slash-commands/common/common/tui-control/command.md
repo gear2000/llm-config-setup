@@ -137,12 +137,13 @@ stop-ask-human → the TUI halts and surfaces status to the human
 
 A `decision-required` event tagged `iac-approval` means one terraform layer finished planning and needs the human before anything is applied. The TUI runs this flow itself; the apply is never delegated:
 
-1. Read the event's evidence paths: the rendered table and the saved plan artifact. Print the table to the human VERBATIM — never summarize it away.
-2. Collect the decision. When the table shows "Destroy total to confirm: N" with N above zero, the human approves by typing that exact number; any other answer is a decline. A zero-destroy plan accepts a plain yes.
-3. Write `<pass-dir>/iac/approval.json`: `{"approved": true|false, "plan_sha256": "<sha256 of the plan artifact>", "destroy_total_confirmed": <n>, "by": "human", "at": "<ISO timestamp>"}`. The sha binds the approval to the exact artifact — a re-planned file invalidates it and the leader will re-ask.
-4. On approval, apply DIRECTLY in this pane with the saved artifact — `terraform apply <artifact> 2>&1 | tee <pass-dir>/iac/apply.log` (tofu likewise) — then write `<pass-dir>/iac/apply-receipt.json`: `{"command": "<what ran>", "exit_code": <n>, "log_path": "<pass-dir>/iac/apply.log", "plan_sha256": "<same sha>", "applied_at": "<ISO timestamp>"}`. The receipt is the paper trail; the leader validates it and records stage-4 from it.
-5. Ack the event and re-await. The leader sees the durable files and finishes the phase.
-6. On decline, write the approval file with `approved: false`, ack, and expect the phase to end `blocked`.
+1. Read the event's evidence paths: the rendered table and the plan output it summarizes. Print the table to the human VERBATIM — never summarize it away.
+2. Show the human exactly what will run: `cd <absolute pass-dir>` on one line, the apply (or destroy) command on the next. Never a bare relative path, never an implied cwd.
+3. Collect the decision. When the table shows "Destroy total to confirm: N" with N above zero, the human approves by typing that exact number; any other answer is a decline. A zero-destroy plan accepts a plain yes.
+4. Write `<pass-dir>/iac/approval.json`: `{"approved": true|false, "plan_sha256": "<sha256 of the plan output the human reviewed>", "cwd": "<absolute pass-dir>", "command": "<command shown>", "destroy_total_confirmed": <n>, "by": "human", "at": "<ISO timestamp>"}`. The sha records what the human reviewed — there is no artifact it binds to.
+5. On approval, apply DIRECTLY in this pane with a FRESH plan — `cd <pass-dir> && terraform apply 2>&1 | tee <pass-dir>/iac/apply.log` (tofu likewise) — then write `<pass-dir>/iac/apply-receipt.json`: `{"command": "<what ran>", "cwd": "<pass-dir>", "exit_code": <n>, "log_path": "<pass-dir>/iac/apply.log", "applied_at": "<ISO timestamp>"}`. The receipt is the paper trail; the leader validates it and records stage-4 from it. NEVER save a plan to a file and apply that file (`plan -out=<artifact>` then `apply <artifact>`) — that pattern is banned kit-wide; apply always re-plans fresh so what runs is never an opaque saved artifact.
+6. Ack the event and re-await. The leader sees the durable files and finishes the phase.
+7. On decline, write the approval file with `approved: false`, ack, and expect the phase to end `blocked`.
 
 IaC layers run strictly in order — a later layer's plan is only truthful after the earlier layer's apply. Phases sharing a route `parallel_group` token are the explicit escape hatch (urgent fixes on genuinely independent stacks) and may be started together; the human owns that risk.
 

@@ -1,1 +1,1 @@
-Terraform infrastructure specialist that writes and validates IaC, produces plans, and keeps apply human-gated.
+Terraform infrastructure specialist that writes and validates IaC, produces plans, and gates apply/destroy on human approval.

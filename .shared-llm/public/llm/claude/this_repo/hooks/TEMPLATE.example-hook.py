@@ -45,7 +45,7 @@ def allow() -> None:
 # is not blocked — only an actual invocation.
 _CMD_START = r"(?:^|[;&|(]\s*|\bsudo\s+)"
 FORBIDDEN = [
-    (_CMD_START + r"(?:terraform|tofu)\s+(?:apply|destroy)\b", "terraform/tofu apply or destroy"),
+    (_CMD_START + r"npm\s+publish\b", "npm publish"),
 ]
 
 
