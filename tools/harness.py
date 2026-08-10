@@ -1083,7 +1083,19 @@ def cmd_compose(args: argparse.Namespace) -> None:
 
 CONFIG_PATH = HOME / ".shared-llm.yaml"
 DEFAULT_SOURCE = HOME / ".shared-llm"
-VALID_HARNESSES = ("cc", "pi", "codex")
+# "cursor" is the Cursor Agent CLI (`cursor-agent`). It consumes exactly the
+# Codex surfaces — the root AGENTS.md instruction file and skills discovered
+# from ~/.agents/skills (plus .claude/skills for compat) — so everywhere the
+# plumbing routes by harness, cursor rides the codex path (see
+# wants_codex_surface / _codex_surface_tokens). No cursor-specific dirs exist.
+VALID_HARNESSES = ("cc", "pi", "codex", "cursor")
+
+
+def wants_codex_surface(harnesses) -> bool:
+    """True when a harness list requires the Codex deployment surface
+    (AGENTS.md + ~/.agents/skills). Both the codex CLI and the Cursor Agent
+    CLI read those same paths, so 'cursor' is an alias at the plumbing level."""
+    return "codex" in harnesses or "cursor" in harnesses
 
 # The ONLY trees `copy` propagates wholesale: pure common layer + runtime
 # content. It never touches a destination's this_repo/ overlays. In the split
@@ -1854,7 +1866,7 @@ def _common_codex_skills(dest: Path) -> dict[str, Path]:
     for d in _skill_dirs(dest):
         if d.name.startswith("cc-") or d.name.startswith("do-"):
             continue
-        if harness_of(dest, d.name) in ("common", "codex"):
+        if harness_of(dest, d.name) in ("common", "codex", "cursor"):
             out[d.name] = d
     return out
 
@@ -1983,7 +1995,7 @@ def destination_home_skills(cfg: dict) -> tuple[dict[str, Path], dict[str, Path]
                 if name in pi_desired and pi_desired[name] != src:
                     collisions.append(f"pi:{name}")
                 pi_desired[name] = src
-        if "codex" in harnesses:
+        if wants_codex_surface(harnesses):
             for name, src in _common_codex_skills(dest).items():
                 if name in codex_desired and codex_desired[name] != src:
                     collisions.append(f"codex:{name}")
@@ -2844,8 +2856,8 @@ def _global_targets_for(scope: str, name: str) -> set[str]:
         if name.startswith("do-"):
             return {"pi"}
         return {"cc", "pi", "codex"}
-    if scope == "codex":
-        return {"codex"}
+    if scope == "codex" or scope == "cursor":
+        return {"codex"}  # cursor shares the codex home dir (~/.agents/skills)
     if scope == "pi":
         return {"pi"}
     return set()
@@ -3017,6 +3029,9 @@ def do_global(cfg: dict, log: RunLog, manifest: HomeManifest | None = None) -> N
     if manifest is None:
         manifest = HomeManifest()
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
+    # cursor shares codex's home surface (~/.agents/skills) — collapse it so the
+    # same dir is never reconciled twice under two tokens.
+    wanted = list(dict.fromkeys("codex" if h == "cursor" else h for h in wanted))
     if not wanted:
         return
     kit = project_root()
@@ -3276,6 +3291,9 @@ def do_home_runtime(cfg: dict, log: RunLog, manifest: HomeManifest | None = None
     if manifest is None:
         manifest = HomeManifest()
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
+    # cursor shares codex's home surface (~/.agents/skills) — collapse it so the
+    # same dir is never reconciled twice under two tokens.
+    wanted = list(dict.fromkeys("codex" if h == "cursor" else h for h in wanted))
     if not wanted:
         return
     kit = project_root()
@@ -3498,8 +3516,8 @@ def do_check(cfg: dict, log: RunLog) -> bool:
         "pi" in d.get("harnesses", []) for d in cfg["destinations"]
     ) or "pi" in cfg.get("global", [])
     uses_codex = any(
-        "codex" in d.get("harnesses", []) for d in cfg["destinations"]
-    ) or "codex" in cfg.get("global", [])
+        wants_codex_surface(d.get("harnesses", [])) for d in cfg["destinations"]
+    ) or wants_codex_surface(cfg.get("global", []))
 
     if uses_pi:
         pi = _pi_global_skills()
@@ -3573,7 +3591,7 @@ def cmd_update(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="harness.py",
-        description="Compose layer files and reconcile per-harness symlinks (pi / codex).",
+        description="Compose layer files and reconcile per-harness symlinks (pi / codex / cursor).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -3618,7 +3636,7 @@ def main() -> None:
     pcfg.add_argument(
         "-l",
         "--list",
-        help="Harnesses for -d (comma-separated: cc,pi,codex). Default cc,pi.",
+        help="Harnesses for -d (comma-separated: cc,pi,codex,cursor). Default cc,pi.",
     )
     pcfg.add_argument(
         "-g", "--global-list", help="Set the global harness list (comma-separated)."

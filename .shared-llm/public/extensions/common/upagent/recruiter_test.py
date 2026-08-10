@@ -19,6 +19,7 @@ import os
 import stat
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -143,6 +144,211 @@ def _roster() -> dict:
             "pi": "pi read:{instructions_path} write:{result_path}",
         }
     }
+
+
+def _cursor_health_herdr(status: str, cwd: Path) -> Callable[..., dict]:
+    def herdr_json(*args: str, **_kwargs: object) -> dict:
+        if args[:2] == ("pane", "get"):
+            return {
+                "result": {
+                    "pane": {
+                        "agent": "cursor",
+                        "agent_status": status,
+                        "foreground_cwd": str(cwd),
+                    }
+                }
+            }
+        if args[:2] == ("pane", "process-info"):
+            return {
+                "result": {
+                    "process_info": {
+                        "foreground_processes": [
+                            {
+                                "cmdline": "cursor-agent --force --trust",
+                                "name": "node",
+                                "pid": 123,
+                            }
+                        ]
+                    }
+                }
+            }
+        raise AssertionError(args)
+
+    return herdr_json
+
+
+def test_cursor_reconnect_loop_fails_startup_before_idle_is_marked_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("idle", tmp_path)
+    )
+    reconnect_output = (
+        "Connection lost, reconnecting to the Cursor backend "
+        "(attempt 5)...\nRetry attempt 5...\n"
+    )
+    monkeypatch.setattr(
+        recruiter, "_pane_recent_output", lambda *a, **k: reconnect_output
+    )
+
+    with pytest.raises(RecruiterError, match="failed cursor startup"):
+        recruiter._wait_for_agent_health(
+            "cursor-pane",
+            expected_agent="cursor",
+            expected_process="cursor-agent",
+            expected_cwd=str(tmp_path),
+            timeout_ms=1_000,
+            completion_order=_order(harness="cursor"),
+        )
+
+
+def test_cursor_idle_with_clean_output_is_startup_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cursor may report `idle` while its interactive TUI is starting; with the
+    expected process present and no reconnect loop in the output, idle is healthy
+    (a 45s blocked timeout here was a real field failure)."""
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("idle", tmp_path)
+    )
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *a, **k: "")
+
+    health = recruiter._wait_for_agent_health(
+        "cursor-pane",
+        expected_agent="cursor",
+        expected_process="cursor-agent",
+        expected_cwd=str(tmp_path),
+        timeout_ms=1_000,
+        completion_order=_order(harness="cursor"),
+    )
+
+    assert health["healthy"] is True
+
+
+def test_cursor_working_status_is_startup_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("working", tmp_path)
+    )
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *a, **k: "")
+
+    health = recruiter._wait_for_agent_health(
+        "cursor-pane",
+        expected_agent="cursor",
+        expected_process="cursor-agent",
+        expected_cwd=str(tmp_path),
+        timeout_ms=1_000,
+        completion_order=_order(harness="cursor"),
+    )
+
+    assert health["healthy"] is True
+    assert health["agent_status"] == "working"
+
+
+def test_cursor_done_status_is_startup_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fast interactive turn may finish before the first startup probe."""
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("done", tmp_path)
+    )
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *a, **k: "")
+
+    health = recruiter._wait_for_agent_health(
+        "cursor-pane",
+        expected_agent="cursor",
+        expected_process="cursor-agent",
+        expected_cwd=str(tmp_path),
+        timeout_ms=1_000,
+        completion_order=_order(harness="cursor"),
+    )
+
+    assert health["healthy"] is True
+    assert health["agent_status"] == "done"
+
+
+def test_cursor_working_status_ignores_stale_reconnect_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("working", tmp_path)
+    )
+    reconnect_output = (
+        "Connection lost, reconnecting to the Cursor backend "
+        "(attempt 5)...\nworker later recovered\n"
+    )
+    monkeypatch.setattr(
+        recruiter, "_pane_recent_output", lambda *a, **k: reconnect_output
+    )
+
+    health = recruiter._wait_for_agent_health(
+        "cursor-pane",
+        expected_agent="cursor",
+        expected_process="cursor-agent",
+        expected_cwd=str(tmp_path),
+        timeout_ms=1_000,
+        completion_order=_order(harness="cursor"),
+    )
+
+    assert health["healthy"] is True
+    assert health["agent_status"] == "working"
+
+
+def test_cursor_generic_retry_output_is_not_a_startup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Generic retry chatter is not the reconnect-failure pattern; an idle pane
+    with a live process and non-matching output is healthy, not failed."""
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("idle", tmp_path)
+    )
+    monkeypatch.setattr(
+        recruiter, "_pane_recent_output", lambda *a, **k: "Retry attempt 5"
+    )
+
+    health = recruiter._wait_for_agent_health(
+        "cursor-pane",
+        expected_agent="cursor",
+        expected_process="cursor-agent",
+        expected_cwd=str(tmp_path),
+        timeout_ms=1_000,
+        completion_order=_order(harness="cursor"),
+    )
+
+    assert health["healthy"] is True
+
+
+def test_cursor_recent_output_read_failure_does_not_abort_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        recruiter, "_herdr_json", _cursor_health_herdr("idle", tmp_path)
+    )
+
+    def fail_recent_output(*_args: object, **_kwargs: object) -> str:
+        raise RecruiterError("pane read failed")
+
+    monkeypatch.setattr(recruiter, "_pane_recent_output", fail_recent_output)
+    monkeypatch.setattr(recruiter, "HEALTH_PROBE_SECONDS", 0)
+
+    with pytest.raises(RecruiterError, match="did not become healthy"):
+        recruiter._wait_for_agent_health(
+            "cursor-pane",
+            expected_agent="cursor",
+            expected_process="cursor-agent",
+            expected_cwd=str(tmp_path),
+            timeout_ms=1,
+            completion_order=_order(harness="cursor"),
+        )
+
+
+def test_cursor_workers_get_a_shorter_inactivity_check() -> None:
+    cursor_order = _order(harness="cursor")
+    claude_order = _order(harness="claude")
+
+    assert recruiter._worker_inactivity_check_ms(cursor_order, 900_000) == 120_000
+    assert recruiter._worker_inactivity_check_ms(claude_order, 900_000) == 900_000
 
 
 def _phase_order(tmp_path: Path, **over: object) -> tuple[dict, Path]:
@@ -1907,9 +2113,7 @@ def test_run_order_blocks_result_when_startup_assessment_rejects_it(
     assert "startup rejected" in result["reason"]
 
 
-def test_submit_agent_prompt_waits_for_idle_and_submits_enter_atomically(
-    monkeypatch,
-) -> None:
+def test_submit_agent_prompt_uses_atomic_run_by_default(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
     monkeypatch.setattr(
@@ -1924,6 +2128,32 @@ def test_submit_agent_prompt_waits_for_idle_and_submits_enter_atomically(
         ("agent", "wait", "manager-name", "--status", "idle", "--timeout", "5000"),
         ("pane", "run", "manager-pane", "Review evidence."),
     ]
+
+
+def test_submit_agent_prompt_splits_cursor_paste_and_enter(monkeypatch) -> None:
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {"result": {"agent": {"pane_id": "cursor-pane"}}},
+    )
+    monkeypatch.setattr(recruiter.time, "sleep", sleeps.append)
+
+    recruiter._submit_agent_prompt(
+        "cursor-name",
+        "Repair result.json.",
+        5_000,
+        paste_settle_seconds=recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS,
+    )
+
+    assert calls == [
+        ("agent", "wait", "cursor-name", "--status", "idle", "--timeout", "5000"),
+        ("pane", "send-text", "cursor-pane", "Repair result.json."),
+        ("pane", "send-keys", "cursor-pane", "Enter"),
+    ]
+    assert sleeps == [recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS]
 
 
 def test_timeout_waits_for_authenticated_requester_extension(
@@ -8882,3 +9112,111 @@ def test_pane_confirmed_gone_trusts_only_positive_answers(monkeypatch) -> None:
         {"result": {"pane": {}}},
     ]
     assert recruiter._worker_pane_confirmed_gone("w1:p1", confirmations=2) is False
+
+
+# --- Role-aware launch state -------------------------------------------------
+
+
+def _claimed_ledger(tmp_path: Path) -> tuple[Any, dict, str, str]:
+    ledger = recruiter.JobLedger(tmp_path / "upagent-hub")
+    order = _order()
+    key, _created = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 60_000)
+    assert isinstance(token, str)
+    return ledger, order, key, token
+
+
+def _launch(ledger: Any, key: str, token: str, role: str, pane: str) -> None:
+    launch_id = ledger.begin_launch(key, token, role, f"{role}-agent", "sess", "/tmp")
+    assert ledger.mark_launch_started(
+        key, token, launch_id, pane, None, f"sess:{role}-agent"
+    )
+
+
+def test_worker_launch_enters_startup_check(tmp_path: Path) -> None:
+    ledger, _order_value, key, token = _claimed_ledger(tmp_path)
+
+    _launch(ledger, key, token, "worker", "1-2")
+
+    assert ledger.state(key)["state"] == "startup-check"
+
+
+def test_checker_launch_does_not_regress_running_state(tmp_path: Path) -> None:
+    ledger, _order_value, key, token = _claimed_ledger(tmp_path)
+    _launch(ledger, key, token, "worker", "1-2")
+    assert ledger.mark_worker_healthy(key, token, {"healthy": True})
+    assert ledger.state(key)["state"] == "running"
+
+    _launch(ledger, key, token, "checker", "1-3")
+
+    assert ledger.state(key)["state"] == "running"
+    events = [item["event"] for item in ledger.events(key)]
+    assert events.count("pane-started") == 2
+
+
+def test_worker_relaunch_never_regresses_running_state(tmp_path: Path) -> None:
+    ledger, _order_value, key, token = _claimed_ledger(tmp_path)
+    _launch(ledger, key, token, "worker", "1-2")
+    assert ledger.mark_worker_healthy(key, token, {"healthy": True})
+
+    _launch(ledger, key, token, "worker", "1-4")
+
+    assert ledger.state(key)["state"] == "running"
+    events = [item["event"] for item in ledger.events(key)]
+    assert "launch-state-suppressed" in events
+
+
+def test_manager_launch_after_running_is_suppressed(tmp_path: Path) -> None:
+    ledger, _order_value, key, token = _claimed_ledger(tmp_path)
+    _launch(ledger, key, token, "worker", "1-2")
+    assert ledger.mark_worker_healthy(key, token, {"healthy": True})
+
+    _launch(ledger, key, token, "manager", "1-5")
+
+    assert ledger.state(key)["state"] == "running"
+    events = [item["event"] for item in ledger.events(key)]
+    assert "launch-state-suppressed" in events
+
+
+def test_initial_manager_launch_snapshots_manager_starting(tmp_path: Path) -> None:
+    ledger, _order_value, key, token = _claimed_ledger(tmp_path)
+
+    _launch(ledger, key, token, "manager", "1-1")
+
+    assert ledger.state(key)["state"] == "manager-starting"
+
+
+def test_claude_launch_pre_trusts_cwd_in_claude_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unattended Claude pane must never wedge on the folder-trust dialog."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(recruiter.Path, "home", staticmethod(lambda: home))
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+
+    recruiter._ensure_claude_folder_trust(str(cwd))
+
+    data = json.loads((home / ".claude.json").read_text())
+    entry = data["projects"][os.path.realpath(str(cwd))]
+    assert entry["hasTrustDialogAccepted"] is True
+
+    # Idempotent, and preserves other settings.
+    data["projects"][os.path.realpath(str(cwd))]["allowedTools"] = ["Bash"]
+    (home / ".claude.json").write_text(json.dumps(data))
+    recruiter._ensure_claude_folder_trust(str(cwd))
+    after = json.loads((home / ".claude.json").read_text())
+    assert after["projects"][os.path.realpath(str(cwd))]["allowedTools"] == ["Bash"]
+
+
+def test_corrupt_claude_json_fails_loud_instead_of_hanging_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude.json").write_text("{not json")
+    monkeypatch.setattr(recruiter.Path, "home", staticmethod(lambda: home))
+
+    with pytest.raises(RecruiterError, match="pre-trust"):
+        recruiter._ensure_claude_folder_trust(str(tmp_path))

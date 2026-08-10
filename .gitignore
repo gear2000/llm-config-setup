@@ -1,5 +1,5 @@
 # Kit self-compose staging — the kit composes ITSELF into examples/ (a gitignored
-# staging dir) via `--target examples` so a self-compose never clobbers the kit's
+# staging dir) via `--target examples` so a self-compose never clobbers the kit's/
 # own hand-maintained root files (CLAUDE.md, README, etc.). install-local.sh /
 # install-global.sh also stage agents + global skills here before copying to $HOME.
 /examples/
@@ -47,3 +47,6 @@ build/
 .pi-lens
 .pi
 .shared-llm/this_repo
+.work-log
+.memsearch
+work-log

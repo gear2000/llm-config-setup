@@ -43,18 +43,19 @@
 # full_log a pointer to the session transcript — and then GO IDLE. A worker never closes its
 # own pane: the Recruiter validates the staged files while the worker is still addressable,
 # may send one COMPLETION_REPAIR turn to fix them, and closes the pane itself afterward.
-# (Exec-style harnesses — codex exec, cursor --print — exit by construction; for them Python's
-# reader-side repair and the completion reactor carry the recovery instead of a live bounce.)
+# Codex exec exits by construction and uses reader-side recovery instead of a live repair.
+# Cursor runs its interactive TUI, remains addressable, and gets the same one-repair path as
+# Claude and Pi.
 # The Recruiter races one event subscription against the lease-private result; `done` is an
 # accelerator, never the verdict or the durable completion record.
 #
-# NON-INTERACTIVE IS MANDATORY. A worker runs unattended in a pane, so every launch template
-# MUST bypass all trust/permission prompts or the worker hangs forever at a dialog (and the
-# Recruiter's wait times out). The bypass per harness:
+# UNATTENDED STARTUP IS MANDATORY. A worker runs AFK in a pane, so every launch template MUST
+# bypass all trust/permission prompts or the worker hangs forever at a dialog (and the Recruiter's
+# wait times out). Interactive TUIs stay visible; unattended does not mean headless. The bypass:
 #   claude → --dangerously-skip-permissions             (trusts cwd, incl. a fresh worktree)
 #   codex  → --dangerously-bypass-approvals-and-sandbox (with --skip-git-repo-check)
 #   pi     → --approve                                  (trusts project-local files for the run)
-#   cursor → --print --force                            (non-interactive + approve commands)
+#   cursor → --force --trust                            (approve commands + trust workspace)
 #
 # PI WORKERS RUN INSULATED. `--no-extensions` turns off extension discovery so a broken
 # globally-installed extension can never brick orchestrated workers (a half-installed
@@ -181,7 +182,7 @@ phase_leaders:
     "Read {instructions_path} and follow that phase-leader assignment."
 
   cursor: >-
-    cursor-agent --print --force --model {model}
+    cursor-agent --force --trust --model {model}
     "Read {instructions_path} and follow that phase-leader assignment."
 
 harnesses:
@@ -218,11 +219,13 @@ harnesses:
     full_log: a pointer to your session transcript. Then remain in your session and go idle;
     do NOT exit or close your pane — the Recruiter validates your files and closes the pane."
 
-  # cursor --print exits when the run ends; same reader-side recovery note as codex.
+  # Cursor stays interactive so Herdr shows live progress and the Recruiter can request one
+  # repair if the required result bundle is missing or malformed.
   cursor: >-
-    cursor-agent --print --force --model {model}
+    cursor-agent --force --trust --model {model}
     "Read {instructions_path}; do the stage in {cwd}; write exactly one result.json to
     {result_path} with order_id exactly {order_id}.
     verdict: exactly one of passed|failed|blocked. revisit: only on a failed verdict, and always
     a JSON list of recognized stage ids from the brief — never a bare string, never prose.
-    full_log: a pointer to your session transcript."
+    full_log: a pointer to your session transcript. Then remain in your session and go idle;
+    do NOT exit or close your pane — the Recruiter validates your files and closes the pane."

@@ -372,7 +372,9 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     specialist_entry: dict[str, object] | None = None
 
     if request_type == "worker":
-        required = ("offering", "effort", "agent")
+        # effort is resolved per-offering: effortful offerings require it,
+        # default-only offerings normalize an omitted effort to "default".
+        required = ("offering", "agent")
         missing = [field for field in required if field not in raw]
         prohibited = [field for field in ("specialist",) if field in raw]
         if missing or prohibited:
@@ -389,11 +391,14 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
                 f"unknown worker persona {agent!r}; expected one of {', '.join(sorted(known_personas))}"
             )
         offering_id = cast(str, raw["offering"])
-        effort = cast(str, raw["effort"])
+        raw_effort = cast("str | None", raw.get("effort"))
         try:
-            snapshot = roster.resolve(offering_id, effort)
+            snapshot = roster.resolve(offering_id, raw_effort)
         except offerings.OfferingError as error:
             raise PublicError(str(error)) from error
+        # Persist the canonical selection so omitted and explicit "default"
+        # requests produce identical payloads and hashes.
+        effort = cast(str, snapshot["selected_effort"])
         specialist_name: str | None = None
     else:
         try:
@@ -1783,7 +1788,7 @@ def execute(args: Any, cwd: Path) -> int:
             harness=snapshot["harness"],
             model=snapshot["model"],
             agent=args.agent,
-            effort=args.effort,
+            effort=cast(str, snapshot["selected_effort"]),
             offering_snapshot=snapshot,
             wait=args.wait,
         )

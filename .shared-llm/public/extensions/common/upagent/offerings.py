@@ -12,6 +12,9 @@ from typing import Any, cast
 import yaml
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Canonical selection for offerings whose harness exposes no effort control.
+# Omitted and explicit "default" requests normalize to the same snapshot/hash.
+DEFAULT_EFFORT = "default"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 APPROVED: dict[str, tuple[str, str, tuple[str, ...]]] = {
@@ -19,12 +22,32 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS),
     "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS),
+    "cursor-composer-2-5": ("cursor", "composer-2.5", (DEFAULT_EFFORT,)),
     "pi-gpt-5-6-sol": ("pi", "openai-codex/gpt-5.6-sol", EFFORTS),
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS),
     "pi-gpt-5-5": ("pi", "openai-codex/gpt-5.5", EFFORTS[:-1]),
     "pi-gpt-5-4-mini": ("pi", "openai-codex/gpt-5.4-mini", EFFORTS[:-1]),
 }
+
+
+# Harness completion semantics. "exec" harnesses run one non-interactive
+# process that exits when its turn is done: the Herdr agent disappears, so no
+# follow-up repair prompt is ever possible. "interactive" harnesses keep an
+# addressable agent that can accept exactly one same-worker repair prompt.
+COMPLETION_STYLES: dict[str, str] = {
+    "claude": "interactive",
+    "codex": "exec",
+    "cursor": "interactive",
+    "pi": "interactive",
+}
+
+
+def completion_style(harness: str) -> str:
+    style = COMPLETION_STYLES.get(harness)
+    if style is None:
+        raise OfferingError(f"harness {harness!r} has no declared completion style")
+    return style
 
 
 class OfferingError(ValueError):
@@ -59,13 +82,21 @@ class OfferingRoster:
     management: dict[str, object]
     source: Path
 
-    def resolve(self, offering_id: str, effort: str) -> dict[str, object]:
+    def resolve(self, offering_id: str, effort: str | None) -> dict[str, object]:
         offering = self.offerings.get(offering_id)
         if offering is None:
             raise OfferingError(
                 f"unknown offering {offering_id!r}; expected one of "
                 + ", ".join(self.offerings)
             )
+        if effort is None:
+            if offering.efforts == (DEFAULT_EFFORT,):
+                effort = DEFAULT_EFFORT
+            else:
+                raise OfferingError(
+                    f"offering {offering_id!r} requires an explicit effort; "
+                    f"expected one of {', '.join(offering.efforts)}"
+                )
         return offering.snapshot(effort)
 
     def listing(self) -> list[dict[str, object]]:
@@ -112,7 +143,7 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
         if extra:
             detail.append("unknown " + ", ".join(extra))
         raise OfferingError(
-            "offering roster must contain exactly the nine approved ids: "
+            f"offering roster must contain exactly the {len(APPROVED)} approved ids: "
             + "; ".join(detail)
         )
     parsed: dict[str, Offering] = {}
@@ -122,11 +153,22 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
             raise OfferingError(
                 f"offering {offering_id!r} must be a shell-safe id mapped to an object"
             )
-        _strict_keys(value, {"harness", "model", "efforts"}, f"offering {offering_id}")
+        _strict_keys(
+            value,
+            {"harness", "model", "efforts", "completion_style"},
+            f"offering {offering_id}",
+        )
         harness, model, efforts = expected
         if value.get("harness") != harness or value.get("model") != model:
             raise OfferingError(
                 f"offering {offering_id!r} must resolve to {harness}:::{model}"
+            )
+        declared_style = value.get("completion_style")
+        if declared_style is not None and declared_style != completion_style(harness):
+            raise OfferingError(
+                f"offering {offering_id!r} declares completion_style "
+                f"{declared_style!r} but harness {harness!r} is "
+                f"{completion_style(harness)!r}"
             )
         raw_efforts = value.get("efforts")
         if not isinstance(raw_efforts, list) or tuple(raw_efforts) != efforts:
@@ -134,7 +176,8 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
                 f"offering {offering_id!r} efforts must be exactly {list(efforts)!r}"
             )
         if len(set(raw_efforts)) != len(raw_efforts) or not all(
-            isinstance(item, str) and item in EFFORTS for item in raw_efforts
+            isinstance(item, str) and (item in EFFORTS or item == DEFAULT_EFFORT)
+            for item in raw_efforts
         ):
             raise OfferingError(f"offering {offering_id!r} has invalid efforts")
         parsed[offering_id] = Offering(offering_id, harness, model, efforts)
@@ -266,6 +309,26 @@ def render_argv(snapshot: object, persona: str, instructions_path: str) -> list[
             "--thinking",
             effort,
             prompt,
+        ]
+    if harness == "cursor":
+        # Keep Cursor's interactive TUI so Herdr receives live progress. --force
+        # approves commands and --trust bypasses the workspace prompt for an
+        # unattended launch. Cursor exposes no effort or persona flag; both the
+        # persona and delivery contract travel in the instructions. Repeat the
+        # delivery gate at the launch boundary because a missing bundle is the
+        # one failure an otherwise successful Cursor turn cannot self-report.
+        cursor_prompt = (
+            f"Read {instructions_path} and do exactly that work. Before returning idle, "
+            "verify every artifact named in the final Recruiter delivery contract exists "
+            "and satisfies that contract."
+        )
+        return [
+            "cursor-agent",
+            "--force",
+            "--trust",
+            "--model",
+            model,
+            cursor_prompt,
         ]
     raise OfferingError(f"offering snapshot has unsupported harness {harness!r}")
 

@@ -1,5 +1,5 @@
 # pyright: reportMissingImports=false
-"""Exact nine-offering roster and child argv tests."""
+"""Exact ten-offering roster and child argv tests."""
 
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ sys.modules[spec.name] = offerings
 spec.loader.exec_module(offerings)
 
 
-def test_roster_contains_exactly_the_nine_approved_offerings() -> None:
+def test_roster_contains_exactly_the_ten_approved_offerings() -> None:
     roster = offerings.load_roster()
 
     assert list(roster.offerings) == list(offerings.APPROVED)
-    assert len(roster.listing()) == 9
-    assert roster.listing()[4]["rendered_identity"] == "pi:::openai-codex/gpt-5.6-sol"
+    assert len(roster.listing()) == 10
+    assert roster.listing()[5]["rendered_identity"] == "pi:::openai-codex/gpt-5.6-sol"
     assert roster.management["account_manager"] == {
         "offering": "claude-sonnet-5",
         "effort": "low",
@@ -107,10 +107,80 @@ def test_every_approved_offering_and_effort_renders_without_yaml_commands() -> N
             argv = offerings.render_argv(
                 offering.snapshot(effort), "backend", "/lease.md"
             )
-            assert argv[0] == offering.harness
+            harness_binaries = {
+                "claude": "claude",
+                "codex": "codex",
+                "pi": "pi",
+                "cursor": "cursor-agent",
+            }
+            assert argv[0] == harness_binaries[offering.harness]
             if offering.harness == "pi":
                 assert argv[argv.index("--model") + 1].startswith("openai-codex/")
                 assert argv[argv.index("--thinking") + 1] == effort
+
+
+def test_cursor_offering_has_only_default_effort() -> None:
+    roster = offerings.load_roster()
+    cursor = roster.offerings["cursor-composer-2-5"]
+
+    assert cursor.efforts == (offerings.DEFAULT_EFFORT,)
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+            roster.resolve("cursor-composer-2-5", effort)
+
+
+def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
+    roster = offerings.load_roster()
+
+    omitted = roster.resolve("cursor-composer-2-5", None)
+    explicit = roster.resolve("cursor-composer-2-5", "default")
+
+    assert omitted == explicit
+    assert omitted["selected_effort"] == "default"
+
+
+def test_effortful_offering_still_requires_effort() -> None:
+    roster = offerings.load_roster()
+
+    for offering_id in ("claude-sonnet-5", "codex-gpt-5-6-sol", "pi-gpt-5-6-sol"):
+        with pytest.raises(
+            offerings.OfferingError, match="requires an explicit effort"
+        ):
+            roster.resolve(offering_id, None)
+
+
+def test_cursor_renderer_is_interactive_trusted_and_has_no_effort_flag() -> None:
+    snapshot = offerings.load_roster().resolve("cursor-composer-2-5", None)
+
+    assert offerings.render_argv(snapshot, "backend", "/lease/instructions.md") == [
+        "cursor-agent",
+        "--force",
+        "--trust",
+        "--model",
+        "composer-2.5",
+        "Read /lease/instructions.md and do exactly that work. Before returning idle, "
+        "verify every artifact named in the final Recruiter delivery contract exists "
+        "and satisfies that contract.",
+    ]
+
+
+def test_completion_styles_declare_cursor_interactive_and_codex_exec() -> None:
+    assert offerings.completion_style("cursor") == "interactive"
+    assert offerings.completion_style("codex") == "exec"
+    assert offerings.completion_style("claude") == "interactive"
+    assert offerings.completion_style("pi") == "interactive"
+    with pytest.raises(offerings.OfferingError, match="no declared completion style"):
+        offerings.completion_style("unknown-harness")
+
+
+def test_roster_rejects_mismatched_declared_completion_style(tmp_path: Path) -> None:
+    source = offerings.yaml.safe_load((HERE / "offerings.yaml").read_text())
+    source["offerings"]["cursor-composer-2-5"]["completion_style"] = "exec"
+    path = tmp_path / "offerings.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+
+    with pytest.raises(offerings.OfferingError, match="completion_style"):
+        offerings.load_roster(path)
 
 
 def test_roster_rejects_even_one_extra_offering(tmp_path: Path) -> None:

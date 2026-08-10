@@ -1503,3 +1503,66 @@ def test_missing_service_state_self_heals_without_prior_up(
 
     assert public_api._cockpit_pane() == "created-service-pane"
     assert starts == [str(public_api.HERE / "offerings.yaml")]
+
+
+# --- Cursor default-effort canonicalization -----------------------------------
+
+
+def _cursor_argv(tmp_path: Path, *, effort: str | None = None) -> list[str]:
+    argv = [
+        "request",
+        "--type",
+        "worker",
+        "--request-id",
+        REQUEST_ID,
+        "--offering",
+        "cursor-composer-2-5",
+        "--agent",
+        "backend",
+        "--prompt-file",
+        str(_prompt(tmp_path)),
+        "--cwd",
+        str(tmp_path),
+    ]
+    if effort is not None:
+        argv += ["--effort", effort]
+    return argv
+
+
+def _persona(tmp_path: Path) -> None:
+    persona_dir = tmp_path / ".claude/agents"
+    persona_dir.mkdir(parents=True, exist_ok=True)
+    (persona_dir / "backend.md").write_text("---\nname: backend\n---\n")
+
+
+def test_cursor_omitted_and_explicit_default_are_canonical(tmp_path: Path) -> None:
+    _persona(tmp_path)
+
+    omitted = public_api.validate_request(_args(_cursor_argv(tmp_path)), tmp_path)
+    explicit = public_api.validate_request(
+        _args(_cursor_argv(tmp_path, effort="default")), tmp_path
+    )
+
+    assert omitted.payload == explicit.payload
+    assert omitted.payload_sha256 == explicit.payload_sha256
+    assert omitted.payload["effort"] == "default"
+    assert omitted.payload["offering_snapshot"]["selected_effort"] == "default"
+
+
+def test_cursor_rejects_every_global_effort(tmp_path: Path) -> None:
+    _persona(tmp_path)
+
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        with pytest.raises(public_api.PublicError, match="does not allow effort"):
+            public_api.validate_request(
+                _args(_cursor_argv(tmp_path, effort=effort)), tmp_path
+            )
+
+
+def test_effortful_offering_rejects_omitted_effort(tmp_path: Path) -> None:
+    _persona(tmp_path)
+    argv = _cursor_argv(tmp_path)
+    argv[argv.index("cursor-composer-2-5")] = "pi-gpt-5-6-sol"
+
+    with pytest.raises(public_api.PublicError, match="requires an explicit effort"):
+        public_api.validate_request(_args(argv), tmp_path)

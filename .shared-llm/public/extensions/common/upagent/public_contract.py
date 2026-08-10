@@ -126,7 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("--request", required=True)
     verify.add_argument("--offering", required=True)
-    verify.add_argument("--effort", required=True)
+    verify.add_argument(
+        "--effort",
+        help="required for effortful offerings; omit for default-only offerings",
+    )
     verify.add_argument("--agent", required=True)
     verify.add_argument("--wait", action="store_true")
     verify.add_argument("--json", action="store_true")
@@ -229,14 +232,18 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
         if args.duration_minutes is not None and not 1 <= args.duration_minutes <= 120:
             raise PublicCommandError("--duration-minutes must be between 1 and 120")
         if args.file is None and args.type == "worker":
+            # --effort is resolved per-offering downstream: effortful offerings
+            # reject an omitted effort before launch; default-only offerings
+            # normalize the omission to the canonical "default" selection.
             missing = [
                 field
-                for field in ("offering", "effort", "agent", "prompt_file")
+                for field in ("offering", "agent", "prompt_file")
                 if getattr(args, field) is None
             ]
             if missing or args.specialist is not None:
                 raise PublicCommandError(
-                    "worker request requires --offering, --effort, --agent, and --prompt-file "
+                    "worker request requires --offering, --agent, and --prompt-file "
+                    "(--effort when the offering is effortful) "
                     "and is incompatible with --specialist"
                 )
         if (

@@ -38,7 +38,7 @@ def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _order(**over: object) -> dict:
-    base = {
+    base: dict[str, object] = {
         "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
         "phase_id": "phase-0",
         "stage_id": "stage-1-implementation",
@@ -848,3 +848,246 @@ def test_a_worker_can_never_author_a_salvaged_verdict_itself() -> None:
         )["verdict"]
         == "salvaged-done"
     )
+
+
+# --- Exec-style completion (codex) and interactive repair (cursor) -----------
+
+
+def _exec_dead_claim(
+    tmp_path: Path, ledger: Any, suffix: str, harness: str
+) -> tuple[dict, Path, str]:
+    instructions = tmp_path / f"instructions-{suffix}.md"
+    instructions.write_text("# Worker\n")
+    order = _order(
+        harness=harness,
+        cwd=str(tmp_path),
+        instructions_path=str(instructions),
+        result_path=str(tmp_path / f"result-{suffix}.json"),
+    )
+    order_path = tmp_path / f"order-{suffix}.json"
+    order_path.write_text(json.dumps(order))
+    key, _created = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "request_id": recruiter.lifecycle.request_identity(order),
+            "runner_pid": -1,
+            "runner_start_time": None,
+        },
+    )
+    assert isinstance(token, str)
+    return order, order_path, key
+
+
+def test_codex_exec_missing_bundle_never_prompts_the_absent_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Codex exec worker disappears, so a stale address cannot authorize repair."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an exec-style worker was prompted for a live repair")
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", refuse)
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _exec_dead_claim(
+        tmp_path, ledger, "exec-codex", "codex"
+    )
+    manifest = _manifest(ledger, key, order)
+    staging = manifest.artifact("result").staging_path
+    staging.parent.mkdir(parents=True, exist_ok=True)
+
+    blocked, salvage = recruiter._complete_typed_bundle(
+        ledger, key, order, manifest, "sess:stale-worker-address",
+        herdr_session="test-session",
+    )
+
+    assert blocked is True
+    assert salvage is not None
+    published = json.loads(staging.read_text())
+    assert published["verdict"] == "blocked"
+    assert "agent_not_found" not in published["reason"]
+    assert "exec-style" in published["reason"]
+    events = [item["event"] for item in ledger.events(key)]
+    assert "completion-repair-unavailable" in events
+
+
+def test_codex_exec_valid_bundle_completes_without_any_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a valid exec bundle must never trigger a repair")
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", refuse)
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _exec_dead_claim(tmp_path, ledger, "exec-valid", "codex")
+    manifest = _manifest(ledger, key, order)
+    staging = manifest.artifact("result").staging_path
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text(
+        json.dumps(
+            {
+                "order_id": order["order_id"],
+                "verdict": "passed",
+                "revisit": [],
+                "reason": "did the work",
+                "full_log": "worker log",
+            }
+        )
+    )
+
+    blocked, salvage = recruiter._complete_typed_bundle(
+        ledger, key, order, manifest, "sess:worker", herdr_session="test-session"
+    )
+
+    assert blocked is False
+    assert salvage is None
+
+
+def test_cursor_missing_bundle_gets_one_same_worker_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _exec_dead_claim(
+        tmp_path, ledger, "interactive-cursor", "cursor"
+    )
+    manifest = _manifest(ledger, key, order)
+    prompts: list[tuple[str, str]] = []
+    repair_polls: list[float] = []
+
+    def repair(target: str, prompt: str, **kwargs: object) -> None:
+        assert (
+            kwargs["paste_settle_seconds"]
+            == recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+        )
+        prompts.append((target, prompt))
+
+    def finish_asynchronous_repair(seconds: float) -> None:
+        repair_polls.append(seconds)
+        staging = manifest.artifact("result").staging_path
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(
+            json.dumps(
+                {
+                    "order_id": order["order_id"],
+                    "verdict": "passed",
+                    "revisit": [],
+                    "reason": "repaired the missing result",
+                    "full_log": "cursor session",
+                }
+            )
+        )
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", repair)
+    monkeypatch.setattr(recruiter.time, "sleep", finish_asynchronous_repair)
+
+    blocked, salvage = recruiter._complete_typed_bundle(
+        ledger,
+        key,
+        order,
+        manifest,
+        "sess:live-cursor",
+        herdr_session="test-session",
+    )
+
+    assert blocked is False
+    assert salvage is None
+    assert len(prompts) == 1
+    assert len(repair_polls) == 1
+    assert prompts[0][0] == "sess:live-cursor"
+    assert "COMPLETION_REPAIR 1/1" in prompts[0][1]
+    events = [item["event"] for item in ledger.events(key)]
+    assert "completion-repair-unavailable" not in events
+
+
+def test_same_worker_repair_wait_is_bounded() -> None:
+    def never_valid() -> dict:
+        raise recruiter.CompletionError("still invalid")
+
+    with pytest.raises(
+        recruiter.CompletionError,
+        match="did not produce a valid artifact bundle within 0 ms",
+    ):
+        recruiter._wait_for_completion_repair(never_valid, 0)
+
+
+def test_codex_exec_post_start_commit_is_still_salvaged_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no live repair")),
+    )
+    ledger = recruiter.JobLedger()
+    _git_repo(tmp_path)
+    order, _order_path, key = _exec_dead_claim(tmp_path, ledger, "exec-commit", "codex")
+    manifest = _manifest(ledger, key, order)
+    sha = _commit(tmp_path, "exec-landed.txt")
+
+    blocked, salvage = recruiter._complete_typed_bundle(
+        ledger, key, order, manifest, "sess:worker", herdr_session="test-session"
+    )
+
+    assert blocked is True
+    assert salvage is not None
+    assert salvage["result"]["verdict"] == "salvaged-done"
+    assert sha in salvage["result"]["reason"]
+
+
+# --- Dirty-worktree evidence --------------------------------------------------
+
+
+def test_exec_dirty_worktree_is_evidence_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uncommitted edits are recorded so the receipt never implies a clean worktree,
+    but unattributable dirty state must not flip the outcome."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    _git_repo(tmp_path)
+    (tmp_path / "baseline.txt").write_text("baseline")
+    subprocess.run(
+        ["git", "add", "baseline.txt"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "baseline"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"},
+    )
+    order, _order_path, key = _dead_runner_claim(tmp_path, ledger, "dirty")
+    (tmp_path / "uncommitted.py").write_text("print('worker was here')\n")
+    (tmp_path / "baseline.txt").write_text("edited")
+
+    evidence = recruiter.inspect_salvage(
+        ledger, key, order, _manifest(ledger, key, order)
+    )
+
+    assert evidence["outcome"] == "empty"
+    dirty = evidence["dirty_worktree"]
+    assert dirty["dirty_path_count"] >= 2
+    assert any("uncommitted.py" in line for line in dirty["dirty_paths"])
+    assert "never success" in dirty["attribution"]
+
+
+def test_salvage_outside_git_records_no_dirty_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _dead_runner_claim(tmp_path, ledger, "no-git")
+
+    evidence = recruiter.inspect_salvage(
+        ledger, key, order, _manifest(ledger, key, order)
+    )
+
+    assert evidence["dirty_worktree"] is None

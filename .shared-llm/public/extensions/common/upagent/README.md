@@ -179,13 +179,17 @@ authenticated terminal cancellation, audit, identical reattachment, and changed-
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
 no-op that also retries removal of a previously swapped runtime-owned residual.
 
-`offerings.yaml` contains exactly nine validated stable ids: three Claude, one Codex, and five Pi.
+`offerings.yaml` contains exactly ten validated stable ids: three Claude, one Codex, one Cursor,
+and five Pi.
 The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,
-and the immutable order snapshot. YAML selects only harness, model, and allowed efforts. It cannot
+and the immutable order snapshot. YAML selects only harness, model, allowed efforts, and the
+optional declared `completion_style` (validated against code-owned policy). It cannot
 supply a public worker or Account Manager shell command. `offerings.py` renders child tokens:
 Claude uses `--effort`,
 Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit
-`--thinking`. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass
+`--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default`
+effort (an omitted `--effort` normalizes to it, producing an identical payload hash) and the
+renderer emits no effort token. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass
 no lifecycle validation.
 
 A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
@@ -354,18 +358,25 @@ only for explicitly route-driven controller compatibility, where existing phase 
 provide raw harness/model profiles and may configure raw lifecycle-role commands. Four launch
 properties remain load-bearing:
 
-1. **Non-interactive.** Workers run unattended in panes — every template bypasses
+1. **Unattended.** Workers start without operator input — every template bypasses
    trust/permission prompts (`claude --dangerously-skip-permissions`,
-   `codex exec --dangerously-bypass-approvals-and-sandbox`, `pi --approve`) or the hire hangs
-   until the Recruiter's timeout.
+   `codex exec --dangerously-bypass-approvals-and-sandbox`, `pi --approve`,
+   `cursor-agent --force --trust`) or the hire hangs until the Recruiter's timeout. Harnesses
+   that support an interactive TUI keep it visible in the Herdr pane.
 2. **Harness-native model ids.** Claude takes its model plus `--effort`; Codex takes a bare model
    plus `-c model_reasoning_effort=...`; Pi takes a provider-qualified model plus a separate
    `--thinking` token. Codex and Pi have no `--agent` flag, so their persona comes from the lease
    instructions.
-3. **Codex completion uses the generic fenced monitor.** Codex does not reliably report a
-   terminal Herdr agent-status transition. The Recruiter's token-scoped staging-result monitor
-   validates and finalizes its result exactly like every other harness; there is no separate
-   public-result polling path.
+3. **Harness-native completion.** `codex exec` exits when its turn ends and its Herdr agent
+   disappears, so its offering declares `completion_style: exec`: the Recruiter's monitor waits
+   for a valid staged bundle or confirmed process/pane exit, then uses mechanical salvage-or-block
+   when the bundle is missing or invalid. Claude, Pi, and Cursor are interactive: their live TUIs
+   remain addressable, the Recruiter validates artifacts before closing the pane, and a missing or
+   malformed result gets exactly one same-worker `COMPLETION_REPAIR` prompt, then the Recruiter
+   waits boundedly for the repaired bundle before cleanup. Cursor's launch prompt repeats the final
+   delivery verification gate, and its follow-ups use separate text and Enter
+   actions after a short settle; one atomic paste+Enter leaves the TUI input visibly drafted but
+   does not submit it.
 4. **pi runs insulated.** `--no-extensions` plus an explicit
    `-e $HOME/.pi/agent/extensions/herdr-agent-state.ts`. Discovery off means a broken
    globally-installed extension can never brick automation; the explicit `-e` keeps Herdr's
@@ -459,8 +470,10 @@ letting liveness checks silently fail open.
 ## Tests
 
 `just test` covers the closed public schema, zero-launch rejection, prompt hashing/snapshotting,
-UUID/ULID idempotency and conflict behavior, the exact nine-entry text/JSON roster, exact Claude /
-Codex / Pi child tokens, specialist offering resolution, request mailboxes, identity/lease fencing,
+UUID/ULID idempotency and conflict behavior, the exact ten-entry text/JSON roster, exact Claude /
+Codex / Cursor / Pi child tokens, Cursor default-effort canonicalization and interactive repair,
+role-aware launch-state transitions, Codex exec-style no-live-repair completion, specialist
+offering resolution, request mailboxes, identity/lease fencing,
 startup health, timeout authority, typed manifests, every missing/malformed artifact, one bounded
 same-worker repair, manager degradation, specialist projection, mandatory-consult enforcement,
 publication fault ordering, and cleanup. Focused per-command tests also cover mutation exclusion, lock-free pure reads, fresh module imports,

@@ -35,7 +35,7 @@ just update                      # the headline command: copy → compose → li
 just update -v                   # same, with per-file detail printed
 ```
 
-- **Harness tokens** are `cc` (Claude Code), `pi` (Pi), and `codex` (Codex). A destination's `-l` list defaults to `cc,pi`.
+- **Harness tokens** are `cc` (Claude Code), `pi` (Pi), `codex` (Codex), and `cursor` (Cursor Agent CLI, `cursor-agent`). A destination's `-l` list defaults to `cc,pi`. `cursor` is a surface alias of `codex`: the Cursor Agent CLI reads the same root `AGENTS.md` and discovers skills from the same `~/.agents/skills/` home dir (plus `.claude/skills/` for compat), so it rides the codex plumbing end to end — no cursor-specific files are generated.
 - `just update` always writes a full run log under `/tmp/.shared-llm/log/<timestamp>.log`; `-v` also prints the per-file detail to the terminal.
 - **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and — when a `global:` list is set — `just global`.
 - `just pi-extensions` installs the pinned third-party Pi extensions via the `pi` CLI (a network step; no-op if `pi` is absent).

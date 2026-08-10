@@ -18,6 +18,16 @@ offerings:
     harness: codex
     model: gpt-5.6-sol
     efforts: [low, medium, high, xhigh, max]
+    # codex exec exits when done; no live repair prompt is possible.
+    completion_style: exec
+  cursor-composer-2-5:
+    harness: cursor
+    # Composer 2.5, deliberately NOT the -fast variant. Cursor CLI exposes no
+    # effort control, so the only allowed selection is the canonical default.
+    model: composer-2.5
+    efforts: [default]
+    # Interactive mode preserves Cursor's live TUI and same-worker repair channel.
+    completion_style: interactive
   pi-gpt-5-6-sol:
     harness: pi
     model: openai-codex/gpt-5.6-sol

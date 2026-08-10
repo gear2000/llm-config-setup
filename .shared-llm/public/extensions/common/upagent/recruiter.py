@@ -173,6 +173,17 @@ COMPLETION_MONITOR_POLL_SECONDS = 0.05
 INVALID_RESULT_SETTLE_SECONDS = 0.5
 STARTUP_FAILURE_SETTLE_SECONDS = 2.0
 HEALTH_PROBE_SECONDS = 0.1
+CURSOR_STARTUP_OUTPUT_PROBE_SECONDS = 1.0
+# Cursor's TUI keeps a bracketed paste in the input field when text and Enter
+# arrive in one atomic `pane run`. A short split-action settle is empirically
+# required before Enter submits unattended follow-up and repair prompts.
+CURSOR_PROMPT_PASTE_SETTLE_SECONDS = 0.5
+CURSOR_INACTIVITY_CHECK_MS = 120_000
+CURSOR_RECONNECT_FAILURE_ATTEMPT = 3
+CURSOR_RECONNECT_ATTEMPT_RE = re.compile(
+    r"^Connection lost, reconnecting[^\n]*\(attempt\s+(\d+)\)",
+    re.IGNORECASE | re.MULTILINE,
+)
 EXPECTED_HARNESS_AGENT = {
     "claude": "claude",
     "codex": "codex",
@@ -1749,8 +1760,45 @@ class JobLedger:
             self._write_json(path, journal)
             self._write_json(claim_dir / "lease.json", lease)
             self._event(key, "pane-started", launch_id=launch_id, role=role, pane=pane)
-            self._snapshot(key, "startup-check", **lease)
+            # Role-aware state: only the primary worker (and the initial
+            # pre-worker manager) launch may move the public request state.
+            # Support-role launches (checker, rescue, ...) keep their full
+            # journal + event trail but must never regress an established
+            # `running` (or later) snapshot back to `startup-check`.
+            if role == "worker":
+                self._snapshot_launch_guarded(key, "startup-check", lease)
+            elif role == "manager":
+                self._snapshot_launch_guarded(key, "manager-starting", lease)
             return True
+
+    # States owned by health/completion/finalization writes. A launch snapshot
+    # must never rewind the request out of them.
+    _LAUNCH_PROTECTED_STATES = frozenset(
+        {
+            "running",
+            "awaiting-requester",
+            "review-delivering",
+            "release-delivering",
+            "finalizing",
+            "cancelling",
+            "finished",
+            "cleanup-failed",
+        }
+    )
+
+    def _snapshot_launch_guarded(
+        self, key: str, state: str, lease: dict[str, object]
+    ) -> None:
+        current = self.state(key).get("state")
+        if current in self._LAUNCH_PROTECTED_STATES:
+            self._event(
+                key,
+                "launch-state-suppressed",
+                attempted_state=state,
+                current_state=current,
+            )
+            return
+        self._snapshot(key, state, **lease)
 
     def mark_launch_closed(
         self,
@@ -3288,6 +3336,24 @@ def _pane_recent_output(
     return process.stdout
 
 
+def _cursor_startup_failure_message(output: str) -> str | None:
+    attempts: list[int] = []
+    for match in CURSOR_RECONNECT_ATTEMPT_RE.finditer(output):
+        attempts.append(int(match.group(1)))
+    if attempts and max(attempts) >= CURSOR_RECONNECT_FAILURE_ATTEMPT:
+        return (
+            "cursor-agent is stuck reconnecting to the Cursor backend "
+            f"(latest retry attempt {max(attempts)})"
+        )
+    return None
+
+
+def _worker_inactivity_check_ms(order: dict, configured_ms: int) -> int:
+    if order.get("harness") != "cursor":
+        return configured_ms
+    return min(configured_ms, CURSOR_INACTIVITY_CHECK_MS)
+
+
 def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
     """Derive a Herdr agent name that stays unique even for ids sharing a long prefix.
 
@@ -3725,6 +3791,37 @@ def _reconcile_exact_launch(
     return pending
 
 
+def _ensure_claude_folder_trust(cwd: str) -> None:
+    """Pre-accept Claude Code's folder-trust dialog for `cwd` in ~/.claude.json.
+
+    Managed panes run unattended; `--dangerously-skip-permissions` does NOT skip
+    the interactive "do you trust this folder?" dialog, so an untrusted cwd
+    wedges the pane until the startup timeout blocks the whole request. A
+    corrupt config raises: silently launching into a guaranteed hang would be
+    the quiet failure this ledger exists to prevent.
+    """
+    path = Path.home() / ".claude.json"
+    try:
+        data = json.loads(path.read_text()) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(
+            f"cannot read {path} to pre-trust {cwd} for an unattended launch: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise RecruiterError(f"{path} is not a JSON object")
+    projects = data.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise RecruiterError(f"{path} projects is not a JSON object")
+    resolved = os.path.realpath(cwd)
+    entry = projects.setdefault(resolved, {})
+    if not isinstance(entry, dict):
+        raise RecruiterError(f"{path} projects[{resolved!r}] is not a JSON object")
+    if entry.get("hasTrustDialogAccepted") is True:
+        return
+    entry["hasTrustDialogAccepted"] = True
+    JobLedger._write_json(path, data)
+
+
 def _start_fenced_ledger_agent(
     ledger: JobLedger,
     key: str,
@@ -3740,6 +3837,11 @@ def _start_fenced_ledger_agent(
     metadata: dict[str, object] | None = None,
 ) -> tuple[str, str | None, str, str]:
     """Journal before create; failed commit returns only truthful cleanup evidence."""
+
+    # Every managed pane (worker, manager, checker, rescue) passes through here.
+    # Claude launches need the cwd pre-trusted or the pane hangs at the dialog.
+    if launch.lstrip().startswith("claude"):
+        _ensure_claude_folder_trust(order["cwd"])
 
     launch_id = ledger.begin_launch(
         key,
@@ -3884,7 +3986,9 @@ def _wait_for_agent_health(
     resolved_cwd = os.path.realpath(expected_cwd)
     deadline = time.monotonic() + timeout_ms / 1000
     started = time.monotonic()
+    next_cursor_output_probe = started
     latest: dict[str, object] = {}
+    is_cursor_worker = expected_agent == "cursor" and completion_order is not None
     while time.monotonic() < deadline:
         pane = (
             _herdr_json("pane", "get", pane_id, herdr_session=herdr_session)
@@ -3942,17 +4046,42 @@ def _wait_for_agent_health(
             if isinstance(matching_process, dict)
             else None,
         }
+        # Cursor can report `idle` while its interactive TUI is starting, so
+        # process + cwd remain the primary health signal. A pane stuck in the
+        # backend-reconnect loop also sits `idle` with a live process, so an
+        # idle Cursor pane is declared healthy only after the recent-output
+        # probe confirms it is not reconnect-looping (a probe read failure just
+        # retries; the loop's timeout stays the backstop). A fast interactive
+        # turn may already be `done` by the first probe and is still healthy.
+        healthy_statuses = ("working", "idle", "done")
         if (
             matching_process is not None
             and detected_agent == expected_agent
-            and status in ("working", "idle", "done")
+            and status in healthy_statuses
         ):
-            if not cwd_matches:
-                raise RecruiterError(
-                    f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}"
-                )
-            latest["healthy"] = True
-            return latest
+            startup_confirmed = True
+            if is_cursor_worker and status == "idle":
+                try:
+                    output = _pane_recent_output(
+                        pane_id, lines=80, herdr_session=herdr_session
+                    )[-4000:]
+                except RecruiterError as error:
+                    latest["recent_output_error"] = str(error)
+                    startup_confirmed = False
+                else:
+                    failure_message = _cursor_startup_failure_message(output)
+                    if failure_message is not None:
+                        raise RecruiterError(
+                            f"agent pane {pane_id} failed cursor startup: "
+                            f"{failure_message}; recent output: {output[-1000:]}"
+                        )
+            if startup_confirmed:
+                if not cwd_matches:
+                    raise RecruiterError(
+                        f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}"
+                    )
+                latest["healthy"] = True
+                return latest
         completed_during_startup = False
         if completion_order is not None:
             try:
@@ -3968,6 +4097,23 @@ def _wait_for_agent_health(
             latest["completed_during_startup"] = True
             latest["healthy"] = True
             return latest
+        if is_cursor_worker and time.monotonic() >= next_cursor_output_probe:
+            next_cursor_output_probe = (
+                time.monotonic() + CURSOR_STARTUP_OUTPUT_PROBE_SECONDS
+            )
+            try:
+                output = _pane_recent_output(
+                    pane_id, lines=80, herdr_session=herdr_session
+                )[-4000:]
+            except RecruiterError as error:
+                latest["recent_output_error"] = str(error)
+            else:
+                failure_message = _cursor_startup_failure_message(output)
+                if failure_message is not None:
+                    raise RecruiterError(
+                        f"agent pane {pane_id} failed cursor startup: "
+                        f"{failure_message}; recent output: {output[-1000:]}"
+                    )
         if (
             matching_process is None
             and time.monotonic() - started >= STARTUP_FAILURE_SETTLE_SECONDS
@@ -4373,6 +4519,48 @@ def _git_worktree_root(cwd: str) -> str | None:
     return completed.stdout.strip() or None
 
 
+SALVAGE_DIRTY_PATH_LIMIT = 200
+
+
+def _dirty_worktree_evidence(worktree: str) -> dict[str, object]:
+    """Bounded record of uncommitted worktree state, as ambiguous operator evidence.
+
+    In a shared checkout dirty paths cannot be attributed to this order's worker,
+    so this NEVER contributes to a salvage outcome — it only keeps the receipt
+    honest that the worktree is not clean/disposable. A git failure inside a
+    known repository raises rather than reading as "clean".
+    """
+    status = subprocess.run(
+        ["git", "-C", worktree, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        raise RecruiterError(
+            f"salvage inspection could not read git status in {worktree}: "
+            f"{status.stderr.strip()}"
+        )
+    lines = [line for line in status.stdout.splitlines() if line.strip()]
+    diff_stat = subprocess.run(
+        ["git", "-C", worktree, "diff", "--shortstat"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff_stat.returncode != 0:
+        raise RecruiterError(
+            f"salvage inspection could not read git diff in {worktree}: "
+            f"{diff_stat.stderr.strip()}"
+        )
+    return {
+        "dirty_path_count": len(lines),
+        "dirty_paths": lines[:SALVAGE_DIRTY_PATH_LIMIT],
+        "diff_shortstat": diff_stat.stdout.strip(),
+        "attribution": "unattributed — shared checkout; evidence only, never success",
+    }
+
+
 def _landed_commits_since(worktree: str, since_ns: int) -> list[dict[str, object]]:
     """Commits at the tip of `worktree` whose commit time is at or after `since_ns`.
 
@@ -4486,6 +4674,10 @@ def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> 
         "landed_commits": landed,
         "ledger_artifacts_written": artifacts_written,
         "order_started_at_ns": started_at_ns,
+        # Recorded for the receipt only; deliberately excluded from `outcome`.
+        "dirty_worktree": (
+            _dirty_worktree_evidence(worktree) if worktree is not None else None
+        ),
     }
 
 
@@ -4656,6 +4848,26 @@ def _normalize_public_result_revisit(order: dict, manifest: Any) -> None:
     JobLedger._write_json(path, {**value, "revisit": revisit})
 
 
+def _wait_for_completion_repair(
+    validate: Callable[[], dict], timeout_ms: int
+) -> dict:
+    """Wait boundedly for an asynchronous same-worker repair to become valid."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    latest_error: CompletionError | None = None
+    while True:
+        try:
+            return validate()
+        except CompletionError as error:
+            latest_error = error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CompletionError(
+                "same-worker repair did not produce a valid artifact bundle within "
+                f"{timeout_ms} ms: {latest_error}"
+            ) from latest_error
+        time.sleep(min(COMPLETION_MONITOR_POLL_SECONDS, remaining))
+
+
 def _complete_typed_bundle(
     ledger: JobLedger,
     key: str,
@@ -4697,8 +4909,28 @@ def _complete_typed_bundle(
             repair_number=1,
             reason=str(first_error),
         )
+        harness = order.get("harness")
+        exec_style = (
+            isinstance(harness, str)
+            and offering_catalog.COMPLETION_STYLES.get(harness) == "exec"
+        )
         repair_error: Exception | None = None
-        if worker_address is None:
+        if exec_style:
+            # Exec-style harnesses (currently codex exec) exit when their turn
+            # ends and their agent disappears; prompting the remembered address
+            # would only ever produce agent_not_found. Skip straight to
+            # salvage-or-block and say why.
+            ledger._event(
+                key,
+                "completion-repair-unavailable",
+                harness=harness,
+                reason=str(first_error),
+            )
+            repair_error = RecruiterError(
+                f"{harness} workers are exec-style and exit when their turn ends; "
+                "no live same-worker repair is possible"
+            )
+        elif worker_address is None:
             repair_error = RecruiterError(
                 "the original worker address is unavailable for the one allowed repair"
             )
@@ -4714,16 +4946,29 @@ def _complete_typed_bundle(
                     "then stop. Do not launch or delegate to another worker.\n"
                     f"{paths}",
                     idle_timeout_ms=WATCHDOG_CONTINUATION_TIMEOUT_MS,
+                    paste_settle_seconds=(
+                        CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+                        if harness == "cursor"
+                        else 0.0
+                    ),
                     herdr_session=herdr_session,
                 )
-                result = validate()
+                result = _wait_for_completion_repair(
+                    validate, WATCHDOG_CONTINUATION_TIMEOUT_MS
+                )
             except (RecruiterError, CompletionError, OSError) as error:
                 repair_error = error
         if repair_error is not None:
-            reason = (
-                f"completion artifacts remained invalid after exactly one same-worker repair: "
-                f"{repair_error}"
-            )
+            if exec_style:
+                reason = (
+                    f"completion artifacts were missing or invalid at exec worker "
+                    f"exit: {first_error}; {repair_error}"
+                )
+            else:
+                reason = (
+                    f"completion artifacts remained invalid after exactly one same-worker repair: "
+                    f"{repair_error}"
+                )
             # Inspect for salvageable work BEFORE authoring anything: both terminal bundles
             # overwrite the very staging directory the inspection reads.
             triaged = _salvage_or_blocked(ledger, key, order, manifest, reason)
@@ -4930,7 +5175,17 @@ def _start_completion_monitor(
         # settle window, wake the job runner through `finalized`; the reactor revalidates
         # authoritatively, so a wake is a request to act, never a claim that the bundle is
         # valid. Retained review-loop workers and watchdogs keep their own protocols.
-        impasse_eligible = not retained and order.get("agent") not in WATCHDOG_AGENTS
+        # Exec-style harnesses never get the impasse wake: its whole purpose is
+        # to reach a live worker for the one same-worker repair, and an exec
+        # worker has no repair channel. Waking early would only start cleanup
+        # while the process may still be writing; wait for a valid bundle or
+        # the job runner's confirmed process/pane exit instead.
+        impasse_eligible = (
+            not retained
+            and order.get("agent") not in WATCHDOG_AGENTS
+            and offering_catalog.COMPLETION_STYLES.get(str(order.get("harness")))
+            != "exec"
+        )
         first_invalid_with_result: float | None = None
         while not stop.is_set():
             if (
@@ -5063,13 +5318,14 @@ def _submit_agent_prompt(
     message: str,
     idle_timeout_ms: int,
     *,
+    paste_settle_seconds: float = 0.0,
     herdr_session: str | None = None,
 ) -> None:
     """Submit one prompt only after Herdr proves the dedicated target is idle.
 
-    ``herdr agent send`` intentionally pastes without Enter. The Recruiter resolves the target to its
-    current pane and uses one serialized ``pane run`` socket action, which includes Enter. This is
-    safe for a dedicated manager; requester delivery remains best-effort and is skipped while busy.
+    Most agents accept one serialized ``pane run`` action. Cursor's interactive
+    TUI needs text and Enter as separate actions with a short settle between
+    them; without it, the prompt remains visibly drafted but never runs.
     """
     with _PROMPT_SUBMISSION_LOCK:
         _herdr(
@@ -5090,7 +5346,12 @@ def _submit_agent_prompt(
         pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
         if not isinstance(pane_id, str) or not pane_id:
             raise RecruiterError(f"Herdr agent target {target!r} has no current pane")
-        _herdr("pane", "run", pane_id, message, herdr_session=herdr_session)
+        if paste_settle_seconds > 0:
+            _herdr("pane", "send-text", pane_id, message, herdr_session=herdr_session)
+            time.sleep(paste_settle_seconds)
+            _herdr("pane", "send-keys", pane_id, "Enter", herdr_session=herdr_session)
+        else:
+            _herdr("pane", "run", pane_id, message, herdr_session=herdr_session)
 
 
 def _notify_requester(
@@ -5910,6 +6171,11 @@ def _run_order(
                 f"{premature_reason}. Resume monitoring now. Do not write another result "
                 "until the authoritative terminal record exists and matches this assignment.",
                 idle_timeout_ms=WATCHDOG_CONTINUATION_TIMEOUT_MS,
+                paste_settle_seconds=(
+                    CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+                    if order.get("harness") == "cursor"
+                    else 0.0
+                ),
                 herdr_session=session,
             )
     except (RecruiterError, ContractError, KeyError, TypeError, OSError) as e:
@@ -9647,6 +9913,11 @@ def cmd_review_continue(
                 "non-empty summary, tests, and changed_files; "
                 f"then return to idle.\n\n{feedback}",
                 idle_timeout_ms=60_000,
+                paste_settle_seconds=(
+                    CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+                    if order.get("harness") == "cursor"
+                    else 0.0
+                ),
                 herdr_session=herdr_session,
             )
         except Exception:
@@ -9711,6 +9982,11 @@ def cmd_review_release(
             f"terminal artifacts below, then go idle — do NOT exit or close your pane; the "
             f"Recruiter validates the files and closes the pane.\n{paths}",
             idle_timeout_ms=60_000,
+            paste_settle_seconds=(
+                CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+                if order.get("harness") == "cursor"
+                else 0.0
+            ),
             herdr_session=herdr_session,
         )
     except Exception as error:
@@ -10027,7 +10303,9 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             order,
             worker_result_path,
             timeout_ms,
-            inactivity_check_ms=management_config.inactivity_check_ms,
+            inactivity_check_ms=_worker_inactivity_check_ms(
+                order, management_config.inactivity_check_ms
+            ),
             on_inactivity=check_inactivity,
             artifact_manifest=artifact_manifest,
         )

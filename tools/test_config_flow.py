@@ -441,6 +441,35 @@ def test_link_creates_global_pi_and_codex(tmp_path: Path) -> None:
     assert (dest / ".claude/skills/demo/SKILL.md").exists()
 
 
+def test_cursor_harness_aliases_codex_surface(tmp_path: Path) -> None:
+    """A cursor-only destination gets the codex surface: skills linked into
+    ~/.agents/skills (what the Cursor Agent CLI reads), nothing cursor-specific."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    cfg = _cfg(m, dest, ["cursor"])
+    m.do_compose(cfg, _quiet(m))
+    m.do_link(cfg, _quiet(m))
+
+    cursor_link = home / ".agents/skills/demo"
+    assert (
+        cursor_link.is_symlink()
+        and cursor_link.resolve() == (dest / ".claude/skills/demo").resolve()
+    )
+    # No Pi links for a cursor-only destination.
+    assert not (home / ".pi/agent/skills/demo").exists()
+
+
+def test_parse_harnesses_accepts_cursor() -> None:
+    m = _load()
+    assert m.parse_harnesses("cc,cursor") == ["cc", "cursor"]
+    assert m.wants_codex_surface(["cursor"])
+    assert m.wants_codex_surface(["codex"])
+    assert not m.wants_codex_surface(["cc", "pi"])
+
+
 def test_link_prunes_our_stale_global_link_not_foreign(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
