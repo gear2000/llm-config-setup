@@ -17,7 +17,7 @@ job runner atomically claims an order, then:
      Manager when the order/config opts in;
   3. atomically starts a worker beside the order's cockpit pane with its cwd and env;
   4. writes a lease-specific worker brief with one literal result path and order id, runs the
-     worker, and races Herdr's event-driven agent-status wait against that private result;
+     worker, and waits by harness semantics: exec turn exit, or interactive typed artifacts;
   5. reads + validates the worker's result.json (must echo the order_id);
   6. closes and verifies owned panes are absent, then atomically publishes the public
      result and a durable completion receipt.
@@ -547,7 +547,9 @@ class JobLedger:
         with self._claim_lock(self.key_for_order(order)):
             return self._submit_unlocked(order)
 
-    def _submit_unlocked(self, order: dict) -> tuple[str, bool]:
+    def _validated_submission_identity(
+        self, order: dict, existing_order: dict | None = None
+    ) -> tuple[str, dict]:
         try:
             completion.ensure_publication_contract(order)
             contracts.parse_order(json.dumps(order))
@@ -556,26 +558,84 @@ class JobLedger:
                 f"request {order.get('order_id', '<unknown>')} has no valid typed artifact contract: {error}"
             ) from error
         key = self.key_for_order(order)
+        comparison_order = order if existing_order is None else existing_order
+        if self.key_for_order(comparison_order) != key:
+            raise RecruiterError(
+                "existing-order comparison must keep the same durable request identity"
+            )
+        return key, comparison_order
+
+    def _existing_submission_unlocked(
+        self, order: dict, comparison_order: dict, key: str
+    ) -> tuple[str, bool] | None:
         request = self.request_dir(key)
-        self.requests.mkdir(parents=True, exist_ok=True)
         if request.exists():
-            return self._existing_request(request, order, key)
+            return self._existing_request(request, comparison_order, key)
 
         # Compatibility with ledgers created before request identity was scoped by result_path.
         # Reuse an identical legacy record; a different record with the same human order_id is a
         # separate request rather than a global collision.
         legacy_key = self.key(order["order_id"])
         legacy_request = self.request_dir(legacy_key)
-        if legacy_request.exists():
-            try:
-                legacy_order = json.loads((legacy_request / "request.json").read_text())
-            except (OSError, json.JSONDecodeError) as error:
-                raise RecruiterError(
-                    f"legacy request record for {order['order_id']} is unreadable: {error}"
-                ) from error
-            if legacy_order == order:
-                return legacy_key, False
+        if not legacy_request.exists():
+            return None
+        try:
+            legacy_order = json.loads((legacy_request / "request.json").read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RecruiterError(
+                f"legacy request record for {order['order_id']} is unreadable: {error}"
+            ) from error
+        return (legacy_key, False) if legacy_order == comparison_order else None
 
+    def submit_with_new_request_guard(
+        self,
+        order: dict,
+        guard: Callable[[], None],
+        *,
+        existing_order: dict | None = None,
+        on_create: Callable[[], None] | None = None,
+    ) -> tuple[str, bool]:
+        """Persist after an unlocked new-request preflight and a locked race recheck.
+
+        The first lookup lets an accepted duplicate attach without revalidating its old placement.
+        A genuinely new request runs the external guard without holding the mutation lock, then
+        rechecks under that lock before creation. ``on_create`` is for bounded local persistence
+        that must commit with the new ledger record; it must not perform process or Herdr work.
+        """
+        key, comparison_order = self._validated_submission_identity(order, existing_order)
+        with self._claim_lock(key):
+            existing = self._existing_submission_unlocked(
+                order, comparison_order, key
+            )
+            if existing is not None:
+                return existing
+        guard()
+        with self._claim_lock(key):
+            return self._submit_unlocked(
+                order,
+                new_request_commit=on_create,
+                existing_order=comparison_order,
+            )
+
+    def _submit_unlocked(
+        self,
+        order: dict,
+        *,
+        new_request_commit: Callable[[], None] | None = None,
+        existing_order: dict | None = None,
+    ) -> tuple[str, bool]:
+        key, comparison_order = self._validated_submission_identity(
+            order, existing_order
+        )
+        existing = self._existing_submission_unlocked(order, comparison_order, key)
+        if existing is not None:
+            return existing
+        request = self.request_dir(key)
+
+        if new_request_commit is not None:
+            new_request_commit()
+
+        self.requests.mkdir(parents=True, exist_ok=True)
         temporary = self.requests / f".{key}.{uuid.uuid4().hex}.tmp"
         temporary.mkdir()
         self._write_json(temporary / "request.json", order)
@@ -606,7 +666,7 @@ class JobLedger:
             if e.errno not in (errno.EEXIST, errno.ENOTEMPTY):
                 raise
             shutil.rmtree(temporary)
-            return self._existing_request(request, order, key)
+            return self._existing_request(request, comparison_order, key)
         return key, True
 
     def order(self, key: str) -> dict:
@@ -2758,7 +2818,9 @@ def load_specialist_roster() -> dict:
     chain: list[dict[str, dict]] = []
     if base is not None and base_path is not None:
         chain.append(
-            _named_specialists(base["specialists"], "kit-base", base_path, primary_repo_root)
+            _named_specialists(
+                base["specialists"], "kit-base", base_path, primary_repo_root
+            )
         )
     includes = primary.get("include")
     if includes is not None:
@@ -2773,7 +2835,9 @@ def load_specialist_roster() -> dict:
                 )
             )
     chain.append(
-        _named_specialists(primary["specialists"], primary_origin, primary_path, primary_repo_root)
+        _named_specialists(
+            primary["specialists"], primary_origin, primary_path, primary_repo_root
+        )
     )
 
     named: dict[str, dict] = {}
@@ -4015,13 +4079,7 @@ def _wait_for_agent_health(
             (
                 process
                 for process in processes
-                if isinstance(process, dict)
-                and (
-                    process.get("name") == expected_process
-                    or expected_process in str(process.get("cmdline", ""))
-                    or expected_process
-                    in " ".join(str(item) for item in process.get("argv", []))
-                )
+                if _matches_expected_process(process, expected_process)
             ),
             None,
         )
@@ -4313,7 +4371,66 @@ def _worker_pane_confirmed_gone(
     return True
 
 
-# How often the agent-status wait independently probes the worker pane. Herdr 0.7.1's wait
+def _matches_expected_process(process: object, expected_process: str) -> bool:
+    if not isinstance(process, dict):
+        return False
+    argv = process.get("argv")
+    rendered_argv = (
+        " ".join(str(item) for item in argv) if isinstance(argv, list) else ""
+    )
+    return (
+        process.get("name") == expected_process
+        or expected_process in str(process.get("cmdline", ""))
+        or expected_process in rendered_argv
+    )
+
+
+def _worker_process_confirmed_gone(
+    worker_pane: str,
+    expected_process: str,
+    *,
+    herdr_session: str | None = None,
+    confirmations: int = 1,
+) -> bool:
+    """True only after normal Herdr replies repeatedly show no expected process."""
+    for attempt in range(max(1, confirmations)):
+        if attempt:
+            time.sleep(1)
+        try:
+            process_info = (
+                _herdr_json(
+                    "pane",
+                    "process-info",
+                    "--pane",
+                    worker_pane,
+                    timeout_seconds=10,
+                    herdr_session=herdr_session,
+                )
+                .get("result", {})
+                .get("process_info")
+            )
+        except RecruiterError as error:
+            if "pane_not_found" in str(error):
+                continue
+            return False
+        if not isinstance(process_info, dict):
+            raise RecruiterError(
+                f"Herdr returned invalid process-info for worker pane {worker_pane}"
+            )
+        processes = process_info.get("foreground_processes")
+        if not isinstance(processes, list):
+            raise RecruiterError(
+                f"Herdr returned no foreground_processes list for worker pane {worker_pane}"
+            )
+        if any(
+            _matches_expected_process(process, expected_process)
+            for process in processes
+        ):
+            return False
+    return True
+
+
+# How often completion waits independently probe the worker pane/process. Herdr 0.7.1's wait
 # subscription goes SILENT when the watched pane vanishes mid-wait (it reports nothing until
 # --timeout), so without this probe a dead worker holds the order for its entire remaining
 # budget — observed as ~2 h of discarded work.
@@ -4325,23 +4442,89 @@ AGENT_WAIT_PANE_PROBE_SECONDS = 15.0
 COMPLETION_IMPASSE_SETTLE_SECONDS = 10.0
 
 
-def _wait_for_agent_status(
+def _wait_for_interactive_completion(
     worker_pane: str,
+    expected_process: str,
     timeout_ms: int,
     monitor_finalized: threading.Event | None,
     *,
     herdr_session: str | None = None,
 ) -> bool:
-    """Race one event-driven Herdr wait against the private-result monitor.
+    """Wait for durable artifacts or proven interactive worker disappearance.
 
-    This opens one Herdr subscription for the whole worker lifetime. When the durable file wins,
-    terminate that waiter promptly; do not create a new socket subscription every second.
-
-    A pane that is positively confirmed gone ends the wait with True — "the worker is finished
-    with its pane, inspect what it staged" — instead of an error. The completion reactor then
-    validates the staged bundle, preserves a terminal result, or deterministically blocks; a
-    dead pane must never classify the whole order as broken infrastructure.
+    Herdr ``done`` means that an LLM turn ended and needs UI attention. It does not mean the
+    assignment ended: Claude may still be waiting on background work and can begin another turn.
+    Interactive harnesses therefore ignore that status. Only the typed artifact monitor, a
+    positively absent pane/process, or the request deadline can end this wait.
     """
+    if monitor_finalized is None:
+        raise RecruiterError(
+            "interactive worker completion requires its typed artifact monitor"
+        )
+    deadline = time.monotonic() + timeout_ms / 1000
+    next_liveness_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AgentWaitTimeout(
+                f"interactive worker {worker_pane} timed out after {timeout_ms} ms "
+                "without a valid artifact bundle or proven process exit"
+            )
+        now = time.monotonic()
+        if now >= next_liveness_probe:
+            next_liveness_probe = now + AGENT_WAIT_PANE_PROBE_SECONDS
+            if _worker_pane_confirmed_gone(
+                worker_pane, herdr_session=herdr_session, confirmations=2
+            ) or _worker_process_confirmed_gone(
+                worker_pane,
+                expected_process,
+                herdr_session=herdr_session,
+                confirmations=2,
+            ):
+                return True
+        wait_seconds = min(
+            remaining,
+            max(0.0, next_liveness_probe - time.monotonic()),
+        )
+        if monitor_finalized.wait(wait_seconds):
+            return False
+
+
+def _wait_for_agent_status(
+    worker_pane: str,
+    timeout_ms: int,
+    monitor_finalized: threading.Event | None,
+    *,
+    completion_style: str = "exec",
+    expected_process: str | None = None,
+    herdr_session: str | None = None,
+) -> bool:
+    """Wait according to harness completion semantics.
+
+    Exec workers may use Herdr ``done`` as process-turn completion. Interactive workers must use
+    durable artifacts or proven pane/process disappearance; a completed interactive turn alone
+    is never assignment terminality.
+    """
+    if completion_style == "interactive":
+        if not isinstance(expected_process, str) or not expected_process:
+            raise RecruiterError(
+                "interactive completion wait requires the expected worker process"
+            )
+        return _wait_for_interactive_completion(
+            worker_pane,
+            expected_process,
+            timeout_ms,
+            monitor_finalized,
+            herdr_session=herdr_session,
+        )
+    if completion_style != "exec":
+        raise RecruiterError(
+            f"unsupported worker completion style {completion_style!r}"
+        )
+
+    # Exec mode opens one Herdr subscription for the whole worker lifetime. When the durable
+    # file wins, terminate that waiter promptly; do not create a new socket subscription every
+    # second. A positively absent pane falls through to salvage-or-block.
 
     def _terminate(process: subprocess.Popen) -> None:
         process.terminate()
@@ -4474,7 +4657,10 @@ def _write_blocked_result(
 
 # Ledger events Python emits only AFTER reading a staged result.json off disk. Their presence
 # is durable proof the worker reached its artifact-writing step even when the bytes are gone.
-ARTIFACTS_WRITTEN_EVENTS = ("completion-artifact-invalid", "completion-repair-exhausted")
+ARTIFACTS_WRITTEN_EVENTS = (
+    "completion-artifact-invalid",
+    "completion-repair-exhausted",
+)
 
 # How far back the salvage inspection reads. A worker's landed work is at the worktree tip.
 SALVAGE_GIT_LOG_LIMIT = 50
@@ -4575,7 +4761,12 @@ def _landed_commits_since(worktree: str, since_ns: int) -> list[dict[str, object
     """
     completed = subprocess.run(
         [
-            "git", "-C", worktree, "log", "-n", str(SALVAGE_GIT_LOG_LIMIT),
+            "git",
+            "-C",
+            worktree,
+            "log",
+            "-n",
+            str(SALVAGE_GIT_LOG_LIMIT),
             "--format=%H%x1f%ct%x1f%an%x1f%ae",
         ],
         capture_output=True,
@@ -4848,9 +5039,7 @@ def _normalize_public_result_revisit(order: dict, manifest: Any) -> None:
     JobLedger._write_json(path, {**value, "revisit": revisit})
 
 
-def _wait_for_completion_repair(
-    validate: Callable[[], dict], timeout_ms: int
-) -> dict:
+def _wait_for_completion_repair(validate: Callable[[], dict], timeout_ms: int) -> dict:
     """Wait boundedly for an asynchronous same-worker repair to become valid."""
     deadline = time.monotonic() + timeout_ms / 1000
     latest_error: CompletionError | None = None
@@ -6111,10 +6300,18 @@ def _run_order(
                 remaining_ms = max(
                     1, math.ceil((wait_deadline - time.monotonic()) * 1000)
                 )
+                harness = cast(str, order["harness"])
+                completion_style = offering_catalog.completion_style(harness)
+                health_override = roster.get("health", {}).get(harness, {})
+                expected_process = health_override.get(
+                    "expected_process", EXPECTED_HARNESS_PROCESS[harness]
+                )
                 agent_finished = _wait_for_agent_status(
                     worker_pane,
                     remaining_ms,
                     monitor_finalized,
+                    completion_style=completion_style,
+                    expected_process=expected_process,
                     herdr_session=session,
                 )
             except AgentWaitTimeout as error:
@@ -8111,7 +8308,7 @@ def error_chain(error: BaseException) -> list[str]:
 
 
 def verify_cockpit_pane(order: dict, *, herdr_session: str | None = None) -> None:
-    """Reject a REQUEST at intake when its cockpit pane no longer exists.
+    """Reject a new REQUEST at intake when its cockpit pane no longer exists.
 
     A relaunched phase leader gets a NEW pane id, and orders still naming the old one
     used to fail deep inside the launch — reaching the requester as a generic blocked verdict
@@ -8122,10 +8319,21 @@ def verify_cockpit_pane(order: dict, *, herdr_session: str | None = None) -> Non
     if not isinstance(pane, str) or not pane:
         return
     if _worker_pane_confirmed_gone(pane, herdr_session=herdr_session, confirmations=2):
+        if isinstance(order.get("public_request"), dict):
+            recovery = (
+                "For an ad-hoc/public request, run `just upagent up`, then retry the SAME "
+                "request id; UpAgent will re-resolve its live service pane before acceptance. "
+                "To anchor it to this caller instead, retry with "
+                '`--cockpit-pane "$HERDR_PANE_ID"`.'
+            )
+        else:
+            recovery = (
+                "A relaunched phase leader gets a new pane id: re-stamp phase-start.json "
+                "with `just leader-restamp`."
+            )
         raise RecruiterError(
             f"cockpit_pane_not_found: {pane} — the requesting pane does not exist, so this "
-            "request is refused before any worker is launched. A relaunched leader gets a "
-            "new pane id: re-stamp phase-start.json with `just leader-restamp`."
+            f"new request is refused before any worker is launched. {recovery}"
         )
 
 
@@ -8202,9 +8410,7 @@ def cmd_leader_restamp(phase_start_path: str, pane: str) -> int:
     # A positive answer, not the absence of an error: `_worker_pane_confirmed_gone` reports
     # "gone" only when herdr says so, so ask for the pane itself and require a real record.
     try:
-        live = (
-            _herdr_json("pane", "get", pane).get("result", {}).get("pane", {})
-        )
+        live = _herdr_json("pane", "get", pane).get("result", {}).get("pane", {})
     except RecruiterError as error:
         raise RecruiterError(
             f"leader restamp refused: pane {pane} could not be verified: {error}"
@@ -8313,8 +8519,15 @@ def _rescuer_evidence_bundle(
         git_log = "(the order cwd is not inside a git worktree)"
     else:
         completed = subprocess.run(
-            ["git", "-C", worktree, "log", "-n", str(SALVAGE_GIT_LOG_LIMIT),
-             "--format=%H %ct %s"],
+            [
+                "git",
+                "-C",
+                worktree,
+                "log",
+                "-n",
+                str(SALVAGE_GIT_LOG_LIMIT),
+                "--format=%H %ct %s",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -9090,13 +9303,17 @@ def cmd_request_strict(order_path: str, roster_path: str) -> int:
 def _request_order(order: dict, roster_path: str) -> int:
     """Submit one already-valid order and return after worker health or rejection."""
     _log_request_event("REQUEST_START", _order_log_payload(order))
-    # Before the ledger, before any launch: a request anchored to a pane that no longer
-    # exists is refused here, naming the pane, instead of failing four frames deep.
-    verify_cockpit_pane(order)
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
     ledger = JobLedger()
-    key, _ = ledger.submit(order)
+    # Placement liveness is an intake precondition only for a genuinely new request. An
+    # identical retry may arrive after its original caller pane exits; that request already
+    # crossed intake and must reattach to its durable ledger record instead of being wedged by
+    # a new transport precondition. The ledger checks once, runs the Herdr preflight without its
+    # mutation lock, then rechecks under lock so a concurrent first submitter has one winner.
+    key, _ = ledger.submit_with_new_request_guard(
+        order, lambda: verify_cockpit_pane(order)
+    )
     warning, _announce = _record_phase_receipt_warning(ledger, key, order)
     existing = ledger.completed_result(key, order)
     if existing is not None:

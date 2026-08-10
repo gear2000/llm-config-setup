@@ -48,10 +48,10 @@
 # own pane: the Recruiter validates the staged files while the worker is still addressable,
 # may send one COMPLETION_REPAIR turn to fix them, and closes the pane itself afterward.
 # Codex exec exits by construction, so its offering declares `completion_style: exec` and uses
-# reader-side normalization plus salvage-or-block instead of a live repair. Cursor runs its
-# interactive TUI, remains addressable, and gets the same one-repair path as Claude and Pi.
-# The Recruiter races one event subscription against the lease-private result; `done` is an
-# accelerator, never the verdict or the durable completion record.
+# reader-side normalization plus salvage-or-block instead of a live repair. Claude, Pi, and Cursor
+# are interactive: Herdr `done` means only one turn ended, so the Recruiter ignores it for
+# terminality and waits for a valid typed bundle, proven pane/process exit, or the deadline.
+# Missing or malformed bundles get one same-address repair only after that legitimate boundary.
 #
 # UNATTENDED STARTUP IS MANDATORY. A worker runs AFK in a pane, so every launch template MUST
 # bypass all trust/permission prompts or the worker hangs forever at a dialog (and the Recruiter's
@@ -66,10 +66,10 @@
 # extension once rerouted every bash/read call through a missing binary — every worker
 # died on its first tool call). Explicit `-e` paths still load, and one is REQUIRED:
 # Herdr's pi integration (`herdr integration install pi` puts it at
-# $HOME/.pi/agent/extensions/herdr-agent-state.ts) is what reports the pane's
-# agent-status — without it the Recruiter's `herdr wait agent-status --status done`
-# never fires and every pi hire times out to blocked. Interactive pi sessions are
-# untouched — they keep the full extension set. Note pi has NO --agent flag: the
+# $HOME/.pi/agent/extensions/herdr-agent-state.ts) reports live working/idle/blocked
+# supervision state. Turn-level `done` is UI telemetry, not completion authority; typed
+# artifacts are authoritative. Interactive pi sessions keep the full extension set.
+# Note pi has NO --agent flag: the
 # persona comes to the worker through the stage brief, not the CLI.
 
 # LEGACY/NON-PUBLIC LLM lifecycle roles are separate from work routes. They interpret
@@ -126,9 +126,12 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
-# Request intake (no configuration): a REQUEST whose `cockpit_pane` no longer exists is refused
-# with `cockpit_pane_not_found: <pane>` before any launch. Re-point a relaunched leader's
-# phase-start.json with `just leader-restamp <phase-start.json> <new-pane>`.
+# Request intake (no configuration): a NEW request whose `cockpit_pane` no longer exists is
+# refused with `cockpit_pane_not_found: <pane>` before ledger creation or launch. An identical
+# ad-hoc/public retry may refresh only this routing field before Recruiter acceptance (`just
+# upagent up`, then retry the same id; optionally pass the current `--cockpit-pane`). Once
+# accepted, the exact pane is frozen and attachment needs no live caller pane. Re-point a
+# relaunched phase leader with `just leader-restamp <phase-start.json> <new-pane>`.
 #
 # Optional process-detector overrides. Use these when a harness wrapper changes what Herdr reports.
 # A mismatch fails startup; the Hub never guesses that some unrelated foreground process is healthy.
@@ -184,9 +187,9 @@ harnesses:
     full_log: a pointer to your session transcript. Then remain in your session and go idle;
     do NOT exit or close your pane — the Recruiter validates your files and closes the pane."
 
-  # Codex has no --agent flag. The persona comes from instructions_path. Codex also does not
-  # reliably report agent-status=done; the Recruiter's generic token-scoped completion monitor
-  # finalizes its private staged result without any Codex-specific public-result polling.
+  # Codex has no --agent flag. The persona comes from instructions_path. Its exec process and
+  # token-scoped completion monitor, rather than agent-status, delimit the run and finalize its
+  # private staged result without any Codex-specific public-result polling.
   # codex exec exits when the run ends (it cannot stay idle), so its recovery path is Python's
   # reader-side repair plus the completion reactor, never a live COMPLETION_REPAIR turn.
   codex: >-
@@ -208,8 +211,9 @@ harnesses:
     full_log: a pointer to your session transcript. Then remain in your session and go idle;
     do NOT exit or close your pane — the Recruiter validates your files and closes the pane."
 
-  # Cursor stays interactive so Herdr shows live progress and the Recruiter can request one
-  # repair if the required result bundle is missing or malformed.
+  # Cursor stays interactive so Herdr shows live progress. Turn-level done is not terminal; an
+  # absent bundle remains supervised until artifacts, positively confirmed process/pane exit, or
+  # the deadline, after which missing or malformed required artifacts can receive one repair.
   cursor: >-
     cursor-agent --force --trust --model {model}
     "Read {instructions_path}; do the stage in {cwd}; write exactly one result.json to

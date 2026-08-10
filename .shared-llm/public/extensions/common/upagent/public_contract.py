@@ -97,7 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument(
         "--cockpit-pane",
         metavar="LIVE_PANE",
-        help="invocation-only live caller-pane override; excluded from the request payload",
+        help=(
+            "live placement override while unaccepted; accepted/terminal same-ID attachments "
+            "preserve their pane; excluded from the request payload"
+        ),
     )
     request.add_argument("--wait", action="store_true")
     request.add_argument("--json", action="store_true")

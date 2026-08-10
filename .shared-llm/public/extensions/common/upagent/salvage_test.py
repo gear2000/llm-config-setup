@@ -641,16 +641,35 @@ def test_intake_refuses_a_request_whose_cockpit_pane_is_gone(
         recruiter.verify_cockpit_pane(_order(cockpit_pane="w1:p1"))
 
     assert "cockpit_pane_not_found: w1:p1" in str(caught.value)
+    assert "leader-restamp" in str(caught.value)
+    assert "just upagent up" not in str(caught.value)
     # Two confirmations: a transport fault must never read as a missing pane.
     assert probed == [("w1:p1", 2)]
+
+
+def test_public_stale_pane_error_names_same_id_ad_hoc_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: True
+    )
+
+    with pytest.raises(recruiter.RecruiterError) as caught:
+        recruiter.verify_cockpit_pane(
+            _order(cockpit_pane="w1:p1", public_request={"type": "worker"})
+        )
+
+    message = str(caught.value)
+    assert "just upagent up" in message
+    assert "SAME request id" in message
+    assert '--cockpit-pane "$HERDR_PANE_ID"' in message
+    assert "leader-restamp" not in message
 
 
 def test_intake_accepts_a_request_whose_cockpit_pane_is_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        recruiter, "_worker_pane_confirmed_gone", lambda *a, **k: False
-    )
+    monkeypatch.setattr(recruiter, "_worker_pane_confirmed_gone", lambda *a, **k: False)
     assert recruiter.verify_cockpit_pane(_order(cockpit_pane="w1:p2")) is None
 
 
@@ -659,6 +678,8 @@ def test_the_request_door_rejects_a_stale_pane_before_reaching_the_ledger(
 ) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     monkeypatch.setattr(recruiter, "_require_hub_authority", lambda: None)
+    roster = recruiter.load_roster(Path(__file__).with_name("upagent.yaml"))
+    monkeypatch.setattr(recruiter, "load_roster", lambda _path: roster)
     monkeypatch.setattr(recruiter, "_worker_pane_confirmed_gone", lambda *a, **k: True)
     monkeypatch.setattr(
         recruiter,
@@ -671,6 +692,8 @@ def test_the_request_door_rejects_a_stale_pane_before_reaching_the_ledger(
 
     with pytest.raises(recruiter.RecruiterError, match="cockpit_pane_not_found: 1-1"):
         recruiter.cmd_request_strict(str(order_path), "roster.yaml")
+
+    assert not recruiter.JobLedger().requests.exists()
 
 
 def test_a_launch_failure_carries_its_root_cause_chain_to_the_requester(
@@ -1004,6 +1027,67 @@ def test_cursor_missing_bundle_gets_one_same_worker_repair(
     assert "COMPLETION_REPAIR 1/1" in prompts[0][1]
     events = [item["event"] for item in ledger.events(key)]
     assert "completion-repair-unavailable" not in events
+
+
+def test_claude_done_without_initial_bundle_waits_for_same_worker_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude reports a completed turn before an artifact repair turn has written its files.
+
+    The repair prompt is asynchronous. Revalidating immediately used to close the healthy Claude
+    pane and publish ``blocked`` even though the worker had completed its real work.
+    """
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order, _order_path, key = _exec_dead_claim(
+        tmp_path, ledger, "interactive-claude", "claude"
+    )
+    manifest = _manifest(ledger, key, order)
+    prompts: list[tuple[str, str]] = []
+    repair_polls: list[float] = []
+
+    def repair(target: str, prompt: str, **kwargs: object) -> None:
+        assert kwargs["paste_settle_seconds"] == 0.0
+        prompts.append((target, prompt))
+
+    def finish_asynchronous_repair(seconds: float) -> None:
+        repair_polls.append(seconds)
+        staging = manifest.artifact("result").staging_path
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(
+            json.dumps(
+                {
+                    "order_id": order["order_id"],
+                    "verdict": "passed",
+                    "revisit": [],
+                    "reason": "reported the already-completed work",
+                    "full_log": "claude session",
+                }
+            )
+        )
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", repair)
+    monkeypatch.setattr(recruiter.time, "sleep", finish_asynchronous_repair)
+
+    blocked, salvage = recruiter._complete_typed_bundle(
+        ledger,
+        key,
+        order,
+        manifest,
+        "sess:live-claude",
+        herdr_session="test-session",
+    )
+
+    assert blocked is False
+    assert salvage is None
+    assert len(prompts) == 1
+    assert len(repair_polls) == 1
+    assert prompts[0][0] == "sess:live-claude"
+    assert "COMPLETION_REPAIR 1/1" in prompts[0][1]
+    assert (
+        json.loads(manifest.artifact("result").staging_path.read_text())["verdict"]
+        == "passed"
+    )
 
 
 def test_same_worker_repair_wait_is_bounded() -> None:

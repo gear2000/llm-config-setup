@@ -119,9 +119,15 @@ arbitrary argument materialization, or empty-request acceptance on this path.
 `--cockpit-pane` is an invocation-only override for anchoring the order to the caller's own pane.
 It may accompany named flags or `--file`, but it is not a request-defining flag, does not enter the
 closed request object or immutable payload hash, and is not an allowed key inside a request file.
-When supplied, it must be a non-empty pane ID that a fresh pane listing proves live in the current
-Herdr session; otherwise submission fails before registration. When omitted, UpAgent preserves the
-existing service-pane resolution and on-demand creation behavior.
+Before Recruiter acceptance, a supplied value must be a non-empty pane ID that a fresh pane listing
+proves live in the current Herdr session; omission resolves the current service pane on demand. A
+same-ID/same-payload retry of a refused or interrupted pre-acceptance submission refreshes only this
+routing field and keeps every immutable request field unchanged. Once
+the Recruiter has accepted the exact order, placement is frozen: active, terminal, and pruned
+attachments preserve the accepted pane and do not require any current caller/service pane to exist.
+On `cockpit_pane_not_found`, ad-hoc callers run `just upagent up` and retry the same request ID
+(optionally with `--cockpit-pane "$HERDR_PANE_ID"`); relaunched phase leaders use
+`just leader-restamp`.
 
 A caller may supply one canonical lowercase hyphenated UUID or uppercase Crockford ULID; otherwise
 Python generates a UUID. UpAgent hashes the canonical immutable payload, including the resolved
@@ -269,9 +275,13 @@ Durable files are the source of truth; terminal text is display-only.
   `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`.
   Without an answer during `management.requester_grace_ms`, the Recruiter performs the declared hard
   stop. Managers/checkers can recommend actions but cannot execute them.
-- The deterministic completion reactor validates the staged bundle. A missing or malformed
-  mandatory artifact causes exactly one repair prompt to the same worker address—never a second
-  worker—and one revalidation. If that still fails, Python writes a schema-valid blocked
+- The deterministic completion reactor validates the staged bundle and permits exactly one repair
+  prompt to the same interactive worker address—never a second worker—when a legitimately completed
+  wait reaches it with missing or malformed mandatory artifacts. A completely absent bundle does
+  not turn an interactive harness's turn-level `done` signal into completion; while the process
+  remains live, supervision continues until the bundle appears, the pane or expected process is
+  positively confirmed gone, or the request reaches its deadline. If repair or deterministic
+  recovery still cannot validate the bundle, Python writes a schema-valid blocked
   result/compacted/handoff bundle and, for specialists, a valid failure answer. A missing optional
   summary never triggers a repair and never blocks.
 - Publication is ordered: validate private staging, prepare and atomically replace every public
@@ -370,19 +380,22 @@ properties remain load-bearing:
 3. **Harness-native completion.** `codex exec` exits when its turn ends and its Herdr agent
    disappears, so its offering declares `completion_style: exec`: the Recruiter's monitor waits
    for a valid staged bundle or confirmed process/pane exit, then uses mechanical salvage-or-block
-   when the bundle is missing or invalid. Claude, Pi, and Cursor are interactive: their live TUIs
-   remain addressable, the Recruiter validates artifacts before closing the pane, and a missing or
-   malformed result gets exactly one same-worker `COMPLETION_REPAIR` prompt, then the Recruiter
-   waits boundedly for the repaired bundle before cleanup. Cursor's launch prompt repeats the final
+   when the bundle is missing or invalid. Claude, Pi, and Cursor are interactive: Herdr `done`
+   means only that one LLM turn ended, so the Recruiter ignores it for terminality and waits for a
+   valid typed bundle, a positively absent pane/process, or the request deadline. Their live TUIs
+   remain addressable; once that legitimate boundary is reached, a missing or malformed bundle gets
+   exactly one same-worker `COMPLETION_REPAIR` prompt, followed by a bounded wait for the repaired
+   bundle before cleanup.
+   Cursor's launch prompt repeats the final
    delivery verification gate, and its follow-ups use separate text and Enter
    actions after a short settle; one atomic paste+Enter leaves the TUI input visibly drafted but
    does not submit it.
 4. **pi runs insulated.** `--no-extensions` plus an explicit
    `-e $HOME/.pi/agent/extensions/herdr-agent-state.ts`. Discovery off means a broken
    globally-installed extension can never brick automation; the explicit `-e` keeps Herdr's
-   pi integration loaded, which is what reports pane agent-status — without it,
-   `herdr wait agent-status --status done` never fires and every pi hire times out to
-   blocked. Workers are still full visible TUIs in panes (headless `-p` is never used);
+   pi integration loaded, which reports live working/idle/blocked status for supervision.
+   Turn-level `done` is UI telemetry, not completion authority; durable typed artifacts remain
+   authoritative. Workers are still full visible TUIs in panes (headless `-p` is never used);
    interactive pi sessions keep the whole extension set.
 
 The `phase_leaders:` map is deliberately separate from `harnesses:`. A phase leader is launched

@@ -557,6 +557,70 @@ class PublicRequestStore:
             )
         return cast(dict[str, object], value)
 
+    def cockpit_resolution(self, request: ValidatedRequest) -> tuple[bool, str | None]:
+        """Say whether this invocation must resolve a fresh live placement pane.
+
+        New and not-yet-accepted requests need current placement. Submitted, terminal, pruned,
+        and Recruiter-accepted requests are attachments: their accepted pane is immutable, and
+        replay must not depend on any service/caller pane still being alive.
+        """
+        with self.request_lock(request.request_id):
+            if not self.path(request.request_id).exists():
+                return True, None
+            registered = self.load(request.request_id)
+            if registered.record.get("payload_sha256") != request.payload_sha256:
+                raise PublicError(
+                    f"request_id_conflict: {request.request_id} already names a different canonical payload"
+                )
+            if registered.pruned:
+                return False, None
+            order = recruiter.load_order(registered.order_path)
+            submission = self.submission(registered)
+            if submission["state"] == "submitted":
+                return False, cast(str, order["cockpit_pane"])
+            ledger = recruiter.JobLedger()
+            key = ledger.key_for_order(order)
+            if ledger.request_dir(key).exists():
+                return False, cast(str, order["cockpit_pane"])
+            return True, cast(str, order["cockpit_pane"])
+
+    def rebind_unaccepted_cockpit(
+        self,
+        registered: RegisteredRequest,
+        cockpit_pane: str,
+        ledger: Any,
+    ) -> dict[str, object]:
+        """Refresh invocation-only placement while no Recruiter record exists.
+
+        ``cockpit_pane`` is deliberately outside the immutable request payload. A failed intake
+        leaves public submission state at ``submitting`` but creates no Recruiter record; retrying
+        the same id must therefore use the newly resolved live pane. Once the Recruiter has
+        accepted an order, its exact stored bytes stay immutable and the retry only reattaches.
+        """
+        submission = self.submission(registered)
+        state = submission["state"]
+        if state == "submitted":
+            return recruiter.load_order(registered.order_path)
+        if state not in ("registered", "submitting"):
+            raise PublicError(
+                f"request {registered.request_id} cannot rebind its cockpit from submission state {state!r}"
+            )
+        order = recruiter.load_order(registered.order_path)
+        rebound = {**order, "cockpit_pane": cockpit_pane}
+        recruiter.contracts.parse_order(json.dumps(rebound))
+
+        def commit_new_order() -> None:
+            if rebound != order:
+                _write_json_atomic(registered.order_path, rebound)
+
+        _key, created = ledger.submit_with_new_request_guard(
+            rebound,
+            lambda: recruiter.verify_cockpit_pane(rebound),
+            existing_order=order,
+            on_create=commit_new_order,
+        )
+        return rebound if created else order
+
     def transition_submission(
         self, registered: RegisteredRequest, state: str
     ) -> dict[str, object]:
@@ -590,7 +654,7 @@ class PublicRequestStore:
         return updated
 
     def register(
-        self, request: ValidatedRequest, cockpit_pane: str
+        self, request: ValidatedRequest, cockpit_pane: str | None
     ) -> RegisteredRequest:
         with self.request_lock(request.request_id):
             directory = self.path(request.request_id)
@@ -601,6 +665,10 @@ class PublicRequestStore:
                         f"request_id_conflict: {request.request_id} already names a different canonical payload"
                     )
                 return existing
+            if not isinstance(cockpit_pane, str) or not cockpit_pane:
+                raise PublicError(
+                    f"new request {request.request_id} has no freshly resolved live cockpit pane"
+                )
             temporary = self.requests / f".{request.request_id}.{uuid.uuid4().hex}.tmp"
             temporary.mkdir(parents=True)
             final_prompt = directory / "prompt.md"
@@ -1623,7 +1691,11 @@ def _cleanup(args: Any, store: PublicRequestStore) -> int:
 
 
 def _submit_registered(
-    store: PublicRequestStore, registered: RegisteredRequest, *, wait: bool
+    store: PublicRequestStore,
+    registered: RegisteredRequest,
+    *,
+    wait: bool,
+    cockpit_pane: str | None,
 ) -> tuple[int, bool]:
     """Fence the public-to-Recruiter seam and resume interrupted submissions safely."""
     with store.request_lock(registered.request_id):
@@ -1649,6 +1721,11 @@ def _submit_registered(
                 )
                 return code, False
             return 0, False
+        if cockpit_pane is None:
+            raise PublicError(
+                f"request {registered.request_id} has no accepted or freshly resolved cockpit pane"
+            )
+        store.rebind_unaccepted_cockpit(registered, cockpit_pane, ledger)
         store.transition_submission(registered, "submitting")
         command = (
             recruiter.cmd_dispatch_strict if wait else recruiter.cmd_request_strict
@@ -1668,10 +1745,17 @@ def _request(args: Any, cwd: Path) -> int:
         raise PublicError(
             "--keep-open is incompatible with --wait; submit asynchronously to receive the review control token"
         )
-    cockpit_pane = _request_cockpit_pane(args.cockpit_pane)
     store = PublicRequestStore()
+    resolve_cockpit, accepted_cockpit = store.cockpit_resolution(validated)
+    cockpit_pane = (
+        _request_cockpit_pane(args.cockpit_pane)
+        if resolve_cockpit
+        else accepted_cockpit
+    )
     registered = store.register(validated, cockpit_pane)
-    code, submitted_now = _submit_registered(store, registered, wait=args.wait)
+    code, submitted_now = _submit_registered(
+        store, registered, wait=args.wait, cockpit_pane=cockpit_pane
+    )
     status = _public_status(
         store,
         registered,

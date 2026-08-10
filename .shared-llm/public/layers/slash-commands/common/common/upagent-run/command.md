@@ -61,6 +61,12 @@ existing service-pane resolution/creation behavior remains unchanged.
    chmod 600 "$response"
    ```
 
+   If this pre-acceptance call fails with `cockpit_pane_not_found`, do not mint a new request ID
+   or relaunch work. Run `just upagent up` when using service-pane fallback, rebuild
+   `cockpit_args` from the current environment/live pane check above, and retry the exact same
+   request command with the same ID. UpAgent refreshes only unaccepted placement routing; an
+   already-accepted or terminal attachment ignores a new pane and preserves its exact order.
+
 7. Before any await, use a local Python helper to atomically extract `.state.requester_control_token` into `<run-dir>/control-token` with mode `0600`, remove that field from `request.json`, and atomically replace the response with the redacted value. Refuse to print or load the unredacted response into the conversation. If the request terminalized before reaching healthy `running`, the token may be absent; record that fact and do not invent one.
 8. For ordinary one-shot work, block without burning LLM turns with `just upagent await --request "$request_id" --json >"$run_dir/terminal.json"`, preserving its exit code and setting mode `0600` as before.
 9. For `--keep-open`, do **not** call terminal `await` yet. Block on `just upagent review-await --request "$request_id" --after "$last_sequence" --json`. Record both `review.latest_sequence` and `review.checkpoint_sha256`, then inspect that exact checkpoint and the actual worktree diff/tests. Then make exactly one requester-owned decision:

@@ -35,6 +35,12 @@ public_api._bind_recruiter_runtime(recruiter)
 REQUEST_ID = "01957f4e-7f7f-7f8b-9c42-6e7f52f9321a"
 
 
+@pytest.fixture(autouse=True)
+def _accept_public_recruiter_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Public API tests isolate Herdr; Recruiter intake behavior has its own test suite."""
+    monkeypatch.setattr(recruiter, "verify_cockpit_pane", lambda _order: None)
+
+
 def _prompt(tmp_path: Path, text: str = "Do the bounded task.\n") -> Path:
     path = tmp_path / "prompt.md"
     path.write_text(text)
@@ -883,6 +889,57 @@ def test_registered_request_resumes_after_crash_before_recruiter_submission(
     assert store.submission(resumed)["attempts"] == 1
 
 
+def test_same_id_retry_rebinds_a_live_pane_after_stale_preacceptance_intake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-pane refusal creates no Recruiter record, so the transport-only pane may move."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_request_cockpit_pane", lambda value: value)
+    submitted_panes: list[str] = []
+
+    def preflight(order: dict) -> None:
+        if order["cockpit_pane"] == "stale-pane":
+            raise recruiter.RecruiterError(
+                "cockpit_pane_not_found: stale-pane — injected intake refusal"
+            )
+
+    monkeypatch.setattr(recruiter, "verify_cockpit_pane", preflight)
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda order_path, _roster: (
+            submitted_panes.append(recruiter.load_order(order_path)["cockpit_pane"])
+            or 0
+        ),
+    )
+    old_args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "stale-pane"])
+    new_args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "live-pane"])
+
+    with pytest.raises(recruiter.RecruiterError, match="cockpit_pane_not_found"):
+        public_api.execute(old_args, tmp_path)
+    store = public_api.PublicRequestStore()
+    interrupted = store.load(REQUEST_ID)
+    assert store.submission(interrupted)["state"] == "registered"
+    assert (
+        not recruiter.JobLedger()
+        .request_dir(
+            recruiter.JobLedger.key_for_order(
+                recruiter.load_order(interrupted.order_path)
+            )
+        )
+        .exists()
+    )
+
+    assert public_api.execute(new_args, tmp_path) == 0
+
+    rebound = store.load(REQUEST_ID)
+    submission = store.submission(rebound)
+    assert submitted_panes == ["live-pane"]
+    assert recruiter.load_order(rebound.order_path)["cockpit_pane"] == "live-pane"
+    assert submission["state"] == "submitted"
+    assert submission["attempts"] == 1
+
+
 def test_retry_after_recruiter_acceptance_reattaches_idempotently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -890,12 +947,22 @@ def test_retry_after_recruiter_acceptance_reattaches_idempotently(
         pass
 
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
-    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    resolved_panes: list[object] = []
+
+    def resolve_pane(value: object) -> str:
+        resolved_panes.append(value)
+        assert isinstance(value, str)
+        return value
+
+    monkeypatch.setattr(public_api, "_request_cockpit_pane", resolve_pane)
     accepted: list[bool] = []
+    submitted_panes: list[str] = []
 
     def accept_then_crash_once(order_path: str, _roster_path: str) -> int:
         order = public_api.recruiter.load_order(order_path)
-        _key, created = public_api.recruiter.JobLedger().submit(order)
+        submitted_panes.append(order["cockpit_pane"])
+        key, created = public_api.recruiter.JobLedger().submit(order)
+        assert public_api.recruiter.JobLedger().request_dir(key).is_dir()
         accepted.append(created)
         if len(accepted) == 1:
             raise InjectedCrash("crash after Recruiter acceptance")
@@ -904,18 +971,22 @@ def test_retry_after_recruiter_acceptance_reattaches_idempotently(
     monkeypatch.setattr(
         public_api.recruiter, "cmd_request_strict", accept_then_crash_once
     )
-    args = _args(_worker_argv(tmp_path))
+    first_args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "original-pane"])
+    retry_args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "new-pane"])
 
     with pytest.raises(InjectedCrash, match="after Recruiter acceptance"):
-        public_api.execute(args, tmp_path)
+        public_api.execute(first_args, tmp_path)
     store = public_api.PublicRequestStore()
     interrupted = store.load(REQUEST_ID)
     assert store.submission(interrupted)["state"] == "submitting"
 
-    assert public_api.execute(args, tmp_path) == 0
+    assert public_api.execute(retry_args, tmp_path) == 0
 
     recovered = store.load(REQUEST_ID)
-    assert accepted == [True, False]
+    assert accepted == [False, False]
+    assert resolved_panes == ["original-pane"]
+    assert submitted_panes == ["original-pane", "original-pane"]
+    assert recruiter.load_order(recovered.order_path)["cockpit_pane"] == "original-pane"
     assert store.submission(recovered)["state"] == "submitted"
     assert store.submission(recovered)["attempts"] == 2
     key = public_api.recruiter.JobLedger.key_for_order(
@@ -928,11 +999,19 @@ def test_concurrent_identical_retries_submit_once_under_request_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
-    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
-    args = _args(_worker_argv(tmp_path))
-    validated = public_api.validate_request(args, tmp_path)
+    resolved_panes: list[object] = []
+
+    def resolve_pane(value: object) -> str:
+        resolved_panes.append(value)
+        assert isinstance(value, str)
+        return value
+
+    monkeypatch.setattr(public_api, "_request_cockpit_pane", resolve_pane)
+    first_args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "winning-pane"])
+    second_args = _args([*_worker_argv(tmp_path), "--cockpit-pane", "losing-pane"])
+    validated = public_api.validate_request(first_args, tmp_path)
     store = public_api.PublicRequestStore()
-    store.register(validated, "recruiter-pane")
+    store.register(validated, "initial-pane")
     entered = threading.Event()
     release = threading.Event()
     launches: list[str] = []
@@ -945,9 +1024,9 @@ def test_concurrent_identical_retries_submit_once_under_request_lock(
 
     monkeypatch.setattr(public_api.recruiter, "cmd_request_strict", blocking_submit)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(public_api.execute, args, tmp_path)
+        first = pool.submit(public_api.execute, first_args, tmp_path)
         assert entered.wait(timeout=2)
-        second = pool.submit(public_api.execute, args, tmp_path)
+        second = pool.submit(public_api.execute, second_args, tmp_path)
         assert not second.done()
         assert launches == [str(store.load(REQUEST_ID).order_path)]
         release.set()
@@ -956,8 +1035,35 @@ def test_concurrent_identical_retries_submit_once_under_request_lock(
 
     submission = store.submission(store.load(REQUEST_ID))
     assert launches == [str(store.load(REQUEST_ID).order_path)]
+    assert resolved_panes == ["winning-pane"]
+    assert (
+        recruiter.load_order(store.load(REQUEST_ID).order_path)["cockpit_pane"]
+        == "winning-pane"
+    )
     assert submission["state"] == "submitted"
     assert submission["attempts"] == 1
+
+
+def test_terminal_same_id_attachment_never_resolves_a_new_cockpit_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _store, _registered, _ledger, _token, _control = _finish_registered_request(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        public_api,
+        "_request_cockpit_pane",
+        lambda _value: pytest.fail(
+            "terminal attachment must not depend on a current caller or service pane"
+        ),
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "cmd_request_strict",
+        lambda *_args: pytest.fail("terminal attachment must not resubmit"),
+    )
+
+    assert public_api.execute(_args(_worker_argv(tmp_path)), tmp_path) == 0
 
 
 def test_prompt_bytes_and_offering_snapshot_are_immutable_request_evidence(

@@ -62,7 +62,7 @@ UPAGENT WORKER
 ├─ stages lease-private result.json (mandatory — it carries the verdict)
 ├─ stages compacted.md and handoff.md when it can (best-effort summaries)
 ├─ additionally stages answer.json when it is a specialist (mandatory)
-└─ exits when its work is complete
+└─ in an interactive harness, remains addressable until Recruiter cleanup; exec harnesses exit
    │
    ▼
 PYTHON LIFECYCLE MONITOR
@@ -98,7 +98,9 @@ A managed requester may opt one worker into `completion_policy: requester_releas
 1. Every request has a globally unique durable identity; a caller's human-readable order id is not
    used as a global namespace.
 2. Every state change is an atomic durable event with a request id and generation.
-3. Every wait is bounded by a monotonic deadline. Retries are bounded and idempotent.
+3. Every wait is bounded by a monotonic deadline. Retries are bounded and idempotent. Before
+   Recruiter acceptance, invocation-only cockpit routing may refresh on an identical retry; after
+   acceptance, the exact order and its pane are immutable and attachment needs no live caller pane.
 4. Terminal keystrokes and pane scrollback are never a request, acknowledgement, or verdict.
 5. `pane created` is not `worker healthy`. Health requires the expected foreground process,
    detected harness, expected working directory, and a non-terminal agent state.
@@ -146,7 +148,10 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     reconciliation performs process/Herdr work outside it and acquires it only for each CAS commit.
     It is never held across Herdr waits or a worker lifetime. Reads remain
     lock-free. A caller receives `REQUEST_ACCEPTED` when verified startup finishes.
-15. A terminal record always answers with exactly one structured outcome. Typed completion
+15. Interactive-harness `done` means one LLM turn ended, not that the assignment ended. Claude,
+    Pi, and Cursor remain live until a valid typed bundle, positively confirmed pane/process exit,
+    or the request deadline. Codex exec keeps process-turn completion semantics. A terminal record
+    always answers with exactly one structured outcome. Typed completion
     validates lease-private staging, projects every public artifact, revalidates public paths,
     writes the receipt, and only then writes terminal state/event/requester evidence. Await cannot
     wake from pre-receipt `result-ready` evidence. Publication writes the validated result, the
@@ -158,11 +163,14 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     reason, the receipt path, and the recorded verdict. A terminal record never crashes the result
     loader and never silently reopens finished work.
 16. Every accepted path has a required typed manifest. Compatibility input is normalized before
-    ledger mutation, never given a result-only fallback. Missing or malformed required artifacts
-    receive exactly one repair request at the original worker address. A second worker is never
-    launched. One failed revalidation, crash reconciliation, or worker/manager cleanup failure
-    regenerates one Python-authored schema-valid blocked three-file bundle; specialists also
-    receive a valid failure answer. Success prose is never retained beside a blocked result.
+    ledger mutation, never given a result-only fallback. Once an interactive wait legitimately
+    reaches completion with a missing or malformed required bundle, it receives exactly one repair
+    request at the original worker address. A completely absent bundle keeps a live worker under
+    supervision until valid artifacts, positively confirmed process/pane exit, or the deadline;
+    turn-level `done` is not a repair or terminal boundary. A second worker is never launched. One
+    failed revalidation, crash reconciliation, or worker/manager cleanup failure regenerates one
+    Python-authored schema-valid blocked three-file bundle; specialists also receive a valid failure
+    answer. Success prose is never retained beside a blocked result.
 17. Retained review is explicit and release-gated. A valid checkpoint keeps the same worker pane live; it is not a terminal result. Feedback and release require the current requester control token and current lease identity. Premature terminal artifacts are quarantined, and a worker that exits before release blocks rather than entering artifact repair. The default order shape and one-shot cleanup path are unchanged when no completion policy is present.
 18. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
     can pass only with matching Recruiter-verified receipts whose answers are cited successes. Absent,

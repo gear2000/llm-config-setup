@@ -4213,11 +4213,9 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     ledger = recruiter.JobLedger()
     key, _ = ledger.submit(order)
     worker_launched = threading.Event()
-    status_wait_started = threading.Event()
     staging_paths: list[Path] = []
     closed_panes: list[str] = []
     worker_closed = threading.Event()
-    status_wait_timeouts: list[str] = []
     outcomes: list[int] = []
     _patch_approved_manager(monkeypatch)
 
@@ -4233,35 +4231,19 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
         worker_closed.set()
         return _cleanup(pane)
 
-    class NeverDoneProcess:
-        returncode: int | None = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def terminate(self) -> None:
-            self.returncode = -15
-
-        def kill(self) -> None:
-            self.returncode = -9
-
-        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-            return "", ""
-
-    def fake_popen(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
-        assert command[4:6] == ["agent-status", "worker-pane"]
-        status_wait_timeouts.append(command[-1])
-        status_wait_started.set()
-        return NeverDoneProcess()
-
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
         recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
     )
     monkeypatch.setattr(recruiter, "_close_worker_pane", fake_close)
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
-    monkeypatch.setattr(recruiter.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        recruiter.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail(
+            "interactive completion must not subscribe to turn-level done"
+        ),
+    )
     monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     runner = threading.Thread(
@@ -4269,7 +4251,6 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     )
     runner.start()
     assert worker_launched.wait(timeout=2)
-    assert status_wait_started.wait(timeout=2)
     staging_paths[0].parent.mkdir(parents=True, exist_ok=True)
     _write_typed_worker_result(staging_paths[0], _result(order["order_id"]))
     deadline = time.monotonic() + 2
@@ -4284,7 +4265,6 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     assert not runner.is_alive()
     assert time.monotonic() - promoted_at < 0.5
     assert outcomes == [0]
-    assert status_wait_timeouts and set(status_wait_timeouts) == {"1000"}
     assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
     assert closed_panes == ["worker-pane", "manager-pane"]
 
@@ -6342,6 +6322,141 @@ def test_strict_executable_requests_reach_request_accepted(
     assert accepted["state"] == "running"
     assert accepted["control_token"] == "control-token"
     assert not (tmp_path / "order.json.interpreted.json").exists()
+
+
+def test_new_request_guard_runs_outside_mutation_lock_and_commit_runs_inside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    lock_depth = 0
+
+    class TrackedLock:
+        def __enter__(self) -> None:
+            nonlocal lock_depth
+            lock_depth += 1
+
+        def __exit__(self, *_args: object) -> None:
+            nonlocal lock_depth
+            lock_depth -= 1
+
+    monkeypatch.setattr(ledger, "_claim_lock", lambda _key: TrackedLock())
+    guard_calls: list[int] = []
+    commit_calls: list[int] = []
+
+    key, created = ledger.submit_with_new_request_guard(
+        order,
+        lambda: guard_calls.append(lock_depth),
+        on_create=lambda: commit_calls.append(lock_depth),
+    )
+
+    assert created is True
+    assert ledger.order(key) == order
+    assert guard_calls == [0]
+    assert commit_calls == [1]
+
+
+def test_direct_submit_can_win_while_new_request_preflight_is_in_progress(
+    tmp_path: Path,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    original = _order(
+        result_path=str(tmp_path / "result.json"), cockpit_pane="original-pane"
+    )
+    rebound = {**original, "cockpit_pane": "candidate-pane"}
+    guard_entered = threading.Event()
+    release_guard = threading.Event()
+    direct_done = threading.Event()
+    candidate_result: list[tuple[str, bool]] = []
+    direct_result: list[tuple[str, bool]] = []
+    create_commits: list[str] = []
+
+    def preflight_candidate() -> None:
+        guard_entered.set()
+        assert release_guard.wait(timeout=3)
+
+    def submit_candidate() -> None:
+        candidate_result.append(
+            ledger.submit_with_new_request_guard(
+                rebound,
+                preflight_candidate,
+                existing_order=original,
+                on_create=lambda: create_commits.append("candidate"),
+            )
+        )
+
+    def submit_direct() -> None:
+        direct_result.append(ledger.submit(original))
+        direct_done.set()
+
+    candidate_thread = threading.Thread(target=submit_candidate)
+    candidate_thread.start()
+    assert guard_entered.wait(timeout=2)
+    direct_thread = threading.Thread(target=submit_direct)
+    direct_thread.start()
+    assert direct_done.wait(timeout=2), "preflight must not hold the mutation lock"
+    release_guard.set()
+    candidate_thread.join(timeout=3)
+    direct_thread.join(timeout=3)
+
+    assert not candidate_thread.is_alive()
+    assert not direct_thread.is_alive()
+    assert direct_result[0][1] is True
+    assert candidate_result == [(direct_result[0][0], False)]
+    assert create_commits == []
+    assert ledger.order(direct_result[0][0]) == original
+
+
+def test_accepted_retry_reattaches_after_its_original_cockpit_pane_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cockpit liveness gates first intake, not an identical order already in the ledger."""
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(tmp_path / "result.json"),
+        cockpit_pane="dead-original-pane",
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
+    monkeypatch.setattr(
+        recruiter,
+        "verify_cockpit_pane",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an accepted duplicate must not reapply first-intake pane liveness"
+        ),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_owner_record",
+        lambda: {"herdr_session": "test-session"},
+    )
+    ledger = recruiter.JobLedger()
+    key, created = ledger.submit(order)
+    assert created is True
+
+    def attach_runner(candidate: str, _roster: str) -> SimpleNamespace:
+        assert candidate == key
+        recruiter.JobLedger()._snapshot(
+            key,
+            "running",
+            requester_control_token="control-token",
+            worker_address="existing-worker",
+            worker_pane="existing-worker-pane",
+        )
+        return SimpleNamespace(poll=lambda: None)
+
+    monkeypatch.setattr(recruiter, "_spawn_job", attach_runner)
+
+    assert recruiter._request_order(order, "roster.yaml") == 0
+
+    assert (
+        json.loads((ledger.request_dir(key) / "request.json").read_text())[
+            "cockpit_pane"
+        ]
+        == "dead-original-pane"
+    )
+    accepted = json.loads(capsys.readouterr().out.split("REQUEST_ACCEPTED ", 1)[1])
+    assert accepted["worker_address"] == "existing-worker"
 
 
 def test_simultaneous_async_spawn_loser_attaches_to_active_winner(
@@ -9029,9 +9144,86 @@ def _patch_wait_plumbing(monkeypatch, process: _FakeWaitProcess) -> None:
         "_herdr_argv",
         lambda args, session: (session, ["herdr", *args]),
     )
+    monkeypatch.setattr(recruiter.subprocess, "Popen", lambda *args, **kwargs: process)
+
+
+def test_interactive_done_is_not_terminal_without_durable_artifacts(
+    monkeypatch,
+) -> None:
+    """Interactive completion never opens the Herdr done subscription."""
+    finalized = threading.Event()
+    finalized.set()
     monkeypatch.setattr(
-        recruiter.subprocess, "Popen", lambda *args, **kwargs: process
+        recruiter.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail(
+            "interactive workers must not subscribe to turn-level done"
+        ),
     )
+
+    assert (
+        recruiter._wait_for_agent_status(
+            "w1:p1",
+            5_000,
+            finalized,
+            completion_style="interactive",
+            expected_process="claude",
+            herdr_session="test-session",
+        )
+        is False
+    )
+
+
+def test_interactive_wait_blocks_on_artifact_event_until_next_liveness_probe(
+    monkeypatch,
+) -> None:
+    waits: list[float] = []
+
+    class FinalizedOnWait:
+        def wait(self, seconds: float) -> bool:
+            waits.append(seconds)
+            return True
+
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 15.0)
+    assert (
+        recruiter._wait_for_agent_status(
+            "w1:p1",
+            30_000,
+            FinalizedOnWait(),
+            completion_style="interactive",
+            expected_process="claude",
+            herdr_session="test-session",
+        )
+        is False
+    )
+    assert len(waits) == 1
+    assert waits[0] > 10.0
+
+
+def test_interactive_wait_ends_on_proven_process_exit(monkeypatch) -> None:
+    finalized = threading.Event()
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.0)
+    monkeypatch.setattr(recruiter, "_worker_pane_confirmed_gone", lambda *a, **k: False)
+    probes: list[tuple[str, str]] = []
+
+    def process_gone(pane: str, expected: str, **_kwargs: object) -> bool:
+        probes.append((pane, expected))
+        return True
+
+    monkeypatch.setattr(recruiter, "_worker_process_confirmed_gone", process_gone)
+
+    assert (
+        recruiter._wait_for_agent_status(
+            "w1:p2",
+            5_000,
+            finalized,
+            completion_style="interactive",
+            expected_process="claude",
+            herdr_session="test-session",
+        )
+        is True
+    )
+    assert probes == [("w1:p2", "claude")]
 
 
 def test_wait_falls_through_when_pane_already_gone(monkeypatch) -> None:
@@ -9077,6 +9269,60 @@ def test_wait_probe_ends_mid_wait_silence(monkeypatch) -> None:
     assert recruiter._wait_for_agent_status("w1:p2", 60_000, None) is True
     assert len(probes) >= 2
     assert process.terminated
+
+
+def test_process_confirmed_gone_requires_normal_repeated_absence(monkeypatch) -> None:
+    responses: list[dict[str, object] | Exception] = []
+
+    def fake_herdr_json(*_args: object, **_kwargs: object) -> dict[str, object]:
+        answer = responses.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_herdr_json)
+    monkeypatch.setattr(recruiter.time, "sleep", lambda _seconds: None)
+    absent: dict[str, object] = {
+        "result": {"process_info": {"foreground_processes": []}}
+    }
+    live: dict[str, object] = {
+        "result": {
+            "process_info": {
+                "foreground_processes": [
+                    {"name": "bash", "argv": ["bash", "-lc", "claude --model fable"]}
+                ]
+            }
+        }
+    }
+
+    responses.clear()
+    responses.extend((absent, absent))
+    assert (
+        recruiter._worker_process_confirmed_gone("w1:p1", "claude", confirmations=2)
+        is True
+    )
+    responses.clear()
+    responses.extend((absent, live))
+    assert (
+        recruiter._worker_process_confirmed_gone("w1:p1", "claude", confirmations=2)
+        is False
+    )
+    responses.clear()
+    responses.extend(
+        (
+            recruiter.RecruiterError("pane_not_found"),
+            recruiter.RecruiterError("pane_not_found"),
+        )
+    )
+    assert (
+        recruiter._worker_process_confirmed_gone(
+            "w1:p1", "claude", confirmations=2
+        )
+        is True
+    )
+    responses.clear()
+    responses.append(recruiter.RecruiterError("socket unavailable"))
+    assert recruiter._worker_process_confirmed_gone("w1:p1", "claude") is False
 
 
 def test_pane_confirmed_gone_trusts_only_positive_answers(monkeypatch) -> None:
