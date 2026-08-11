@@ -293,7 +293,9 @@ def test_live_path_blocked_receipt_after_inspection_carries_salvage_evidence(
     manifest = _manifest(ledger, key, order)
     staging = manifest.artifact("result").staging_path
     staging.parent.mkdir(parents=True, exist_ok=True)
-    token = json.loads((ledger.active / "requests" / key / "lease.json").read_text())["token"]
+    token = json.loads((ledger.active / "requests" / key / "lease.json").read_text())[
+        "token"
+    ]
 
     blocked, salvage = recruiter._complete_typed_bundle(
         ledger, key, order, manifest, None, herdr_session="test-session"
@@ -302,7 +304,9 @@ def test_live_path_blocked_receipt_after_inspection_carries_salvage_evidence(
     assert salvage is not None
 
     # Same fork `cmd_run_job` runs right before its `ledger.finalize` call.
-    result = salvage["result"] if salvage is not None else json.loads(staging.read_text())
+    result = (
+        salvage["result"] if salvage is not None else json.loads(staging.read_text())
+    )
     finalized = ledger.finalize(
         key,
         token,
@@ -713,9 +717,7 @@ def test_a_launch_failure_carries_its_root_cause_chain_to_the_requester(
 
     try:
         try:
-            raise recruiter.RecruiterError(
-                "herdr pane get w1:p1 -> pane_not_found"
-            )
+            raise recruiter.RecruiterError("herdr pane get w1:p1 -> pane_not_found")
         except recruiter.RecruiterError as inner:
             raise RuntimeError("could not create the worker agent") from inner
     except RuntimeError as error:
@@ -916,15 +918,17 @@ def test_codex_exec_missing_bundle_never_prompts_the_absent_agent(
 
     monkeypatch.setattr(recruiter, "_submit_agent_prompt", refuse)
     ledger = recruiter.JobLedger()
-    order, _order_path, key = _exec_dead_claim(
-        tmp_path, ledger, "exec-codex", "codex"
-    )
+    order, _order_path, key = _exec_dead_claim(tmp_path, ledger, "exec-codex", "codex")
     manifest = _manifest(ledger, key, order)
     staging = manifest.artifact("result").staging_path
     staging.parent.mkdir(parents=True, exist_ok=True)
 
     blocked, salvage = recruiter._complete_typed_bundle(
-        ledger, key, order, manifest, "sess:stale-worker-address",
+        ledger,
+        key,
+        order,
+        manifest,
+        "sess:stale-worker-address",
         herdr_session="test-session",
     )
 

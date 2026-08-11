@@ -652,7 +652,9 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> 
     assert start[-3:] == ("bash", "-lc", "claude --model some-model")
 
 
-def test_start_herdr_agent_honors_downward_role_placement(monkeypatch, tmp_path) -> None:
+def test_start_herdr_agent_honors_downward_role_placement(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls = []
 
@@ -701,11 +703,10 @@ def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
 
 def test_start_herdr_agent_refuses_duplicate_agent_name(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+
     def fake_json(*args: str, **kwargs: object) -> dict:
         if args[:2] == ("agent", "get"):
-            return {
-                "result": {"agent": {"name": "worker", "pane_id": "other-pane"}}
-            }
+            return {"result": {"agent": {"name": "worker", "pane_id": "other-pane"}}}
         raise AssertionError(f"launch must not proceed past the name check: {args}")
 
     monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
@@ -729,9 +730,7 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
     def fake_json(*args: str, **kwargs: object) -> dict:
         if args[:2] == ("agent", "get"):
             if state["started"]:
-                return {
-                    "result": {"agent": {"name": args[2], "pane_id": "pane-first"}}
-                }
+                return {"result": {"agent": {"name": args[2], "pane_id": "pane-first"}}}
             time.sleep(0.05)  # widen the check-then-act window
             raise RecruiterError("agent_not_found")
         if args[:2] == ("pane", "get"):
@@ -1371,16 +1370,17 @@ def test_receipt_artifacts_carry_frozen_present_flags(tmp_path: Path) -> None:
     assert token is not None
     recruiter.completion.ensure_publication_contract(order)
     manifest = recruiter.completion.build_manifest(
-        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+        order,
+        ledger.request_dir(key),
+        token,
+        recruiter.lifecycle.request_identity(order),
     )
     result = _result(order["order_id"])
     recruiter.JobLedger._write_json(manifest.artifact("result").staging_path, result)
     manifest.artifact("handoff").staging_path.parent.mkdir(parents=True, exist_ok=True)
     manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
     # compacted is deliberately never staged: optional here, so the job still publishes.
-    assert ledger.finalize(
-        key, token, order, result, cleanup=_cleanup(), exit_code=0
-    )
+    assert ledger.finalize(key, token, order, result, cleanup=_cleanup(), exit_code=0)
     receipt = json.loads((ledger.request_dir(key) / "receipt.json").read_text())
     by_kind = {item["kind"]: item for item in receipt["artifacts"]}
     assert by_kind["result"]["present"] is True
@@ -1405,7 +1405,10 @@ def test_finalize_publishes_the_normalized_result_bytes(tmp_path: Path) -> None:
     assert token is not None
     recruiter.completion.ensure_publication_contract(order)
     manifest = recruiter.completion.build_manifest(
-        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+        order,
+        ledger.request_dir(key),
+        token,
+        recruiter.lifecycle.request_identity(order),
     )
     raw = {
         "order_id": order["order_id"],
@@ -1414,7 +1417,9 @@ def test_finalize_publishes_the_normalized_result_bytes(tmp_path: Path) -> None:
         "full_log": "/tmp/worker.log",
     }
     recruiter.JobLedger._write_json(manifest.artifact("result").staging_path, raw)
-    manifest.artifact("compacted").staging_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.artifact("compacted").staging_path.parent.mkdir(
+        parents=True, exist_ok=True
+    )
     manifest.artifact("compacted").staging_path.write_text("# Compact\n")
     manifest.artifact("handoff").staging_path.write_text("# Handoff\n")
     parsed = recruiter.load_result(
@@ -1496,10 +1501,9 @@ def test_consult_receipt_publication_is_atomic_and_idempotent_under_concurrency(
     monkeypatch.setattr(
         recruiter,
         "consult_index_entry_path",
-        lambda requested_by, consult_id: tmp_path
-        / "index"
-        / requested_by
-        / f"{consult_id}.json",
+        lambda requested_by, consult_id: (
+            tmp_path / "index" / requested_by / f"{consult_id}.json"
+        ),
     )
     receipt = {
         "consult_id": "consult-race-1",
@@ -9315,9 +9319,7 @@ def test_process_confirmed_gone_requires_normal_repeated_absence(monkeypatch) ->
         )
     )
     assert (
-        recruiter._worker_process_confirmed_gone(
-            "w1:p1", "claude", confirmations=2
-        )
+        recruiter._worker_process_confirmed_gone("w1:p1", "claude", confirmations=2)
         is True
     )
     responses.clear()
@@ -9340,7 +9342,9 @@ def test_pane_confirmed_gone_trusts_only_positive_answers(monkeypatch) -> None:
     assert recruiter._worker_pane_confirmed_gone("w1:p1") is True
 
     # A transport fault is NOT pane-gone.
-    responses[:] = [recruiter.RecruiterError("herdr pane get timed out after 10 seconds")]
+    responses[:] = [
+        recruiter.RecruiterError("herdr pane get timed out after 10 seconds")
+    ]
     assert recruiter._worker_pane_confirmed_gone("w1:p1") is False
 
     # A live pane answers normally.

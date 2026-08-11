@@ -1012,6 +1012,7 @@ def _public_status(
         result = _read_json_optional(result_path, "published result")
     public_evidence = cast(dict[str, object], order["public_request"])
     publication = cast(dict[str, object], order["artifact_publication"])
+
     # Every path-bearing entry carries `present`, recomputed by a stat at read time so a
     # caller can gate on artifact completeness without stat-ing the ledger itself. The
     # receipt's own artifact list keeps the authoritative `present` frozen at publication;

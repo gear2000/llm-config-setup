@@ -602,11 +602,11 @@ class JobLedger:
         rechecks under that lock before creation. ``on_create`` is for bounded local persistence
         that must commit with the new ledger record; it must not perform process or Herdr work.
         """
-        key, comparison_order = self._validated_submission_identity(order, existing_order)
+        key, comparison_order = self._validated_submission_identity(
+            order, existing_order
+        )
         with self._claim_lock(key):
-            existing = self._existing_submission_unlocked(
-                order, comparison_order, key
-            )
+            existing = self._existing_submission_unlocked(order, comparison_order, key)
             if existing is not None:
                 return existing
         guard()
