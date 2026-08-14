@@ -284,6 +284,56 @@ def test_duration_minutes_rejects_values_outside_public_cap(
         _args(_worker_argv(tmp_path) + ["--duration-minutes", minutes])
 
 
+def test_no_sentinel_opt_out_enters_payload_and_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    request = public_api.validate_request(
+        _args(_worker_argv(tmp_path) + ["--no-sentinel"]), tmp_path
+    )
+    assert request.payload["sentinel"] is False
+    registered = public_api.PublicRequestStore().register(request, "recruiter-pane")
+    order = json.loads(registered.order_path.read_text())
+    assert order["sentinel"] is False
+
+
+def test_sentinel_default_stays_out_of_payload_and_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default-on carries no payload key, so every pre-existing request hash is stable."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    request = public_api.validate_request(_args(_worker_argv(tmp_path)), tmp_path)
+    assert "sentinel" not in request.payload
+    registered = public_api.PublicRequestStore().register(request, "recruiter-pane")
+    assert "sentinel" not in json.loads(registered.order_path.read_text())
+
+
+def test_sentinel_must_be_boolean_and_respects_file_flag_exclusivity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_file = tmp_path / "request.json"
+    request_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "type": "worker",
+                "offering": "pi-gpt-5-6-sol",
+                "effort": "high",
+                "agent": "backend",
+                "prompt_file": str(_prompt(tmp_path)),
+                "cwd": str(tmp_path),
+                "sentinel": "no",
+            }
+        )
+    )
+    with pytest.raises(public_api.PublicError, match="sentinel must be a boolean"):
+        public_api.validate_request(
+            _args(["request", "--file", str(request_file)]), tmp_path
+        )
+    with pytest.raises(Exception, match="mutually exclusive"):
+        _args(["request", "--file", str(request_file), "--no-sentinel"])
+
+
 def test_keep_open_is_worker_only_and_maps_to_release_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

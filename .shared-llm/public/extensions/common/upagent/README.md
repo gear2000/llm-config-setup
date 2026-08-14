@@ -80,7 +80,8 @@ just upagent get --request ID [--json]
 just upagent lists --type offerings|specialists|workers [--status active|terminal|all] [--json]
 just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
   --prompt-file /absolute/brief.md [--cwd /absolute/worktree] \
-  [--duration-minutes 1..120] [--keep-open] [--cockpit-pane LIVE_PANE] [--wait] [--json]
+  [--duration-minutes 1..120] [--keep-open] [--no-sentinel] [--cockpit-pane LIVE_PANE] \
+  [--wait] [--json]
 just upagent request --type specialist --specialist NAME \
   --prompt-file /absolute/question.md [--cwd /absolute/worktree] \
   [--cockpit-pane LIVE_PANE] [--wait] [--json]
@@ -284,6 +285,64 @@ Durable files are the source of truth; terminal text is display-only.
   recovery still cannot validate the bundle, Python writes a schema-valid blocked
   result/compacted/handoff bundle and, for specialists, a valid failure answer. A missing optional
   summary never triggers a repair and never blocks.
+- Four mechanical reliability gates run inside this lifecycle. A startup marker records the
+  worker's first observable action in the ledger once Python proves health (agent activity, a
+  staged artifact, or changed pane output). The liftoff deadline is the smaller of 5 minutes
+  and half the order's own work cap, so on a valid short order (1-minute caps are allowed)
+  the never-started classification always fires before the hard request timeout can claim
+  the request — the hard timeout stays the ultimate backstop. The typed `never-started`
+  terminal is deadline-proven and side-effect-free: it requires the recorded
+  worker-never-started deadline event — attempt-scoped, so a prior attempt's proof never
+  authorizes a later attempt's mint — AND no staged artifact file of any kind (result.json,
+  compacted.md, handoff.md alike), no landed commits, no recorded first action, and a clean
+  worktree (uncommitted paths — attributable or not — and staged artifacts alike route the
+  miss to the ordinary blocked path with the epilogue evidence instead). It is a
+  distinct synthesized verdict — never worker vocabulary, like `salvaged-done` — and the
+  Recruiter auto-retries that outcome exactly once with a fresh worker before it
+  surfaces (awaiting callers still see the blocked bucket; the receipt keeps the typed
+  verdict). Every Python-authored blocked bundle carries a harness epilogue — landed commits,
+  files touched, and the staged artifact files the worker actually wrote — so a worker that
+  did work but skipped its bundle can no longer produce an empty result. And before any
+  `passed` publishes, the bundle validator parses the worker's non-empty artifact files: an
+  explicitly empty `findings` beside a non-empty report, or a report whose last non-blank
+  line states `VERDICT: VEERED` (markdown emphasis, trailing punctuation, and case are
+  normalized away), invalidates the verdict and forces the one same-worker re-evaluation
+  instead of a silent accept; an unrepaired inconsistent result blocks and is never salvaged
+  as "a valid staged result".
+- On top of those gates, every ordinary request is Sentinel-supervised by default
+  (`--no-sentinel` opts out; watchdogs and retained review workers never get one). The
+  Recruiter hires one haiku Herdr pane per worker attempt, duty-bound to that worker:
+  LIFTOFF corroborates the startup marker and, once a first real tool action is proven, the
+  requester receives the worker's live pane address; PULSE wakes every 15 minutes over the
+  pane tail and git/fs deltas, nudging once before declaring a stall; LANDING steers
+  finalization by dialogue under a hard never-believe-the-worker rule — only bundle files
+  verified on disk count — with at most 3 exchanges. The Sentinel's one typed
+  `closeout.json` (outcome `COMPLETE | NEVER_STARTED | STALLED | FINALIZATION_FAILED`, plus
+  interpretation, citations, bundle, blocking_question, exchanges) is THE teardown trigger
+  while the Sentinel is live: a staged artifact bundle alone no longer ends a supervised
+  wait (the Sentinel verifies it in LANDING and writes COMPLETE), and a positively dead
+  worker pane/process — or the mechanical never-started deadline, whose LIFTOFF the live
+  Sentinel owns (its brief carries the same clamped deadline the watcher enforces) —
+  first opens a bounded closeout window — a few minutes — for the Sentinel to land its
+  closeout before the mechanical path takes over. Python re-verifies every citation
+  before it counts (an absolute-path citation corroborates only when it exists INSIDE the
+  request's own territory — the worktree/cwd subtree or the ledger directory; an
+  existing-but-out-of-scope path like `/etc/passwd` is discarded as out-of-scope) and a
+  COMPLETE closeout ends the wait only into the ordinary bundle validation — an invalid
+  COMPLETE is rejected with exactly one more landing round — so a fooled Sentinel may end
+  a request early but can never cause a false `passed`. A blocked terminal's published
+  reason lists Python-verified citations separately as checked fact; the Sentinel's
+  interpretation and progress prose always travel but, being LLM-authored and never
+  mechanically checkable, always carry their explicit `(uncorroborated)` marker — a
+  verified citation never launders the prose around it — and a closeout's
+  `blocking_question` is surfaced first-class on the
+  published result.json, the receipt, and any Python-composed retry brief. The Sentinel
+  never kills anything and never outlives its worker attempt. When the hire fails, the
+  mechanical paths stay fully in charge (a never-hired Sentinel cannot strand a finished
+  worker); when a live Sentinel dies and no closeout ever appears, the hard timeout,
+  salvage triage, and epilogue backstop fire unchanged. Requester→worker messages go through
+  `just upagent-message <order.json> <control-token-file> <message-file>`, which logs each
+  message to the durable ledger before delivery.
 - Publication is ordered: validate private staging, prepare and atomically replace every public
   artifact, revalidate the public bundle, write `receipt.json`, then append the durable terminal
   event/state and requester notification. `upagent-await` wakes only from that post-receipt

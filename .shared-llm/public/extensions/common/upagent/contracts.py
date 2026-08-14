@@ -29,14 +29,18 @@ VERDICTS = ("passed", "failed", "blocked")
 # `salvaged-done` says: the worker's self-report was lost, but mechanical evidence (a landed
 # commit, a staged artifact) shows work reached disk. It is deliberately NOT `passed` — every
 # consumer dispatches on `verdict == "passed"`, so a salvage routes to attention-with-evidence
-# rather than a silent merge. `parse_result` accepts one only when the caller explicitly opts
-# in, and the only opt-in callers are the Recruiter's own salvage writers: a worker that types
-# `salvaged-done` into its own result.json is still rejected on the strict path.
-SYNTHESIZED_VERDICTS = ("salvaged-done",)
+# rather than a silent merge. `never-started` says the opposite: the worker was accepted and
+# its pane became healthy, but no first observable action was ever recorded and nothing
+# reached disk — a distinct typed outcome instead of the generic lifecycle-blocked bucket, so
+# the Recruiter can auto-retry it once and the ledger can tell died-at-startup from
+# ran-and-failed. `parse_result` accepts either only when the caller explicitly opts
+# in, and the only opt-in callers are the Recruiter's own terminal writers: a worker that
+# types a synthesized verdict into its own result.json is still rejected on the strict path.
+SYNTHESIZED_VERDICTS = ("salvaged-done", "never-started")
 
 # How a terminal verdict came to be. Recorded on every receipt so a reader can tell a
 # validated worker bundle from one Python reconstructed out of leftovers.
-SYNTHESIS_PATHS = ("clean", "salvaged-mechanical", "salvaged-rescuer")
+SYNTHESIS_PATHS = ("clean", "salvaged-mechanical", "salvaged-rescuer", "never-started")
 DEFAULT_SYNTHESIS_PATH = "clean"
 
 # Whether the verdict is backed by a validated worker artifact (`confirmed`) or only by
@@ -177,6 +181,10 @@ def parse_order(text: str) -> dict:
         raise ContractError(
             "order.json: retained-worker `timeout_ms` may not exceed 7200000 (120 minutes)"
         )
+    # Optional `sentinel` opts one request out of the default-on per-request Sentinel pane.
+    # Only an explicit boolean is a decision; anything else is a malformed order.
+    if "sentinel" in order and not isinstance(order["sentinel"], bool):
+        raise ContractError("order.json: `sentinel` must be a boolean when present")
     # Optional `env` must be a flat str->str map when present (injected via `pane split --env`).
     env = order.get("env")
     if env is not None and (

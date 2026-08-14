@@ -64,6 +64,7 @@ REQUEST_KEYS = {
     "cwd",
     "duration_minutes",
     "keep_open",
+    "sentinel",
 }
 REQUEST_ID_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab0-9a-f][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -323,6 +324,7 @@ def _inline_request(args: Any) -> dict[str, object]:
         "cwd",
         "duration_minutes",
         "keep_open",
+        "sentinel",
     ):
         item = getattr(args, field)
         if item is not None:
@@ -343,7 +345,12 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
         raw.get("schema_version"), bool
     ):
         raise PublicError("request schema_version must be integer 1")
-    string_fields = REQUEST_KEYS - {"schema_version", "duration_minutes", "keep_open"}
+    string_fields = REQUEST_KEYS - {
+        "schema_version",
+        "duration_minutes",
+        "keep_open",
+        "sentinel",
+    }
     for key, value in raw.items():
         if key in string_fields and (not isinstance(value, str) or not value):
             raise PublicError(f"request {key} must be a non-empty string")
@@ -359,6 +366,9 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     keep_open = raw.get("keep_open", False)
     if not isinstance(keep_open, bool):
         raise PublicError("request keep_open must be a boolean when present")
+    sentinel = raw.get("sentinel", True)
+    if not isinstance(sentinel, bool):
+        raise PublicError("request sentinel must be a boolean when present")
     request_type = raw.get("type")
     if request_type not in ("worker", "specialist"):
         raise PublicError("request type must be worker or specialist")
@@ -454,6 +464,10 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     if keep_open:
         payload["keep_open"] = True
         payload["managed_requester"] = _managed_retained_requester()
+    # Default-on Sentinel supervision: only the explicit opt-out enters the payload, so
+    # every pre-existing request hash stays identical.
+    if sentinel is False:
+        payload["sentinel"] = False
     return ValidatedRequest(
         request_id=request_id,
         payload=payload,
@@ -730,6 +744,11 @@ class PublicRequestStore:
                 **(
                     {"completion_policy": "requester_release"}
                     if payload.get("keep_open") is True
+                    else {}
+                ),
+                **(
+                    {"sentinel": False}
+                    if payload.get("sentinel") is False
                     else {}
                 ),
                 "artifact_publication": {

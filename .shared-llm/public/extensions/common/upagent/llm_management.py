@@ -25,6 +25,11 @@ DEFAULT_RESCUER_COMMAND = (
     "claude --dangerously-skip-permissions --agent upagent-rescuer --model claude-sonnet-5 --effort low "
     '"Read {brief_path}, perform that one bounded salvage assessment, write {output_path}, then exit."'
 )
+DEFAULT_SENTINEL_COMMAND = (
+    "claude --dangerously-skip-permissions --agent upagent-sentinel --model haiku --effort low "
+    '"Read {brief_path}, perform that one sentinel duty cycle for its worker, write '
+    '{output_path} when the worker lifecycle ends, then exit."'
+)
 DEFAULT_INTAKE_CLERK_COMMAND = (
     'claude --print --output-format text --tools "" --agent intake-clerk '
     "--model sonnet --effort low < {brief_path}"
@@ -56,6 +61,10 @@ class ManagementConfig:
     # evidence about a vanished worker. A clean hit and a clean miss are both decided in
     # Python and never spawn this role.
     rescuer: ManagementRole
+    # One per sentinel-supervised request: a cheap pane duty-bound to that request's worker
+    # from liftoff to closeout. Eyes and interpretation only — it holds no kill switch and
+    # its closeout citations are re-verified in Python before they count.
+    sentinel: ManagementRole
     intake_clerk: ManagementRole
     startup_timeout_ms: int
     inactivity_check_ms: int
@@ -139,6 +148,7 @@ def load_management_config(roster: dict) -> ManagementConfig:
         ),
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
         rescuer=_role(raw.get("rescuer"), "rescuer", DEFAULT_RESCUER_COMMAND),
+        sentinel=_role(raw.get("sentinel"), "sentinel", DEFAULT_SENTINEL_COMMAND),
         intake_clerk=_role(
             raw.get("intake_clerk"),
             "intake_clerk",
@@ -381,6 +391,121 @@ Write exactly one JSON object to `{output_path}`:
   "cited_commits": ["full 40-character SHA observed in the evidence bundle"],
   "cited_files": ["absolute path observed in the evidence bundle"],
   "message": "concise explanation naming the evidence you relied on"
+}}
+```
+"""
+
+
+SENTINEL_PULSE_MINUTES = 15
+SENTINEL_MAX_LANDING_EXCHANGES = 3
+
+
+def _liftoff_deadline_phrase(deadline_ms: int) -> str:
+    """The liftoff deadline as duty-brief prose. Whole minutes read as minutes; anything
+    else (a clamped short order, e.g. 30s on a one-minute cap) reads as seconds so the
+    Sentinel's instructions never round past the mechanical deadline."""
+    if deadline_ms <= 0:
+        raise ManagementConfigError(
+            f"sentinel liftoff deadline must be positive, got {deadline_ms} ms"
+        )
+    if deadline_ms % 60_000 == 0:
+        minutes = deadline_ms // 60_000
+        return f"{minutes} minute{'' if minutes == 1 else 's'}"
+    seconds = deadline_ms / 1000
+    return f"{seconds:g} seconds"
+
+
+def sentinel_brief(
+    request_id: str,
+    order_id: str,
+    worker_pane: str,
+    cwd: str,
+    closeout_path: Path,
+    *,
+    liftoff_deadline_ms: int,
+) -> str:
+    """One Sentinel duty cycle: watch exactly one worker from liftoff to closeout.
+
+    The Sentinel is eyes and interpretation only. Python spawned the worker, holds the
+    kill switch and the verdict, and re-verifies every citation in the closeout before it
+    counts. The closeout file is the one thing the Recruiter waits on for this request, so
+    the brief is explicit about when and how to write it.
+
+    `liftoff_deadline_ms` is the caller's EFFECTIVE clamped first-action deadline
+    (`_first_action_deadline_ms`), threaded in so the Sentinel's LIFTOFF instructions
+    always match the mechanical deadline — a short order clamps both, never just one.
+    """
+    liftoff_deadline = _liftoff_deadline_phrase(liftoff_deadline_ms)
+    return f"""# UpAgent Sentinel — duty-bound to one worker
+
+You watch exactly one worker for its whole lifecycle and then write exactly one closeout
+file. You never kill, close, or interrupt any pane, never write or repair the worker's
+artifacts, and never do the worker's task yourself. Python owns the kill switch and the
+verdict; you own eyes and interpretation.
+
+The literal request id is `{request_id}` and the literal order id is `{order_id}`. Copy
+those values exactly into the closeout. The worker's Herdr pane is `{worker_pane}` and its
+working directory is `{cwd}`.
+
+Your tools for every observation:
+- pane tail: `herdr pane read {worker_pane} --source recent-unwrapped --lines 80`
+- work deltas: `git -C {cwd} log --oneline -5` and `git -C {cwd} status --porcelain`
+- speak to the worker (dialogue only, never instructions to stop or exit):
+  `herdr pane run {worker_pane} "<one short question>"`
+- sleep between pulses: `sleep {SENTINEL_PULSE_MINUTES * 60}`
+
+## 1. LIFTOFF
+
+Watch the pane until you see the worker's FIRST real tool action (a command running, a
+file being edited, tool output appearing — not a banner, prompt, or greeting). Python
+records the same signal mechanically; you corroborate it. If you see a first action,
+note the evidence and continue to PULSE. If {liftoff_deadline} pass with no action,
+write the closeout now with outcome `NEVER_STARTED` and cite the pane evidence you saw.
+
+## 2. PULSE
+
+Sleep, then wake every {SENTINEL_PULSE_MINUTES} minutes. Each pulse: read the pane tail
+and the git/fs deltas since your last pulse.
+- Progressing → go back to sleep.
+- Quiet → send ONE status nudge ("status? what are you on?"). If it resumes, log what you
+  saw and sleep again.
+- Unrecoverably stuck (repeated pulses with no output change, no deltas, and no answer to
+  your nudge) → write the closeout with outcome `STALLED`, including `progress_so_far`
+  (what verifiably got done, from the deltas) and `last_alive` (the last moment you saw
+  real activity).
+
+## 3. LANDING
+
+When the worker goes quiet after real work, steer it to finalization by dialogue:
+"finished?" — "did you write all N result files?". HARD RULE: never believe the worker's
+answer. After EVERY exchange, list and read the bundle files on disk yourself before
+concluding anything. At most {SENTINEL_MAX_LANDING_EXCHANGES} exchanges.
+- Bundle verified on disk → closeout `COMPLETE` with the `bundle` path you verified, and
+  `blocking_question` if the worker finished but is blocked on a question only the
+  requester can answer.
+- Exchange cap hit without a verified bundle → closeout `FINALIZATION_FAILED`, citing the
+  evidence of what actually got done.
+
+## 4. CLOSEOUT
+
+Write exactly one JSON object to `{closeout_path}` and then exit. This file ends the
+request, so write it exactly once, when the worker's lifecycle has ended — never early,
+never speculatively. Cite only what you actually observed: full 40-character commit SHAs
+and absolute file paths. Python re-verifies every citation; one that does not check out
+is discarded.
+
+```json
+{{
+  "request_id": "{request_id}",
+  "order_id": "{order_id}",
+  "outcome": "COMPLETE|NEVER_STARTED|STALLED|FINALIZATION_FAILED",
+  "interpretation": "concise account of what you observed and what it means",
+  "citations": ["full 40-character commit SHA or absolute file path you observed"],
+  "bundle": "absolute path of the verified bundle (COMPLETE only, else null)",
+  "blocking_question": "the worker's open question for the requester, or null",
+  "exchanges": [{{"question": "...", "answer": "...", "verified": false}}],
+  "progress_so_far": "STALLED only: what verifiably got done",
+  "last_alive": "STALLED only: last observed real activity"
 }}
 ```
 """

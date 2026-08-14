@@ -1,0 +1,1 @@
+Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout; watches, nudges, and steers finalization by dialogue, then writes one typed closeout whose every citation Python re-verifies — it holds no kill switch and can never mint a verdict.

@@ -3037,6 +3037,15 @@ def test_dispatch_reconciles_its_exited_dead_child_immediately(
                     owner={"herdr_session": "test-session", "runner_pid": 999_999},
                 )
                 assert token
+                # The dead child's watcher had already proven the idle deadline: the
+                # typed `never-started` terminal is minted only over this event.
+                ledger._event(
+                    key,
+                    "worker-never-started",
+                    deadline_ms=300_000,
+                    worker_pane="worker-pane",
+                    attempt=1,
+                )
                 claimed = True
             return 9
 
@@ -3050,7 +3059,9 @@ def test_dispatch_reconciles_its_exited_dead_child_immediately(
     ledger = recruiter.JobLedger()
     key = ledger.key_for_order(order)
     receipt = ledger.completed_receipt(key, order)
-    assert receipt["verdict"] == "blocked"
+    # An empty claim with no recorded first action reconciles as the typed
+    # `never-started` terminal (startup-marker gate), not generic blocked.
+    assert receipt["verdict"] == "never-started"
     assert not dict(ledger.active_claims())
 
 
@@ -3189,11 +3200,11 @@ def test_completed_result_returns_durable_when_the_public_read_always_oserrors(
     real_load = recruiter.load_result
     public_reads = {"n": 0}
 
-    def always_racing_load(path, expected_order_id=None):
+    def always_racing_load(path, expected_order_id=None, **kwargs):
         if str(path) == order["result_path"]:
             public_reads["n"] += 1
             raise OSError("simulated: result.json unreadable on every read")
-        return real_load(path, expected_order_id=expected_order_id)
+        return real_load(path, expected_order_id=expected_order_id, **kwargs)
 
     monkeypatch.setattr(recruiter, "load_result", always_racing_load)
 
@@ -3243,10 +3254,10 @@ def test_a_terminal_record_refuses_with_evidence_when_the_hub_copy_is_unreadable
     durable = str(ledger.published_result_path(key))
     real_load = recruiter.load_result
 
-    def flaky_load(path, expected_order_id=None):
+    def flaky_load(path, expected_order_id=None, **kwargs):
         if str(path) == durable:
             raise OSError("simulated: durable copy unreadable")
-        return real_load(path, expected_order_id=expected_order_id)
+        return real_load(path, expected_order_id=expected_order_id, **kwargs)
 
     monkeypatch.setattr(recruiter, "load_result", flaky_load)
 
@@ -3445,6 +3456,14 @@ def test_missing_runner_json_is_reconstructed_after_dead_runner_reconciliation(
         },
     )
     assert token
+    # Deadline-proven: the never-started reconciliation below requires this event.
+    ledger._event(
+        key,
+        "worker-never-started",
+        deadline_ms=300_000,
+        worker_pane="worker-pane",
+        attempt=1,
+    )
     runner_path = ledger.request_dir(key) / "runner.json"
     runner_path.unlink()
     lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
@@ -3473,7 +3492,9 @@ def test_missing_runner_json_is_reconstructed_after_dead_runner_reconciliation(
     tombstone = {
         "request_id": request_id,
         "payload_sha256": payload_sha256,
-        "terminal_verdict": "blocked",
+        # An empty dead-runner claim with no recorded first action now reconciles as the
+        # typed `never-started` terminal (startup-marker gate).
+        "terminal_verdict": "never-started",
     }
     pruned = ledger.prune_terminal(
         key,
@@ -4093,6 +4114,9 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
 def test_account_manager_crash_degrades_supervision_but_worker_still_terminalizes(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     instructions = tmp_path / "instructions.md"
     instructions.write_text("Do the stage.\n")
     result_path = tmp_path / "result.json"
@@ -4201,6 +4225,9 @@ def test_file_mailbox_requester_receives_correlated_lifecycle_message(
 def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status_result(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     order = _order(
         cwd=str(tmp_path),
@@ -4249,6 +4276,9 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
         ),
     )
     monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
+    # The startup-activity watcher is unit-tested on its own; a live probe here would
+    # only trip the strict Popen stub above from a background thread.
+    monkeypatch.setattr(recruiter, "_watch_first_action", lambda *args, **kwargs: None)
 
     runner = threading.Thread(
         target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path)))
@@ -4276,6 +4306,9 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
 def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_result(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     order = _order(
         cwd=str(tmp_path),
@@ -4365,6 +4398,9 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
     monkeypatch.setattr(recruiter.subprocess, "Popen", never_done)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
+    # The startup-activity watcher is unit-tested on its own; a live probe here would
+    # only trip the strict `never_done` command-shape stub from a background thread.
+    monkeypatch.setattr(recruiter, "_watch_first_action", lambda *args, **kwargs: None)
 
     runner = threading.Thread(
         target=lambda: outcomes.append(recruiter.cmd_run_job(key, str(roster_path)))
@@ -4403,6 +4439,9 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
 def test_run_job_keeps_worker_result_when_status_wait_fails(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     order = _order(
         cwd=str(tmp_path),
@@ -4456,6 +4495,9 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
 def test_cleanup_waits_for_post_notification_runner_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     payload_sha256 = "a" * 64
     order = _order(
@@ -4813,6 +4855,9 @@ def test_direct_lifecycle_runs_job_without_an_account_manager(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     """The default mode hires no standing manager LLM; Python owns the lifecycle."""
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     order = _order(
         cwd=str(tmp_path),
@@ -4875,6 +4920,9 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     """First launch explodes; the rescue broker says retry; the relaunch succeeds."""
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     order = _order(
         cwd=str(tmp_path),
@@ -5001,6 +5049,9 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
 def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
+    # herdr stubs must see only the launches it fakes.
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
     result_path = tmp_path / "result.json"
     order = _order(
         cwd=str(tmp_path),
@@ -5167,6 +5218,14 @@ def test_await_reconciles_dead_runner_before_timeout(
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     ledger = recruiter.JobLedger()
     order, order_path, key = _dead_runner_claim(tmp_path, ledger, "await")
+    # Deadline-proven: the never-started reconciliation below requires this event.
+    ledger._event(
+        key,
+        "worker-never-started",
+        deadline_ms=300_000,
+        worker_pane="worker-pane",
+        attempt=1,
+    )
 
     assert recruiter.cmd_await(str(order_path), notify_after_ms=0) == 1
 
@@ -5174,7 +5233,9 @@ def test_await_reconciles_dead_runner_before_timeout(
     assert len(lines) == 1
     receipt = json.loads(lines[0].removeprefix("ORDER_RECEIPT "))
     assert receipt["request_id"] == recruiter.lifecycle.request_identity(order)
-    assert receipt["verdict"] == "blocked"
+    # An empty dead-runner claim with no recorded first action reconciles as the typed
+    # `never-started` terminal (startup-marker gate), not generic blocked.
+    assert receipt["verdict"] == "never-started"
     assert (ledger.request_dir(key) / "runner-completed.json").is_file()
     assert not (ledger.active / "requests" / key).exists()
 

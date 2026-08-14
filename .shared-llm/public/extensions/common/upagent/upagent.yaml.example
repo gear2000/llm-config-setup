@@ -132,6 +132,20 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
+  # One per sentinel-supervised request (default-on; `--no-sentinel` / order `sentinel: false`
+  # opts out): a cheap pane duty-bound to that request's worker from liftoff to closeout.
+  # Eyes and interpretation only — it holds no kill switch, its closeout citations are
+  # re-verified in Python before they count, and a claimed COMPLETE still passes the ordinary
+  # bundle validation before anything publishes.
+  sentinel:
+    command: >-
+      claude --dangerously-skip-permissions --agent upagent-sentinel
+      --model haiku --effort low
+      "Read {brief_path}, perform that one sentinel duty cycle for its worker, write
+      {output_path} when the worker lifecycle ends, then exit."
+    expected_agent: claude
+    expected_process: claude
+    timeout_ms: 120000
 # Request intake (no configuration): every NEW REQUEST carrying a `cockpit_pane` has that pane
 # verified with herdr before ledger creation or launch. A missing pane is refused immediately.
 # An identical ad-hoc/public retry may refresh only this routing field before Recruiter acceptance

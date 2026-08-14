@@ -500,6 +500,10 @@ def test_reactor_sends_exactly_one_repair_to_the_original_worker(
         def _event(self, *args: object, **kwargs: object) -> None:
             pass
 
+        # The reactor checks for a never-started candidacy before repairing.
+        def events(self, key: str) -> list[dict]:
+            return []
+
     monkeypatch.setattr(recruiter, "_submit_agent_prompt", repair)
     assert (
         recruiter._complete_typed_bundle(

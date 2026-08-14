@@ -114,6 +114,13 @@ upagent-await-any timeout_ms cursor +orders:
 upagent-respond order control_token nonce action extension_ms:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"
 
+# Send one requester message to the live worker pane. The message is logged to the request's
+# durable ledger BEFORE delivery, so requester→worker nudges stay audit-honest. The message
+# and the private control token both travel in files, never in process arguments.
+[no-cd]
+upagent-message order control_token_file message_file:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter message "{{order}}" "{{control_token_file}}" "{{message_file}}"
+
 # Managed phase-leader retained-worker review loop. These operate on the same strict order and
 # current requester control token returned by upagent-request; no second worker is launched.
 [no-cd]

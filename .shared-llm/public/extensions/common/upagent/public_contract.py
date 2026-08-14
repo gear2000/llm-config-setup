@@ -95,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--duration-minutes", type=int)
     request.add_argument("--keep-open", action="store_true", default=None)
     request.add_argument(
+        "--no-sentinel",
+        dest="sentinel",
+        action="store_false",
+        default=None,
+        help="opt this request out of the default-on per-request Sentinel pane",
+    )
+    request.add_argument(
         "--cockpit-pane",
         metavar="LIVE_PANE",
         help=(
@@ -221,6 +228,7 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
             "cwd",
             "duration_minutes",
             "keep_open",
+            "sentinel",
         )
         if args.file is not None and any(
             getattr(args, field) is not None for field in defining

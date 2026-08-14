@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import uuid
 from collections.abc import Callable
@@ -426,6 +427,76 @@ def skip_optional(artifact: Artifact, path: Path) -> bool:
         return True
 
 
+# The one mechanically parseable findings marker in this runtime's artifact vocabulary.
+# KEEP IN SYNC with contracts.REVIEW_VERDICT_TAILS (this module stays pure and callback-fed,
+# so it does not import contracts).
+CONTRADICTORY_ARTIFACT_TAIL = "VERDICT: VEERED"
+
+# Search instead of enumerating Markdown decorations: any final-line occurrence is a
+# fail-safe contradiction, regardless of what punctuation or quoting surrounds it.
+_CONTRADICTORY_TAIL_RE = re.compile(r"verdict\s*:\s*veered", re.IGNORECASE)
+
+
+def artifact_ends_with_contradictory_tail(text: str) -> bool:
+    """True when the artifact's LAST non-blank line contains the veered verdict.
+
+    A substring search deliberately errs toward blocking a false pass: arbitrary
+    Markdown, punctuation, or prose around the mechanically parseable phrase cannot
+    hide it. Only the final non-blank line counts — a mid-document mention of a veered
+    verdict is prose, not the report's stated outcome.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return _CONTRADICTORY_TAIL_RE.search(lines[-1]) is not None
+
+
+def verdict_artifact_consistency_error(
+    result: dict[str, Any], report_texts: dict[str, str]
+) -> str | None:
+    """The verdict/artifact consistency gate: parse what the worker wrote before `passed`.
+
+    `report_texts` maps the kind of every NON-EMPTY markdown artifact to its full text.
+    Two invalid combinations, both field-observed (a `passed` ledger verdict with empty
+    findings while the worker's own artifact files held a full findings report):
+
+    - the result EXPLICITLY claims empty findings (`findings: []` or blank) while artifact
+      files are non-empty — the evaluator never parsed what it wrote. No amount of
+      `reason`/`summary`/`verdict_document` prose excuses that claim: prose beside an
+      explicitly-empty findings record is exactly the F3 shape this gate exists to catch.
+      A result with NO `findings` key at all stays valid — ordinary non-evaluator workers
+      never carry the field, and their `reason` is their account;
+    - a non-empty artifact ends with the veered findings tail while the result says passed —
+      the report itself contradicts the verdict.
+
+    Returns the precise error, or None when the bundle is consistent. Callers raise
+    `CompletionError` so the standard one-repair re-evaluation path fires instead of a
+    silent acceptance.
+    """
+    if result.get("verdict") != "passed" or not report_texts:
+        return None
+    for kind, text in report_texts.items():
+        if artifact_ends_with_contradictory_tail(text):
+            return (
+                f"verdict/artifact consistency: result.json claims `passed` but the "
+                f"{kind} artifact ends with `{CONTRADICTORY_ARTIFACT_TAIL}` — the "
+                "findings report contradicts the verdict; re-evaluate and restate one "
+                "consistent outcome"
+            )
+    findings = result.get("findings")
+    explicitly_empty = (isinstance(findings, list) and not findings) or (
+        isinstance(findings, str) and not findings.strip()
+    )
+    if explicitly_empty:
+        return (
+            "verdict/artifact consistency: result.json claims `passed` with explicitly "
+            "empty `findings` while non-empty artifact files exist ("
+            + ", ".join(sorted(report_texts))
+            + "); parse those artifacts and restate the verdict with its findings"
+        )
+    return None
+
+
 def validate_bundle(
     manifest: Manifest,
     *,
@@ -434,6 +505,7 @@ def validate_bundle(
     public: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] | None = None
+    report_texts: dict[str, str] = {}
     for artifact in manifest.artifacts:
         path = artifact.public_path if public else artifact.staging_path
         if skip_optional(artifact, path):
@@ -449,6 +521,7 @@ def validate_bundle(
                     raise CompletionError(
                         f"{artifact.kind}.md must contain non-whitespace text"
                     )
+                report_texts[artifact.kind] = text
         except (OSError, ValueError) as error:
             location = "public" if public else "staged"
             raise CompletionError(
@@ -457,6 +530,9 @@ def validate_bundle(
     if result is None:
         location = "public" if public else "staged"
         raise CompletionError(f"{location} result artifact is missing")
+    consistency_error = verdict_artifact_consistency_error(result, report_texts)
+    if consistency_error is not None:
+        raise CompletionError(consistency_error)
     return result
 
 
@@ -576,6 +652,34 @@ def write_salvaged_bundle(
             "verify the cited evidence before treating the work as accepted."
         ),
         answer_prefix="upagent completion salvaged without an answer",
+    )
+
+
+def write_never_started_bundle(
+    manifest: Manifest,
+    reason: str,
+    *,
+    write_result: Callable[[Path, str], dict[str, Any]],
+    failure_answer: Callable[[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Author the bundle for a worker that never performed an observable first action.
+
+    Every file says so: the pane became healthy but no activity, staged artifact, or landed
+    commit was ever recorded, so there is no work to accept OR to lose. The Recruiter may
+    auto-retry this outcome once with a fresh worker precisely because it is side-effect-free.
+    """
+    return _write_terminal_bundle(
+        manifest,
+        reason,
+        write_result=write_result,
+        failure_answer=failure_answer,
+        heading="Never started",
+        handoff_body=(
+            "The worker was accepted and its pane became healthy, but it never performed "
+            "an observable first action and nothing reached disk. Nothing was done; "
+            "nothing needs review. A retry starts from the original brief."
+        ),
+        answer_prefix="upagent worker never started",
     )
 
 

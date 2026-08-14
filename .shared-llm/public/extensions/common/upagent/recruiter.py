@@ -93,6 +93,19 @@ sys.modules[_consult_spec.name] = contracts_consult
 _consult_spec.loader.exec_module(contracts_consult)
 ConsultError = contracts_consult.ConsultError
 
+# The Sentinel closeout contract: yet another separate boundary. It gates the
+# Recruiter<->Sentinel exchange (`closeout.json`) — the one file the Recruiter's wait loop
+# watches for a sentinel-supervised request.
+_sentinel_spec = importlib.util.spec_from_file_location(
+    "upagent_contracts_sentinel", HERE / "contracts_sentinel.py"
+)
+if _sentinel_spec is None or _sentinel_spec.loader is None:
+    raise RuntimeError("could not load UpAgent sentinel contracts")
+contracts_sentinel = cast(Any, importlib.util.module_from_spec(_sentinel_spec))
+sys.modules[_sentinel_spec.name] = contracts_sentinel
+_sentinel_spec.loader.exec_module(contracts_sentinel)
+SentinelContractError = contracts_sentinel.SentinelContractError
+
 _lifecycle_spec = importlib.util.spec_from_file_location(
     "upagent_lifecycle", HERE / "lifecycle.py"
 )
@@ -217,6 +230,31 @@ WATCHDOG_PANE_FRACTION = 0.28
 SUPPORT_PANE_FRACTION = 0.20
 LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
 WATCHDOG_CONTINUATION_TIMEOUT_MS = 120_000
+# Startup-activity marker (the plumbing a per-request Sentinel's liftoff check later reads).
+# After Python proves worker health, the first observable action must appear within this
+# deadline or the request is classified `never-started` instead of generic lifecycle-blocked.
+FIRST_ACTION_DEADLINE_MS = 300_000
+FIRST_ACTION_PROBE_SECONDS = 5.0
+# Herdr agent statuses that prove the worker acted: `working` is an in-flight turn, `done` is
+# a finished turn, `blocked` is an attempted action waiting on approval. `idle` proves nothing.
+FIRST_ACTION_ACTIVITY_STATUSES = ("working", "done", "blocked")
+# A never-started deadline verdict needs real observations behind it: this many successful
+# idle probes minimum, so a pane that merely could not be read is never aborted over it.
+FIRST_ACTION_MIN_IDLE_PROBES = 3
+
+
+def _first_action_deadline_ms(timeout_ms: int) -> int:
+    """The effective liftoff deadline for one order: the smaller of the standard
+    5-minute deadline and HALF the order's own work cap.
+
+    Public orders may legitimately cap work at 1 minute — shorter than the standard
+    deadline — and an unclamped watcher would let the hard request timeout beat the
+    liftoff check, burying a never-started worker in the generic timeout bucket.
+    Precedence, therefore: the never-started classification always gets a chance to fire
+    (and auto-retry) before the hard timeout backstop can claim the request; the halved
+    margin leaves the remaining half of the cap for the classification and retry to run.
+    """
+    return min(FIRST_ACTION_DEADLINE_MS, timeout_ms // 2)
 COCKPIT_TAB_ROLES = frozenset(("workers", "oversight", "services", "control"))
 COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
@@ -338,6 +376,31 @@ class FencedLaunchError(RecruiterError):
 
 class AgentWaitTimeout(RecruiterError):
     """The worker reached its declared work cap without terminal evidence."""
+
+
+class WorkerNeverStartedError(RecruiterError):
+    """A healthy worker produced no observable first action within the startup deadline."""
+
+
+class SentinelEndedRequest(RecruiterError):
+    """A Sentinel closeout ended the wait early. The closeout travels for the receipt.
+
+    Python still owns the terminal: these route through the ordinary blocked-bundle path
+    (epilogue included), so a fooled Sentinel can end a request early but can never mint
+    a verdict.
+    """
+
+    def __init__(self, message: str, closeout: dict):
+        super().__init__(message)
+        self.closeout = closeout
+
+
+class SentinelStalledError(SentinelEndedRequest):
+    """The Sentinel's PULSE found the worker unrecoverably stalled mid-work."""
+
+
+class SentinelFinalizationFailedError(SentinelEndedRequest):
+    """The Sentinel's landing dialogue exhausted its cap without a verified bundle."""
 
 
 class StartupRejectedByManager(RecruiterError):
@@ -770,8 +833,13 @@ class JobLedger:
             return None
         receipt = self.completed_receipt(key, order)
         try:
+            # Terminal artifacts are Python-published: the synthesized verdicts
+            # (`salvaged-done`, `never-started`) are legitimate here. The forgery fence
+            # is at bundle validation, not at reading back a finished record.
             result = load_result(
-                order["result_path"], expected_order_id=order["order_id"]
+                order["result_path"],
+                expected_order_id=order["order_id"],
+                allow_synthesized=True,
             )
         except (ContractError, OSError) as unusable:
             # Both a malformed contract and a filesystem read error (the public result vanished
@@ -842,7 +910,11 @@ class JobLedger:
         recorded = receipt.get("published_result_path")
         if isinstance(recorded, str) and recorded:
             try:
-                return load_result(recorded, expected_order_id=order["order_id"])
+                return load_result(
+                    recorded,
+                    expected_order_id=order["order_id"],
+                    allow_synthesized=True,
+                )
             except (ContractError, OSError):
                 return None
         # Records finalized before the receipt named its copy: the lease-private results still
@@ -855,7 +927,11 @@ class JobLedger:
         )
         for path in [*legacy_paths, *typed_paths]:
             try:
-                candidate = load_result(path, expected_order_id=order["order_id"])
+                candidate = load_result(
+                    path,
+                    expected_order_id=order["order_id"],
+                    allow_synthesized=True,
+                )
             except (ContractError, OSError):
                 continue
             if (
@@ -1707,13 +1783,14 @@ class JobLedger:
                 **(metadata or {}),
             }
             self._write_json(self.launch_journal_path(key, launch_id), journal)
-            self._event(
-                key,
-                "pane-launching",
-                launch_id=launch_id,
-                role=role,
-                agent_name=agent_name,
-            )
+            launch_event: dict[str, object] = {
+                "launch_id": launch_id,
+                "role": role,
+                "agent_name": agent_name,
+            }
+            if "attempt" in journal:
+                launch_event["attempt"] = journal["attempt"]
+            self._event(key, "pane-launching", **launch_event)
         return launch_id
 
     def record_launch_created(
@@ -2248,7 +2325,12 @@ class JobLedger:
             launches.append(cast(dict[str, object], journal))
         result_path = self.published_result_path(key)
         try:
-            result = load_result(result_path, expected_order_id=order["order_id"])
+            # The ledger's own published copy: synthesized verdicts are legitimate here.
+            result = load_result(
+                result_path,
+                expected_order_id=order["order_id"],
+                allow_synthesized=True,
+            )
         except (ContractError, OSError) as error:
             raise RecruiterError(
                 f"request {request_id} has no valid retained terminal result: {error}"
@@ -2438,6 +2520,15 @@ class JobLedger:
                         f"publication: {item.public_path}"
                     )
             terminal_at_ns = time.time_ns()
+            # The Sentinel's cold handoff must survive onto the receipt even when the
+            # published result is worker-authored (a COMPLETE closeout beside a valid
+            # bundle): fall back to the ledger-recorded closeout question.
+            result_question = parsed.get("blocking_question")
+            blocking_question = (
+                result_question
+                if isinstance(result_question, str) and result_question.strip()
+                else _sentinel_blocking_question(self, key)
+            )
             receipt = {
                 "cleanup": cleanup,
                 "generation": lease.get("generation", 1),
@@ -2457,6 +2548,11 @@ class JobLedger:
                 # mechanical evidence or a corroborated rescuer citation.
                 "synthesis_path": synthesis_path,
                 "confirmation": confirmation,
+                **(
+                    {"blocking_question": blocking_question}
+                    if blocking_question is not None
+                    else {}
+                ),
                 **(
                     {"salvage_evidence": salvage_evidence}
                     if salvage_evidence is not None
@@ -4252,11 +4348,16 @@ def _write_worker_instructions(
     destination: Path,
     artifact_manifest: Any,
     review_generation: int = 1,
+    carried_question: str | None = None,
 ) -> None:
     """Append one final, literal delivery contract to the stage brief.
 
     The order's public result_path belongs to the Recruiter. The worker writes only this lease's
     private staging path, which prevents a stale/recovered worker from publishing over its owner.
+
+    `carried_question` is the cold handoff into a Python-composed retry brief: the blocking
+    question the previous attempt's Sentinel closeout recorded, surfaced to the fresh worker
+    instead of dying in the ledger.
     """
     source = Path(order["instructions_path"])
     try:
@@ -4323,6 +4424,14 @@ def _write_worker_instructions(
             "instruction to fix them, and closes the pane itself after validation.\n"
         )
     )
+    handoff_section = (
+        "\n\n# Open question from the previous attempt\n\n"
+        "The previous worker on this order ended blocked on the question below. Resolve "
+        "it, or state explicitly in your result why it does not apply:\n\n"
+        f"{carried_question}\n"
+        if carried_question
+        else ""
+    )
     suffix = (
         "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
         "The Recruiter, not this worker, publishes completion artifacts. "
@@ -4331,7 +4440,7 @@ def _write_worker_instructions(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(original.rstrip() + suffix)
+        temporary.write_text(original.rstrip() + handoff_section + suffix)
         os.replace(temporary, destination)
     except OSError as e:
         temporary.unlink(missing_ok=True)
@@ -4441,6 +4550,37 @@ AGENT_WAIT_PANE_PROBE_SECONDS = 15.0
 # writer to finish its bundle; short enough that a wedged order resolves in seconds.
 COMPLETION_IMPASSE_SETTLE_SECONDS = 10.0
 
+# When a live Sentinel supervises a request, its closeout file is THE teardown trigger:
+# a staged artifact bundle no longer ends the wait (the Sentinel verifies it in LANDING
+# and writes COMPLETE), and a positively dead worker pane/process — or the mechanical
+# never-started deadline, whose LIFTOFF the Sentinel owns — opens this bounded window
+# for the Sentinel to land its closeout before the mechanical path takes over. The hard
+# request timeout backstop is unchanged and caps the window too.
+SENTINEL_CLOSEOUT_GRACE_SECONDS = 180.0
+
+
+def _await_sentinel_closeout_after_worker_gone(
+    sentinel_watch: Any, deadline: float
+) -> bool:
+    """Bounded closeout window under Sentinel supervision, opened by proven worker
+    death/exit or by the mechanical never-started deadline.
+
+    Returns True when a COMPLETE closeout ended the wait (the ordinary completion reactor
+    validates from there); False when the window — or the request deadline — lapsed with
+    no closeout, handing the request back to the mechanical path that opened the window.
+    Typed closeout faults (NEVER_STARTED / STALLED / FINALIZATION_FAILED) propagate.
+    """
+    grace_deadline = min(
+        deadline, time.monotonic() + SENTINEL_CLOSEOUT_GRACE_SECONDS
+    )
+    while True:
+        if sentinel_watch.poll() == "complete":
+            return True
+        remaining = grace_deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(COMPLETION_MONITOR_POLL_SECONDS, remaining))
+
 
 def _wait_for_interactive_completion(
     worker_pane: str,
@@ -4448,6 +4588,8 @@ def _wait_for_interactive_completion(
     timeout_ms: int,
     monitor_finalized: threading.Event | None,
     *,
+    never_started_abort: threading.Event | None = None,
+    sentinel_watch: Any | None = None,
     herdr_session: str | None = None,
 ) -> bool:
     """Wait for durable artifacts or proven interactive worker disappearance.
@@ -4456,14 +4598,39 @@ def _wait_for_interactive_completion(
     assignment ended: Claude may still be waiting on background work and can begin another turn.
     Interactive harnesses therefore ignore that status. Only the typed artifact monitor, a
     positively absent pane/process, or the request deadline can end this wait.
+
+    Under a LIVE Sentinel the closeout file is the teardown trigger instead: the artifact
+    monitor no longer ends the wait (the Sentinel verifies the staged bundle in LANDING
+    and writes COMPLETE), and proven pane/process death first opens the bounded closeout
+    window before the mechanical death path takes over. The hard deadline is unchanged.
     """
     if monitor_finalized is None:
         raise RecruiterError(
             "interactive worker completion requires its typed artifact monitor"
         )
+    supervised = sentinel_watch is not None and sentinel_watch.supervising
     deadline = time.monotonic() + timeout_ms / 1000
     next_liveness_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while True:
+        # `poll` returns "complete" (validated landing), raises a typed wait-ending fault
+        # (NEVER_STARTED / STALLED / FINALIZATION_FAILED), or keeps waiting. Every
+        # mechanical path below remains, so a dead Sentinel changes nothing (backstop).
+        # Polled BEFORE the mechanical never-started abort: for supervised attempts the
+        # Sentinel owns LIFTOFF and its NEVER_STARTED closeout is the trigger.
+        if sentinel_watch is not None and sentinel_watch.poll() == "complete":
+            return False
+        if never_started_abort is not None and never_started_abort.is_set():
+            # Under a live Sentinel the mechanical deadline opens the same bounded
+            # closeout grace window as worker death; only a lapsed window (or a
+            # degraded/never-hired Sentinel) lets the mechanical abort end the wait.
+            if supervised and _await_sentinel_closeout_after_worker_gone(
+                sentinel_watch, deadline
+            ):
+                return False
+            raise WorkerNeverStartedError(
+                f"interactive worker {worker_pane} recorded no first observable action "
+                "within its startup-activity deadline of proven health"
+            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise AgentWaitTimeout(
@@ -4481,12 +4648,20 @@ def _wait_for_interactive_completion(
                 herdr_session=herdr_session,
                 confirmations=2,
             ):
+                if supervised and _await_sentinel_closeout_after_worker_gone(
+                    sentinel_watch, deadline
+                ):
+                    return False
                 return True
         wait_seconds = min(
             remaining,
             max(0.0, next_liveness_probe - time.monotonic()),
         )
-        if monitor_finalized.wait(wait_seconds):
+        if supervised:
+            # Supervised: a staged bundle alone must not end the wait — the Sentinel
+            # verifies it in LANDING and its COMPLETE closeout is what ends the wait.
+            time.sleep(min(wait_seconds, 1.0))
+        elif monitor_finalized.wait(wait_seconds):
             return False
 
 
@@ -4497,6 +4672,8 @@ def _wait_for_agent_status(
     *,
     completion_style: str = "exec",
     expected_process: str | None = None,
+    never_started_abort: threading.Event | None = None,
+    sentinel_watch: Any | None = None,
     herdr_session: str | None = None,
 ) -> bool:
     """Wait according to harness completion semantics.
@@ -4515,6 +4692,8 @@ def _wait_for_agent_status(
             expected_process,
             timeout_ms,
             monitor_finalized,
+            never_started_abort=never_started_abort,
+            sentinel_watch=sentinel_watch,
             herdr_session=herdr_session,
         )
     if completion_style != "exec":
@@ -4535,6 +4714,7 @@ def _wait_for_agent_status(
             process.communicate()
 
     _herdr_available()
+    supervised = sentinel_watch is not None and sentinel_watch.supervising
     deadline = time.monotonic() + timeout_ms / 1000
     args = (
         "wait",
@@ -4552,6 +4732,31 @@ def _wait_for_agent_status(
     pane_missing_streak = 0
     next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while process.poll() is None:
+        # Sentinel closeout polled BEFORE the mechanical never-started abort: for
+        # supervised attempts the Sentinel owns LIFTOFF and its NEVER_STARTED closeout
+        # is the trigger.
+        if sentinel_watch is not None:
+            try:
+                closeout_action = sentinel_watch.poll()
+            except (SentinelEndedRequest, WorkerNeverStartedError):
+                _terminate(process)
+                raise
+            if closeout_action == "complete":
+                _terminate(process)
+                return False
+        if never_started_abort is not None and never_started_abort.is_set():
+            _terminate(process)
+            # Under a live Sentinel the mechanical deadline opens the same bounded
+            # closeout grace window as worker death; only a lapsed window (or a
+            # degraded/never-hired Sentinel) lets the mechanical abort end the wait.
+            if supervised and _await_sentinel_closeout_after_worker_gone(
+                sentinel_watch, deadline
+            ):
+                return False
+            raise WorkerNeverStartedError(
+                f"exec worker {worker_pane} recorded no first observable action "
+                "within its startup-activity deadline of proven health"
+            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate(process)
@@ -4564,25 +4769,43 @@ def _wait_for_agent_status(
                 pane_missing_streak += 1
                 if pane_missing_streak >= 2:
                     _terminate(process)
+                    if supervised and _await_sentinel_closeout_after_worker_gone(
+                        sentinel_watch, deadline
+                    ):
+                        return False
                     return True
             else:
                 pane_missing_streak = 0
         wait_seconds = min(COMPLETION_MONITOR_POLL_SECONDS, remaining)
-        if monitor_finalized is not None and monitor_finalized.wait(wait_seconds):
-            _terminate(process)
-            return False
-        if monitor_finalized is None:
+        if monitor_finalized is not None and not supervised:
+            # Unsupervised: the typed artifact monitor may end the wait directly.
+            if monitor_finalized.wait(wait_seconds):
+                _terminate(process)
+                return False
+        else:
+            # Supervised (or monitor-less): staged artifacts alone never end the wait —
+            # the Sentinel verifies them in LANDING and its closeout ends the wait above.
             time.sleep(wait_seconds)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
+        # An exec worker's finished turn is its exit. Under supervision the Sentinel
+        # still owns the teardown: give it the bounded closeout window first.
+        if supervised and _await_sentinel_closeout_after_worker_gone(
+            sentinel_watch, deadline
+        ):
+            return False
         return True
-    if monitor_finalized is not None and monitor_finalized.is_set():
+    if monitor_finalized is not None and monitor_finalized.is_set() and not supervised:
         return False
     # A pane that was already gone when the wait started makes herdr fail fast with a decode
     # error. Confirm with two positive probes and fall through to the completion reactor.
     if _worker_pane_confirmed_gone(
         worker_pane, herdr_session=herdr_session, confirmations=2
     ):
+        if supervised and _await_sentinel_closeout_after_worker_gone(
+            sentinel_watch, deadline
+        ):
+            return False
         return True
     raise RecruiterError(f"{' '.join(argv)} failed: {(stderr or stdout).strip()}")
 
@@ -4622,11 +4845,21 @@ def _write_blocked_result(
     result_path: str | Path | None = None,
     *,
     preserve_valid: bool = True,
+    epilogue: dict | None = None,
+    blocking_question: str | None = None,
 ) -> dict:
     """Return a valid fallback result, writing it when no valid worker result exists.
 
     This deliberately does not suppress filesystem failures.  Callers may emit DONE or publish
     terminal ledger state only after this result has been durably promoted by the lease owner.
+
+    `epilogue` is the harness-assembled evidence record (commits, files touched, staged
+    artifact files) frozen into the result, so a worker that did work but skipped its bundle
+    can never produce an empty blocked result.
+
+    `blocking_question` is the Sentinel-relayed cold handoff: the question a done-but-blocked
+    worker ended on, frozen into the published result so the requester and any retry brief
+    see it without reading the ledger.
     """
     path = Path(result_path or order["result_path"])
     if preserve_valid and path.is_file():
@@ -4642,6 +4875,12 @@ def _write_blocked_result(
         "revisit": [stage] if stage in RECOGNIZED_STAGE_IDS else [],
         "reason": f"recruiter: {reason}",
         "full_log": "(none — worker did not run to completion)",
+        **({"epilogue": epilogue} if epilogue is not None else {}),
+        **(
+            {"blocking_question": blocking_question}
+            if blocking_question is not None
+            else {}
+        ),
     }
     JobLedger._write_json(path, result)
     return load_result(path, expected_order_id=order["order_id"])
@@ -4668,11 +4907,13 @@ SALVAGE_GIT_LOG_LIMIT = 50
 SALVAGE_OUTCOMES = ("salvageable", "ambiguous", "empty")
 
 
-def _salvage_staged_result_state(staging_path: Path, order: dict) -> str:
-    """Classify the staged result.json as absent, unparseable, invalid, or valid.
+def _salvage_staged_result_state(staging_path: Path, order: dict, manifest: Any) -> str:
+    """Classify the staged result.json: absent, unparseable, invalid, inconsistent, or valid.
 
     An unreadable staging directory is a real fault and propagates: `absent` must mean the
-    file is not there, never that Python could not look.
+    file is not there, never that Python could not look. `inconsistent` means the result
+    parses but fails the verdict/artifact consistency gate — a `passed` self-report the
+    worker's own artifact files contradict is never salvaged as "a valid staged result".
     """
     if not staging_path.is_file():
         return "absent"
@@ -4682,9 +4923,17 @@ def _salvage_staged_result_state(staging_path: Path, order: dict) -> str:
     except json.JSONDecodeError:
         return "unparseable"
     try:
-        parse_result(text, expected_order_id=order["order_id"])
+        result = parse_result(text, expected_order_id=order["order_id"])
     except ContractError:
         return "invalid"
+    report_texts: dict[str, str] = {}
+    for item in manifest.artifacts:
+        if item.kind in ("compacted", "handoff") and item.staging_path.is_file():
+            report_text = item.staging_path.read_text(encoding="utf-8")
+            if report_text.strip():
+                report_texts[item.kind] = report_text
+    if completion.verdict_artifact_consistency_error(result, report_texts) is not None:
+        return "inconsistent"
     return "valid"
 
 
@@ -4814,6 +5063,592 @@ def commit_exists_in_worktree(worktree: str, sha: str) -> bool:
     return completed.returncode == 0
 
 
+# --- startup marker (gate: never-started) ------------------------------------
+#
+# After Python proves worker health, a small watcher records the worker's first observable
+# action in the ledger. "Accepted but no first action within the deadline" then classifies as
+# a distinct typed `never-started` terminal instead of the generic lifecycle-blocked bucket,
+# and the Recruiter auto-retries that outcome once. This ledger marker is also the plumbing a
+# per-request Sentinel's liftoff check later reads.
+
+FIRST_ACTION_EVENT = "worker-first-action"
+NEVER_STARTED_EVENT = "worker-never-started"
+FIRST_ACTION_WATCH_DEGRADED_EVENT = "worker-first-action-watch-degraded"
+_STARTUP_MARKER_EVENTS = (
+    FIRST_ACTION_EVENT,
+    NEVER_STARTED_EVENT,
+    FIRST_ACTION_WATCH_DEGRADED_EVENT,
+)
+_ATTEMPT_BEGIN_EVENTS = (
+    "never-started-auto-retry",
+    "startup-rescue-relaunch",
+    "pane-launching",
+)
+_ATTEMPT_EVIDENCE_EVENTS = frozenset((*_STARTUP_MARKER_EVENTS, *_ATTEMPT_BEGIN_EVENTS))
+
+
+def _first_action_event(ledger: JobLedger, key: str) -> dict | None:
+    """The recorded first-activity marker for this request, or None when none was ever seen."""
+    for item in ledger.events(key):
+        if item.get("event") == FIRST_ACTION_EVENT:
+            return item
+    return None
+
+
+def _worker_attempt_evidence(event: dict) -> int | None:
+    """Return one worker-attempt fact from a relevant ledger event, if it carries one."""
+    event_name = event.get("event")
+    if event_name not in _ATTEMPT_EVIDENCE_EVENTS:
+        return None
+    if event_name == "pane-launching" and event.get("role") != "worker":
+        return None
+    attempt = event.get("attempt")
+    if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1:
+        return attempt
+    return None
+
+
+def _never_started_deadline_fired(
+    ledger: JobLedger, key: str, *, attempt: int | None
+) -> bool:
+    """Whether the deadline proof authorizing a `never-started` mint exists FOR THIS ATTEMPT.
+
+    The deadline event is attempt-scoped: each watcher stamps its worker attempt on the
+    event, and a prior attempt's proof must never authorize a later attempt's mint. A
+    live runner passes its current `attempt` and only that attempt's own event counts.
+    The reconciler runs after the runner died and cannot know the attempt (`None`); there
+    the latest startup marker must still be a deadline AND its attempt must equal the
+    request's highest attempt known from every attempt-bearing marker, auto-retry,
+    startup-rescue, and worker-launch event. Thus a later attempt that dies before its
+    watcher emits a marker still invalidates the prior attempt's deadline proof.
+    """
+    events = ledger.events(key)
+    markers = [
+        item for item in events if item.get("event") in _STARTUP_MARKER_EVENTS
+    ]
+    if attempt is not None:
+        return any(
+            item.get("event") == NEVER_STARTED_EVENT
+            and item.get("attempt") == attempt
+            for item in markers
+        )
+    if not markers or markers[-1].get("event") != NEVER_STARTED_EVENT:
+        return False
+    deadline_attempt = _worker_attempt_evidence(markers[-1])
+    known_attempts = [
+        known
+        for item in events
+        if (known := _worker_attempt_evidence(item)) is not None
+    ]
+    return (
+        deadline_attempt is not None
+        and bool(known_attempts)
+        and deadline_attempt == max(known_attempts)
+    )
+
+
+def _watch_first_action(
+    ledger: JobLedger,
+    key: str,
+    worker_pane: str,
+    staged_artifact_paths: Sequence[Path],
+    abort_event: threading.Event,
+    stop_event: threading.Event,
+    *,
+    abort_on_deadline: bool,
+    herdr_session: str | None,
+    attempt: int,
+    on_first_action: Callable[[dict], None] | None = None,
+    deadline_ms: int | None = None,
+) -> None:
+    """Record the worker's first observable action, or its proven absence, in the ledger.
+
+    Activity evidence, cheapest first: a Herdr agent status proving an acted turn, ANY
+    staged artifact file (result.json, compacted.md, handoff.md, …— a worker that staged
+    anything at all has demonstrably acted), or the pane's recent output changing from
+    its post-health baseline. The watcher only ever records evidence; the deadline
+    verdict aborts the runner's wait (via `abort_event`) only when `abort_on_deadline`
+    is set AND enough successful idle probes back the claim — a pane that merely could
+    not be read is never aborted over it.
+
+    `attempt` is the worker attempt this watcher is duty-bound to; it is stamped on
+    every recorded marker so a prior attempt's deadline proof can never authorize a
+    later attempt's `never-started` mint. `deadline_ms` is the caller's clamped
+    effective deadline (`_first_action_deadline_ms`); None keeps the standard module
+    deadline.
+    """
+    effective_deadline_ms = (
+        FIRST_ACTION_DEADLINE_MS if deadline_ms is None else deadline_ms
+    )
+    deadline = time.monotonic() + effective_deadline_ms / 1000
+    baseline_output: str | None = None
+    idle_probes = 0
+    last_status: object = None
+    while not stop_event.is_set():
+        signal: str | None = None
+        try:
+            pane = (
+                _herdr_json("pane", "get", worker_pane, herdr_session=herdr_session)
+                .get("result", {})
+                .get("pane", {})
+            )
+            last_status = pane.get("agent_status") if isinstance(pane, dict) else None
+            if last_status in FIRST_ACTION_ACTIVITY_STATUSES:
+                signal = "agent-status"
+            elif any(path.is_file() for path in staged_artifact_paths):
+                signal = "staged-artifact"
+            else:
+                output = _pane_recent_output(worker_pane, herdr_session=herdr_session)
+                if baseline_output is None:
+                    baseline_output = output
+                elif output != baseline_output:
+                    signal = "pane-output-changed"
+                else:
+                    idle_probes += 1
+        except (RecruiterError, OSError):
+            # A probe fault (pane momentarily unreadable, herdr hiccup) is not evidence of
+            # anything. The runner's own liveness checks own pane death; keep probing, and
+            # the min-idle-probes floor below keeps an unreadable pane from ever aborting.
+            pass
+        if signal is not None:
+            marker = {
+                "signal": signal,
+                "agent_status": last_status,
+                "worker_pane": worker_pane,
+                "attempt": attempt,
+            }
+            ledger._event(key, FIRST_ACTION_EVENT, **marker)
+            if on_first_action is not None:
+                # Liftoff address relay: the requester learns the worker's live pane the
+                # moment a first real action is proven. Fail-loud — a raised notify is a
+                # visible thread traceback, and the durable marker above already landed.
+                on_first_action(marker)
+            return
+        if time.monotonic() >= deadline:
+            if idle_probes < FIRST_ACTION_MIN_IDLE_PROBES:
+                ledger._event(
+                    key,
+                    FIRST_ACTION_WATCH_DEGRADED_EVENT,
+                    reason="startup-activity probes could not observe the pane",
+                    idle_probes=idle_probes,
+                    worker_pane=worker_pane,
+                    attempt=attempt,
+                )
+                return
+            ledger._event(
+                key,
+                NEVER_STARTED_EVENT,
+                deadline_ms=effective_deadline_ms,
+                idle_probes=idle_probes,
+                agent_status=last_status,
+                worker_pane=worker_pane,
+                attempt=attempt,
+            )
+            if abort_on_deadline:
+                abort_event.set()
+            return
+        stop_event.wait(FIRST_ACTION_PROBE_SECONDS)
+
+
+def _epilogue_evidence(order: dict, manifest: Any) -> dict[str, object]:
+    """The harness epilogue: mechanical evidence of what a worker's run left behind.
+
+    Frozen into every Python-authored blocked result so a worker that stopped without
+    finalizing can no longer produce an EMPTY terminal: landed commits (window anchored on
+    the durable request.json), files touched (unattributed, evidence only), and which staged
+    artifact files the worker actually wrote. This runs while authoring a terminal bundle,
+    where an evidence-collection fault must not prevent terminalization — each failed item is
+    recorded as its own `..._error` string instead of raising.
+    """
+    staging_root = manifest.artifact("result").staging_path.parent
+    request_json = staging_root.parents[1] / "request.json"
+    evidence: dict[str, object] = {
+        "attribution": "unattributed — mechanical epilogue evidence, never a verdict",
+    }
+    # Terminal publication is an invariant this evidence must never break (a supervisor
+    # start failure still owes the requester a blocked terminal), so the collection as a
+    # whole is guarded: any fault is RECORDED in the evidence — never silent, never fatal.
+    try:
+        evidence["staged_artifacts"] = [
+            {
+                "kind": item.kind,
+                "path": str(item.staging_path),
+                "bytes": item.staging_path.stat().st_size,
+            }
+            for item in manifest.artifacts
+            if item.staging_path.is_file()
+        ]
+        worktree = _git_worktree_root(order["cwd"])
+        evidence["git_worktree"] = worktree
+        if worktree is None:
+            return evidence
+        since_ns = request_json.stat().st_mtime_ns if request_json.is_file() else None
+        evidence["window_started_at_ns"] = since_ns
+        try:
+            evidence["landed_commits"] = (
+                _landed_commits_since(worktree, since_ns)
+                if since_ns is not None
+                else []
+            )
+        except (RecruiterError, OSError) as error:
+            evidence["landed_commits_error"] = str(error)
+        try:
+            evidence["dirty_worktree"] = _dirty_worktree_evidence(worktree)
+        except (RecruiterError, OSError) as error:
+            evidence["dirty_worktree_error"] = str(error)
+    except Exception as error:  # recorded fault, not a swallowed one — see above
+        evidence["collection_error"] = f"{type(error).__name__}: {error}"
+    return evidence
+
+
+# --- Sentinel (Phase 2) -------------------------------------------------------
+#
+# One haiku Herdr pane per request, duty-bound to that request's worker: LIFTOFF (corroborate
+# the first tool action, or NEVER_STARTED), PULSE (wake every 15 minutes), LANDING (steer
+# finalization by dialogue, verify the bundle on disk, never believe the worker's word), then
+# one typed closeout. For a sentinel-supervised request the Recruiter's wait additionally
+# watches that closeout file as the teardown trigger; the mechanical paths (validated staged
+# bundle, proven pane/process exit, hard deadline backstop) all remain, so a dead Sentinel
+# changes nothing. Python re-verifies every closeout citation before it counts, and a
+# COMPLETE closeout publishes `passed` only after the staged bundle independently passes the
+# existing bundle validation — a fooled Sentinel may end a request early but can never cause
+# a false `passed`.
+
+SENTINEL_CLOSEOUT_EVENT = "sentinel-closeout"
+SENTINEL_PROMPT_IDLE_TIMEOUT_MS = 120_000
+# How many extra landing rounds an invalid COMPLETE closeout may buy the Sentinel before the
+# ordinary completion reactor (one same-worker repair, then blocked) takes over.
+SENTINEL_LANDING_RETRY_LIMIT = 1
+
+
+def _sentinel_enabled(order: dict) -> bool:
+    """Default-on per request; `sentinel: false` opts out. Watchdogs and retained review
+    workers keep their own supervision protocols and never get one."""
+    return (
+        order.get("sentinel") is not False
+        and order.get("agent") not in WATCHDOG_AGENTS
+        and order.get("completion_policy") != "requester_release"
+    )
+
+
+def _sentinel_closeout_path(ledger: JobLedger, key: str, attempt: int) -> Path:
+    """Each worker attempt gets its own closeout file: a retry's fresh Sentinel must never
+    be able to read (or race) the previous attempt's terminal claim."""
+    return ledger.request_dir(key) / "sentinel" / f"attempt-{attempt}" / "closeout.json"
+
+
+def _start_sentinel(
+    ledger: JobLedger,
+    key: str,
+    token: str,
+    order: dict,
+    config: Any,
+    worker_pane: str,
+    closeout_path: Path,
+    generation: int,
+    *,
+    herdr_session: str,
+    liftoff_deadline_ms: int,
+) -> dict[str, object]:
+    """Hire one Sentinel pane beside its worker. Failure propagates; callers degrade.
+
+    `liftoff_deadline_ms` is the EFFECTIVE clamped first-action deadline for this order
+    (`_first_action_deadline_ms`), threaded into the brief so the Sentinel's LIFTOFF
+    instructions always match the mechanical deadline.
+    """
+    request_id = lifecycle.request_identity(order)
+    closeout_path.unlink(missing_ok=True)
+    brief_path = closeout_path.with_name("brief.md")
+    _write_text_atomic(
+        brief_path,
+        llm_management.sentinel_brief(
+            request_id,
+            order["order_id"],
+            worker_pane,
+            order["cwd"],
+            closeout_path,
+            liftoff_deadline_ms=liftoff_deadline_ms,
+        ),
+    )
+    command = llm_management.render_role_command(
+        config.sentinel, brief_path, order["cwd"], closeout_path
+    )
+    name = _safe_agent_name("upagent-sentinel", request_id, generation)
+    sentinel_order = {**order, "cockpit_pane": worker_pane}
+    pane, workspace_id, address, launch_id = _start_fenced_ledger_agent(
+        ledger,
+        key,
+        token,
+        "sentinel",
+        name,
+        sentinel_order,
+        command,
+        split_direction="down",
+        tab_role="oversight",
+        herdr_session=herdr_session,
+        metadata={"generation": generation, "worker_pane": worker_pane},
+    )
+    _resize_started_pane(
+        pane,
+        split_direction="down",
+        target_fraction=SUPPORT_PANE_FRACTION,
+        role="sentinel",
+        herdr_session=herdr_session,
+    )
+    try:
+        _wait_for_agent_health(
+            pane,
+            expected_agent=config.sentinel.expected_agent,
+            expected_process=config.sentinel.expected_process,
+            expected_cwd=order["cwd"],
+            timeout_ms=config.startup_timeout_ms,
+            herdr_session=herdr_session,
+        )
+    except (RecruiterError, OSError):
+        cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
+        ledger.mark_launch_closed(
+            key, launch_id, pane, cleanup, expected_lease_token=token
+        )
+        raise
+    ledger._event(
+        key,
+        "sentinel-hired",
+        sentinel_pane=pane,
+        worker_pane=worker_pane,
+        closeout_path=str(closeout_path),
+    )
+    return {
+        "address": address,
+        "closeout_path": closeout_path,
+        "launch_id": launch_id,
+        "pane": pane,
+        "workspace_id": workspace_id,
+    }
+
+
+def _sentinel_blocking_question(ledger: JobLedger, key: str) -> str | None:
+    """The latest closeout-carried blocking question for this request, or None.
+
+    The cold-handoff piece of the plan: a done-but-blocked worker's question must survive
+    where requesters and retry tooling actually look — the published result.json, the
+    receipt, and any Python-composed retry brief — never only as ledger spelunking.
+    """
+    question: str | None = None
+    for item in ledger.events(key):
+        if item.get("event") == SENTINEL_CLOSEOUT_EVENT:
+            value = item.get("blocking_question")
+            if isinstance(value, str) and value.strip():
+                question = value
+    return question
+
+
+def _closeout_published_reason(
+    closeout: dict, corroborated: list[str], uncorroborated: list[str]
+) -> str:
+    """Build the wait-ending fault message — the prose the published blocked reason is
+    made from, so the authority rule applies HERE: only Python-corroborated evidence may
+    speak plainly. Corroborated citations are listed separately as checked fact; the
+    Sentinel's interpretation (and any STALLED progress prose) always travels but is
+    LLM-authored and never mechanically checkable, so it ALWAYS carries its explicit
+    uncorroborated marker — a citation that happens to check out must never launder the
+    prose around it. When zero citations survive, the mechanical epilogue Python attaches
+    to the blocked bundle is named as the authoritative record.
+    """
+    marker = " (uncorroborated)"
+    parts: list[str] = []
+    if corroborated:
+        parts.append("Python-verified citations: " + ", ".join(corroborated))
+    else:
+        parts.append(
+            "no sentinel citation survived Python verification — the authoritative "
+            "evidence is the mechanical epilogue attached to this result"
+        )
+    parts.append(f"sentinel interpretation{marker}: {closeout['interpretation']}")
+    for field in ("progress_so_far", "last_alive"):
+        value = closeout.get(field)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{field}{marker}: {value}")
+    if uncorroborated:
+        parts.append(
+            "uncorroborated citations (discarded): " + ", ".join(uncorroborated)
+        )
+    return "; ".join(parts)
+
+
+class _SentinelWatch:
+    """Poll one closeout file from inside the Recruiter's completion wait.
+
+    `poll()` returns None (keep waiting) or "complete" (end the wait and let the ordinary
+    completion reactor validate), and raises the typed wait-ending faults for the other
+    outcomes. Called only from the runner's own wait loop, so its state needs no lock.
+    """
+
+    def __init__(
+        self,
+        ledger: JobLedger,
+        key: str,
+        order: dict,
+        manifest: Any,
+        closeout_path: Path,
+        sentinel_state: dict[str, object],
+        *,
+        herdr_session: str | None = None,
+    ):
+        self.ledger = ledger
+        self.key = key
+        self.order = order
+        self.manifest = manifest
+        self.closeout_path = closeout_path
+        # Shared with cmd_run_job: the live Sentinel's pane/address once hired.
+        self.sentinel_state = sentinel_state
+        self.herdr_session = herdr_session
+        self._landing_rounds_granted = 0
+        self._invalid_reported = False
+
+    @property
+    def supervising(self) -> bool:
+        """True while a live Sentinel is actually hired for this attempt.
+
+        Only a live Sentinel may suppress the mechanical wait-ending paths (artifact
+        monitor, immediate pane-death teardown): a degraded hire keeps this closeout
+        path watched best-effort, but a never-hired Sentinel must not be able to strand
+        a finished worker until the hard timeout.
+        """
+        return isinstance(self.sentinel_state.get("address"), str)
+
+    def poll(self) -> str | None:
+        if not self.closeout_path.is_file():
+            return None
+        request_id = lifecycle.request_identity(self.order)
+        try:
+            closeout = contracts_sentinel.load_closeout(
+                self.closeout_path, request_id, self.order["order_id"]
+            )
+        except (OSError, SentinelContractError) as error:
+            # An LLM writes this file, so a partial write may parse on the next poll.
+            # Report once and keep waiting: the hard timeout backstop owns a closeout
+            # that never becomes valid, and teardown never fires on a malformed claim.
+            if not self._invalid_reported:
+                self._invalid_reported = True
+                self.ledger._event(
+                    self.key,
+                    "sentinel-closeout-invalid",
+                    reason=str(error),
+                    path=str(self.closeout_path),
+                )
+            return None
+        self._invalid_reported = False
+        worktree = _git_worktree_root(self.order["cwd"])
+        # A path citation only corroborates inside this request's own territory: the
+        # attempt's worktree (or bare cwd) subtree and the request's ledger directory.
+        # /etc/passwd exists everywhere and proves nothing about this request.
+        scope_roots = (
+            worktree if worktree is not None else self.order["cwd"],
+            self.ledger.request_dir(self.key),
+        )
+        corroborated, uncorroborated = contracts_sentinel.verify_citations(
+            cast(list, closeout["citations"]),
+            file_exists=lambda path: Path(path).is_file(),
+            commit_exists=lambda sha: worktree is not None
+            and commit_exists_in_worktree(worktree, sha),
+            scope_roots=scope_roots,
+        )
+        outcome = closeout["outcome"]
+        self.ledger._event(
+            self.key,
+            SENTINEL_CLOSEOUT_EVENT,
+            outcome=outcome,
+            interpretation=closeout["interpretation"],
+            corroborated_citations=corroborated,
+            uncorroborated_citations=uncorroborated,
+            blocking_question=closeout.get("blocking_question"),
+            exchanges=len(cast(list, closeout["exchanges"])),
+            first_action_recorded=_first_action_event(self.ledger, self.key)
+            is not None,
+        )
+        reason = _closeout_published_reason(closeout, corroborated, uncorroborated)
+        if outcome == "NEVER_STARTED":
+            # Routes through the same triage as the mechanical deadline: the typed
+            # `never-started` terminal is minted only when the salvage facts independently
+            # agree — the recorded worker-never-started deadline event, no staged result,
+            # no landed commit, no recorded first action, and a clean worktree. A Sentinel
+            # claim without the deadline proof lands in the ordinary blocked path.
+            raise WorkerNeverStartedError(
+                f"sentinel closeout NEVER_STARTED: {reason}"
+            )
+        if outcome == "STALLED":
+            raise SentinelStalledError(
+                f"sentinel closeout STALLED: {reason}",
+                closeout,
+            )
+        if outcome == "FINALIZATION_FAILED":
+            raise SentinelFinalizationFailedError(
+                f"sentinel closeout FINALIZATION_FAILED: {reason}",
+                closeout,
+            )
+        # COMPLETE — never on the Sentinel's word. The staged bundle must pass the same
+        # mechanical validation as any other completion before the wait may end on it.
+        try:
+            completion.validate_bundle(
+                self.manifest,
+                load_result=contracts.result_loader(self.order),
+                load_answer=contracts_consult.load_answer,
+            )
+        except CompletionError as error:
+            address = self.sentinel_state.get("address")
+            if (
+                self._landing_rounds_granted < SENTINEL_LANDING_RETRY_LIMIT
+                and isinstance(address, str)
+            ):
+                # Reject and grant exactly one more landing round: the Sentinel claimed a
+                # verified bundle that does not validate, so its claim is archived and it
+                # gets one chance to steer the still-live worker to a real bundle.
+                self._landing_rounds_granted += 1
+                rejected = self.closeout_path.with_name(
+                    f"closeout.rejected-{self._landing_rounds_granted}.json"
+                )
+                os.replace(self.closeout_path, rejected)
+                self.ledger._event(
+                    self.key,
+                    "sentinel-complete-rejected",
+                    reason=str(error),
+                    archived=str(rejected),
+                )
+                try:
+                    _submit_agent_prompt(
+                        address,
+                        "SENTINEL_LANDING_RETRY: your COMPLETE closeout was rejected — "
+                        f"the staged bundle did not validate: {error}. Run one more "
+                        "landing round with the worker, verify the bundle files on "
+                        "disk yourself, and write a fresh closeout to "
+                        f"{self.closeout_path}.",
+                        idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                        herdr_session=self.herdr_session,
+                    )
+                except (RecruiterError, OSError) as prompt_error:
+                    # An unreachable Sentinel cannot run another landing round. Recorded,
+                    # then handed to the ordinary reactor below — never a silent pass,
+                    # never a blocked request over a supervision-side fault.
+                    self.ledger._event(
+                        self.key,
+                        "sentinel-landing-retry-unavailable",
+                        reason=str(prompt_error),
+                    )
+                    self.ledger._event(
+                        self.key, "sentinel-complete-unvalidated", reason=str(error)
+                    )
+                    return "complete"
+                return None
+            # The extra landing round is spent (or the Sentinel is unreachable). End the
+            # wait and hand the invalid completion to the ordinary reactor, which owns
+            # the one same-worker repair and the blocked fallback — never a silent pass.
+            self.ledger._event(
+                self.key, "sentinel-complete-unvalidated", reason=str(error)
+            )
+            return "complete"
+        return "complete"
+
+
 def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> dict:
     """Look for mechanical proof that a worker's work reached disk before blocking it.
 
@@ -4821,15 +5656,31 @@ def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> 
       - `salvageable` — a positive finding (a commit landed after the order started, or a
         staged result.json that actually validates). Terminalize `salvaged-done`.
       - `ambiguous` — the evidence contradicts itself: a staged result.json that will not
-        validate, or a ledger that recorded artifacts while staging is empty. ONLY this
-        outcome may hire the Rescuer.
-      - `empty` — nothing on disk, nothing in the ledger. Block exactly as before.
+        validate (or fails the verdict/artifact consistency gate), or a ledger that recorded
+        artifacts while staging is empty. ONLY this outcome may hire the Rescuer.
+      - `empty` — nothing on disk, nothing in the ledger. Block exactly as before — unless
+        no first action was ever recorded either AND no staged artifact file of any kind
+        exists, in which case `_salvage_or_blocked` classifies the distinct typed
+        `never-started` terminal.
 
     Every branch returns the concrete evidence (paths, SHAs, event names) so a receipt can
     cite what was actually observed instead of asserting a conclusion.
     """
     staging_path = manifest.artifact("result").staging_path
-    staged_state = _salvage_staged_result_state(staging_path, order)
+    staged_state = _salvage_staged_result_state(staging_path, order, manifest)
+    # Every non-empty staged artifact file, result.json included: the never-started gate
+    # reads this as a side-effect veto — a worker that staged ANY artifact (a compacted.md,
+    # a handoff.md) demonstrably acted, so the typed `never-started` terminal and its
+    # auto-retry are forbidden and the miss routes to the ordinary blocked path, whose
+    # bundle carries the epilogue evidence naming these files.
+    staged_artifact_files: list[dict[str, object]] = []
+    for item in manifest.artifacts:
+        if item.staging_path.is_file():
+            size = item.staging_path.stat().st_size
+            if size > 0:
+                staged_artifact_files.append(
+                    {"kind": item.kind, "path": str(item.staging_path), "bytes": size}
+                )
     events = ledger.events(key)
     artifacts_written = sorted(
         {
@@ -4851,7 +5702,7 @@ def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> 
 
     if landed or staged_state == "valid":
         outcome = "salvageable"
-    elif staged_state in ("unparseable", "invalid") or artifacts_written:
+    elif staged_state in ("unparseable", "invalid", "inconsistent") or artifacts_written:
         outcome = "ambiguous"
     else:
         outcome = "empty"
@@ -4861,11 +5712,14 @@ def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> 
         "synthesis_path": "salvaged-mechanical",
         "staged_result_path": str(staging_path),
         "staged_result_state": staged_state,
+        "staged_artifact_files": staged_artifact_files,
         "git_worktree": worktree,
         "landed_commits": landed,
         "ledger_artifacts_written": artifacts_written,
         "order_started_at_ns": started_at_ns,
-        # Recorded for the receipt only; deliberately excluded from `outcome`.
+        # Deliberately excluded from `outcome` (unattributable dirt is never salvage
+        # success). The never-started gate reads it as a side-effect veto: a dirty
+        # worktree forbids the typed `never-started` terminal and its auto-retry.
         "dirty_worktree": (
             _dirty_worktree_evidence(worktree) if worktree is not None else None
         ),
@@ -4931,6 +5785,55 @@ def _write_salvaged_bundle(order: dict, manifest: Any, reason: str) -> dict:
             manifest,
             reason,
             write_result=lambda path, why: _write_salvaged_result(order, why, path),
+            failure_answer=contracts_consult.failure_answer,
+        ),
+    )
+
+
+def _write_never_started_result(
+    order: dict,
+    reason: str,
+    result_path: str | Path,
+    *,
+    blocking_question: str | None = None,
+) -> dict:
+    """Author the Python-owned `never-started` result. Filesystem failures propagate."""
+    path = Path(result_path)
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "never-started",
+        "revisit": [],
+        "reason": f"recruiter: {reason}",
+        "full_log": "(none — worker never performed an observable first action)",
+        "confirmation": "unconfirmed",
+        **(
+            {"blocking_question": blocking_question}
+            if blocking_question is not None
+            else {}
+        ),
+    }
+    JobLedger._write_json(path, result)
+    return load_result(
+        path, expected_order_id=order["order_id"], allow_synthesized=True
+    )
+
+
+def _write_never_started_bundle(
+    order: dict,
+    manifest: Any,
+    reason: str,
+    *,
+    blocking_question: str | None = None,
+) -> dict:
+    """Regenerate every required staged artifact for a never-started terminal."""
+    return cast(
+        dict,
+        completion.write_never_started_bundle(
+            manifest,
+            reason,
+            write_result=lambda path, why: _write_never_started_result(
+                order, why, path, blocking_question=blocking_question
+            ),
             failure_answer=contracts_consult.failure_answer,
         ),
     )
@@ -5028,7 +5931,7 @@ def _normalize_public_result_revisit(order: dict, manifest: Any) -> None:
     if not isinstance(value, dict):
         return
     verdict = value.get("verdict")
-    if verdict in ("passed", "blocked", "salvaged-done"):
+    if verdict in ("passed", "blocked", "salvaged-done", "never-started"):
         revisit: list[str] = []
     elif verdict == "failed":
         revisit = [order["stage_id"]]
@@ -5065,6 +5968,7 @@ def _complete_typed_bundle(
     worker_address: str | None,
     *,
     herdr_session: str,
+    attempt: int | None = None,
 ) -> tuple[bool, dict | None]:
     """Validate once, request one same-worker repair, then deterministically block if needed.
 
@@ -5072,6 +5976,8 @@ def _complete_typed_bundle(
     repair was rescued from mechanical evidence instead of blocked. This is the LIVE path a
     worker whose pane died mid-wait actually terminalizes through — the reconciler's salvage
     never sees it — so a worker whose commit landed before its pane died is triaged here too.
+    `attempt` is the current worker attempt; it scopes the never-started deadline proof so
+    a prior attempt's event can never authorize this attempt's mint.
     """
     python_blocked = False
     salvage: dict | None = None
@@ -5104,7 +6010,26 @@ def _complete_typed_bundle(
             and offering_catalog.COMPLETION_STYLES.get(harness) == "exec"
         )
         repair_error: Exception | None = None
-        if exec_style:
+        never_started_candidate = (
+            _never_started_deadline_fired(ledger, key, attempt=attempt)
+            and _first_action_event(ledger, key) is None
+        )
+        if never_started_candidate:
+            # A worker that never acted must not be woken by a repair prompt: the one
+            # same-worker repair exists to reach a live worker about ITS work, and there
+            # is no work. Skip straight to triage, which classifies the typed
+            # never-started terminal from the salvage evidence.
+            ledger._event(
+                key,
+                "completion-repair-skipped-never-started",
+                reason=str(first_error),
+            )
+            repair_error = RecruiterError(
+                "no first observable action was ever recorded within the startup "
+                "deadline; the one same-worker repair is skipped for a worker that "
+                "never started"
+            )
+        elif exec_style:
             # Exec-style harnesses (currently codex exec) exit when their turn
             # ends and their agent disappears; prompting the remembered address
             # would only ever produce agent_not_found. Skip straight to
@@ -5148,7 +6073,9 @@ def _complete_typed_bundle(
             except (RecruiterError, CompletionError, OSError) as error:
                 repair_error = error
         if repair_error is not None:
-            if exec_style:
+            if never_started_candidate:
+                reason = f"completion artifacts were never staged: {repair_error}"
+            elif exec_style:
                 reason = (
                     f"completion artifacts were missing or invalid at exec worker "
                     f"exit: {first_error}; {repair_error}"
@@ -5160,7 +6087,9 @@ def _complete_typed_bundle(
                 )
             # Inspect for salvageable work BEFORE authoring anything: both terminal bundles
             # overwrite the very staging directory the inspection reads.
-            triaged = _salvage_or_blocked(ledger, key, order, manifest, reason)
+            triaged = _salvage_or_blocked(
+                ledger, key, order, manifest, reason, attempt=attempt
+            )
             result = triaged["result"]
             # Carry the salvage record whether the order was salvaged or remained blocked
             # after inspection — `_salvage_or_blocked` always returns finalize_kwargs worth
@@ -6204,6 +7133,9 @@ def _run_order(
     start_worker_agent: Callable[..., tuple[str, str | None, str]] | None = None,
     artifact_manifest: Any | None = None,
     review_generation: int = 1,
+    never_started_abort: threading.Event | None = None,
+    sentinel_watch: Any | None = None,
+    carried_blocking_question: str | None = None,
 ) -> tuple[int, dict, dict[str, object]]:
     """Run a worker and return its valid private result without publishing terminal state.
 
@@ -6250,6 +7182,7 @@ def _run_order(
             effective_instructions,
             artifact_manifest,
             review_generation,
+            carried_question=carried_blocking_question,
         )
         execution_order["instructions_path"] = str(effective_instructions)
         launch = resolve_launch_command(execution_order, roster)
@@ -6312,6 +7245,8 @@ def _run_order(
                     monitor_finalized,
                     completion_style=completion_style,
                     expected_process=expected_process,
+                    never_started_abort=never_started_abort,
+                    sentinel_watch=sentinel_watch,
                     herdr_session=session,
                 )
             except AgentWaitTimeout as error:
@@ -6386,37 +7321,62 @@ def _run_order(
         # A dedicated manager's explicit refusal is a ruling, not a launch flake — callers
         # must not auto-relaunch against it.
         startup_rejected = isinstance(e, StartupRejectedByManager)
-        # A filesystem failure writing the fallback propagates.  Without a valid result, the
-        # caller must not publish terminal state or DONE.
-        try:
-            # The order's own result contract applies here too: preserving a review result
-            # that lacks its validated verdict_document would republish exactly the
-            # unusable "passed" this contract exists to prevent.
-            existing_result = contracts.result_loader(order)(
-                worker_result_path, expected_order_id=order_id
-            )
-        except ContractError:
-            existing_result = None
-        preserve_existing = existing_result is not None and _may_preserve_worker_result(
-            order, existing_result, startup_validated=startup_validated
-        )
-        if preserve_existing:
-            result = cast(dict, existing_result)
-        else:
-            if artifact_manifest is None:
-                raise CompletionError(
-                    "worker fallback has no required typed artifact manifest"
-                ) from e
-            result = _write_required_blocked_bundle(order, artifact_manifest, str(e))
-        fell_back = not preserve_existing
-        if fell_back:
+        if isinstance(e, WorkerNeverStartedError):
+            # Leave staging untouched: the completion reactor's salvage triage must read the
+            # worker's (absent) leftovers to classify the distinct typed `never-started`
+            # terminal. Authoring a blocked bundle here would make the reactor accept it and
+            # bury the classification in the generic lifecycle-blocked bucket.
+            fell_back = True
             command_runtime.write_stderr(
-                f"recruiter: order {order_id} fell back to blocked: {e}\n"
+                f"recruiter: order {order_id} aborted as never-started: {e}\n"
             )
         else:
-            command_runtime.write_stderr(
-                f"recruiter: order {order_id} kept existing worker result after Recruiter wait fault: {e}\n"
+            # A filesystem failure writing the fallback propagates.  Without a valid result,
+            # the caller must not publish terminal state or DONE.
+            try:
+                # The order's own result contract applies here too: preserving a review result
+                # that lacks its validated verdict_document would republish exactly the
+                # unusable "passed" this contract exists to prevent.
+                existing_result = contracts.result_loader(order)(
+                    worker_result_path, expected_order_id=order_id
+                )
+            except ContractError:
+                existing_result = None
+            preserve_existing = (
+                existing_result is not None
+                and _may_preserve_worker_result(
+                    order, existing_result, startup_validated=startup_validated
+                )
             )
+            if preserve_existing:
+                result = cast(dict, existing_result)
+            else:
+                if artifact_manifest is None:
+                    raise CompletionError(
+                        "worker fallback has no required typed artifact manifest"
+                    ) from e
+                # A Sentinel-ended wait carries its closeout: the worker's blocking
+                # question (cold handoff) rides into the published blocked result.
+                closeout_question = (
+                    cast(dict, e.closeout).get("blocking_question")
+                    if isinstance(e, SentinelEndedRequest)
+                    else None
+                )
+                result = _write_required_blocked_bundle(
+                    order,
+                    artifact_manifest,
+                    str(e),
+                    blocking_question=cast(str | None, closeout_question),
+                )
+            fell_back = not preserve_existing
+            if fell_back:
+                command_runtime.write_stderr(
+                    f"recruiter: order {order_id} fell back to blocked: {e}\n"
+                )
+            else:
+                command_runtime.write_stderr(
+                    f"recruiter: order {order_id} kept existing worker result after Recruiter wait fault: {e}\n"
+                )
     finally:
         if not launch_recovery_pending and before_worker_cleanup is not None:
             completion_blocked = before_worker_cleanup()
@@ -6489,6 +7449,7 @@ ORDER_INTAKE_ALIASES: dict[str, tuple[str, ...]] = {
     "cockpit_pane": ("cockpit_pane", "pane", "cockpit"),
     "timeout_ms": ("timeout_ms", "timeout"),
     "completion_policy": ("completion_policy",),
+    "sentinel": ("sentinel",),
     "env": ("env",),
     "requester": ("requester",),
     "management": ("management",),
@@ -8274,15 +9235,33 @@ def _cancel_owned_request(
     }
 
 
-def _write_required_blocked_bundle(order: dict, manifest: Any, reason: str) -> dict:
-    """Regenerate every required staged artifact with one consistent blocked reason."""
+def _write_required_blocked_bundle(
+    order: dict,
+    manifest: Any,
+    reason: str,
+    *,
+    blocking_question: str | None = None,
+) -> dict:
+    """Regenerate every required staged artifact with one consistent blocked reason.
+
+    The harness epilogue travels with every such bundle: the evidence of what the worker's
+    run left behind (commits, files touched, staged artifact files) is collected BEFORE the
+    blocked bundle overwrites the staging directory it inventories, so a worker that did
+    work but skipped its bundle can no longer terminalize as an empty result.
+    """
+    epilogue = _epilogue_evidence(order, manifest)
     return cast(
         dict,
         completion.write_blocked_bundle(
             manifest,
             reason,
             write_result=lambda path, why: _write_blocked_result(
-                order, why, path, preserve_valid=False
+                order,
+                why,
+                path,
+                preserve_valid=False,
+                epilogue=epilogue,
+                blocking_question=blocking_question,
             ),
             failure_answer=contracts_consult.failure_answer,
         ),
@@ -8744,8 +9723,14 @@ def _salvage_or_blocked(
     order: dict,
     manifest: Any,
     reason: str,
+    *,
+    attempt: int | None = None,
 ) -> dict:
     """Decide a terminal for an order whose staged bundle would not validate.
+
+    `attempt` is the live runner's current worker attempt, used to scope the
+    never-started deadline proof; the reconciler cannot know it and passes None (see
+    `_never_started_deadline_fired`).
 
     Returns the authored `result` plus the provenance kwargs `finalize` needs. Three outcomes:
 
@@ -8767,12 +9752,59 @@ def _salvage_or_blocked(
         }
 
     evidence = inspect_salvage(ledger, key, order, manifest)
+    # The cold handoff: whatever question the Sentinel's closeout carried rides into every
+    # Python-authored terminal here, so retry tooling reads it off the published result.
+    blocking_question = _sentinel_blocking_question(ledger, key)
+    dirty = evidence.get("dirty_worktree")
+    dirty_worktree = isinstance(dirty, dict) and cast(int, dirty.get("dirty_path_count", 0)) > 0
+    if (
+        evidence["staged_result_state"] == "absent"
+        and not evidence["staged_artifact_files"]
+        and not evidence["landed_commits"]
+        and not dirty_worktree
+        and _first_action_event(ledger, key) is None
+        and _never_started_deadline_fired(ledger, key, attempt=attempt)
+    ):
+        # The typed `never-started` terminal — and the mechanical auto-retry it authorizes —
+        # requires BOTH halves: the recorded worker-never-started deadline event (the
+        # watcher proved sustained idleness against a healthy pane FOR THIS ATTEMPT, not
+        # merely "nothing in the ledger") AND genuinely zero side effects — no staged
+        # artifact file of ANY kind and no dirty-worktree evidence.
+        # Uncommitted paths cannot be attributed to this worker in a shared checkout, but
+        # that ambiguity forbids the retry rather than excusing it: anything dirty routes
+        # to the ordinary blocked path below, whose bundle carries the epilogue evidence.
+        # Checked on the inspected FACTS, before any rescuer: `completion-artifact-invalid`
+        # can fire for a result that never existed, and a request nothing ever touched is
+        # an unambiguous answer no model should be spent on.
+        ledger._event(key, "salvage-inspected", evidence=evidence, reason=reason)
+        never_started_reason = (
+            "never started: the worker was accepted but no first observable action "
+            "(agent activity, staged artifact, or landed commit) was ever recorded — "
+            f"{reason}"
+        )
+        ledger._event(key, "never-started-classified", reason=reason)
+        return {
+            "result": _write_never_started_bundle(
+                order,
+                manifest,
+                never_started_reason,
+                blocking_question=blocking_question,
+            ),
+            "finalize_kwargs": {
+                "allow_synthesized": True,
+                "synthesis_path": "never-started",
+                "confirmation": "unconfirmed",
+                "salvage_evidence": evidence,
+            },
+        }
     if evidence["outcome"] == "ambiguous":
         evidence = _rescue_ambiguous_salvage(ledger, key, order, evidence)
     ledger._event(key, "salvage-inspected", evidence=evidence, reason=reason)
     if evidence["outcome"] != "salvageable":
         return {
-            "result": _write_required_blocked_bundle(order, manifest, reason),
+            "result": _write_required_blocked_bundle(
+                order, manifest, reason, blocking_question=blocking_question
+            ),
             "finalize_kwargs": {"salvage_evidence": evidence},
         }
     salvaged_reason = _salvage_reason(evidence)
@@ -9633,6 +10665,8 @@ _AWAIT_ANY_VERDICT_KINDS = {
     "passed": "completed",
     "failed": "failed",
     "blocked": "blocked",
+    # The typed terminal stays on the receipt; awaiting callers see the blocked bucket.
+    "never-started": "blocked",
 }
 
 
@@ -10310,6 +11344,91 @@ def cmd_cancel(order_path: str, control_token: str) -> dict[str, object]:
     }
 
 
+def _live_worker_journal(ledger: JobLedger, key: str) -> dict:
+    """The most recent started worker launch for one active request, or fail loud."""
+    candidates = [
+        journal
+        for journal_key, journal in ledger.launch_journals()
+        if journal_key == key
+        and journal.get("role") == "worker"
+        and journal.get("state") == "started"
+    ]
+    if not candidates:
+        raise RecruiterError("request has no started worker launch to message")
+    return max(
+        candidates,
+        key=lambda item: cast(int, item.get("created_at_ns") or 0),
+    )
+
+
+def cmd_message_worker(
+    order_path: str, control_token_file: str, message_file: str
+) -> int:
+    """The requester→worker channel: authenticate, LOG TO THE LEDGER, then deliver.
+
+    The liftoff address relay invites the requester to look into the worker's pane and
+    nudge it. This command is the sanctioned path for those nudges: every message becomes
+    a durable `requester-worker-message` ledger event beside the request before it reaches
+    the pane, so the audit never depends on unlogged pane keystrokes. The message text
+    travels in a file, never in process arguments.
+    """
+    try:
+        order = load_order(order_path)
+    except ContractError as error:
+        raise RecruiterError(f"invalid order {order_path}: {error}") from error
+    token_path = Path(control_token_file)
+    if not token_path.is_absolute():
+        raise RecruiterError("control token file must be an absolute path")
+    control_token = token_path.read_text(encoding="utf-8").strip()
+    if not control_token:
+        raise RecruiterError(f"control token file {token_path} is empty")
+    message_path = Path(message_file)
+    if not message_path.is_absolute():
+        raise RecruiterError("message file must be an absolute path")
+    message = message_path.read_text(encoding="utf-8").strip()
+    if not message:
+        raise RecruiterError(f"message file {message_path} is empty")
+    ledger = JobLedger()
+    key = ledger.key_for_order(order)
+    ledger.verify_control_token(key, control_token)
+    if not (ledger.active / "requests" / key).is_dir():
+        raise RecruiterError(
+            f"request {lifecycle.request_identity(order)} is not active"
+        )
+    journal = _live_worker_journal(ledger, key)
+    # The durable log first: delivery may fail loud afterwards, but the audit record of
+    # what the requester tried to say never depends on Herdr.
+    ledger._event(
+        key,
+        "requester-worker-message",
+        message=message,
+        worker_address=journal.get("address"),
+        worker_pane=journal.get("pane"),
+    )
+    _submit_agent_prompt(
+        cast(str, journal["address"]),
+        message,
+        idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+        paste_settle_seconds=(
+            CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+            if order.get("harness") == "cursor"
+            else 0.0
+        ),
+        herdr_session=cast(str | None, journal.get("herdr_session")),
+    )
+    print(
+        json.dumps(
+            {
+                "delivered": True,
+                "request_id": lifecycle.request_identity(order),
+                "worker_pane": journal.get("pane"),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def cmd_run_job(key: str, roster_path: str) -> int:
     """Claim one persisted request, then run its existing exclusive worker lifecycle."""
     ledger = JobLedger()
@@ -10455,6 +11574,79 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     owned_worker_pane: str | None = None
     owned_worker_address: str | None = None
     worker_launches: list[tuple[str, str]] = []
+    # Startup marker plumbing: one watcher per attempt records the worker's first observable
+    # action in the ledger; the abort event ends the wait early on a proven never-started
+    # deadline. Watchdogs and retained review workers keep their own protocols and are
+    # observed but never aborted.
+    abort_eligible = (
+        order.get("agent") not in WATCHDOG_AGENTS
+        and order.get("completion_policy") != "requester_release"
+    )
+    first_action_watch: dict[str, object] = {}
+    never_started_abort = threading.Event()
+    # The current worker attempt, set by run_order_once before each launch. The watcher
+    # stamps it on every startup marker and the completion reactor scopes the
+    # never-started deadline proof to it, so a prior attempt's proof can never
+    # authorize a later attempt's mint.
+    attempt_state = {"number": 1}
+
+    def stop_first_action_watch() -> None:
+        stop = first_action_watch.get("stop")
+        thread = first_action_watch.get("thread")
+        if isinstance(stop, threading.Event):
+            stop.set()
+        if isinstance(thread, threading.Thread):
+            thread.join()
+        first_action_watch.clear()
+
+    # Sentinel plumbing (Phase 2): one duty-bound haiku pane per supervised worker attempt.
+    # `sentinel_state` holds the live hire (shared with the closeout watch for landing-retry
+    # prompts); `sentinel_context` carries the current attempt's closeout path from
+    # `run_order_once` to the `worker_healthy` hire; every attempt's cleanup evidence is
+    # kept so a leaked Sentinel pane can never publish a clean receipt.
+    sentinel_supervised = _sentinel_enabled(order)
+    sentinel_state: dict[str, object] = {}
+    sentinel_context: dict[str, object] = {}
+    sentinel_cleanups: list[dict[str, object]] = []
+
+    def close_sentinel() -> dict[str, object]:
+        pane = sentinel_state.get("pane")
+        if not isinstance(pane, str):
+            sentinel_state.clear()
+            return {"status": "not-created", "worker_pane": None, "verified_absent": True}
+        launch_id = sentinel_state.get("launch_id")
+        try:
+            sentinel_cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
+        except RecruiterError as error:
+            sentinel_cleanup = {
+                "status": "cleanup-failed",
+                "worker_pane": pane,
+                "verified_absent": False,
+                "reason": str(error),
+            }
+        if isinstance(launch_id, str):
+            ledger.mark_launch_closed(
+                key, launch_id, pane, sentinel_cleanup, expected_lease_token=token
+            )
+        sentinel_state.clear()
+        return sentinel_cleanup
+
+    def relay_worker_address(marker: dict) -> None:
+        # Liftoff address relay: once a first real tool action is proven, the requester
+        # gets the worker's live pane address. The look-in is welcome; requester→worker
+        # messages go through `just upagent-message`, which logs them to the ledger.
+        _notify_requester(
+            ledger,
+            key,
+            order,
+            generation,
+            "worker-address",
+            "The worker performed its first observable action. Its pane address is "
+            "attached; to message the worker use `just upagent-message "
+            f"{ledger.request_dir(key) / 'request.json'} <control-token-file> "
+            "<message-file>` so every message is ledger-logged.",
+            {**marker, "worker_address": owned_worker_address},
+        )
 
     def start_worker(
         name: str,
@@ -10550,6 +11742,9 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     completion_salvage: dict[str, dict] = {}
 
     def finish_monitor_before_cleanup() -> bool | None:
+        # The watcher stops before triage so a late first-action event cannot race the
+        # reactor's never-started classification.
+        stop_first_action_watch()
         if monitor is not None:
             monitor[0].set()
             # A checker is bounded by its own startup/response timeouts. Taking this lock prevents
@@ -10564,6 +11759,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             artifact_manifest,
             owned_worker_address,
             herdr_session=herdr_session,
+            attempt=attempt_state["number"],
         )
         if salvaged is not None:
             completion_salvage["salvage"] = salvaged
@@ -10571,6 +11767,91 @@ def cmd_run_job(key: str, roster_path: str) -> int:
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
+        # Health is the startup-marker clock zero: from here the worker has the clamped
+        # first-action deadline (_first_action_deadline_ms) to show a first observable
+        # action.
+        assert owned_worker_pane is not None
+        stop_first_action_watch()
+        watch_stop = threading.Event()
+        watch_thread = threading.Thread(
+            target=_watch_first_action,
+            args=(
+                ledger,
+                key,
+                owned_worker_pane,
+                # ANY staged artifact is first-action evidence, not just result.json:
+                # a worker that staged a compacted.md or handoff.md has acted.
+                tuple(item.staging_path for item in artifact_manifest.artifacts),
+                never_started_abort,
+                watch_stop,
+            ),
+            kwargs={
+                "abort_on_deadline": abort_eligible,
+                "herdr_session": herdr_session,
+                "attempt": attempt_state["number"],
+                "on_first_action": (
+                    relay_worker_address if sentinel_supervised else None
+                ),
+                # Clamped so the liftoff check always beats the hard timeout, even on a
+                # short (1-minute) order — see _first_action_deadline_ms.
+                "deadline_ms": _first_action_deadline_ms(timeout_ms),
+            },
+            name=f"upagent-first-action-{order['order_id'][:24]}",
+            daemon=True,
+        )
+        first_action_watch.update({"stop": watch_stop, "thread": watch_thread})
+        watch_thread.start()
+        if sentinel_supervised:
+            # One Sentinel per worker attempt, hired the moment the worker is proven
+            # healthy. Hire failure degrades supervision only: the mechanical gates and
+            # the hard-timeout backstop still own the lifecycle.
+            close_sentinel()
+            closeout_path = sentinel_context.get("closeout_path")
+            assert isinstance(closeout_path, Path)
+            try:
+                sentinel_state.update(
+                    _start_sentinel(
+                        ledger,
+                        key,
+                        token,
+                        order,
+                        management_config,
+                        cast(str, owned_worker_pane),
+                        closeout_path,
+                        generation,
+                        herdr_session=herdr_session,
+                        # The Sentinel's LIFTOFF brief carries the same clamped
+                        # deadline the mechanical watcher enforces.
+                        liftoff_deadline_ms=_first_action_deadline_ms(timeout_ms),
+                    )
+                )
+            except (RecruiterError, OSError) as error:
+                ledger._event(key, "sentinel-degraded", reason=str(error))
+                _notify_requester(
+                    ledger,
+                    key,
+                    order,
+                    generation,
+                    "sentinel-degraded",
+                    f"The per-request Sentinel could not be hired: {error}. The worker "
+                    "continues under direct mechanical supervision.",
+                    {"reason": str(error)},
+                )
+            else:
+                _notify_requester(
+                    ledger,
+                    key,
+                    order,
+                    generation,
+                    "sentinel-hired",
+                    "A Sentinel pane now watches this request's worker from liftoff "
+                    "to closeout.",
+                    {
+                        "sentinel_pane": sentinel_state.get("pane"),
+                        "sentinel_address": sentinel_state.get("address"),
+                        "worker_pane": owned_worker_pane,
+                    },
+                )
         if manager["pane"] is None:
             if not ledger.mark_worker_healthy(key, token, evidence):
                 raise RecruiterError(
@@ -10653,23 +11934,50 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             evidence,
         )
 
-    def run_order_once(attempt: int) -> tuple[int, dict, dict[str, object]]:
+    def run_order_once(
+        attempt: int, carried_question: str | None = None
+    ) -> tuple[int, dict, dict[str, object]]:
+        nonlocal never_started_abort
+        never_started_abort = threading.Event()
+        attempt_state["number"] = attempt
+        sentinel_watch: _SentinelWatch | None = None
+        if sentinel_supervised:
+            # Each attempt watches its own closeout file, so a retry's fresh Sentinel can
+            # never race the previous attempt's terminal claim.
+            closeout_path = _sentinel_closeout_path(ledger, key, attempt)
+            sentinel_context["closeout_path"] = closeout_path
+            sentinel_watch = _SentinelWatch(
+                ledger,
+                key,
+                order,
+                artifact_manifest,
+                closeout_path,
+                sentinel_state,
+                herdr_session=herdr_session,
+            )
         before = len(worker_launches)
-        outcome = _run_order(
-            str(ledger.request_dir(key) / "request.json"),
-            roster_path,
-            worker_result_path,
-            start_monitor,
-            ledger.worker_instructions_path(key, token),
-            worker_healthy,
-            handle_timeout,
-            finish_monitor_before_cleanup,
-            attempt=attempt,
-            herdr_session=herdr_session,
-            start_worker_agent=start_worker,
-            artifact_manifest=artifact_manifest,
-            review_generation=generation,
-        )
+        try:
+            outcome = _run_order(
+                str(ledger.request_dir(key) / "request.json"),
+                roster_path,
+                worker_result_path,
+                start_monitor,
+                ledger.worker_instructions_path(key, token),
+                worker_healthy,
+                handle_timeout,
+                finish_monitor_before_cleanup,
+                attempt=attempt,
+                herdr_session=herdr_session,
+                start_worker_agent=start_worker,
+                artifact_manifest=artifact_manifest,
+                review_generation=generation,
+                never_started_abort=never_started_abort,
+                sentinel_watch=sentinel_watch,
+                carried_blocking_question=carried_question,
+            )
+        finally:
+            # The Sentinel is duty-bound to this attempt's worker and never outlives it.
+            sentinel_cleanups.append(close_sentinel())
         if len(worker_launches) > before:
             launch_id, pane = worker_launches[-1]
             ledger.mark_launch_closed(
@@ -10682,6 +11990,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         return outcome
 
     result_code, result, cleanup = run_order_once(1)
+    attempts_used = 1
     if (
         result_code != 0
         and cleanup.get("startup_validated") is False
@@ -10693,7 +12002,13 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         )
         advice = _startup_rescue_advice(ledger, key, order, manager, failure_reason)
         if advice == "retry-startup":
-            ledger._event(key, "startup-rescue-relaunch", failure=failure_reason)
+            rescue_attempt = attempts_used + 1
+            ledger._event(
+                key,
+                "startup-rescue-relaunch",
+                failure=failure_reason,
+                attempt=rescue_attempt,
+            )
             _notify_requester(
                 ledger,
                 key,
@@ -10702,9 +12017,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 "startup-rescue",
                 "The worker launch failed before health verification. The rescue broker "
                 "advised one retry; relaunching now.",
-                {"failure": failure_reason},
+                {"failure": failure_reason, "attempt": rescue_attempt},
             )
-            result_code, result, cleanup = run_order_once(2)
+            result_code, result, cleanup = run_order_once(rescue_attempt)
+            attempts_used = rescue_attempt
         else:
             _notify_requester(
                 ledger,
@@ -10716,6 +12032,34 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 f"broker advised '{advice}' instead of a retry.",
                 {"advice": advice, "failure": failure_reason},
             )
+    if result.get("verdict") == "never-started":
+        # Auto-retry-once: a never-started classification is by construction side-effect
+        # free (empty salvage, no recorded first action), so one mechanical retry with a
+        # fresh worker replaces the caller's hand-rolled ground-truth check. A second
+        # never-started outcome surfaces as the typed terminal without further retries.
+        ledger._event(key, "never-started-auto-retry", attempt=attempts_used + 1)
+        _notify_requester(
+            ledger,
+            key,
+            order,
+            generation,
+            "never-started-retry",
+            "The worker was accepted but never performed an observable first action and "
+            "left zero side effects. Auto-retrying once with a fresh worker.",
+            {"attempt": attempts_used + 1},
+        )
+        completion_salvage.pop("salvage", None)
+        # The never-started bundle occupies the staging paths; a fresh attempt must not
+        # publish attempt 1's terminal prose beside its own result.
+        for staged_item in artifact_manifest.artifacts:
+            staged_item.staging_path.unlink(missing_ok=True)
+        # Cold handoff: a closeout-recorded blocking question (rare for never-started,
+        # but contractual) reaches the fresh worker's Python-composed brief.
+        result_code, result, cleanup = run_order_once(
+            attempts_used + 1,
+            carried_question=_sentinel_blocking_question(ledger, key),
+        )
+        attempts_used += 1
     try:
         manager_cleanup = (
             _close_worker_pane(cast(str, manager["pane"]), herdr_session=herdr_session)
@@ -10749,19 +12093,62 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         cleanup["verified_absent"] is True
         and manager_cleanup["verified_absent"] is True
     )
+    if sentinel_supervised:
+        # Defensive final close (each attempt already closed its own Sentinel), then fold
+        # every attempt's cleanup evidence into the receipt. A leaked Sentinel pane taints
+        # the terminal exactly like a leaked manager pane.
+        sentinel_cleanups.append(close_sentinel())
+        sentinel_cleanup = next(
+            (
+                item
+                for item in sentinel_cleanups
+                if item.get("verified_absent") is not True
+            ),
+            sentinel_cleanups[-1],
+        )
+        if sentinel_cleanup.get("verified_absent") is not True:
+            result = _write_required_blocked_bundle(
+                order,
+                artifact_manifest,
+                f"sentinel cleanup failed: {sentinel_cleanup.get('reason')}",
+            )
+            result_code = 1
+        cleanup["sentinel"] = sentinel_cleanup
+        cleanup["verified_absent"] = (
+            cleanup["verified_absent"] is True
+            and sentinel_cleanup.get("verified_absent") is True
+        )
     launch_evidence = _launch_receipt_evidence(ledger, key)
     if launch_evidence:
         cleanup["launches"] = launch_evidence
     salvage = completion_salvage.get("salvage")
+    finalize_extra: dict[str, object] = (
+        {} if salvage is None else dict(salvage["finalize_kwargs"])
+    )
     if salvage is not None:
         # The reactor already authored and validated this bundle from mechanical evidence.
         # Rewriting it as blocked here would throw the salvage away.
         result = salvage["result"]
+    elif result.get("verdict") == "never-started":
+        # Only the reactor's triage can author this verdict; when its parked provenance
+        # record is unavailable, finalize still needs the synthesized-verdict provenance.
+        finalize_extra = {
+            "allow_synthesized": True,
+            "synthesis_path": "never-started",
+            "confirmation": "unconfirmed",
+        }
     elif result.get("verdict") == "blocked":
+        # Regeneration must not drop the cold handoff the earlier writer attached.
+        question = result.get("blocking_question")
         result = _write_required_blocked_bundle(
             order,
             artifact_manifest,
             str(result.get("reason", "worker lifecycle blocked")),
+            blocking_question=(
+                question
+                if isinstance(question, str) and question.strip()
+                else _sentinel_blocking_question(ledger, key)
+            ),
         )
     finalized = ledger.finalize(
         key,
@@ -10772,7 +12159,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         defer_runner_completion=True,
         exit_code=result_code,
         completion_source="result-or-agent-status",
-        **({} if salvage is None else salvage["finalize_kwargs"]),
+        **finalize_extra,
     )
     if not finalized:
         return 1
@@ -11837,6 +13224,17 @@ def main(argv: list[str] | None = None) -> int:
     p_respond.add_argument(
         "extension_ms", type=int, help="positive for extend; 0 for cancel"
     )
+    p_message = sub.add_parser(
+        "message",
+        help="send one ledger-logged requester message to the live worker pane",
+    )
+    p_message.add_argument("order", help="path to order.json")
+    p_message.add_argument(
+        "control_token_file", help="absolute path to the private requester control token"
+    )
+    p_message.add_argument(
+        "message_file", help="absolute path to the message text to deliver"
+    )
     p_review_await = sub.add_parser(
         "review-await", help="wait for the next retained checkpoint"
     )
@@ -11935,6 +13333,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.action,
                 extension_ms,
                 f"Requester authorized {args.action}.",
+            )
+        if args.command == "message":
+            return cmd_message_worker(
+                args.order, args.control_token_file, args.message_file
             )
         if args.command == "review-await":
             return cmd_review_await(args.order, args.after, args.timeout_ms)

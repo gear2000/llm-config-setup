@@ -150,7 +150,8 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     lock-free. A caller receives `REQUEST_ACCEPTED` when verified startup finishes.
 15. Interactive-harness `done` means one LLM turn ended, not that the assignment ended. Claude,
     Pi, and Cursor remain live until a valid typed bundle, positively confirmed pane/process exit,
-    or the request deadline. Codex exec keeps process-turn completion semantics. A terminal record
+    or the request deadline. Codex exec keeps process-turn completion semantics. Under a live
+    Sentinel the closeout file supersedes the bundle/exit triggers (see 20). A terminal record
     always answers with exactly one structured outcome. Typed completion
     validates lease-private staging, projects every public artifact, revalidates public paths,
     writes the receipt, and only then writes terminal state/event/requester evidence. Await cannot
@@ -176,6 +177,40 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     can pass only with matching Recruiter-verified receipts whose answers are cited successes. Absent,
     rejected, failed, borrowed, or forged claims block finalization; direct source reading is not
     consult evidence.
+19. Startup is proven twice: worker health, then a first observable action recorded in the
+    ledger. The liftoff deadline is clamped to the smaller of 5 minutes and half the order's
+    own work cap, so a never-started worker is always classified before the hard timeout
+    backstop can claim even the shortest valid order. The typed `never-started` verdict is
+    minted only deadline-proven — the recorded worker-never-started event, scoped to the
+    same worker attempt so a prior attempt's proof never authorizes a later one, plus
+    genuinely zero side effects: no staged artifact file of any kind and no dirty-worktree
+    evidence — and is auto-retried exactly once with a fresh worker; any side effect routes
+    the miss to the ordinary blocked path.
+    Python-authored blocked terminals carry the harness epilogue (commits, files touched,
+    staged artifact files), and a `passed` result is published only after the validator parses
+    the worker's own artifact files — a report that contradicts the verdict, or an explicitly
+    empty findings record beside a non-empty report, forces re-evaluation instead of a silent
+    accept.
+20. Sentinel supervision is default-on and advisory-only. One cheap Sentinel pane per worker
+    attempt watches liftoff → pulse → landing → closeout; while it is live its typed
+    `closeout.json` is THE teardown trigger — a staged bundle alone no longer ends the
+    supervised wait, and proven worker pane/process death — or the mechanical never-started
+    deadline, whose LIFTOFF the live Sentinel owns with a brief that carries the same
+    clamped deadline — first opens a bounded closeout window before the mechanical path
+    resumes — yet the closeout is never an authority. Python re-verifies every closeout
+    citation (a path citation corroborates only inside the request's own worktree/cwd or
+    ledger territory), validates a claimed COMPLETE against the ordinary bundle contract
+    (one extra landing round on rejection), and routes NEVER_STARTED / STALLED /
+    FINALIZATION_FAILED through the same salvage triage and epilogue paths as mechanical
+    faults; a published blocked reason lists Python-verified citations separately as
+    checked fact, with the Sentinel's LLM-authored interpretation attached but always
+    marked uncorroborated, and a closeout `blocking_question` surfaces
+    on the published result, the receipt, and any Python-composed retry brief. The Sentinel
+    holds no kill switch and never outlives its worker attempt; a failed hire leaves the
+    mechanical paths fully in charge, and a dead Sentinel changes nothing: the hard
+    deadline, salvage, and rescuer backstops fire unchanged. The liftoff address
+    relay hands the requester the worker's pane; requester→worker messages travel only
+    through the ledger-logged message command.
 
 ## Lifecycle states
 

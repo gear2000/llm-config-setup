@@ -159,13 +159,42 @@ def test_reconciliation_salvages_an_order_whose_commit_landed(
     assert "authorship not verified" in published["reason"]
 
 
-def test_reconciliation_blocks_when_nothing_reached_disk(
+def test_reconciliation_types_a_clean_miss_without_first_action_as_never_started(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    """A clean miss keeps the pre-existing blocked terminal and the clean synthesis path."""
+    """A DEADLINE-PROVEN clean miss with no recorded first action is the distinct typed
+    `never-started` terminal now, not the generic lifecycle-blocked bucket (startup-marker
+    gate). Without the recorded worker-never-started deadline event the same miss stays
+    blocked — see the missing-deadline-event test in mechanical_gates_test.py."""
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     ledger = recruiter.JobLedger()
-    _order_value, order_path, _key = _dead_runner_claim(tmp_path, ledger, "empty")
+    _order_value, order_path, key = _dead_runner_claim(tmp_path, ledger, "empty")
+    ledger._event(
+        key,
+        "worker-never-started",
+        deadline_ms=300_000,
+        worker_pane="worker-pane",
+        attempt=1,
+    )
+
+    receipt = _reconciled_receipt(order_path, capsys)
+
+    assert receipt["verdict"] == "never-started"
+    assert receipt["synthesis_path"] == "never-started"
+    assert receipt["confirmation"] == "unconfirmed"
+    assert receipt["salvage_evidence"]["outcome"] == "empty"
+    assert receipt["salvage_evidence"]["git_worktree"] is None
+
+
+def test_reconciliation_blocks_a_clean_miss_whose_first_action_was_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """A recorded first action proves the worker DID start: an empty miss then keeps the
+    pre-existing blocked terminal and the clean synthesis path."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    _order_value, order_path, key = _dead_runner_claim(tmp_path, ledger, "empty")
+    ledger._event(key, "worker-first-action", signal="agent-status")
 
     receipt = _reconciled_receipt(order_path, capsys)
 
@@ -219,7 +248,10 @@ def test_clean_salvage_outcomes_never_hire_the_rescuer(
     miss.mkdir()
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(miss / "hub"))
     miss_ledger = recruiter.JobLedger()
-    _order_b, miss_path, _miss_key = _dead_runner_claim(miss, miss_ledger, "miss")
+    _order_b, miss_path, miss_key = _dead_runner_claim(miss, miss_ledger, "miss")
+    # A recorded first action keeps a clean miss in the blocked bucket; without one the
+    # startup-marker gate would type it never-started instead. Either way: no rescuer.
+    miss_ledger._event(miss_key, "worker-first-action", signal="agent-status")
     assert _reconciled_receipt(miss_path, capsys)["verdict"] == "blocked"
 
 
@@ -260,6 +292,9 @@ def test_the_live_reactor_still_blocks_when_no_work_survives(
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     ledger = recruiter.JobLedger()
     order, _order_path, key = _dead_runner_claim(tmp_path, ledger, "reactor-empty")
+    # The recorded first action keeps this empty miss in the blocked bucket; without it
+    # the startup-marker gate types the terminal `never-started` instead.
+    ledger._event(key, "worker-first-action", signal="agent-status")
     manifest = _manifest(ledger, key, order)
     staging = manifest.artifact("result").staging_path
     staging.parent.mkdir(parents=True, exist_ok=True)
@@ -290,6 +325,8 @@ def test_live_path_blocked_receipt_after_inspection_carries_salvage_evidence(
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     ledger = recruiter.JobLedger()
     order, _order_path, key = _dead_runner_claim(tmp_path, ledger, "reactor-empty-live")
+    # Keep this empty miss in the blocked bucket (see the never-started gate tests).
+    ledger._event(key, "worker-first-action", signal="agent-status")
     manifest = _manifest(ledger, key, order)
     staging = manifest.artifact("result").staging_path
     staging.parent.mkdir(parents=True, exist_ok=True)
@@ -919,6 +956,8 @@ def test_codex_exec_missing_bundle_never_prompts_the_absent_agent(
     monkeypatch.setattr(recruiter, "_submit_agent_prompt", refuse)
     ledger = recruiter.JobLedger()
     order, _order_path, key = _exec_dead_claim(tmp_path, ledger, "exec-codex", "codex")
+    # Keep this empty miss in the blocked bucket (see the never-started gate tests).
+    ledger._event(key, "worker-first-action", signal="agent-status")
     manifest = _manifest(ledger, key, order)
     staging = manifest.artifact("result").staging_path
     staging.parent.mkdir(parents=True, exist_ok=True)
