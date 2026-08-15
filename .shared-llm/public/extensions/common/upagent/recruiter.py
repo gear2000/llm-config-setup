@@ -4480,6 +4480,30 @@ def _worker_pane_confirmed_gone(
     return True
 
 
+def _worker_pane_confirmed_present(
+    worker_pane: str,
+    *,
+    herdr_session: str | None = None,
+) -> bool:
+    """True only when herdr POSITIVELY answers that the pane exists.
+
+    The mirror of `_worker_pane_confirmed_gone`, for decisions that must not treat
+    probe uncertainty as liveness: a transport fault answers False here AND False
+    there, so callers that require a positive answer take neither branch.
+    """
+    try:
+        _herdr_json(
+            "pane",
+            "get",
+            worker_pane,
+            timeout_seconds=10,
+            herdr_session=herdr_session,
+        )
+        return True
+    except RecruiterError:
+        return False
+
+
 def _matches_expected_process(process: object, expected_process: str) -> bool:
     if not isinstance(process, dict):
         return False
@@ -4558,26 +4582,55 @@ COMPLETION_IMPASSE_SETTLE_SECONDS = 10.0
 # request timeout backstop is unchanged and caps the window too.
 SENTINEL_CLOSEOUT_GRACE_SECONDS = 180.0
 
+# The nudged landing window must be at least one full pulse block: a Sentinel that
+# (wrongly) re-sleeps after a valid-bundle wake still gets one more wake-wait return
+# inside the window, so a lapse can never be guaranteed by arithmetic alone.
+SENTINEL_LANDING_WINDOW_SECONDS = float(
+    llm_management.SENTINEL_PULSE_MINUTES * 60 + 60
+)
+assert SENTINEL_LANDING_WINDOW_SECONDS >= llm_management.SENTINEL_PULSE_MINUTES * 60
+
 
 def _await_sentinel_closeout_after_worker_gone(
-    sentinel_watch: Any, deadline: float
+    sentinel_watch: Any, deadline: float, *, reason: str
 ) -> bool:
     """Bounded closeout window under Sentinel supervision, opened by proven worker
-    death/exit or by the mechanical never-started deadline.
+    death/exit (`reason="worker-gone"`) or by the mechanical never-started deadline
+    (`reason="never-started"` — the worker may still be live but idle, so the wake
+    reason must not falsely claim its pane is gone).
 
     Returns True when a COMPLETE closeout ended the wait (the ordinary completion reactor
     validates from there); False when the window — or the request deadline — lapsed with
     no closeout, handing the request back to the mechanical path that opened the window.
     Typed closeout faults (NEVER_STARTED / STALLED / FINALIZATION_FAILED) propagate.
+    Every no-closeout exit records the typed `closeout` window lapse, so the ledger
+    alone always says why the supervised wait ended.
     """
     grace_deadline = min(
         deadline, time.monotonic() + SENTINEL_CLOSEOUT_GRACE_SECONDS
     )
+    next_sentinel_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while True:
+        # Published at entry — the window starts with an awake Sentinel — and
+        # republished each poll if consumed, so a claim racing a write never loses
+        # the wake (touch_wake is idempotent).
+        sentinel_watch.touch_wake(reason)
         if sentinel_watch.poll() == "complete":
             return True
+        # A Sentinel that dies inside its own window can never land a closeout:
+        # hand the wait straight back to the mechanical path that opened the window.
+        # The death reason lives in sentinel-dead; the typed window lapse still
+        # records that THIS window ended without a closeout.
+        if time.monotonic() >= next_sentinel_probe:
+            next_sentinel_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
+            if not sentinel_watch.probe_liveness():
+                sentinel_watch.note_window_lapsed("closeout")
+                return False
         remaining = grace_deadline - time.monotonic()
         if remaining <= 0:
+            # Typed lapse: a wake event alone proves only that Python touched a
+            # file; this records WHY the supervised wait fell back mechanically.
+            sentinel_watch.note_window_lapsed("closeout")
             return False
         time.sleep(min(COMPLETION_MONITOR_POLL_SECONDS, remaining))
 
@@ -4608,10 +4661,13 @@ def _wait_for_interactive_completion(
         raise RecruiterError(
             "interactive worker completion requires its typed artifact monitor"
         )
-    supervised = sentinel_watch is not None and sentinel_watch.supervising
     deadline = time.monotonic() + timeout_ms / 1000
     next_liveness_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while True:
+        # Supervision is recomputed every iteration, never snapshotted at wait entry: a
+        # Sentinel that dies mid-wait hands the rest of the wait back to the mechanical
+        # paths instead of stranding a finished worker until the hard timeout.
+        supervised = sentinel_watch is not None and sentinel_watch.supervising
         # `poll` returns "complete" (validated landing), raises a typed wait-ending fault
         # (NEVER_STARTED / STALLED / FINALIZATION_FAILED), or keeps waiting. Every
         # mechanical path below remains, so a dead Sentinel changes nothing (backstop).
@@ -4624,15 +4680,32 @@ def _wait_for_interactive_completion(
             # closeout grace window as worker death; only a lapsed window (or a
             # degraded/never-hired Sentinel) lets the mechanical abort end the wait.
             if supervised and _await_sentinel_closeout_after_worker_gone(
-                sentinel_watch, deadline
+                sentinel_watch, deadline, reason="never-started"
             ):
                 return False
             raise WorkerNeverStartedError(
                 f"interactive worker {worker_pane} recorded no first observable action "
                 "within its startup-activity deadline of proven health"
             )
+        if supervised:
+            # VALID-BUNDLE LANDING (shared with the exec wait): a validated staged bundle
+            # wakes the Sentinel and opens one bounded landing window; a lapse — or
+            # the hard deadline clipping the window — ends the wait on the validated
+            # bundle. Checked BEFORE the generic timeout so work that is already done
+            # is accepted rather than timed out.
+            if sentinel_watch.landing_pass(monitor_finalized, deadline) == "mechanical":
+                return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            # The timeout decision RE-OBSERVES the finalized event: a validation
+            # that landed after this iteration's landing pass but before this line
+            # must end the wait on the bundle, never as a timeout over finished
+            # work. A set arriving after this observation legitimately linearizes
+            # after the timeout.
+            if monitor_finalized.is_set():
+                if supervised:
+                    sentinel_watch.note_window_lapsed("landing")
+                return False
             raise AgentWaitTimeout(
                 f"interactive worker {worker_pane} timed out after {timeout_ms} ms "
                 "without a valid artifact bundle or proven process exit"
@@ -4640,6 +4713,18 @@ def _wait_for_interactive_completion(
         now = time.monotonic()
         if now >= next_liveness_probe:
             next_liveness_probe = now + AGENT_WAIT_PANE_PROBE_SECONDS
+            # The Sentinel's own pane is probed on the same cadence as the worker's.
+            if supervised:
+                supervised = sentinel_watch.probe_liveness()
+            # Partial/invalid staging wakes the Sentinel too: a worker that wrote
+            # some-but-not-all files needs its LANDING dialogue now, not at pulse
+            # expiry. The timer then only covers wrote-nothing-and-stopped.
+            if (
+                supervised
+                and not monitor_finalized.is_set()
+                and sentinel_watch.staging_activity()
+            ):
+                sentinel_watch.touch_wake("partial-staging")
             if _worker_pane_confirmed_gone(
                 worker_pane, herdr_session=herdr_session, confirmations=2
             ) or _worker_process_confirmed_gone(
@@ -4648,8 +4733,13 @@ def _wait_for_interactive_completion(
                 herdr_session=herdr_session,
                 confirmations=2,
             ):
+                if supervised and monitor_finalized.is_set():
+                    # A valid staged bundle already exists at proven exit: nothing is
+                    # left for the Sentinel to add, so skip the closeout grace window.
+                    sentinel_watch.note_bypassed_at_exit()
+                    return False
                 if supervised and _await_sentinel_closeout_after_worker_gone(
-                    sentinel_watch, deadline
+                    sentinel_watch, deadline, reason="worker-gone"
                 ):
                     return False
                 return True
@@ -4658,8 +4748,8 @@ def _wait_for_interactive_completion(
             max(0.0, next_liveness_probe - time.monotonic()),
         )
         if supervised:
-            # Supervised: a staged bundle alone must not end the wait — the Sentinel
-            # verifies it in LANDING and its COMPLETE closeout is what ends the wait.
+            # Supervised: the staged bundle does not end the wait directly — the
+            # landing pass above woke the Sentinel and owns the bounded fallback.
             time.sleep(min(wait_seconds, 1.0))
         elif monitor_finalized.wait(wait_seconds):
             return False
@@ -4714,7 +4804,19 @@ def _wait_for_agent_status(
             process.communicate()
 
     _herdr_available()
-    supervised = sentinel_watch is not None and sentinel_watch.supervising
+
+    def _supervised() -> bool:
+        # Recomputed at every decision point, never snapshotted at wait entry: a
+        # Sentinel that dies mid-wait hands the wait back to the mechanical paths.
+        return sentinel_watch is not None and sentinel_watch.supervising
+
+    def _bundle_already_valid() -> bool:
+        # M3: an exec request pays the closeout grace window only when the Sentinel
+        # has something to add. A bundle the artifact monitor already validated at
+        # proven exit takes the mechanical path immediately (Python validates the
+        # bundle either way; verdict authority is unchanged).
+        return monitor_finalized is not None and monitor_finalized.is_set()
+
     deadline = time.monotonic() + timeout_ms / 1000
     args = (
         "wait",
@@ -4749,61 +4851,98 @@ def _wait_for_agent_status(
             # Under a live Sentinel the mechanical deadline opens the same bounded
             # closeout grace window as worker death; only a lapsed window (or a
             # degraded/never-hired Sentinel) lets the mechanical abort end the wait.
-            if supervised and _await_sentinel_closeout_after_worker_gone(
-                sentinel_watch, deadline
+            if _supervised() and _await_sentinel_closeout_after_worker_gone(
+                sentinel_watch, deadline, reason="never-started"
             ):
                 return False
             raise WorkerNeverStartedError(
                 f"exec worker {worker_pane} recorded no first observable action "
                 "within its startup-activity deadline of proven health"
             )
+        if _supervised():
+            # VALID-BUNDLE LANDING (shared with the interactive wait): a validated staged
+            # bundle from a still-live exec worker wakes the Sentinel and opens the
+            # bounded landing window; a lapse — or the hard deadline clipping the
+            # window — ends the wait on the validated bundle instead of holding it
+            # for process exit, a pulse, or the timeout.
+            if sentinel_watch.landing_pass(monitor_finalized, deadline) == "mechanical":
+                _terminate(process)
+                return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate(process)
+            # See the interactive wait: the timeout decision re-observes the
+            # finalized event so a validation racing the deadline is never lost.
+            if _bundle_already_valid():
+                if _supervised():
+                    sentinel_watch.note_window_lapsed("landing")
+                return False
             raise AgentWaitTimeout(
                 f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms"
             )
         if time.monotonic() >= next_pane_probe:
             next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
+            # The Sentinel's own pane is probed on the same cadence as the worker's.
+            if _supervised():
+                sentinel_watch.probe_liveness()
+            # Partial/invalid staging wakes the Sentinel (see the interactive wait).
+            if (
+                _supervised()
+                and not _bundle_already_valid()
+                and sentinel_watch.staging_activity()
+            ):
+                sentinel_watch.touch_wake("partial-staging")
             if _worker_pane_confirmed_gone(worker_pane, herdr_session=herdr_session):
                 pane_missing_streak += 1
                 if pane_missing_streak >= 2:
                     _terminate(process)
-                    if supervised and _await_sentinel_closeout_after_worker_gone(
-                        sentinel_watch, deadline
+                    if _supervised() and _bundle_already_valid():
+                        sentinel_watch.note_bypassed_at_exit()
+                        return False
+                    if _supervised() and _await_sentinel_closeout_after_worker_gone(
+                        sentinel_watch, deadline, reason="worker-gone"
                     ):
                         return False
                     return True
             else:
                 pane_missing_streak = 0
         wait_seconds = min(COMPLETION_MONITOR_POLL_SECONDS, remaining)
-        if monitor_finalized is not None and not supervised:
+        if monitor_finalized is not None and not _supervised():
             # Unsupervised: the typed artifact monitor may end the wait directly.
             if monitor_finalized.wait(wait_seconds):
                 _terminate(process)
                 return False
         else:
-            # Supervised (or monitor-less): staged artifacts alone never end the wait —
-            # the Sentinel verifies them in LANDING and its closeout ends the wait above.
+            # Supervised (or monitor-less): staged artifacts alone never end the wait
+            # while the process lives — the Sentinel verifies them in LANDING and its
+            # closeout ends the wait above; at proven exit a validated bundle bypasses
+            # the closeout window instead of paying it.
             time.sleep(wait_seconds)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
         # An exec worker's finished turn is its exit. Under supervision the Sentinel
-        # still owns the teardown: give it the bounded closeout window first.
-        if supervised and _await_sentinel_closeout_after_worker_gone(
-            sentinel_watch, deadline
+        # still owns the teardown — unless a validated staged bundle already exists,
+        # in which case it has nothing to add and the mechanical path proceeds now.
+        if _supervised() and _bundle_already_valid():
+            sentinel_watch.note_bypassed_at_exit()
+            return False
+        if _supervised() and _await_sentinel_closeout_after_worker_gone(
+            sentinel_watch, deadline, reason="worker-gone"
         ):
             return False
         return True
-    if monitor_finalized is not None and monitor_finalized.is_set() and not supervised:
+    if monitor_finalized is not None and monitor_finalized.is_set() and not _supervised():
         return False
     # A pane that was already gone when the wait started makes herdr fail fast with a decode
     # error. Confirm with two positive probes and fall through to the completion reactor.
     if _worker_pane_confirmed_gone(
         worker_pane, herdr_session=herdr_session, confirmations=2
     ):
-        if supervised and _await_sentinel_closeout_after_worker_gone(
-            sentinel_watch, deadline
+        if _supervised() and _bundle_already_valid():
+            sentinel_watch.note_bypassed_at_exit()
+            return False
+        if _supervised() and _await_sentinel_closeout_after_worker_gone(
+            sentinel_watch, deadline, reason="worker-gone"
         ):
             return False
         return True
@@ -5304,7 +5443,7 @@ def _epilogue_evidence(order: dict, manifest: Any) -> dict[str, object]:
 # --- Sentinel (Phase 2) -------------------------------------------------------
 #
 # One haiku Herdr pane per request, duty-bound to that request's worker: LIFTOFF (corroborate
-# the first tool action, or NEVER_STARTED), PULSE (wake every 15 minutes), LANDING (steer
+# the first tool action, or NEVER_STARTED), PULSE (event-driven wake file, llm_management.SENTINEL_PULSE_MINUTES fallback), LANDING (steer
 # finalization by dialogue, verify the bundle on disk, never believe the worker's word), then
 # one typed closeout. For a sentinel-supervised request the Recruiter's wait additionally
 # watches that closeout file as the teardown trigger; the mechanical paths (validated staged
@@ -5331,10 +5470,68 @@ def _sentinel_enabled(order: dict) -> bool:
     )
 
 
+# Per-process-invocation cache for the Sentinel persona pre-check, keyed by
+# (command, cwd): the answer cannot change mid-invocation, and a missing persona must
+# not be re-diagnosed (and re-warned about) on every attempt of every request this
+# process handles. Per-command execution makes "per process" mean "per invocation".
+_sentinel_persona_check_cache: dict[tuple[str, str], str | None] = {}
+
+
+def _sentinel_persona_missing(command: str, cwd: str) -> str | None:
+    """A pre-hire check that the Sentinel's `--agent` persona file exists.
+
+    Returns None when the command names no persona or the persona file exists;
+    otherwise a message naming the exact candidate paths, so the degrade event tells
+    the operator precisely which file to create instead of a generic hire failure.
+    """
+    cache_key = (command, cwd)
+    if cache_key in _sentinel_persona_check_cache:
+        return _sentinel_persona_check_cache[cache_key]
+    try:
+        words = shlex.split(command)
+    except ValueError as error:
+        # A malformed configured command (e.g. an unmatched quote) must land in the
+        # same degrade path as any other hire failure, never crash the worker
+        # lifecycle: report it as a hire-blocking diagnosis with the fix named.
+        missing = (
+            f"sentinel command could not be parsed ({error}) — fix "
+            "management.sentinel.command"
+        )
+        _sentinel_persona_check_cache[cache_key] = missing
+        return missing
+    agent = None
+    for index, word in enumerate(words[:-1]):
+        if word == "--agent":
+            agent = words[index + 1]
+            break
+    missing: str | None = None
+    if agent is not None:
+        candidates = [
+            Path(cwd) / ".claude/agents" / f"{agent}.md",
+            Path.home() / ".claude/agents" / f"{agent}.md",
+        ]
+        if not any(candidate.is_file() for candidate in candidates):
+            missing = (
+                f"sentinel persona {agent!r} was not found at: "
+                + ", ".join(str(candidate) for candidate in candidates)
+                + " — deploy the persona (`just update`) or configure "
+                "management.sentinel.command"
+            )
+    _sentinel_persona_check_cache[cache_key] = missing
+    return missing
+
+
 def _sentinel_closeout_path(ledger: JobLedger, key: str, attempt: int) -> Path:
     """Each worker attempt gets its own closeout file: a retry's fresh Sentinel must never
     be able to read (or race) the previous attempt's terminal claim."""
     return ledger.request_dir(key) / "sentinel" / f"attempt-{attempt}" / "closeout.json"
+
+
+def _sentinel_wake_path(closeout_path: Path) -> Path:
+    """The attempt's wake file, beside its closeout. Python is the ONLY writer (staging
+    activity, proven worker death); the Sentinel is the only consumer — its pulse wait
+    blocks until this file exists or the interval elapses, then deletes it."""
+    return closeout_path.with_name("wake")
 
 
 def _start_sentinel(
@@ -5357,7 +5554,15 @@ def _start_sentinel(
     instructions always match the mechanical deadline.
     """
     request_id = lifecycle.request_identity(order)
+    # Fail the hire BEFORE creating a pane when the persona file is provably absent:
+    # the raised message names the exact missing paths, and the per-process cache
+    # keeps repeated attempts from re-diagnosing the same missing file.
+    persona_missing = _sentinel_persona_missing(config.sentinel.command, order["cwd"])
+    if persona_missing is not None:
+        raise RecruiterError(persona_missing)
     closeout_path.unlink(missing_ok=True)
+    wake_path = _sentinel_wake_path(closeout_path)
+    wake_path.unlink(missing_ok=True)
     brief_path = closeout_path.with_name("brief.md")
     _write_text_atomic(
         brief_path,
@@ -5368,6 +5573,7 @@ def _start_sentinel(
             order["cwd"],
             closeout_path,
             liftoff_deadline_ms=liftoff_deadline_ms,
+            wake_path=wake_path,
         ),
     )
     command = llm_management.render_role_command(
@@ -5423,6 +5629,8 @@ def _start_sentinel(
         "launch_id": launch_id,
         "pane": pane,
         "workspace_id": workspace_id,
+        # The supervised worker's pane, kept for the uncorroborated-STALLED re-probe.
+        "worker_pane": worker_pane,
     }
 
 
@@ -5502,8 +5710,13 @@ class _SentinelWatch:
         # Shared with cmd_run_job: the live Sentinel's pane/address once hired.
         self.sentinel_state = sentinel_state
         self.herdr_session = herdr_session
+        self.wake_path = _sentinel_wake_path(closeout_path)
         self._landing_rounds_granted = 0
         self._invalid_reported = False
+        self._stalled_recheck_used = False
+        self._confirmed_dead = False
+        self._wakes_touched: set[str] = set()
+        self._landing_window_deadline: float | None = None
 
     @property
     def supervising(self) -> bool:
@@ -5511,10 +5724,147 @@ class _SentinelWatch:
 
         Only a live Sentinel may suppress the mechanical wait-ending paths (artifact
         monitor, immediate pane-death teardown): a degraded hire keeps this closeout
-        path watched best-effort, but a never-hired Sentinel must not be able to strand
-        a finished worker until the hard timeout.
+        path watched best-effort, but a never-hired — or confirmed-dead — Sentinel must
+        not be able to strand a finished worker until the hard timeout. Wait loops
+        re-read this property every iteration instead of snapshotting it at wait entry.
         """
-        return isinstance(self.sentinel_state.get("address"), str)
+        return (
+            isinstance(self.sentinel_state.get("address"), str)
+            and not self._confirmed_dead
+        )
+
+    def probe_liveness(self) -> bool:
+        """Probe the Sentinel's own pane; on confirmed-gone, degrade supervision.
+
+        Called from the wait loops on the same cadence as the worker liveness probe.
+        A dead Sentinel can never write a closeout, so continuing to suppress the
+        mechanical paths for it would strand a finished worker until the hard timeout.
+        Returns the post-probe `supervising` value. A transport fault is NOT
+        pane-gone; supervision continues (the hard timeout stays the backstop).
+        """
+        if not self.supervising:
+            return False
+        pane = self.sentinel_state.get("pane")
+        if not isinstance(pane, str):
+            return True
+        if _worker_pane_confirmed_gone(
+            pane, herdr_session=self.herdr_session, confirmations=2
+        ):
+            self._confirmed_dead = True
+            self.ledger._event(
+                self.key,
+                "sentinel-dead",
+                sentinel_pane=pane,
+                reason="sentinel pane confirmed gone mid-wait; supervision degrades "
+                "to the mechanical paths for the rest of this wait",
+            )
+        return self.supervising
+
+    def touch_wake(self, kind: str) -> None:
+        """Publish the attempt's wake file with the wake REASON as its content, and
+        record the typed event once per kind.
+
+        The FILE is the ONE wake channel: the Sentinel's bounded wake-wait polls this
+        path every second, atomically CLAIMS it (rename to a private name), reads the
+        reason, and acts on it — a `valid-bundle` wake means write the COMPLETE
+        closeout immediately, never re-sleep. Python is the only writer.
+
+        Race safety: the publish is a temp-file write plus `os.replace`, so the
+        consumer can never observe a partially written (empty) reason; and the
+        publish REPEATS whenever the file is observed consumed — a claim racing a
+        write costs one republish on the caller's next pass, never a lost wake. A
+        later, different kind overwrites the content: the newest reason wins.
+        """
+        if kind in self._wakes_touched and self.wake_path.exists():
+            return
+        first = kind not in self._wakes_touched
+        self._wakes_touched.add(kind)
+        self.wake_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.wake_path.with_name(
+            f".{self.wake_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        temporary.write_text(kind + "\n")
+        os.replace(temporary, self.wake_path)
+        if first:
+            self.ledger._event(
+                self.key, f"sentinel-wake-{kind}", wake_path=str(self.wake_path)
+            )
+
+    def staging_activity(self) -> bool:
+        """True when the worker has staged ANY non-empty artifact file. Used to wake
+        the Sentinel on partial/invalid staging: a worker that wrote some-but-not-all
+        files gets its LANDING dialogue in seconds instead of a pulse expiry.
+
+        One stat per artifact: the worker owns these paths and may replace or unlink
+        one at any moment, so a vanished file is simply "no activity on this probe" —
+        never an escaped fault that would falsely block the request.
+        """
+        for item in self.manifest.artifacts:
+            try:
+                size = item.staging_path.stat().st_size
+            except FileNotFoundError:
+                continue
+            if size > 0:
+                return True
+        return False
+
+    def landing_pass(
+        self, monitor_finalized: threading.Event | None, deadline: float
+    ) -> str | None:
+        """Drive the valid-bundle landing transition — shared by BOTH wait modes.
+
+        First call with a validated bundle wakes the Sentinel (`valid-bundle` wake
+        file) and opens one bounded landing window of at least a full pulse block.
+        Returns "mechanical" when the window — or the request deadline — lapses with
+        no closeout, telling the caller to end the wait on the validated bundle
+        instead of raising a timeout over work that is already done. Otherwise None.
+        """
+        if monitor_finalized is None or not monitor_finalized.is_set():
+            return None
+        now = time.monotonic()
+        if self._landing_window_deadline is None:
+            if now >= deadline:
+                # First observation at/after the hard deadline: the bundle already
+                # validated, so end on it NOW — never open a nominal window that the
+                # caller's generic timeout would immediately turn into a false
+                # AgentWaitTimeout over finished work.
+                self.note_window_lapsed("landing")
+                return "mechanical"
+            self._landing_window_deadline = now + SENTINEL_LANDING_WINDOW_SECONDS
+        if now >= self._landing_window_deadline or now >= deadline:
+            self.note_window_lapsed("landing")
+            return "mechanical"
+        # Republished every pass while the window is open (touch_wake is idempotent
+        # and re-publishes a consumed file), so a claim racing a write never loses
+        # the wake.
+        self.touch_wake("valid-bundle")
+        return None
+
+    def note_window_lapsed(self, window: str) -> None:
+        """A supervised bounded window (`landing` after a valid-bundle wake,
+        `closeout` after proven worker death / the never-started deadline) lapsed
+        with no closeout: the mechanical path ends the wait, and this typed event is
+        the ledger's record of WHY supervision ended."""
+        self.ledger._event(
+            self.key,
+            "sentinel-window-lapsed",
+            window=window,
+            closeout_path=str(self.closeout_path),
+            note="no closeout inside the bounded window; the mechanical path ends "
+            "the wait",
+        )
+
+    def note_bypassed_at_exit(self) -> None:
+        """A valid staged bundle already existed at proven worker exit: nothing is
+        left for the Sentinel to add, so the mechanical path proceeds immediately
+        instead of paying the closeout grace window. Verdict authority is unchanged —
+        the bundle is Python-validated either way."""
+        self.ledger._event(
+            self.key,
+            "sentinel-bypassed-at-exit",
+            note="valid staged bundle at proven worker exit; closeout grace window "
+            "skipped, mechanical validation proceeds",
+        )
 
     def poll(self) -> str | None:
         if not self.closeout_path.is_file():
@@ -5577,6 +5927,61 @@ class _SentinelWatch:
                 f"sentinel closeout NEVER_STARTED: {reason}"
             )
         if outcome == "STALLED":
+            # An uncorroborated STALLED claim may not terminalize a possibly-healthy
+            # worker on the Sentinel's word alone: when EVERY citation failed
+            # corroboration, Python re-probes the worker pane once. Only a POSITIVE
+            # pane-get answer rejects the closeout back to the Sentinel for one
+            # re-check — probe uncertainty (a transport fault) is not liveness and
+            # accepts the original claim, as does a gone pane or a spent recheck.
+            worker_pane = self.sentinel_state.get("worker_pane")
+            if (
+                not corroborated
+                and not self._stalled_recheck_used
+                and isinstance(worker_pane, str)
+                and _worker_pane_confirmed_present(
+                    worker_pane, herdr_session=self.herdr_session
+                )
+            ):
+                self._stalled_recheck_used = True
+                archived = self.closeout_path.with_name(
+                    "closeout.stalled-rejected.json"
+                )
+                os.replace(self.closeout_path, archived)
+                self.ledger._event(
+                    self.key,
+                    "sentinel-stalled-rejected",
+                    archived=str(archived),
+                    worker_pane=worker_pane,
+                    reason="STALLED closeout carried zero Python-corroborated "
+                    "citations while the worker pane is provably live",
+                )
+                address = self.sentinel_state.get("address")
+                if isinstance(address, str):
+                    try:
+                        _submit_agent_prompt(
+                            address,
+                            "SENTINEL_STALL_RECHECK: your STALLED closeout carried "
+                            "no citation Python could corroborate, and the worker "
+                            "pane is still live. Re-probe the worker (pane tail plus "
+                            "git/fs deltas), nudge it once more, and either resume "
+                            "PULSE or write a fresh closeout with real citations to "
+                            f"{self.closeout_path}.",
+                            idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                            herdr_session=self.herdr_session,
+                        )
+                    except (RecruiterError, OSError) as prompt_error:
+                        # An unreachable Sentinel gets no recheck; accept the
+                        # archived claim rather than waiting on a prompt nobody read.
+                        self.ledger._event(
+                            self.key,
+                            "sentinel-stall-recheck-unavailable",
+                            reason=str(prompt_error),
+                        )
+                        raise SentinelStalledError(
+                            f"sentinel closeout STALLED: {reason}",
+                            closeout,
+                        ) from prompt_error
+                return None
             raise SentinelStalledError(
                 f"sentinel closeout STALLED: {reason}",
                 closeout,
@@ -11608,6 +12013,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     sentinel_state: dict[str, object] = {}
     sentinel_context: dict[str, object] = {}
     sentinel_cleanups: list[dict[str, object]] = []
+    # One requester notification per distinct degrade reason per invocation: the ledger
+    # records every attempt's degrade (typed, with the attempt number), but a persona
+    # missing on attempt 1 is still missing on attempt 2 and must not spam the requester.
+    sentinel_degrades_notified: set[str] = set()
 
     def close_sentinel() -> dict[str, object]:
         pane = sentinel_state.get("pane")
@@ -11826,17 +12235,27 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                     )
                 )
             except (RecruiterError, OSError) as error:
-                ledger._event(key, "sentinel-degraded", reason=str(error))
-                _notify_requester(
-                    ledger,
+                # Any hire failure — persona missing, pane creation refused by a herdr
+                # error or concurrency limit — degrades supervision for this request
+                # only; the mechanical gates and backstops still own the lifecycle.
+                ledger._event(
                     key,
-                    order,
-                    generation,
                     "sentinel-degraded",
-                    f"The per-request Sentinel could not be hired: {error}. The worker "
-                    "continues under direct mechanical supervision.",
-                    {"reason": str(error)},
+                    reason=str(error),
+                    attempt=attempt_state["number"],
                 )
+                if str(error) not in sentinel_degrades_notified:
+                    sentinel_degrades_notified.add(str(error))
+                    _notify_requester(
+                        ledger,
+                        key,
+                        order,
+                        generation,
+                        "sentinel-degraded",
+                        f"The per-request Sentinel could not be hired: {error}. The worker "
+                        "continues under direct mechanical supervision.",
+                        {"reason": str(error)},
+                    )
             else:
                 _notify_requester(
                     ledger,

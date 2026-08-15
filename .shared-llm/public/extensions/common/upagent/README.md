@@ -313,18 +313,40 @@ Durable files are the source of truth; terminal text is display-only.
   (`--no-sentinel` opts out; watchdogs and retained review workers never get one). The
   Recruiter hires one haiku Herdr pane per worker attempt, duty-bound to that worker:
   LIFTOFF corroborates the startup marker and, once a first real tool action is proven, the
-  requester receives the worker's live pane address; PULSE wakes every 15 minutes over the
-  pane tail and git/fs deltas, nudging once before declaring a stall; LANDING steers
+  requester receives the worker's live pane address; PULSE is event-driven on the
+  attempt's wake file (beside its closeout.json — Python is the only writer, touching it
+  on worker staging activity, valid or partial, and on proven worker death; the Sentinel
+  is the only consumer, blocking on it with a bounded wake-wait run under an explicit
+  command timeout that outlives the wait, then reading the wake REASON from the file's
+  content before consuming it — a `valid-bundle` wake means write the COMPLETE closeout
+  immediately, never re-sleep), with a 5-minute interval as the fallback timer, reading
+  the pane tail and
+  git/fs deltas each wake and nudging once before declaring a stall; LANDING steers
   finalization by dialogue under a hard never-believe-the-worker rule — only bundle files
   verified on disk count — with at most 3 exchanges. The Sentinel's one typed
   `closeout.json` (outcome `COMPLETE | NEVER_STARTED | STALLED | FINALIZATION_FAILED`, plus
   interpretation, citations, bundle, blocking_question, exchanges) is THE teardown trigger
-  while the Sentinel is live: a staged artifact bundle alone no longer ends a supervised
-  wait (the Sentinel verifies it in LANDING and writes COMPLETE), and a positively dead
+  while the Sentinel is live: when the artifact monitor validates a staged bundle under a
+  live Sentinel, the Recruiter does not suppress that signal silently — it publishes
+  the wake file (the ONE wake channel: an atomic temp-write-and-rename, claimed by the
+  Sentinel with an atomic rename and republished while the window is open, so a write
+  racing a claim is never lost) so the
+  Sentinel closes out now and holds one bounded landing window of at
+  least a full pulse block, shared by the interactive and exec waits alike; a
+  closeout inside the window keeps closeout-as-trigger, and a lapsed window — or the
+  hard deadline clipping it, which is checked before the generic timeout — ends the
+  wait on the validated bundle with the typed lapse recorded. A positively dead
   worker pane/process — or the mechanical never-started deadline, whose LIFTOFF the live
   Sentinel owns (its brief carries the same clamped deadline the watcher enforces) —
   first opens a bounded closeout window — a few minutes — for the Sentinel to land its
-  closeout before the mechanical path takes over. Python re-verifies every citation
+  closeout before the mechanical path takes over; when a valid staged bundle already
+  exists at proven worker exit, that window is skipped (bypassed-at-exit) because the
+  Sentinel has nothing left to add and the bundle is Python-validated either way.
+  Supervision is re-checked throughout the wait, never snapshotted at wait entry: the
+  Sentinel's own pane is probed on the same cadence as the worker's, and a
+  confirmed-gone Sentinel degrades supervision back to the mechanical paths for the rest
+  of the wait, so a dead Sentinel can never strand a finished worker until the hard
+  timeout. Python re-verifies every citation
   before it counts (an absolute-path citation corroborates only when it exists INSIDE the
   request's own territory — the worktree/cwd subtree or the ledger directory; an
   existing-but-out-of-scope path like `/etc/passwd` is discarded as out-of-scope) and a
@@ -336,11 +358,30 @@ Durable files are the source of truth; terminal text is display-only.
   mechanically checkable, always carry their explicit `(uncorroborated)` marker — a
   verified citation never launders the prose around it — and a closeout's
   `blocking_question` is surfaced first-class on the
-  published result.json, the receipt, and any Python-composed retry brief. The Sentinel
-  never kills anything and never outlives its worker attempt. When the hire fails, the
+  published result.json, the receipt, and any Python-composed retry brief. A STALLED
+  closeout whose citations ALL failed corroboration does not terminalize a provably live
+  worker on the Sentinel's word: Python re-probes the worker pane once and, only on a
+  POSITIVE pane answer (probe uncertainty is never treated as liveness), rejects the
+  closeout back to the Sentinel for one re-check before a repeat claim
+  is accepted. The Sentinel
+  never kills anything and never outlives its worker attempt. When the hire fails —
+  including a missing `upagent-sentinel` persona, which is diagnosed before any pane is
+  created with the exact missing paths named in the degrade event (checked once per
+  invocation), and a pane creation refused by a herdr error or limit — supervision
+  degrades for that request and the
   mechanical paths stay fully in charge (a never-hired Sentinel cannot strand a finished
-  worker); when a live Sentinel dies and no closeout ever appears, the hard timeout,
-  salvage triage, and epilogue backstop fire unchanged. Requester→worker messages go through
+  worker); the requester is notified once per distinct degrade reason, while the ledger
+  records every attempt's degrade. When a live Sentinel dies and no closeout ever
+  appears mid-window, the hard timeout,
+  salvage triage, and epilogue backstop fire unchanged. Every supervision state change
+  is a distinct typed ledger event — `sentinel-hired`, `sentinel-degraded`,
+  `sentinel-dead`, `sentinel-wake-valid-bundle`, `sentinel-wake-partial-staging`,
+  `sentinel-wake-worker-gone`, `sentinel-wake-never-started` (the truthful liftoff
+  reason: the worker may still be live but idle),
+  `sentinel-window-lapsed` (with its `window`: `landing` or `closeout`),
+  `sentinel-bypassed-at-exit`, `sentinel-closeout` (consumed), `sentinel-stalled-rejected`
+  — so an operator can reconstruct a request's supervision from the ledger alone.
+  Requester→worker messages go through
   `just upagent-message <order.json> <control-token-file> <message-file>`, which logs each
   message to the durable ledger before delivery.
 - Publication is ordered: validate private staging, prepare and atomically replace every public

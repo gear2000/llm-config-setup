@@ -192,12 +192,31 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     empty findings record beside a non-empty report, forces re-evaluation instead of a silent
     accept.
 20. Sentinel supervision is default-on and advisory-only. One cheap Sentinel pane per worker
-    attempt watches liftoff → pulse → landing → closeout; while it is live its typed
-    `closeout.json` is THE teardown trigger — a staged bundle alone no longer ends the
-    supervised wait, and proven worker pane/process death — or the mechanical never-started
+    attempt watches liftoff → pulse → landing → closeout. Its pulse is event-driven on a
+    per-attempt wake file that carries the wake REASON as its content — Python is the
+    only writer (staging activity, valid or
+    partial, and proven worker death), the Sentinel the only consumer via a bounded
+    wake-wait run under an explicit command timeout, with a short interval as the
+    fallback timer. While it is live its typed
+    `closeout.json` is THE teardown trigger — a validated staged bundle wakes the
+    Sentinel to close out now (the wake file is the one channel — published by an
+    atomic temp-write-and-rename, claimed by the Sentinel with an atomic rename, and
+    republished while the window is open, so a write racing a claim is never lost —
+    and a `valid-bundle` reason forbids re-sleeping) under one bounded landing window of at
+    least a full pulse block, shared by the interactive and exec waits, whose lapse —
+    checked before the generic timeout, so a deadline-clipped window still ends on the
+    validated bundle — falls back to the mechanical artifact path with a typed lapse
+    event, and proven worker pane/process
+    death — which also touches the wake file so the window opens on an awake
+    Sentinel, and whose own window lapse is the same typed event — or the mechanical
+    never-started
     deadline, whose LIFTOFF the live Sentinel owns with a brief that carries the same
     clamped deadline — first opens a bounded closeout window before the mechanical path
-    resumes — yet the closeout is never an authority. Python re-verifies every closeout
+    resumes, skipped entirely when a valid staged bundle already exists at proven exit
+    (bypassed-at-exit) — yet the closeout is never an authority. Supervision is
+    re-evaluated throughout the wait: the Sentinel's own pane is probed on the worker's
+    probe cadence, and a confirmed-gone Sentinel degrades supervision to the mechanical
+    paths for the rest of the wait. Python re-verifies every closeout
     citation (a path citation corroborates only inside the request's own worktree/cwd or
     ledger territory), validates a claimed COMPLETE against the ordinary bundle contract
     (one extra landing round on rejection), and routes NEVER_STARTED / STALLED /
@@ -205,10 +224,20 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     faults; a published blocked reason lists Python-verified citations separately as
     checked fact, with the Sentinel's LLM-authored interpretation attached but always
     marked uncorroborated, and a closeout `blocking_question` surfaces
-    on the published result, the receipt, and any Python-composed retry brief. The Sentinel
-    holds no kill switch and never outlives its worker attempt; a failed hire leaves the
+    on the published result, the receipt, and any Python-composed retry brief. A STALLED
+    closeout with zero corroborated citations may not terminalize a provably live worker:
+    Python re-probes the worker pane once and rejects the closeout back to the Sentinel
+    for one re-check only on a positive pane answer — probe uncertainty accepts the
+    original claim. The Sentinel
+    holds no kill switch and never outlives its worker attempt; a failed hire — a
+    missing persona (diagnosed pre-pane with the exact paths, once per invocation) or a
+    refused pane creation alike — degrades supervision and leaves the
     mechanical paths fully in charge, and a dead Sentinel changes nothing: the hard
-    deadline, salvage, and rescuer backstops fire unchanged. The liftoff address
+    deadline, salvage, and rescuer backstops fire unchanged. Every supervision state
+    change (hired, degraded, dead, wake-file touches by kind — `valid-bundle`,
+    `partial-staging`, `worker-gone`, and the truthful `never-started` for the liftoff
+    deadline — window-lapsed by window, bypassed-at-exit,
+    closeout consumed, stalled-rejected) is a distinct typed ledger event. The liftoff address
     relay hands the requester the worker's pane; requester→worker messages travel only
     through the ledger-logged message command.
 

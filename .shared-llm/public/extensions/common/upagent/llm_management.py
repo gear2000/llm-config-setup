@@ -396,7 +396,19 @@ Write exactly one JSON object to `{output_path}`:
 """
 
 
-SENTINEL_PULSE_MINUTES = 15
+# The pulse interval is only the FALLBACK: the Sentinel's wait is event-driven on its
+# per-attempt wake file (touched by the Recruiter on staging activity or worker death),
+# so a short interval costs one cheap extra loop and the file arrives in seconds.
+SENTINEL_PULSE_MINUTES = 5
+# The wait exceeds the harness's DEFAULT foreground-command timeout (Claude Code's Bash
+# tool defaults to 120 s), so the brief instructs running it with this explicit command
+# timeout — proven to work live — and the pair must fit the 600 s hard cap. One
+# mechanism only: explicit timeout, no sleep chunking.
+SENTINEL_PULSE_COMMAND_TIMEOUT_MS = SENTINEL_PULSE_MINUTES * 60 * 1000 + 10_000
+assert SENTINEL_PULSE_COMMAND_TIMEOUT_MS <= 600_000, (
+    "the sentinel pulse wait plus its buffer must fit the harness's 600 s hard "
+    "command-timeout cap"
+)
 SENTINEL_MAX_LANDING_EXCHANGES = 3
 
 
@@ -423,6 +435,7 @@ def sentinel_brief(
     closeout_path: Path,
     *,
     liftoff_deadline_ms: int,
+    wake_path: Path,
 ) -> str:
     """One Sentinel duty cycle: watch exactly one worker from liftoff to closeout.
 
@@ -434,8 +447,14 @@ def sentinel_brief(
     `liftoff_deadline_ms` is the caller's EFFECTIVE clamped first-action deadline
     (`_first_action_deadline_ms`), threaded in so the Sentinel's LIFTOFF instructions
     always match the mechanical deadline — a short order clamps both, never just one.
+
+    `wake_path` is this attempt's wake file. The Recruiter (Python) is its only
+    writer — it touches the file on worker staging activity or proven worker death —
+    and this Sentinel is its only consumer: the pulse wait blocks until the file
+    exists or the interval elapses, then deletes it before checking the worker.
     """
     liftoff_deadline = _liftoff_deadline_phrase(liftoff_deadline_ms)
+    pulse_wait_seconds = SENTINEL_PULSE_MINUTES * 60
     return f"""# UpAgent Sentinel — duty-bound to one worker
 
 You watch exactly one worker for its whole lifecycle and then write exactly one closeout
@@ -452,7 +471,17 @@ Your tools for every observation:
 - work deltas: `git -C {cwd} log --oneline -5` and `git -C {cwd} status --porcelain`
 - speak to the worker (dialogue only, never instructions to stop or exit):
   `herdr pane run {worker_pane} "<one short question>"`
-- sleep between pulses: `sleep {SENTINEL_PULSE_MINUTES * 60}`
+- wait between pulses (your wake file is `{wake_path}`; the Recruiter WRITES THE WAKE
+  REASON INTO THE FILE and can wake you in seconds — the {SENTINEL_PULSE_MINUTES}-minute
+  interval is only the fallback). Run EXACTLY this one bounded command, never a bare
+  long `sleep`, and ALWAYS run it with an explicit command timeout of
+  {SENTINEL_PULSE_COMMAND_TIMEOUT_MS} ms — your harness's default foreground timeout is
+  shorter than the wait and would kill it mid-block:
+  `for i in $(seq {pulse_wait_seconds}); do [ -e "{wake_path}" ] && break; sleep 1; done; mv "{wake_path}" "{wake_path}.claimed" 2>/dev/null; cat "{wake_path}.claimed" 2>/dev/null; rm -f "{wake_path}.claimed"`
+  The `mv` CLAIMS the wake atomically (a Recruiter write racing your claim lands as a
+  fresh wake file for your next wait — nothing is lost), and the `cat` prints the wake
+  reason (`valid-bundle`, `partial-staging`, `worker-gone`, or `never-started`); empty
+  output means the interval simply elapsed.
 
 ## 1. LIFTOFF
 
@@ -464,8 +493,26 @@ write the closeout now with outcome `NEVER_STARTED` and cite the pane evidence y
 
 ## 2. PULSE
 
-Sleep, then wake every {SENTINEL_PULSE_MINUTES} minutes. Each pulse: read the pane tail
-and the git/fs deltas since your last pulse.
+Run the bounded wake-wait command above; it returns when your wake file appears OR
+after {SENTINEL_PULSE_MINUTES} minutes, printing the wake reason and consuming the
+file. Act on the printed reason:
+- `valid-bundle` → the worker's bundle already passed the Recruiter's mechanical
+  validation. Do NOT re-sleep and do NOT wait for the worker to go quiet — whether it
+  is still printing output is irrelevant. Skip the landing dialogue: list and read the
+  bundle files on disk yourself, then write the `COMPLETE` closeout immediately
+  (Python revalidates the bundle when it consumes your closeout).
+- `partial-staging` → the worker staged some-but-not-all files (or an invalid
+  result). Go to LANDING now: steer it to finish the bundle by dialogue.
+- `worker-gone` → the worker's pane/process is proven gone. Inspect the pane tail and
+  git/fs deltas and write your closeout now.
+- `never-started` → the worker recorded no first tool action by the deadline. It may
+  still be live but idle — inspect the pane yourself, then write the `NEVER_STARTED`
+  closeout now if the evidence warrants it.
+- empty (interval elapsed) → an ordinary pulse: check the worker for quiet
+  IMMEDIATELY, before anything else.
+A prompt from the Recruiter (`SENTINEL_LANDING_RETRY` or `SENTINEL_STALL_RECHECK`)
+OVERRIDES waiting: act on it at once. Each pulse: read the pane tail and the git/fs
+deltas since your last pulse.
 - Progressing → go back to sleep.
 - Quiet → send ONE status nudge ("status? what are you on?"). If it resumes, log what you
   saw and sleep again.

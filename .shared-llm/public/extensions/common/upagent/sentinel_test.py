@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -563,6 +565,122 @@ def test_an_out_of_scope_citation_never_corroborates_in_the_published_reason(
     assert "sentinel interpretation (uncorroborated):" in message
 
 
+def _stalled_watch_with_worker_pane(
+    ledger: Any, order: dict, key: str, manifest: Any
+) -> Any:
+    closeout_path = recruiter._sentinel_closeout_path(ledger, key, 1)
+    closeout_path.parent.mkdir(parents=True, exist_ok=True)
+    return recruiter._SentinelWatch(
+        ledger,
+        key,
+        order,
+        manifest,
+        closeout_path,
+        {"address": "sentinel-address", "worker_pane": "worker-pane"},
+        herdr_session="default",
+    )
+
+
+def test_an_uncorroborated_stalled_over_a_live_worker_is_rejected_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1: a STALLED closeout whose citations ALL failed corroboration may not
+    terminalize a provably live worker on the Sentinel's word — Python re-probes the
+    worker pane once, rejects the closeout back to the Sentinel, and continues the
+    wait. A second uncorroborated STALLED is then accepted (the recheck is spent)."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_present", lambda *args, **kwargs: True
+    )
+    prompts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda address, message, **kwargs: prompts.append((address, message)),
+    )
+    watch = _stalled_watch_with_worker_pane(ledger, order, key, manifest)
+    stalled = _closeout(
+        order,
+        outcome="STALLED",
+        bundle=None,
+        progress_so_far="claims with no evidence",
+        last_alive="unknown",
+    )
+    watch.closeout_path.write_text(json.dumps(stalled))
+    assert watch.poll() is None
+    assert not watch.closeout_path.is_file()
+    assert watch.closeout_path.with_name("closeout.stalled-rejected.json").is_file()
+    assert prompts and prompts[0][0] == "sentinel-address"
+    assert "SENTINEL_STALL_RECHECK" in prompts[0][1]
+    assert "sentinel-stalled-rejected" in _events(ledger, key)
+
+    watch.closeout_path.write_text(json.dumps(stalled))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+
+
+def test_an_uncorroborated_stalled_without_positive_liveness_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-probe rejects only on a POSITIVE pane-get answer: a gone pane AND a
+    transport/probe fault both answer not-present, and both accept the STALLED
+    closeout immediately — probe uncertainty is never treated as liveness."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_present", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail("no recheck prompt for a gone worker"),
+    )
+    watch = _stalled_watch_with_worker_pane(ledger, order, key, manifest)
+    watch.closeout_path.write_text(
+        json.dumps(
+            _closeout(
+                order,
+                outcome="STALLED",
+                bundle=None,
+                progress_so_far="unknown",
+                last_alive="unknown",
+            )
+        )
+    )
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "sentinel-stalled-rejected" not in _events(ledger, key)
+
+
+def test_a_corroborated_stalled_needs_no_worker_re_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A STALLED closeout with at least one Python-corroborated citation is accepted
+    without probing: the second look is only for claims with zero checked evidence."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    real_file = Path(order["cwd"]) / "evidence.txt"
+    real_file.write_text("progress\n")
+    monkeypatch.setattr(
+        recruiter,
+        "_worker_pane_confirmed_present",
+        lambda *args, **kwargs: pytest.fail("corroborated STALLED must not probe"),
+    )
+    watch = _stalled_watch_with_worker_pane(ledger, order, key, manifest)
+    watch.closeout_path.write_text(
+        json.dumps(
+            _closeout(
+                order,
+                outcome="STALLED",
+                bundle=None,
+                citations=[str(real_file)],
+                progress_so_far="evidence written",
+                last_alive="pulse 2",
+            )
+        )
+    )
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+
+
 def test_a_finalization_failed_closeout_raises_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -688,14 +806,66 @@ def test_the_backstop_times_out_when_no_closeout_ever_appears(
         )
 
 
-def test_a_staged_bundle_alone_does_not_end_a_supervised_wait(
+def test_a_validated_bundle_nudges_the_sentinel_and_lapses_into_the_mechanical_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The closeout file is THE teardown trigger while a live Sentinel supervises: even a
-    valid staged bundle plus a fired artifact monitor must not end the wait — the Sentinel
-    verifies the bundle in LANDING and writes COMPLETE."""
+    """NUDGE-TO-LAND: a validated staged bundle under a live Sentinel is not suppressed
+    silently — the wake FILE (the one nudge channel, carrying the reason as content)
+    wakes the Sentinel and opens one bounded landing window; when the window lapses
+    with no closeout, the mechanical artifact path ends the wait (with the typed lapse
+    recorded), instead of stranding the finished worker."""
     ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
     monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    monkeypatch.setattr(recruiter, "SENTINEL_LANDING_WINDOW_SECONDS", 0.15)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail("the wake file is the one nudge channel"),
+    )
+    _stage_valid_result(manifest, order)
+    monitor = threading.Event()
+    monitor.set()
+    watch = _watch(ledger, order, key, manifest)
+    assert watch.supervising
+    started = time.monotonic()
+    assert (
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            5_000,
+            monitor,
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    # The wait held the landing window open before falling back mechanically.
+    assert time.monotonic() - started >= 0.15
+    # The wake file carries the reason as its content.
+    assert watch.wake_path.read_text().strip() == "valid-bundle"
+    events = _events(ledger, key)
+    assert "sentinel-wake-valid-bundle" in events
+    lapse = _event(ledger, key, "sentinel-window-lapsed")
+    assert lapse["window"] == "landing"
+
+
+def test_a_landing_window_clipped_by_the_hard_deadline_still_accepts_the_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (review finding 3): a valid bundle arriving with less than a full
+    landing window left before the request cap must end the wait on the bundle — the
+    active window lapse is checked BEFORE the generic timeout, so the request never
+    times out over work that is already done."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    # Window far longer than the request cap: only the deadline can clip it.
+    monkeypatch.setattr(recruiter, "SENTINEL_LANDING_WINDOW_SECONDS", 60.0)
     monkeypatch.setattr(
         recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
     )
@@ -706,16 +876,436 @@ def test_a_staged_bundle_alone_does_not_end_a_supervised_wait(
     monitor = threading.Event()
     monitor.set()
     watch = _watch(ledger, order, key, manifest)
-    assert watch.supervising
-    with pytest.raises(recruiter.AgentWaitTimeout):
+    assert (
         recruiter._wait_for_interactive_completion(
             "worker-pane",
             "claude",
-            200,
+            300,
             monitor,
             sentinel_watch=watch,
             herdr_session="default",
         )
+        is False
+    )
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "landing"
+
+
+def test_the_exec_wait_shares_the_valid_bundle_nudge_and_landing_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding 2: a still-live exec worker whose staged bundle already
+    validated gets the same wake + bounded landing window as an interactive worker —
+    the wait ends on the bundle at window lapse instead of holding for process exit,
+    a pulse, or the hard deadline."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    # The long-lived stand-in for `herdr wait agent-status` on a live exec worker.
+    monkeypatch.setattr(
+        recruiter, "_herdr_argv", lambda args, session: ("default", ["sleep", "30"])
+    )
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    monkeypatch.setattr(recruiter, "COMPLETION_MONITOR_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(recruiter, "SENTINEL_LANDING_WINDOW_SECONDS", 0.15)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    _stage_valid_result(manifest, order)
+    monitor = threading.Event()
+    monitor.set()
+    watch = _watch(ledger, order, key, manifest)
+    started = time.monotonic()
+    assert (
+        recruiter._wait_for_agent_status(
+            "worker-pane",
+            60_000,
+            monitor,
+            completion_style="exec",
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    assert time.monotonic() - started < 10.0
+    assert watch.wake_path.read_text().strip() == "valid-bundle"
+    events = _events(ledger, key)
+    assert "sentinel-wake-valid-bundle" in events
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "landing"
+
+
+def test_a_closeout_landing_inside_the_nudged_window_ends_the_wait_normally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The woken Sentinel lands COMPLETE inside its window: the wait ends through the
+    closeout (closeout-as-trigger preserved), not the mechanical fallback."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
+    )
+    _stage_valid_result(manifest, order)
+    watch = _watch(ledger, order, key, manifest)
+
+    def sentinel_wakes_and_lands() -> None:
+        # A stand-in Sentinel: wake on the file, act on the reason, close out.
+        deadline = time.monotonic() + 5
+        while not watch.wake_path.is_file():
+            if time.monotonic() > deadline:  # pragma: no cover - test guard
+                return
+            time.sleep(0.005)
+        assert watch.wake_path.read_text().strip() == "valid-bundle"
+        watch.wake_path.unlink()
+        watch.closeout_path.parent.mkdir(parents=True, exist_ok=True)
+        watch.closeout_path.write_text(json.dumps(_closeout(order)))
+
+    threading.Thread(target=sentinel_wakes_and_lands).start()
+    monitor = threading.Event()
+    monitor.set()
+    assert (
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            5_000,
+            monitor,
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    events = _events(ledger, key)
+    assert "sentinel-window-lapsed" not in events
+    assert _event(ledger, key, "sentinel-closeout")["outcome"] == "COMPLETE"
+
+
+def test_partial_staging_wakes_the_sentinel_without_ending_the_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging activity that has not validated (some-but-not-all files, or an invalid
+    result) touches the wake file with its own typed event, so the worker gets its
+    LANDING dialogue in seconds — while the wait itself continues to the closeout,
+    the mechanical paths, or the deadline."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail("partial staging must not prompt"),
+    )
+    # A partial bundle: only the optional summary staged, no result.json.
+    staged = manifest.artifact("compacted").staging_path
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("partial summary\n")
+    watch = _watch(ledger, order, key, manifest)
+    with pytest.raises(recruiter.AgentWaitTimeout):
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            300,
+            threading.Event(),
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+    assert watch.wake_path.is_file()
+    assert "sentinel-wake-partial-staging" in _events(ledger, key)
+
+
+def test_a_wake_write_racing_a_consumer_claim_is_never_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer/consumer interleaving (final-review must-fix 1): the publish is an
+    atomic temp-write + rename, the consumer claims by renaming to a private name,
+    and a publish after the claim lands as a fresh wake file — never a lost wake, and
+    never an observable empty reason."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+
+    # Publish, then the consumer claims atomically (the brief's `mv`).
+    watch.touch_wake("valid-bundle")
+    assert watch.wake_path.read_text().strip() == "valid-bundle"
+    claimed = watch.wake_path.with_name(watch.wake_path.name + ".claimed")
+    os.replace(watch.wake_path, claimed)
+    assert not watch.wake_path.exists()
+
+    # A publish racing (after) the claim republishes a complete file: the consumer's
+    # next wait sees it, and the claimed copy is untouched.
+    watch.touch_wake("valid-bundle")
+    assert watch.wake_path.read_text().strip() == "valid-bundle"
+    assert claimed.read_text().strip() == "valid-bundle"
+    # No partially-written temp residue beside the wake file.
+    residue = [
+        item.name
+        for item in watch.wake_path.parent.iterdir()
+        if item.name.startswith(".wake") and item.name.endswith(".tmp")
+    ]
+    assert residue == []
+    # The ledger event stays once-per-kind even across republishes.
+    assert _events(ledger, key).count("sentinel-wake-valid-bundle") == 1
+
+
+def test_landing_pass_first_observed_at_expired_deadline_is_mechanical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final-review must-fix 2: a bundle first observed with the request deadline
+    already reached must lapse to the mechanical path immediately — never open a
+    nominal window that the caller's generic timeout turns into AgentWaitTimeout."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    monitor = threading.Event()
+    monitor.set()
+    # The reviewer's direct probe: must not be None at an expired deadline.
+    assert watch.landing_pass(monitor, time.monotonic() - 1) == "mechanical"
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "landing"
+
+    # And through the real loop: monitor validated, deadline effectively immediate.
+    (tmp_path / "second").mkdir()
+    ledger2, order2, key2, manifest2 = _claimed_request(
+        tmp_path / "second", monkeypatch
+    )
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
+    )
+    _stage_valid_result(manifest2, order2)
+    watch2 = _watch(ledger2, order2, key2, manifest2)
+    assert (
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            1,
+            monitor,
+            sentinel_watch=watch2,
+            herdr_session="default",
+        )
+        is False
+    )
+    assert _event(ledger2, key2, "sentinel-window-lapsed")["window"] == "landing"
+
+
+class _FlipEvent(threading.Event):
+    """The reviewer's deterministic probe: the first is_set() observation reports
+    False (the landing pass misses the validation), every later one True (the monitor
+    set the event right after). A set observed before the timeout decision must never
+    be lost to AgentWaitTimeout."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._observed = False
+
+    def is_set(self) -> bool:
+        if not self._observed:
+            self._observed = True
+            return False
+        self.set()
+        return True
+
+
+def test_a_validation_racing_the_deadline_is_reobserved_interactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check/use gap at the hard deadline (interactive): the landing pass observes an
+    unset monitor, the monitor validates immediately after, and the deadline is
+    reached — the timeout decision must re-observe the event and end the wait on the
+    validated bundle with the typed lapse, never raise AgentWaitTimeout."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 5.0)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
+    )
+    _stage_valid_result(manifest, order)
+    watch = _watch(ledger, order, key, manifest)
+    monitor = _FlipEvent()
+    assert (
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            1,
+            monitor,
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    assert monitor.is_set()
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "landing"
+
+
+def test_a_validation_racing_the_deadline_is_reobserved_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same check/use gap in the exec loop: the re-observation at the timeout
+    decision accepts the validated bundle instead of raising."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(
+        recruiter, "_herdr_argv", lambda args, session: ("default", ["sleep", "30"])
+    )
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 5.0)
+    monkeypatch.setattr(recruiter, "COMPLETION_MONITOR_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: False
+    )
+    _stage_valid_result(manifest, order)
+    watch = _watch(ledger, order, key, manifest)
+    monitor = _FlipEvent()
+    assert (
+        recruiter._wait_for_agent_status(
+            "worker-pane",
+            1,
+            monitor,
+            completion_style="exec",
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    assert monitor.is_set()
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "landing"
+
+
+def test_sentinel_death_inside_the_worker_gone_window_records_the_typed_lapse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final-review must-fix 3: when the Sentinel dies inside an already-open
+    worker-gone closeout window, the exit carries BOTH the death reason
+    (sentinel-dead) and the typed window lapse — no supervised-wait ending lacks a
+    typed cause."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(recruiter, "COMPLETION_MONITOR_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: True
+    )
+    closeout_path = recruiter._sentinel_closeout_path(ledger, key, 1)
+    closeout_path.parent.mkdir(parents=True, exist_ok=True)
+    watch = recruiter._SentinelWatch(
+        ledger,
+        key,
+        order,
+        manifest,
+        closeout_path,
+        {"address": "sentinel-address", "pane": "sentinel-pane"},
+        herdr_session="default",
+    )
+    assert (
+        recruiter._await_sentinel_closeout_after_worker_gone(
+            watch, time.monotonic() + 30, reason="worker-gone"
+        )
+        is False
+    )
+    events = _events(ledger, key)
+    assert "sentinel-dead" in events
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "closeout"
+    assert watch.wake_path.read_text().strip() == "worker-gone"
+
+
+def test_a_dead_sentinel_pane_degrades_supervision_mid_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: the Sentinel's own pane is probed on the poll cadence; on confirmed-gone the
+    wait falls back to the mechanical paths for the rest of the wait instead of trusting
+    the wait-entry supervision snapshot and stranding a finished worker."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+
+    def only_sentinel_gone(pane: str, **kwargs: object) -> bool:
+        return pane == "sentinel-pane"
+
+    monkeypatch.setattr(recruiter, "_worker_pane_confirmed_gone", only_sentinel_gone)
+    monkeypatch.setattr(
+        recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail("a dead sentinel must not be nudged"),
+    )
+    _stage_valid_result(manifest, order)
+    monitor = threading.Event()
+    closeout_path = recruiter._sentinel_closeout_path(ledger, key, 1)
+    closeout_path.parent.mkdir(parents=True, exist_ok=True)
+    watch = recruiter._SentinelWatch(
+        ledger,
+        key,
+        order,
+        manifest,
+        closeout_path,
+        {"address": "sentinel-address", "pane": "sentinel-pane"},
+        herdr_session="default",
+    )
+    assert watch.supervising
+
+    def fire_monitor() -> None:
+        time.sleep(0.2)
+        monitor.set()
+
+    threading.Thread(target=fire_monitor).start()
+    started = time.monotonic()
+    assert (
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            10_000,
+            monitor,
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    assert time.monotonic() - started < 5.0
+    assert not watch.supervising
+    dead = _event(ledger, key, "sentinel-dead")
+    assert dead["sentinel_pane"] == "sentinel-pane"
+
+
+def test_a_worker_gone_with_a_validated_bundle_bypasses_the_closeout_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M3: proven worker exit with an already-validated staged bundle takes the
+    mechanical path immediately — the Sentinel has nothing to add, and the bypass is a
+    typed ledger event."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(recruiter, "AGENT_WAIT_PANE_PROBE_SECONDS", 0.02)
+    monkeypatch.setattr(recruiter, "SENTINEL_CLOSEOUT_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_gone", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda address, message, **kwargs: None,
+    )
+    _stage_valid_result(manifest, order)
+    monitor = threading.Event()
+    monitor.set()
+    watch = _watch(ledger, order, key, manifest)
+    started = time.monotonic()
+    assert (
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            60_000,
+            monitor,
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+        is False
+    )
+    assert time.monotonic() - started < 5.0
+    assert "sentinel-bypassed-at-exit" in _events(ledger, key)
 
 
 def test_a_degraded_sentinel_leaves_the_mechanical_paths_in_charge(
@@ -769,6 +1359,12 @@ def test_worker_death_grants_a_bounded_closeout_window_then_mechanical_paths(
     )
     # The wait outlived the death probe by at least the closeout window.
     assert time.monotonic() - started >= 0.1
+    # The window opened with an awake Sentinel: the wake file was touched first,
+    # carrying the reason, and the fallback is a typed lapse — the ledger alone says
+    # why the supervised wait ended mechanically.
+    assert watch.wake_path.read_text().strip() == "worker-gone"
+    assert "sentinel-wake-worker-gone" in _events(ledger, key)
+    assert _event(ledger, key, "sentinel-window-lapsed")["window"] == "closeout"
 
 
 def test_a_closeout_landing_inside_the_death_window_ends_the_wait_normally(
@@ -951,6 +1547,7 @@ def test_the_sentinel_brief_carries_the_effective_clamped_liftoff_deadline() -> 
         "/work/tree",
         Path("/ledger/closeout.json"),
         liftoff_deadline_ms=clamped,
+        wake_path=Path("/ledger/wake"),
     )
     assert "If 30 seconds pass with no action" in brief
     assert "minutes pass with no action" not in brief
@@ -961,8 +1558,196 @@ def test_the_sentinel_brief_carries_the_effective_clamped_liftoff_deadline() -> 
         "/work/tree",
         Path("/ledger/closeout.json"),
         liftoff_deadline_ms=recruiter._first_action_deadline_ms(1_800_000),
+        wake_path=Path("/ledger/wake"),
     )
     assert "If 5 minutes pass with no action" in standard
+
+
+def test_the_brief_pulse_is_an_event_driven_bounded_wake_wait() -> None:
+    """M2 (wake-file design): the pulse is a bounded wait on the attempt's wake file
+    with the interval as fallback only. The exact path and the exact blocking
+    one-liner — which prints the wake REASON before consuming the file — are threaded
+    into the brief, the brief instructs the explicit command timeout that outlives the
+    wait (the harness default would kill it mid-block), a valid-bundle wake forbids
+    re-sleeping and goes straight to the closeout, and a Recruiter prompt overrides
+    waiting."""
+    llm = recruiter.llm_management
+    wake = Path("/ledger/wake")
+    brief = llm.sentinel_brief(
+        "request-1",
+        "order-1",
+        "worker-pane",
+        "/work/tree",
+        Path("/ledger/closeout.json"),
+        liftoff_deadline_ms=300_000,
+        wake_path=wake,
+    )
+    assert "sleep 900" not in brief
+    assert llm.SENTINEL_PULSE_MINUTES == 5
+    pulse_seconds = llm.SENTINEL_PULSE_MINUTES * 60
+    assert llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS > pulse_seconds * 1000
+    assert llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS <= 600_000
+    assert f"{llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS} ms" in brief
+    assert (
+        f'for i in $(seq {pulse_seconds}); do [ -e "{wake}" ] && break; '
+        f'sleep 1; done; mv "{wake}" "{wake}.claimed" 2>/dev/null; '
+        f'cat "{wake}.claimed" 2>/dev/null; rm -f "{wake}.claimed"'
+    ) in brief
+    # The wake reason drives the response; valid-bundle skips dialogue and re-sleep.
+    assert "`valid-bundle`" in brief
+    assert "Do NOT re-sleep" in brief
+    assert "`partial-staging`" in brief
+    assert "`worker-gone`" in brief
+    assert "`never-started`" in brief
+    assert "worker for quiet\n  IMMEDIATELY" in brief or "worker for quiet" in brief
+    assert "OVERRIDES waiting" in brief
+    # The prompt-based nudge channel is deleted: the wake file is the one channel.
+    assert "SENTINEL_NUDGE_TO_LAND" not in brief
+
+
+def test_staging_activity_tolerates_concurrent_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding 5: the worker owns its staging paths and may unlink/replace one
+    between any check and read, so the probe uses one stat per artifact and treats a
+    vanished file as no activity — never an escaped fault that blocks the request."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+
+    class _VanishingPath:
+        def stat(self) -> object:
+            raise FileNotFoundError("unlinked mid-probe")
+
+    class _Artifact:
+        def __init__(self, staging_path: object) -> None:
+            self.staging_path = staging_path
+
+    real = tmp_path / "staged.md"
+    real.write_text("content\n")
+
+    watch.manifest = type(
+        "M", (), {"artifacts": [_Artifact(_VanishingPath())]}
+    )()
+    assert watch.staging_activity() is False
+
+    watch.manifest = type(
+        "M", (), {"artifacts": [_Artifact(_VanishingPath()), _Artifact(real)]}
+    )()
+    assert watch.staging_activity() is True
+
+
+def test_a_malformed_sentinel_command_lands_in_the_degrade_path(
+    tmp_path: Path,
+) -> None:
+    """Review finding 6: an unmatched quote in a configured sentinel command must
+    become the ordinary hire-degrade diagnosis, never a ValueError that fails the
+    worker lifecycle."""
+    missing = recruiter._sentinel_persona_missing(
+        'claude --agent "unclosed', str(tmp_path)
+    )
+    assert missing is not None
+    assert "could not be parsed" in missing
+    assert "management.sentinel.command" in missing
+
+
+# --- Persona pre-check and degrade hygiene ---------------------------------------
+
+
+def test_the_persona_pre_check_names_the_exact_missing_paths(
+    tmp_path: Path,
+) -> None:
+    """S2: a missing Sentinel persona is diagnosed before any pane exists, the message
+    names the candidate paths the operator must fix, and the answer is cached per
+    process invocation instead of being re-diagnosed on every attempt."""
+    agent = f"upagent-sentinel-test-{uuid.uuid4().hex}"
+    command = f"claude --dangerously-skip-permissions --agent {agent} --model haiku"
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    missing = recruiter._sentinel_persona_missing(command, str(cwd))
+    assert missing is not None
+    assert repr(agent) in missing
+    assert str(cwd / ".claude/agents" / f"{agent}.md") in missing
+    assert str(Path.home() / ".claude/agents" / f"{agent}.md") in missing
+    # Cached per invocation: creating the file later does not change this process's
+    # cached answer (the next per-command invocation re-checks fresh).
+    persona = cwd / ".claude/agents" / f"{agent}.md"
+    persona.parent.mkdir(parents=True)
+    persona.write_text("persona\n")
+    assert recruiter._sentinel_persona_missing(command, str(cwd)) == missing
+
+    # A persona present from the start (fresh cache key via a fresh cwd) passes.
+    other = tmp_path / "wt2"
+    (other / ".claude/agents").mkdir(parents=True)
+    (other / ".claude/agents" / f"{agent}.md").write_text("persona\n")
+    assert recruiter._sentinel_persona_missing(command, str(other)) is None
+    # A command with no --agent needs no persona file.
+    assert recruiter._sentinel_persona_missing("claude --model haiku", str(cwd)) is None
+
+
+def test_a_failed_sentinel_hire_degrades_supervision_and_notifies_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """S3 + S2 hygiene: a hire that fails (herdr pane limit, missing persona, ...)
+    degrades supervision for the request instead of failing it — every attempt's
+    degrade is a typed ledger event carrying the attempt number, but the requester is
+    notified once per distinct reason per invocation, not spammed per attempt."""
+    ledger, order, key, roster_path, drill = _drill_job(
+        tmp_path, monkeypatch, first_action=False, grace_ms=50
+    )
+
+    # With no Sentinel there is no closeout to end the wait: the mechanical abort
+    # does, exactly as the real watcher fires it on the proven deadline.
+    def abort_watch(
+        ledger_arg: Any,
+        key_arg: str,
+        pane: str,
+        staging: Path,
+        abort: threading.Event,
+        stop: threading.Event,
+        **kwargs: object,
+    ) -> None:
+        ledger_arg._event(
+            key_arg,
+            "worker-never-started",
+            deadline_ms=300_000,
+            idle_probes=recruiter.FIRST_ACTION_MIN_IDLE_PROBES,
+            agent_status="idle",
+            worker_pane=pane,
+            attempt=kwargs["attempt"],
+        )
+        if kwargs.get("abort_on_deadline"):
+            abort.set()
+
+    monkeypatch.setattr(recruiter, "_watch_first_action", abort_watch)
+
+    def refuse_hire(*args: object, **kwargs: object) -> dict[str, object]:
+        raise recruiter.RecruiterError(
+            "pane creation refused: workspace pane limit reached"
+        )
+
+    monkeypatch.setattr(recruiter, "_start_sentinel", refuse_hire)
+    notified: list[str] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_notify_requester",
+        lambda ledger_arg, key_arg, order_arg, generation, message_type, *rest: (
+            notified.append(message_type)
+        ),
+    )
+
+    # The never-started auto-retry gives two attempts; both hires fail.
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+
+    receipt = ledger.completed_receipt(key, order)
+    assert receipt["verdict"] == "never-started"
+    degrades = [
+        item
+        for item in ledger.events(key)
+        if item.get("event") == "sentinel-degraded"
+    ]
+    assert [item["attempt"] for item in degrades] == [1, 2]
+    assert all("pane limit" in item["reason"] for item in degrades)
+    assert notified.count("sentinel-degraded") == 1
 
 
 # --- Requester→worker logged message channel ------------------------------------

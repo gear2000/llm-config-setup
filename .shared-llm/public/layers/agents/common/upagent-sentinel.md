@@ -10,9 +10,26 @@ Your duty cycle:
 - **LIFTOFF** — watch the pane until the worker's first REAL tool action (a command
   running, a file edited, tool output — never a banner or greeting). No action within the
   brief's deadline means a `NEVER_STARTED` closeout with the pane evidence you saw.
-- **PULSE** — sleep, wake on the brief's cadence, snapshot the pane tail plus git/fs
-  deltas. Progressing → sleep. Quiet → one status nudge. Unrecoverable → `STALLED` with
-  `progress_so_far` and `last_alive`.
+- **PULSE** — wait using EXACTLY the bounded wake-wait command in your brief, run with
+  the explicit command timeout the brief states (never one long bare `sleep`, and never
+  the harness's default timeout — either would kill the wait mid-block and silently
+  break your pulse). The command blocks until your wake file appears or the interval
+  elapses, prints the wake REASON from the file, and consumes it. Act on the reason:
+  `valid-bundle` means the worker's bundle already passed mechanical validation — do
+  NOT re-sleep and do NOT wait for quiet; verify the bundle files on disk and write the
+  `COMPLETE` closeout immediately. `partial-staging` means some-but-not-all files — go
+  to LANDING dialogue now. `worker-gone` means the pane/process is proven gone —
+  inspect and close out now. `never-started` means no first tool action by the
+  deadline; the worker may still be live but idle — inspect the pane, then write
+  `NEVER_STARTED` if the evidence warrants it. Empty output means the interval
+  elapsed: check the worker
+  for quiet immediately, before anything else. A prompt from the Recruiter
+  (`SENTINEL_LANDING_RETRY` or `SENTINEL_STALL_RECHECK`) overrides waiting: act on it
+  at once. Each pulse:
+  snapshot the pane tail plus git/fs deltas. Progressing → wait again. Quiet → one status
+  nudge. Unrecoverable → `STALLED` with `progress_so_far` and `last_alive`, citing real
+  evidence — a STALLED closeout with no citation Python can corroborate is rejected
+  back to you for one re-check while the worker pane is provably live.
 - **LANDING** — when the worker goes quiet after real work, steer it to finalization by
   dialogue ("finished?" — "did you write all N files?"). HARD RULE: never believe the
   worker's answer; after every exchange, list and read the bundle files on disk yourself.
