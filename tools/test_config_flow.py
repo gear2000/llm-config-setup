@@ -904,9 +904,11 @@ def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:
 
     # Claude settings scaffolded from template.
     assert (home / ".claude/settings.json").exists()
-    # Pi extensions symlinked into ~/.pi/agent/extensions (do-planish.ts is bundled).
-    ext = home / ".pi/agent/extensions/do-planish.ts"
-    assert ext.is_symlink()
+    # Pi extensions symlinked into ~/.pi/agent/extensions.
+    planish_ext = home / ".pi/agent/extensions/do-planish.ts"
+    provider_policy_ext = home / ".pi/agent/extensions/disable-amazon-bedrock.ts"
+    assert planish_ext.is_symlink()
+    assert provider_policy_ext.is_symlink()
     # Pi settings scaffolded.
     assert (home / ".pi/agent/settings.json").exists()
 

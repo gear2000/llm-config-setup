@@ -97,6 +97,7 @@ test:
     ${PYTHON_BIN:-python3} -m pytest tools/ .shared-llm/public/extensions/common/ -q
     node --experimental-strip-types .shared-llm/public/llm/pi/common/meta-plan/meta-plan-schema.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/disable-amazon-bedrock.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 
 # Runs planish_resolve.py and both Pi extensions that delegate to it over one corpus.
@@ -105,6 +106,9 @@ test-resolver-parity:
 
 test-auto-compact:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts
+
+test-provider-policy:
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/disable-amazon-bedrock.test.ts
 
 test-memsearch:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/memsearch.test.ts
