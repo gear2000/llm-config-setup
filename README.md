@@ -176,6 +176,56 @@ There is no scaffolding command — a destination is set up by hand once, then d
 
 From then on, `just update` keeps every registered destination in sync: it rebuilds `public/` from the kit (your `this_repo/` tree is never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
 
+## Troubleshooting — `just update` succeeds but a repo stays stale
+
+`just update` only ever writes to the paths listed in `~/.shared-llm.yaml` — and that file is **per-machine**. When a repo keeps running an old `.shared-llm` runtime even though `just update` reports success, the update machinery is almost never the problem; the destination list is. Work through these scenarios in order.
+
+First, on the affected machine, confirm what the engine is actually targeting:
+
+```bash
+cat ~/.shared-llm.yaml          # what does this machine think the destinations are?
+just update -v                  # watch which paths it writes
+```
+
+### Scenario 1 — the destination path points at the wrong copy of the repo
+
+The config lists a stale path: an archived copy, a moved/renamed checkout, or a parent/container folder instead of the exact repo root where you run the commands. `just update` faithfully refreshes that other folder, while the repo you actually work in either keeps a stale `.shared-llm/` or (if it was never registered under its real path) has none at all.
+
+```
+~/.shared-llm.yaml
+└── destinations:
+    └── ~/repos/archive/old-copy/foo    ← updated forever, used by nobody
+
+~/repos/foo/                            ← the live repo you run `just <cmd>` in
+└── .shared-llm/                        ✗ stale or missing — never targeted
+```
+
+This is especially easy to hit when moving between machines: absolute paths differ, and a path that was right on one machine can point at the wrong level (or a dead copy) on another.
+
+**Diagnose:** in the affected repo, check where its commands resolve (`git rev-parse --show-toplevel`, `just --list`), then compare that root against every `path:` in `~/.shared-llm.yaml`. If no entry matches it exactly, this is your scenario.
+
+**Fix:** edit the entry's `path:` to the exact repo root that runs the commands (keep its `harnesses:` and `placeholders:`), remove or correct the stale entry, then `just update -v`. Verify the repo-local `.shared-llm/public/` tree now contains the expected new files.
+
+### Scenario 2 — the repo was never registered on this machine
+
+`~/.shared-llm.yaml` does not travel with the kit or the repo. A repo registered on machine A is invisible to machine B until you register it there too.
+
+**Fix:** on the affected machine, `just configure -d /path/to/repo -l cc,pi` (add the `placeholders:` map its layers need), then `just update`.
+
+### Scenario 3 — the kit checkout itself is behind
+
+The engine copies from the kit's working tree. If you `git pull`ed the kit on one machine but not this one, `just update` here dutifully deploys the old content everywhere.
+
+**Fix:** `git pull` in the kit repo, then `just update`.
+
+### Verifying the fix
+
+In the affected repo, after `just update -v`:
+
+- the repo-local `.shared-llm/public/` tree contains the new files you expected (grep for a symbol you know shipped recently);
+- `just --list` resolves the tool-module recipes from the repo-local runtime;
+- `git status` shows no surprises — `.shared-llm/` is typically gitignored, and only the composed outputs (`CLAUDE.md`, skills, agents) change as tracked files.
+
 ## Where compose outputs land
 
 **Recipe `output:` paths are root-relative**, and they resolve against the destination's root. So a real destination's generated files land exactly where each harness reads them — `CLAUDE.md` and `AGENTS.md` at the root, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md` — with no manual move.
