@@ -37,6 +37,13 @@ configure *args:
 update *args:
     ${PYTHON_BIN:-python3} tools/harness.py update {{args}}
 
+# The heavy hammer for stale/corrupt kit-owned state: deletes the hub's kit
+# content and every destination's .shared-llm/public/ tree (never this_repo/,
+# never ~/.shared-llm/generated/ or the manifest), then rebuilds via a full
+# update. Use when README's troubleshooting scenarios don't explain the drift.
+reset *args:
+    ${PYTHON_BIN:-python3} tools/harness.py reset {{args}}
+
 # Verify skill placement per harness (do-* Pi-only, cc-* Claude-only, common both).
 # Run this on any machine after `just update` to confirm the layout is correct.
 check:

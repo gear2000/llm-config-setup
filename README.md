@@ -33,6 +33,7 @@ just configure -d /path/to/repo -l cc,pi   # register a destination repo + its h
 just configure -g cc,pi          # set the GLOBAL (home / all-projects) harness list
 just update                      # the headline command: copy → compose → link (+ global), every destination
 just update -v                   # same, with per-file detail printed
+just reset                       # heavy hammer: delete all kit-owned state, then rebuild via update
 ```
 
 - **Harness tokens** are `cc` (Claude Code), `pi` (Pi), `codex` (Codex), and `cursor` (Cursor Agent CLI, `cursor-agent`). A destination's `-l` list defaults to `cc,pi`. `cursor` is a surface alias of `codex`: the Cursor Agent CLI reads the same root `AGENTS.md` and discovers skills from the same `~/.agents/skills/` home dir (plus `.claude/skills/` for compat), so it rides the codex plumbing end to end — no cursor-specific files are generated.
@@ -217,6 +218,16 @@ This is especially easy to hit when moving between machines: absolute paths diff
 The engine copies from the kit's working tree. If you `git pull`ed the kit on one machine but not this one, `just update` here dutifully deploys the old content everywhere.
 
 **Fix:** `git pull` in the kit repo, then `just update`.
+
+### The heavy hammer — `just reset`
+
+If the config is verified correct and a repo still looks wrong (half-copied state, a runtime dir corrupted by hand-edits, drift you can't explain), `just reset` deletes all kit-owned state and rebuilds it from scratch:
+
+- removes the hub's kit-synced content and every destination's `.shared-llm/public/` tree;
+- never touches a destination's `this_repo/` tree, and never `~/.shared-llm/generated/` or `manifest.json` (home symlinks point into those — the rebuild reconciles them in place);
+- then runs the full `update` flow, so everything kit-owned is regenerated fresh.
+
+It is safe to run any time — everything it deletes is a build product the next update recreates.
 
 ### Verifying the fix
 

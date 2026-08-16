@@ -3588,6 +3588,48 @@ def cmd_update(args: argparse.Namespace) -> None:
         print(f"(run `just update -v` or see {log_path} for the per-file detail)")
 
 
+def do_reset(cfg: dict, log: RunLog) -> None:
+    """Delete the kit-owned state so the next update rebuilds it from scratch:
+    each destination's ``.shared-llm/public/`` tree, and the hub's kit-synced
+    top-level entries. Never touches a destination's ``this_repo/`` tree, and
+    never the hub's ``generated/`` tree or ``manifest.json`` — home symlinks
+    point into those, and the update flow reconciles them in place."""
+    kit_shared = project_root() / ".shared-llm" / PUBLIC_DIR
+    hub = Path(cfg["source"]).expanduser()
+    if hub.resolve() == kit_shared.resolve():
+        sys.exit(
+            "error: the hub (`source:` in ~/.shared-llm.yaml) is the kit's own "
+            "public/ source tree — refusing to reset it."
+        )
+    for entry in sorted(kit_shared.iterdir()):
+        target = hub / entry.name
+        if target.exists():
+            log.always(f"reset: rm hub {target}")
+            shutil.rmtree(target) if target.is_dir() else target.unlink()
+    for d in cfg["destinations"]:
+        pub = Path(d["path"]).expanduser() / ".shared-llm" / PUBLIC_DIR
+        # The kit's own public/ tree is the SOURCE, not a build product — if the
+        # kit itself is registered as a destination, deleting it destroys the kit.
+        if pub.resolve() == kit_shared.resolve():
+            log.always(f"reset: skip {pub} (this is the kit source tree)")
+            continue
+        if pub.exists():
+            log.always(f"reset: rm {pub}")
+            shutil.rmtree(pub)
+
+
+def cmd_reset(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    if not cfg["destinations"] and not cfg["global"]:
+        sys.exit(
+            "error: nothing configured. Run `just configure -d <repo> -l cc,pi` first."
+        )
+    log = RunLog(verbose=True)
+    do_reset(cfg, log)
+    log.always("reset: kit-owned state removed — rebuilding via update")
+    cmd_update(argparse.Namespace(verbose=args.verbose))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="harness.py",
@@ -3694,6 +3736,19 @@ def main() -> None:
         help="Print per-file detail (always written to the log).",
     )
     pup.set_defaults(func=cmd_update)
+
+    prs = sub.add_parser(
+        "reset",
+        help="Delete kit-owned state (hub kit content + every destination's "
+        "public/ tree), then rebuild via a full update.",
+    )
+    prs.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print per-file detail (always written to the log).",
+    )
+    prs.set_defaults(func=cmd_reset)
 
     args = parser.parse_args()
     args.func(args)
