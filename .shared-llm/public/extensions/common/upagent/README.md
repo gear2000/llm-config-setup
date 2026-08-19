@@ -148,8 +148,10 @@ attaches and a changed payload still conflicts without launching.
 ### Read, cancel, and terminal cleanup
 
 `status` without a request describes the per-command runtime; `get --request ID` is the read-only request view. It
-returns submission and lifecycle state, retained result and receipt values, and typed
-result/compacted/handoff/receipt/log pointers. After pruning it reports `state: pruned`, the prior
+returns submission and lifecycle state, retained result and receipt values, typed
+result/compacted/handoff/receipt/log pointers, and — when nudge events exist — a compact
+nudge summary (attempt count, delivered/failed/held counts, escalation state, and last
+event time). Requests with no nudge history show no summary. After pruning it reports `state: pruned`, the prior
 terminal state/verdict/timestamp, and which runtime-owned pointers were pruned. It never reconstructs,
 republishes, or mutates an artifact. Mutation credentials are redacted from `status`, `get`,
 `await`, listing, cancellation output, and tombstones; the requester control token appears only in

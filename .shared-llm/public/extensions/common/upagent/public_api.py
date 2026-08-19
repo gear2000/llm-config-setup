@@ -1001,6 +1001,32 @@ def _tombstone_status(tombstone: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _nudge_summary(events: list[dict]) -> dict[str, object] | None:
+    tracked = [
+        event
+        for event in events
+        if isinstance(event.get("event"), str)
+        and (
+            cast(str, event["event"]).startswith("worker-nudge-")
+            or event["event"] == "worker-stall-escalation"
+        )
+    ]
+    if not tracked:
+        return None
+    return {
+        "count": sum(event["event"] == "worker-nudge-intent" for event in tracked),
+        "delivered": sum(
+            event["event"] == "worker-nudge-delivered" for event in tracked
+        ),
+        "failed": sum(event["event"] == "worker-nudge-failed" for event in tracked),
+        "held": sum(event["event"] == "worker-nudge-held" for event in tracked),
+        "escalated": any(
+            event["event"] == "worker-stall-escalation" for event in tracked
+        ),
+        "last_event_at_ns": tracked[-1]["at_ns"],
+    }
+
+
 def _public_status(
     store: PublicRequestStore,
     registered: RegisteredRequest,
@@ -1025,10 +1051,12 @@ def _public_status(
         state: dict[str, object] = {"state": submission["state"]}
         receipt = None
         result = None
+        nudge_summary = None
     else:
         state = ledger.state(key)
         receipt = _public_receipt(_read_json_optional(receipt_path, "terminal receipt"))
         result = _read_json_optional(result_path, "published result")
+        nudge_summary = _nudge_summary(ledger.events(key))
     public_evidence = cast(dict[str, object], order["public_request"])
     publication = cast(dict[str, object], order["artifact_publication"])
 
@@ -1121,8 +1149,24 @@ def _public_status(
         "receipt": receipt,
         "result": result,
         "review": review,
+        "nudge_summary": nudge_summary,
         "pruned": False,
     }
+
+
+def _human_request_status(request_id: str, status: dict[str, object]) -> str:
+    state = cast(dict[str, object], status["state"])
+    rendered = f"request {request_id}: {state.get('state')}"
+    summary = status.get("nudge_summary")
+    if not isinstance(summary, dict):
+        return rendered
+    return (
+        f"{rendered}; nudges: {summary['count']} total, "
+        f"{summary['delivered']} delivered, {summary['failed']} failed, "
+        f"{summary['held']} held; escalated: "
+        f"{'yes' if summary['escalated'] else 'no'}; "
+        f"last event at_ns: {summary['last_event_at_ns']}"
+    )
 
 
 def _emit(
@@ -1804,11 +1848,7 @@ def execute(args: Any, cwd: Path) -> int:
     if args.command in ("status", "get"):
         if args.command == "get" or args.request:
             status = _public_status(store, store.load(args.request))
-            _emit(
-                status,
-                args.json,
-                f"request {args.request}: {cast(dict[str, object], status['state']).get('state')}",
-            )
+            _emit(status, args.json, _human_request_status(args.request, status))
         else:
             identity = _identity()
             human = "\n".join(f"{key}: {value}" for key, value in identity.items())

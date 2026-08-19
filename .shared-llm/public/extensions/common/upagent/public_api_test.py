@@ -1245,7 +1245,49 @@ def test_get_is_read_only_and_includes_typed_artifact_and_log_pointers(
         if path.is_file()
     }
     assert after == before
+    assert value["nudge_summary"] is None
     assert store.load(REQUEST_ID).pruned is False
+
+
+def test_get_surfaces_compact_nudge_history_and_none_without_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, registered, ledger, _token, _control = _registered_request(
+        tmp_path, monkeypatch
+    )
+    status = public_api._public_status(store, registered)
+    assert status["nudge_summary"] is None
+
+    assert public_api.execute(_args(["get", "--request", REQUEST_ID]), tmp_path) == 0
+    assert "nudges:" not in capsys.readouterr().out
+
+    order = recruiter.load_order(registered.order_path)
+    key = ledger.key_for_order(order)
+    ledger._event(key, "worker-nudge-intent", nudge_index=1)
+    ledger._event(key, "worker-nudge-delivered")
+    ledger._event(key, "worker-nudge-held")
+    ledger._event(key, "worker-nudge-intent", nudge_index=2)
+    ledger._event(key, "worker-nudge-failed")
+    ledger._event(key, "worker-stall-escalation")
+    last_event_at_ns = ledger.events(key)[-1]["at_ns"]
+
+    status = public_api._public_status(store, registered)
+    assert status["nudge_summary"] == {
+        "count": 2,
+        "delivered": 1,
+        "failed": 1,
+        "held": 1,
+        "escalated": True,
+        "last_event_at_ns": last_event_at_ns,
+    }
+
+    assert public_api.execute(_args(["get", "--request", REQUEST_ID]), tmp_path) == 0
+    assert capsys.readouterr().out.strip() == (
+        f"request {REQUEST_ID}: claimed; nudges: 2 total, 1 delivered, 1 failed, "
+        f"1 held; escalated: yes; last event at_ns: {last_event_at_ns}"
+    )
 
 
 def test_originating_async_request_token_file_can_cancel_the_active_request(
