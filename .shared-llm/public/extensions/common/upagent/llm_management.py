@@ -519,7 +519,10 @@ deltas since your last pulse.
 - Unrecoverably stuck (repeated pulses with no output change, no deltas, and no answer to
   your nudge) → write the closeout with outcome `STALLED`, including `progress_so_far`
   (what verifiably got done, from the deltas) and `last_alive` (the last moment you saw
-  real activity).
+  real activity). A STALLED closeout is PROVISIONAL — do NOT exit after writing it.
+  Stay idle: the Recruiter may nudge the worker itself and prompt you with
+  `SENTINEL_STALL_NUDGED`, which authorizes you to resume PULSE and, if the worker
+  stalls again, write a fresh STALLED closeout.
 
 ## 3. LANDING
 
@@ -535,8 +538,12 @@ concluding anything. At most {SENTINEL_MAX_LANDING_EXCHANGES} exchanges.
 
 ## 4. CLOSEOUT
 
-Write exactly one JSON object to `{closeout_path}` and then exit. This file ends the
-request, so write it exactly once, when the worker's lifecycle has ended — never early,
+Write exactly one JSON object to `{closeout_path}` and then exit — with one exception:
+a `STALLED` closeout is provisional, so after writing it stay idle for the Recruiter's
+disposition (`SENTINEL_STALL_NUDGED` resumes PULSE; a fresh STALLED closeout is then
+allowed). Only a terminal closeout (`COMPLETE`, `NEVER_STARTED`, `FINALIZATION_FAILED`)
+ends your duty. This file ends the
+request, so write it when the worker's lifecycle has ended — never early,
 never speculatively. Cite only what you actually observed: full 40-character commit SHAs
 and absolute file paths. Python re-verifies every citation; one that does not check out
 is discarded.

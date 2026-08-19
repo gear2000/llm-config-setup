@@ -228,7 +228,23 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     closeout with zero corroborated citations may not terminalize a provably live worker:
     Python re-probes the worker pane once and rejects the closeout back to the Sentinel
     for one re-check only on a positive pane answer — probe uncertainty accepts the
-    original claim. The Sentinel
+    original claim. A confirmed stall over a positively present worker is nudged by the
+    hub before it may end the wait: Python alone delivers the one literal payload
+    `continue` through the worker's agent-idle prompt path, under an
+    intent-before-delivery idempotency record, a backoff ladder, and a hard cap of 3,
+    all durable in ledger events and `nudges.json`; a staged bundle that already
+    validates supersedes the stall (completion wins the race), the Sentinel's brief
+    makes STALLED provisional so it stays for later rungs, and nudges are refused in
+    requester-facing/terminal states (checked again immediately before delivery,
+    failing closed on unreadable state), for mismatched attempt/generation journals,
+    and for gone panes; keep-open workers are never
+    classified as stalled (they carry no Sentinel), corrupt nudge state falls through
+    to the pre-ladder blocked path, and exhausted nudges publish exactly
+    one typed requester escalation (durable idempotency flag) before the stall ends
+    the wait as before. An opt-in
+    cross-provider gate (`UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1`) degrades a
+    same-provider (or unprovable) sentinel hire to mechanical supervision with a typed
+    reason rather than hiring silently. The Sentinel
     holds no kill switch and never outlives its worker attempt; a failed hire — a
     missing persona (diagnosed pre-pane with the exact paths, once per invocation) or a
     refused pane creation alike — degrades supervision and leaves the

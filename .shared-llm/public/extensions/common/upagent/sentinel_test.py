@@ -2152,3 +2152,427 @@ def test_drill_complete_closeout_publishes_passed_through_ordinary_validation(
     assert receipt["verdict"] == "passed"
     assert drill.closed == ["worker-pane", "sentinel-pane"]
     assert json.loads(Path(order["result_path"]).read_text())["verdict"] == "passed"
+
+
+# --- Stall nudge ladder (hub-owned "continue") ---------------------------------
+
+
+def _nudgeable(
+    ledger: Any,
+    order: dict,
+    key: str,
+    manifest: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, list[tuple[str, str]]]:
+    """A STALLED-ready watch over a request with a live worker journal and a captured
+    prompt channel: the preconditions under which the hub may nudge at all."""
+    monkeypatch.setattr(
+        recruiter,
+        "_live_worker_journal",
+        lambda *_args, **_kwargs: {
+            "address": "worker-address",
+            "attempt": 1,
+            "generation": 1,
+        },
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_present", lambda *args, **kwargs: True
+    )
+    prompts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda address, message, **kwargs: prompts.append((address, message)),
+    )
+    closeout_path = recruiter._sentinel_closeout_path(ledger, key, 1)
+    closeout_path.parent.mkdir(parents=True, exist_ok=True)
+    watch = recruiter._SentinelWatch(
+        ledger,
+        key,
+        order,
+        manifest,
+        closeout_path,
+        {
+            "address": "sentinel-address",
+            "worker_pane": "worker-pane",
+            "attempt": 1,
+            "generation": 1,
+        },
+        herdr_session="default",
+    )
+    return watch, prompts
+
+
+def _corroborated_stalled(order: dict) -> dict:
+    evidence = Path(order["cwd"]) / "evidence.txt"
+    evidence.write_text("progress\n")
+    return _closeout(
+        order,
+        outcome="STALLED",
+        bundle=None,
+        citations=[str(evidence)],
+        progress_so_far="halted after provider overload",
+        last_alive="pulse 2",
+    )
+
+
+def test_a_confirmed_stall_over_a_live_worker_nudges_continue_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole feature in one line: a corroborated STALLED with a live worker journal
+    delivers exactly the literal 'continue' to the worker's agent address, archives the
+    closeout, prompts the Sentinel back to PULSE, and keeps the wait alive."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    assert not watch.closeout_path.is_file()
+    assert watch.closeout_path.with_name("closeout.stalled-nudged-1.json").is_file()
+    assert prompts[0] == ("worker-address", "continue")
+    assert prompts[1][0] == "sentinel-address"
+    assert "SENTINEL_STALL_NUDGED" in prompts[1][1]
+    events = _events(ledger, key)
+    assert events.index("worker-nudge-intent") < events.index("worker-nudge-delivered")
+    intent = _event(ledger, key, "worker-nudge-intent")
+    assert intent["nudge_index"] == 1
+    assert intent["generation"] == 1
+    assert intent["attempt"] == 1
+
+
+def test_a_second_stall_inside_the_backoff_window_holds_without_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    worker_prompts = [item for item in prompts if item[0] == "worker-address"]
+    assert len(worker_prompts) == 1
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    worker_prompts = [item for item in prompts if item[0] == "worker-address"]
+    assert len(worker_prompts) == 1
+    assert "worker-nudge-held" in _events(ledger, key)
+    assert list(watch.closeout_path.parent.glob("closeout.stalled-held-2-*.json"))
+
+
+def test_exhausted_nudges_escalate_once_to_the_requester_and_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    state_path = watch.closeout_path.with_name("nudges.json")
+    state_path.write_text(
+        json.dumps(
+            {
+                "nudges": [
+                    {"at": 1.0, "digest": "d1", "delivered": True},
+                    {"at": 2.0, "digest": "d2", "delivered": True},
+                    {"at": 3.0, "digest": "d3", "delivered": False},
+                ]
+            }
+        )
+    )
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    escalation = _event(ledger, key, "worker-stall-escalation")
+    assert escalation["nudges"] == 3
+    mailbox = ledger.requester_mailbox(key).read_all()
+    assert any(item["type"] == "worker-stall-escalation" for item in mailbox)
+    assert not [item for item in prompts if item[0] == "worker-address"]
+
+
+def test_a_nudge_is_rejected_in_requester_facing_and_terminal_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    state_file = ledger.request_dir(key) / "state" / "latest.json"
+    snapshot = json.loads(state_file.read_text())
+    snapshot["state"] = "awaiting-requester"
+    state_file.write_text(json.dumps(snapshot))
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    rejected = _event(ledger, key, "worker-nudge-rejected")
+    assert rejected["state"] == "awaiting-requester"
+    assert not prompts
+
+
+def test_a_failed_delivery_is_recorded_and_counts_toward_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, _prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+
+    def _refuse(address: str, message: str, **kwargs: object) -> None:
+        raise recruiter.RecruiterError("agent never went idle")
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", _refuse)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    events = _events(ledger, key)
+    assert "worker-nudge-intent" in events
+    assert "worker-nudge-failed" in events
+    assert "worker-nudge-delivered" not in events
+    state = json.loads(watch.closeout_path.with_name("nudges.json").read_text())
+    assert len(state["nudges"]) == 1
+    assert state["nudges"][0]["delivered"] is False
+
+
+def test_a_stall_without_a_live_worker_journal_raises_exactly_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail("no delivery without a live worker"),
+    )
+    watch = _stalled_watch_with_worker_pane(ledger, order, key, manifest)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-nudge-intent" not in _events(ledger, key)
+
+
+# --- Cross-provider sentinel gate (opt-in) --------------------------------------
+
+
+def test_provider_conflict_is_ignored_unless_explicitly_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL", raising=False)
+    assert recruiter._sentinel_provider_conflict(_order(harness="claude")) is None
+
+
+def test_provider_conflict_degrades_same_provider_and_unknown_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL", "1")
+    conflict = recruiter._sentinel_provider_conflict(_order(harness="claude"))
+    assert conflict is not None and "anthropic" in conflict
+    unknown = recruiter._sentinel_provider_conflict(
+        _order(harness="cursor", model="mystery")
+    )
+    assert unknown is not None and "unknown" in unknown
+    assert (
+        recruiter._sentinel_provider_conflict(_order(harness="codex", model="gpt-5.6"))
+        is None
+    )
+
+
+def test_a_stall_over_a_gone_worker_pane_never_nudges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live launch journal is not liveness: only a POSITIVELY present worker pane
+    may receive a nudge — a gone pane keeps the exact pre-ladder blocked path."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_present", lambda *args, **kwargs: False
+    )
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-nudge-intent" not in _events(ledger, key)
+    assert not prompts
+
+
+# --- Stall nudge: adversarial-review hardening ----------------------------------
+
+
+def test_a_journal_from_another_attempt_or_generation_is_never_nudged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cheap fence: the started worker journal must match the watch's own attempt
+    and generation exactly — a replacement worker keeps the pre-ladder behavior."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    monkeypatch.setattr(
+        recruiter,
+        "_live_worker_journal",
+        lambda *_a, **_k: {"address": "worker-address", "attempt": 2, "generation": 2},
+    )
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-nudge-intent" not in _events(ledger, key)
+    assert not prompts
+
+
+def test_an_unreadable_ledger_state_fails_closed_and_never_nudges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    state_file = ledger.request_dir(key) / "state" / "latest.json"
+    state_file.write_text("{ not json")
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-nudge-intent" not in _events(ledger, key)
+    assert not prompts
+
+
+def test_a_mechanically_valid_bundle_supersedes_the_stall_nudge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completion wins the race: when the staged bundle already validates, a STALLED
+    closeout must never resume the finished worker — the wait continues into the
+    ordinary completion path with the closeout archived, no nudge spent."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    _stage_valid_result(manifest, order)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    assert not watch.closeout_path.is_file()
+    assert watch.closeout_path.with_name("closeout.stalled-superseded.json").is_file()
+    assert "worker-nudge-superseded" in _events(ledger, key)
+    assert "worker-nudge-intent" not in _events(ledger, key)
+    assert not [item for item in prompts if item[0] == "worker-address"]
+
+
+def test_a_corrupt_nudge_state_falls_through_to_the_pre_ladder_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, _prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    watch.closeout_path.with_name("nudges.json").write_text("{ not json")
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-nudge-state-invalid" in _events(ledger, key)
+
+
+def test_exhaustion_escalates_exactly_once_across_repeated_stalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, _prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    state_path = watch.closeout_path.with_name("nudges.json")
+    state_path.write_text(
+        json.dumps(
+            {
+                "nudges": [
+                    {"at": 1.0, "digest": "d1", "delivered": True},
+                    {"at": 2.0, "digest": "d2", "delivered": True},
+                    {"at": 3.0, "digest": "d3", "delivered": True},
+                ]
+            }
+        )
+    )
+    for _ in range(2):
+        watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+        with pytest.raises(recruiter.SentinelStalledError):
+            watch.poll()
+    events = _events(ledger, key)
+    assert events.count("worker-stall-escalation") == 1
+    mailbox = ledger.requester_mailbox(key).read_all()
+    assert (
+        len([item for item in mailbox if item["type"] == "worker-stall-escalation"])
+        == 1
+    )
+    assert json.loads(state_path.read_text()).get("escalated") is True
+
+
+def test_repeated_held_closeouts_keep_distinct_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, _prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    for _ in range(2):
+        watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+        assert watch.poll() is None
+    held = list(watch.closeout_path.parent.glob("closeout.stalled-held-*.json"))
+    assert len(held) == 2
+
+
+def test_a_failed_delivery_is_reported_honestly_to_the_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, _prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    prompts: list[tuple[str, str]] = []
+
+    def _refuse_worker(address: str, message: str, **kwargs: object) -> None:
+        if address == "worker-address":
+            raise recruiter.RecruiterError("agent never went idle")
+        prompts.append((address, message))
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", _refuse_worker)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    assert prompts and prompts[0][0] == "sentinel-address"
+    assert "delivery failed" in prompts[0][1]
+    assert "delivered" not in prompts[0][1].replace("delivery failed", "")
+
+
+def test_a_cursor_worker_nudge_uses_the_paste_settle_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    order["harness"] = "cursor"
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_live_worker_journal",
+        lambda *_a, **_k: {"address": "worker-address", "attempt": 1, "generation": 1},
+    )
+    monkeypatch.setattr(
+        recruiter, "_worker_pane_confirmed_present", lambda *a, **k: True
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda address, message, **kwargs: calls.append(
+            {"address": address, **kwargs}
+        ),
+    )
+    closeout_path = recruiter._sentinel_closeout_path(ledger, key, 1)
+    closeout_path.parent.mkdir(parents=True, exist_ok=True)
+    watch = recruiter._SentinelWatch(
+        ledger, key, order, manifest, closeout_path,
+        {"address": "sentinel-address", "worker_pane": "worker-pane",
+         "attempt": 1, "generation": 1},
+        herdr_session="default",
+    )
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    worker_calls = [c for c in calls if c["address"] == "worker-address"]
+    assert worker_calls[0]["paste_settle_seconds"] == (
+        recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+    )
+    assert worker_calls[0]["idle_timeout_ms"] == recruiter.NUDGE_PROMPT_IDLE_TIMEOUT_MS
+
+
+def test_an_overridden_sentinel_command_fails_the_provider_gate_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL", "1")
+    overridden = recruiter._sentinel_provider_conflict(
+        _order(harness="codex", model="gpt-5.6"), "some-custom-sentinel-command"
+    )
+    assert overridden is not None and "overridden" in overridden
+    default_ok = recruiter._sentinel_provider_conflict(
+        _order(harness="codex", model="gpt-5.6"),
+        recruiter.llm_management.DEFAULT_SENTINEL_COMMAND,
+    )
+    assert default_ok is None
+
+
+def test_the_sentinel_brief_makes_stalled_provisional() -> None:
+    brief = recruiter.llm_management.sentinel_brief(
+        "req-id",
+        "order-id",
+        "w1:p1",
+        "/tmp/wt",
+        Path("/tmp/closeout.json"),
+        liftoff_deadline_ms=300_000,
+        wake_path=Path("/tmp/wake"),
+    )
+    assert "SENTINEL_STALL_NUDGED" in brief
+    assert "PROVISIONAL" in brief

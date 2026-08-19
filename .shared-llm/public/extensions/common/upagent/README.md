@@ -363,7 +363,44 @@ Durable files are the source of truth; terminal text is display-only.
   worker on the Sentinel's word: Python re-probes the worker pane once and, only on a
   POSITIVE pane answer (probe uncertainty is never treated as liveness), rejects the
   closeout back to the Sentinel for one re-check before a repeat claim
-  is accepted. The Sentinel
+  is accepted. A confirmed stall over a provably live worker does not end the wait
+  immediately either: the hub runs its own nudge ladder first — Python (never the
+  Sentinel) delivers the one literal payload `continue` through the worker's agent
+  address (the agent-idle prompt path, so a busy tool or foreground state refuses
+  delivery), with an intent-before-delivery record under an idempotency key
+  `(generation, attempt, nudge_index)`, a backoff ladder (immediate, then 5, then
+  15 minutes) and a hard cap of 3, all persisted beside the closeout in
+  `nudges.json` and in typed ledger events (`worker-nudge-intent` /
+  `worker-nudge-delivered` / `worker-nudge-failed` / `worker-nudge-held` /
+  `worker-nudge-rejected`). Completion always wins the race: a staged bundle that
+  already validates supersedes the stall (`worker-nudge-superseded`) instead of
+  resuming a finished worker. A STALLED closeout is provisional in the Sentinel's
+  own brief — it stays idle for the hub's disposition and resumes PULSE on
+  `SENTINEL_STALL_NUDGED` — so later rungs are actually reachable. Nudges are
+  refused outright in requester-facing,
+  release, cancelling, and terminal states (checked at classification AND re-checked
+  immediately before delivery, failing CLOSED on unreadable state; nudge delivery
+  uses a short ~10s idle wait — a stalled worker is already idle, a busy worker is
+  not stalled and fails the rung — so the gate-to-send window is seconds, an
+  accepted residual rather than a mutation-lock reservation), for a journal
+  whose attempt/generation is not this watch's own, for requests with no started
+  worker launch, and for a worker pane that is not POSITIVELY present; corrupt
+  nudge state is recorded (`worker-nudge-state-invalid`) and falls through to the
+  exact pre-ladder blocked path; retained
+  keep-open workers never get a Sentinel at all, so their designed idle checkpoint
+  is never classified as a stall. Exhausted nudges publish exactly one durable
+  `worker-stall-escalation` requester-mailbox event (idempotent via a durable
+  `escalated` flag in the nudge records, published-then-flagged so a crash risks a
+  rare duplicate, never a lost escalation) pointing at the Python-owned
+  nudge records and archived closeouts, and only then does the stall end the wait
+  exactly as before. An opt-in cross-provider gate
+  (`UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1`) refuses to hire a sentinel whose
+  provider matches the worker's or cannot be proven distinct — including any
+  management-config override of the sentinel command, which fails closed —
+  degrading to
+  mechanical supervision with the typed degrade event instead — never a silent
+  same-provider fallback; both providers are recorded on the durable
+  `sentinel-hired` requester event. The Sentinel
   never kills anything and never outlives its worker attempt. When the hire fails —
   including a missing `upagent-sentinel` persona, which is diagnosed before any pane is
   created with the exact missing paths named in the degrade event (checked once per
