@@ -205,3 +205,51 @@ def test_public_offering_yaml_cannot_inject_a_launch_command(tmp_path: Path) -> 
 
     with pytest.raises(offerings.OfferingError, match="unknown keys: command"):
         offerings.load_roster(path)
+
+
+def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
+    roster = offerings.load_roster()
+    expected = {
+        "claude-fable-5": "anthropic",
+        "claude-sonnet-5": "anthropic",
+        "claude-opus-4-8": "anthropic",
+        "codex-gpt-5-6-sol": "openai",
+        "cursor-composer-2-5": "unknown",
+        "pi-gpt-5-6-sol": "openai",
+        "pi-gpt-5-6-terra": "openai",
+        "pi-gpt-5-6-luna": "openai",
+        "pi-gpt-5-5": "openai",
+        "pi-gpt-5-4-mini": "openai",
+    }
+
+    assert {key: item.provider for key, item in roster.offerings.items()} == expected
+    for offering_id, offering in roster.offerings.items():
+        assert offering.snapshot(offering.efforts[0])["provider"] == expected[offering_id]
+
+
+def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
+    snapshot = offerings.load_roster().resolve("pi-gpt-5-4-mini", "low")
+
+    missing = dict(snapshot)
+    missing.pop("provider")
+    with pytest.raises(offerings.OfferingError, match="provider"):
+        offerings.validate_snapshot(missing)
+
+    foreign = {**snapshot, "provider": "anthropic"}
+    with pytest.raises(offerings.OfferingError, match="approved policy"):
+        offerings.validate_snapshot(foreign)
+
+
+def test_public_roster_materializes_approved_sentinel_commands_for_both_providers() -> None:
+    management = offerings.materialize_management(offerings.load_roster())
+
+    assert set(management["sentinels"]) == {"anthropic", "openai"}
+    anthropic = management["sentinels"]["anthropic"]
+    assert anthropic["expected_agent"] == "claude"
+    assert anthropic["expected_process"] == "claude"
+    assert "upagent-sentinel" in anthropic["command"]
+    openai = management["sentinels"]["openai"]
+    assert openai["expected_agent"] == "pi"
+    assert openai["expected_process"] == "pi"
+    assert "openai-codex/gpt-5.4-mini" in openai["command"]
+    assert "--thinking low" in openai["command"]

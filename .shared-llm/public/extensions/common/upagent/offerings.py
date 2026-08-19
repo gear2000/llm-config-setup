@@ -17,17 +17,28 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EFFORT = "default"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
-APPROVED: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    "claude-fable-5": ("claude", "claude-fable-5", EFFORTS),
-    "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS),
-    "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS),
-    "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS),
-    "cursor-composer-2-5": ("cursor", "composer-2.5", (DEFAULT_EFFORT,)),
-    "pi-gpt-5-6-sol": ("pi", "openai-codex/gpt-5.6-sol", EFFORTS),
-    "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS),
-    "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS),
-    "pi-gpt-5-5": ("pi", "openai-codex/gpt-5.5", EFFORTS[:-1]),
-    "pi-gpt-5-4-mini": ("pi", "openai-codex/gpt-5.4-mini", EFFORTS[:-1]),
+APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
+    "claude-fable-5": ("claude", "claude-fable-5", EFFORTS, "anthropic"),
+    "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS, "anthropic"),
+    "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
+    "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
+    # Cursor does not expose the backing model provider as a stable contract.
+    "cursor-composer-2-5": (
+        "cursor",
+        "composer-2.5",
+        (DEFAULT_EFFORT,),
+        "unknown",
+    ),
+    "pi-gpt-5-6-sol": ("pi", "openai-codex/gpt-5.6-sol", EFFORTS, "openai"),
+    "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS, "openai"),
+    "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS, "openai"),
+    "pi-gpt-5-5": ("pi", "openai-codex/gpt-5.5", EFFORTS[:-1], "openai"),
+    "pi-gpt-5-4-mini": (
+        "pi",
+        "openai-codex/gpt-5.4-mini",
+        EFFORTS[:-1],
+        "openai",
+    ),
 }
 
 
@@ -60,6 +71,7 @@ class Offering:
     harness: str
     model: str
     efforts: tuple[str, ...]
+    provider: str
 
     def snapshot(self, effort: str) -> dict[str, object]:
         if effort not in self.efforts:
@@ -71,6 +83,7 @@ class Offering:
             "id": self.offering_id,
             "harness": self.harness,
             "model": self.model,
+            "provider": self.provider,
             "efforts": list(self.efforts),
             "selected_effort": effort,
         }
@@ -105,6 +118,7 @@ class OfferingRoster:
                 "id": item.offering_id,
                 "harness": item.harness,
                 "model": item.model,
+                "provider": item.provider,
                 "efforts": list(item.efforts),
                 "rendered_identity": f"{item.harness}:::{item.model}",
             }
@@ -158,7 +172,7 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
             {"harness", "model", "efforts", "completion_style"},
             f"offering {offering_id}",
         )
-        harness, model, efforts = expected
+        harness, model, efforts, provider = expected
         if value.get("harness") != harness or value.get("model") != model:
             raise OfferingError(
                 f"offering {offering_id!r} must resolve to {harness}:::{model}"
@@ -180,7 +194,7 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
             for item in raw_efforts
         ):
             raise OfferingError(f"offering {offering_id!r} has invalid efforts")
-        parsed[offering_id] = Offering(offering_id, harness, model, efforts)
+        parsed[offering_id] = Offering(offering_id, harness, model, efforts, provider)
     management = raw.get("management", {})
     if not isinstance(management, dict):
         raise OfferingError("offering roster management must be an object")
@@ -199,6 +213,7 @@ def _validate_management(
         "requester_grace_ms",
         "account_manager",
         "checker",
+        "sentinels",
     }
     _strict_keys(management, allowed, "management")
     for role_name in ("account_manager", "checker"):
@@ -237,23 +252,80 @@ def _validate_management(
             raise OfferingError(
                 f"management.{role_name} effort {role['effort']!r} is not allowed by {role['offering']!r}"
             )
+    sentinels = management.get("sentinels")
+    if not isinstance(sentinels, dict) or set(sentinels) != {"anthropic", "openai"}:
+        raise OfferingError(
+            "management.sentinels must define exactly anthropic and openai"
+        )
+    for provider, role in sentinels.items():
+        if not isinstance(role, dict):
+            raise OfferingError(f"management.sentinels.{provider} must be an object")
+        _strict_keys(
+            role,
+            {
+                "offering",
+                "effort",
+                "agent",
+                "expected_agent",
+                "expected_process",
+                "timeout_ms",
+            },
+            f"management.sentinels.{provider}",
+        )
+        for field in (
+            "offering",
+            "effort",
+            "agent",
+            "expected_agent",
+            "expected_process",
+        ):
+            if not isinstance(role.get(field), str) or not role[field]:
+                raise OfferingError(
+                    f"management.sentinels.{provider}.{field} must be a non-empty string"
+                )
+        offering = offerings.get(role["offering"])
+        if offering is None:
+            raise OfferingError(
+                f"management.sentinels.{provider} references unknown offering "
+                f"{role['offering']!r}"
+            )
+        if offering.provider != provider:
+            raise OfferingError(
+                f"management.sentinels.{provider} offering {role['offering']!r} "
+                f"has provider {offering.provider!r}"
+            )
+        if role["effort"] not in offering.efforts:
+            raise OfferingError(
+                f"management.sentinels.{provider} effort {role['effort']!r} is not "
+                f"allowed by {role['offering']!r}"
+            )
 
 
 def validate_snapshot(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise OfferingError("offering snapshot must be an object")
-    _strict_keys(
-        value,
-        {"id", "harness", "model", "efforts", "selected_effort"},
-        "offering snapshot",
-    )
+    snapshot_keys = {
+        "id",
+        "harness",
+        "model",
+        "provider",
+        "efforts",
+        "selected_effort",
+    }
+    _strict_keys(value, snapshot_keys, "offering snapshot")
+    missing = sorted(snapshot_keys - set(value))
+    if missing:
+        raise OfferingError(
+            f"offering snapshot is missing keys: {', '.join(missing)}"
+        )
     offering_id = value.get("id")
     if not isinstance(offering_id, str) or offering_id not in APPROVED:
         raise OfferingError(f"offering snapshot has unknown id {offering_id!r}")
-    harness, model, efforts = APPROVED[offering_id]
+    harness, model, efforts, provider = APPROVED[offering_id]
     if (
         value.get("harness") != harness
         or value.get("model") != model
+        or value.get("provider") != provider
         or value.get("efforts") != list(efforts)
     ):
         raise OfferingError(
@@ -352,4 +424,20 @@ def materialize_management(roster: OfferingRoster) -> dict[str, object]:
         argv[-1] = prompt
         raw["command"] = shlex.join(argv)
         management[role_name] = raw
+    sentinel_prompt = (
+        "Read {brief_path}, perform that one sentinel duty cycle for its worker, "
+        "write {output_path} when the worker lifecycle ends, then exit."
+    )
+    sentinels: dict[str, object] = {}
+    for provider, value in cast(
+        dict[str, dict[str, object]], management["sentinels"]
+    ).items():
+        raw = dict(value)
+        snapshot = roster.resolve(str(raw.pop("offering")), str(raw.pop("effort")))
+        agent = str(raw.pop("agent"))
+        argv = render_argv(snapshot, agent, "{brief_path}")
+        argv[-1] = sentinel_prompt
+        raw["command"] = shlex.join(argv)
+        sentinels[provider] = raw
+    management["sentinels"] = sentinels
     return management

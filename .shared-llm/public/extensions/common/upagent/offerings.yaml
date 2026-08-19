@@ -72,3 +72,20 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
+  # The hub selects the entry opposite the worker offering's pinned provider.
+  # Both use the same sentinel persona and bounded low-effort duty cycle.
+  sentinels:
+    anthropic:
+      offering: claude-sonnet-5
+      effort: low
+      agent: upagent-sentinel
+      expected_agent: claude
+      expected_process: claude
+      timeout_ms: 120000
+    openai:
+      offering: pi-gpt-5-4-mini
+      effort: low
+      agent: upagent-sentinel
+      expected_agent: pi
+      expected_process: pi
+      timeout_ms: 120000

@@ -30,6 +30,21 @@ DEFAULT_SENTINEL_COMMAND = (
     '"Read {brief_path}, perform that one sentinel duty cycle for its worker, write '
     '{output_path} when the worker lifecycle ends, then exit."'
 )
+DEFAULT_OPENAI_SENTINEL_COMMAND = shlex.join(
+    [
+        "pi",
+        "--approve",
+        "--no-extensions",
+        "-e",
+        str(Path.home() / ".pi/agent/extensions/herdr-agent-state.ts"),
+        "--model",
+        "openai-codex/gpt-5.4-mini",
+        "--thinking",
+        "low",
+        "Read {brief_path}, perform that one sentinel duty cycle for its worker, write "
+        "{output_path} when the worker lifecycle ends, then exit.",
+    ]
+)
 DEFAULT_INTAKE_CLERK_COMMAND = (
     'claude --print --output-format text --tools "" --agent intake-clerk '
     "--model sonnet --effort low < {brief_path}"
@@ -65,6 +80,8 @@ class ManagementConfig:
     # from liftoff to closeout. Eyes and interpretation only — it holds no kill switch and
     # its closeout citations are re-verified in Python before they count.
     sentinel: ManagementRole
+    sentinels: dict[str, ManagementRole]
+    sentinel_is_override: bool
     intake_clerk: ManagementRole
     startup_timeout_ms: int
     inactivity_check_ms: int
@@ -126,6 +143,25 @@ def _role(
     return ManagementRole(command, expected_agent, expected_process, timeout_ms)
 
 
+def _sentinel_roles(raw: dict) -> dict[str, ManagementRole]:
+    configured = raw.get("sentinels")
+    if configured is None:
+        return {
+            "anthropic": _role(None, "sentinels.anthropic", DEFAULT_SENTINEL_COMMAND),
+            "openai": _role(
+                None, "sentinels.openai", DEFAULT_OPENAI_SENTINEL_COMMAND
+            ),
+        }
+    if not isinstance(configured, dict) or set(configured) != {"anthropic", "openai"}:
+        raise ManagementConfigError(
+            "management.sentinels must define exactly anthropic and openai"
+        )
+    return {
+        provider: _role(value, f"sentinels.{provider}", "")
+        for provider, value in configured.items()
+    }
+
+
 def load_management_config(roster: dict) -> ManagementConfig:
     raw = roster.get("management", {})
     if not isinstance(raw, dict):
@@ -149,6 +185,8 @@ def load_management_config(roster: dict) -> ManagementConfig:
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
         rescuer=_role(raw.get("rescuer"), "rescuer", DEFAULT_RESCUER_COMMAND),
         sentinel=_role(raw.get("sentinel"), "sentinel", DEFAULT_SENTINEL_COMMAND),
+        sentinels=_sentinel_roles(raw),
+        sentinel_is_override="sentinel" in raw,
         intake_clerk=_role(
             raw.get("intake_clerk"),
             "intake_clerk",
