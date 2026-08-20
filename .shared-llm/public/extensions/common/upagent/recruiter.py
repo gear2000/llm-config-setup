@@ -61,7 +61,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import yaml
 
@@ -5485,42 +5485,99 @@ def _sentinel_enabled(order: dict) -> bool:
     )
 
 
-def _sentinel_provider_conflict(
-    order: dict, sentinel_command: str | None = None
-) -> str | None:
-    """Opt-in cross-provider disjointness gate for the sentinel hire.
+class SentinelSelectionError(RecruiterError):
+    """A typed, fail-closed reason why no disjoint Sentinel can be hired."""
 
-    The shipped sentinel command is claude/haiku (anthropic). When
-    UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1, a worker whose provider matches — or
-    cannot be proven distinct — degrades to mechanical supervision only rather than
-    accepting a same-provider (or unprovable) sentinel. Default off: behavior today
-    is unchanged, and the providers are still recorded on every hire."""
-    if os.environ.get("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL") != "1":
-        return None
-    worker_provider = stall_nudge.provider_of(
+    def __init__(self, reason_type: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_type = reason_type
+
+
+class SentinelSelection(NamedTuple):
+    role: Any
+    worker_provider: str
+    sentinel_provider: str
+
+
+def _worker_provider(order: dict) -> str:
+    """Resolve immutable offering evidence first, then legacy harness/model identity."""
+    snapshot = order.get("offering_snapshot")
+    if isinstance(snapshot, dict) and "provider" in snapshot:
+        provider = snapshot["provider"]
+        if isinstance(provider, str) and provider:
+            return provider
+        return "unknown"
+    return stall_nudge.provider_of(
         str(order.get("harness", "")), str(order.get("model", ""))
     )
-    if (
-        sentinel_command is not None
-        and sentinel_command != llm_management.DEFAULT_SENTINEL_COMMAND
-    ):
-        # A configured sentinel command has no provable provider identity: fail
-        # closed rather than approve a possibly-same-provider override.
-        return (
-            "the sentinel command is overridden in management config, so its "
-            "provider cannot be proven distinct from the worker's"
+
+
+def _sentinel_command_provider(command: str) -> str:
+    """Derive a configured override's provider only from explicit command identity."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return "unknown"
+    if not words:
+        return "unknown"
+    executable = Path(words[0]).name
+    if executable == "claude":
+        return "anthropic"
+    if executable == "codex":
+        return "openai"
+    if executable == "pi":
+        for index, word in enumerate(words[:-1]):
+            if word == "--model":
+                return stall_nudge.provider_of("pi", words[index + 1])
+    return "unknown"
+
+
+def _resolve_sentinel_role(order: dict, config: Any) -> SentinelSelection:
+    """Select and validate a provider-disjoint Sentinel for this worker attempt."""
+    worker_provider = _worker_provider(order)
+    if worker_provider not in {"anthropic", "openai"}:
+        raise SentinelSelectionError(
+            "worker-provider-unknown",
+            f"worker provider is {worker_provider!r}; cross-provider disjointness cannot be proven",
         )
-    sentinel_provider = "anthropic"
-    if worker_provider == sentinel_provider:
-        return (
-            f"worker provider {worker_provider} matches the sentinel provider "
-            f"{sentinel_provider}; cross-provider supervision is required"
+
+    if config.sentinel_is_override:
+        role = config.sentinel
+        sentinel_provider = _sentinel_command_provider(role.command)
+        if sentinel_provider == "unknown":
+            raise SentinelSelectionError(
+                "sentinel-provider-unknown",
+                "the management.sentinel command override has an unknown provider; "
+                "cross-provider disjointness cannot be proven",
+            )
+    else:
+        opposite_provider = {
+            "anthropic": "openai",
+            "openai": "anthropic",
+        }[worker_provider]
+        role = config.sentinels.get(opposite_provider)
+        sentinel_provider = opposite_provider
+        if role is None or not all(
+            isinstance(value, str) and value.strip()
+            for value in (
+                getattr(role, "command", None),
+                getattr(role, "expected_agent", None),
+                getattr(role, "expected_process", None),
+            )
+        ):
+            raise SentinelSelectionError(
+                "opposite-provider-sentinel-unavailable",
+                f"no usable {opposite_provider} Sentinel role is configured for "
+                f"the {worker_provider} worker",
+            )
+
+    if sentinel_provider == worker_provider:
+        raise SentinelSelectionError(
+            "sentinel-provider-conflict",
+            f"worker provider {worker_provider} matches the Sentinel provider "
+            f"{sentinel_provider}; cross-provider supervision is required",
         )
-    if worker_provider == "unknown":
-        return (
-            "worker provider is unknown; cross-provider disjointness cannot be proven"
-        )
-    return None
+    return SentinelSelection(role, worker_provider, sentinel_provider)
 
 
 # Per-process-invocation cache for the Sentinel persona pre-check, keyed by
@@ -5593,6 +5650,7 @@ def _start_sentinel(
     token: str,
     order: dict,
     config: Any,
+    sentinel_role: Any,
     worker_pane: str,
     closeout_path: Path,
     generation: int,
@@ -5610,7 +5668,7 @@ def _start_sentinel(
     # Fail the hire BEFORE creating a pane when the persona file is provably absent:
     # the raised message names the exact missing paths, and the per-process cache
     # keeps repeated attempts from re-diagnosing the same missing file.
-    persona_missing = _sentinel_persona_missing(config.sentinel.command, order["cwd"])
+    persona_missing = _sentinel_persona_missing(sentinel_role.command, order["cwd"])
     if persona_missing is not None:
         raise RecruiterError(persona_missing)
     closeout_path.unlink(missing_ok=True)
@@ -5630,7 +5688,7 @@ def _start_sentinel(
         ),
     )
     command = llm_management.render_role_command(
-        config.sentinel, brief_path, order["cwd"], closeout_path
+        sentinel_role, brief_path, order["cwd"], closeout_path
     )
     name = _safe_agent_name("upagent-sentinel", request_id, generation)
     sentinel_order = {**order, "cockpit_pane": worker_pane}
@@ -5657,8 +5715,8 @@ def _start_sentinel(
     try:
         _wait_for_agent_health(
             pane,
-            expected_agent=config.sentinel.expected_agent,
-            expected_process=config.sentinel.expected_process,
+            expected_agent=sentinel_role.expected_agent,
+            expected_process=sentinel_role.expected_process,
             expected_cwd=order["cwd"],
             timeout_ms=config.startup_timeout_ms,
             herdr_session=herdr_session,
@@ -12514,14 +12572,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             close_sentinel()
             closeout_path = sentinel_context.get("closeout_path")
             assert isinstance(closeout_path, Path)
+            selection: SentinelSelection | None = None
             try:
-                provider_conflict = _sentinel_provider_conflict(
-                    order, management_config.sentinel.command
-                )
-                if provider_conflict is not None:
-                    raise RecruiterError(
-                        f"cross-provider sentinel required: {provider_conflict}"
-                    )
+                # Resolve afresh for every worker attempt. Retry cannot inherit an old
+                # attempt's provider decision or bypass the disjointness invariant.
+                selection = _resolve_sentinel_role(order, management_config)
                 sentinel_state.update(
                     _start_sentinel(
                         ledger,
@@ -12529,6 +12584,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                         token,
                         order,
                         management_config,
+                        selection.role,
                         cast(str, owned_worker_pane),
                         closeout_path,
                         generation,
@@ -12542,10 +12598,12 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 # Any hire failure — persona missing, pane creation refused by a herdr
                 # error or concurrency limit — degrades supervision for this request
                 # only; the mechanical gates and backstops still own the lifecycle.
+                reason_type = getattr(error, "reason_type", "sentinel-hire-failed")
                 ledger._event(
                     key,
                     "sentinel-degraded",
                     reason=str(error),
+                    reason_type=reason_type,
                     attempt=attempt_state["number"],
                 )
                 if str(error) not in sentinel_degrades_notified:
@@ -12558,17 +12616,16 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                         "sentinel-degraded",
                         f"The per-request Sentinel could not be hired: {error}. The worker "
                         "continues under direct mechanical supervision.",
-                        {"reason": str(error)},
+                        {"reason": str(error), "reason_type": reason_type},
                     )
             else:
                 # The nudge ladder fences its intents by these; the providers are
                 # recorded so the cross-provider gate's decisions stay auditable.
+                assert selection is not None
                 sentinel_state["attempt"] = attempt_state["number"]
                 sentinel_state["generation"] = generation
-                sentinel_state["worker_provider"] = stall_nudge.provider_of(
-                    str(order.get("harness", "")), str(order.get("model", ""))
-                )
-                sentinel_state["sentinel_provider"] = "anthropic"
+                sentinel_state["worker_provider"] = selection.worker_provider
+                sentinel_state["sentinel_provider"] = selection.sentinel_provider
                 _notify_requester(
                     ledger,
                     key,

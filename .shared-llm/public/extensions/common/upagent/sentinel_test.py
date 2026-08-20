@@ -1831,6 +1831,7 @@ class _Drill:
         self.closed: list[str] = []
         self.staging: list[Path] = []
         self.hires: list[Path] = []
+        self.sentinel_commands: list[str] = []
         self.prompts: list[tuple[str, str]] = []
         self.launched = threading.Event()
         self.hired = threading.Event()
@@ -1844,6 +1845,8 @@ def _drill_job(
     first_action: bool = True,
     git: bool = False,
     grace_ms: int | None = None,
+    harness: str = "claude",
+    model: str = "some-model",
 ) -> tuple[Any, dict, str, Path, _Drill]:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     worktree = tmp_path / "wt"
@@ -1853,13 +1856,18 @@ def _drill_job(
     instructions = worktree / "instructions.md"
     instructions.write_text("Do the stage.\n")
     order = _order(
+        harness=harness,
+        model=model,
         cwd=str(worktree),
         instructions_path=str(instructions),
         result_path=str(tmp_path / "public" / "result.json"),
         timeout_ms=timeout_ms,
     )
     roster_path = tmp_path / "upagent.yaml"
-    roster = 'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    roster = (
+        f'harnesses:\n  {harness}: "{harness} read:{{instructions_path}} '
+        'write:{result_path}"\n'
+    )
     if grace_ms is not None:
         roster += f"management:\n  requester_grace_ms: {grace_ms}\n"
     roster_path.write_text(roster)
@@ -1939,6 +1947,7 @@ def _drill_job(
         token: str,
         order_arg: dict,
         config: Any,
+        sentinel_role: Any,
         worker_pane: str,
         closeout_path: Path,
         generation: int,
@@ -1948,6 +1957,7 @@ def _drill_job(
     ) -> dict[str, object]:
         assert liftoff_deadline_ms > 0
         drill.hires.append(closeout_path)
+        drill.sentinel_commands.append(sentinel_role.command)
         drill.hired.set()
         return {
             "address": "sentinel-address",
@@ -1974,6 +1984,68 @@ def _pre_write_closeout(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_closeout(order, **over)))
     return path
+
+
+@pytest.mark.parametrize(
+    ("harness", "model", "worker_provider", "sentinel_provider", "command"),
+    (
+        (
+            "claude",
+            "claude-sonnet-5",
+            "anthropic",
+            "openai",
+            recruiter.llm_management.DEFAULT_OPENAI_SENTINEL_COMMAND,
+        ),
+        (
+            "codex",
+            "gpt-5.6",
+            "openai",
+            "anthropic",
+            recruiter.llm_management.DEFAULT_SENTINEL_COMMAND,
+        ),
+    ),
+)
+def test_each_retry_revalidates_and_hires_the_opposite_provider_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    harness: str,
+    model: str,
+    worker_provider: str,
+    sentinel_provider: str,
+    command: str,
+) -> None:
+    ledger, order, key, roster_path, drill = _drill_job(
+        tmp_path,
+        monkeypatch,
+        first_action=False,
+        harness=harness,
+        model=model,
+    )
+    for attempt in (1, 2):
+        _pre_write_closeout(
+            ledger,
+            key,
+            order,
+            attempt,
+            outcome="NEVER_STARTED",
+            bundle=None,
+            interpretation="no first action",
+        )
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+
+    assert drill.sentinel_commands == [command, command]
+    hired = [
+        item
+        for item in ledger.requester_mailbox(key).read_all()
+        if item.get("type") == "sentinel-hired"
+    ]
+    assert len(hired) == 2
+    assert all(item["detail"]["worker_provider"] == worker_provider for item in hired)
+    assert all(
+        item["detail"]["sentinel_provider"] == sentinel_provider for item in hired
+    )
 
 
 def test_drill_worker_dead_before_first_action_lands_never_started(
@@ -2337,30 +2409,70 @@ def test_a_stall_without_a_live_worker_journal_raises_exactly_as_before(
     assert "worker-nudge-intent" not in _events(ledger, key)
 
 
-# --- Cross-provider sentinel gate (opt-in) --------------------------------------
+# --- Cross-provider sentinel selection (default-on) -----------------------------
 
 
-def test_provider_conflict_is_ignored_unless_explicitly_required(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL", raising=False)
-    assert recruiter._sentinel_provider_conflict(_order(harness="claude")) is None
-
-
-def test_provider_conflict_degrades_same_provider_and_unknown_workers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL", "1")
-    conflict = recruiter._sentinel_provider_conflict(_order(harness="claude"))
-    assert conflict is not None and "anthropic" in conflict
-    unknown = recruiter._sentinel_provider_conflict(
-        _order(harness="cursor", model="mystery")
+def _management(**management: object) -> Any:
+    return recruiter.llm_management.load_management_config(
+        {"management": management}
     )
-    assert unknown is not None and "unknown" in unknown
-    assert (
-        recruiter._sentinel_provider_conflict(_order(harness="codex", model="gpt-5.6"))
-        is None
+
+
+def test_anthropic_worker_selects_the_openai_sentinel_command() -> None:
+    selected = recruiter._resolve_sentinel_role(
+        _order(offering_snapshot={"provider": "anthropic"}), _management()
     )
+
+    assert selected.worker_provider == "anthropic"
+    assert selected.sentinel_provider == "openai"
+    assert selected.role.command == recruiter.llm_management.DEFAULT_OPENAI_SENTINEL_COMMAND
+
+
+def test_openai_worker_selects_the_anthropic_sentinel_command() -> None:
+    selected = recruiter._resolve_sentinel_role(
+        _order(offering_snapshot={"provider": "openai"}), _management()
+    )
+
+    assert selected.worker_provider == "openai"
+    assert selected.sentinel_provider == "anthropic"
+    assert selected.role.command == recruiter.llm_management.DEFAULT_SENTINEL_COMMAND
+
+
+def test_worker_provider_falls_back_to_identity_only_without_snapshot_provider() -> None:
+    selected = recruiter._resolve_sentinel_role(
+        _order(harness="codex", model="gpt-5.6"), _management()
+    )
+
+    assert selected.worker_provider == "openai"
+    assert selected.sentinel_provider == "anthropic"
+
+
+def test_unknown_pinned_worker_provider_degrades_with_a_typed_reason() -> None:
+    with pytest.raises(recruiter.SentinelSelectionError) as raised:
+        recruiter._resolve_sentinel_role(
+            _order(
+                harness="claude",
+                model="claude-sonnet-5",
+                offering_snapshot={"provider": "unknown"},
+            ),
+            _management(),
+        )
+
+    assert raised.value.reason_type == "worker-provider-unknown"
+    assert "unknown" in str(raised.value)
+
+
+def test_missing_opposite_provider_role_degrades_with_a_typed_reason() -> None:
+    config = _management()
+    config.sentinels.pop("openai")
+
+    with pytest.raises(recruiter.SentinelSelectionError) as raised:
+        recruiter._resolve_sentinel_role(
+            _order(offering_snapshot={"provider": "anthropic"}), config
+        )
+
+    assert raised.value.reason_type == "opposite-provider-sentinel-unavailable"
+    assert "openai" in str(raised.value)
 
 
 def test_a_stall_over_a_gone_worker_pane_never_nudges(
@@ -2549,19 +2661,39 @@ def test_a_cursor_worker_nudge_uses_the_paste_settle_delivery(
     assert worker_calls[0]["idle_timeout_ms"] == recruiter.NUDGE_PROMPT_IDLE_TIMEOUT_MS
 
 
-def test_an_overridden_sentinel_command_fails_the_provider_gate_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL", "1")
-    overridden = recruiter._sentinel_provider_conflict(
-        _order(harness="codex", model="gpt-5.6"), "some-custom-sentinel-command"
+def test_an_override_violating_disjointness_degrades_with_a_typed_reason() -> None:
+    config = _management(
+        sentinel={
+            "command": "claude --agent upagent-sentinel --model haiku {brief_path}",
+            "expected_agent": "claude",
+            "expected_process": "claude",
+        }
     )
-    assert overridden is not None and "overridden" in overridden
-    default_ok = recruiter._sentinel_provider_conflict(
-        _order(harness="codex", model="gpt-5.6"),
-        recruiter.llm_management.DEFAULT_SENTINEL_COMMAND,
+
+    with pytest.raises(recruiter.SentinelSelectionError) as raised:
+        recruiter._resolve_sentinel_role(
+            _order(offering_snapshot={"provider": "anthropic"}), config
+        )
+
+    assert raised.value.reason_type == "sentinel-provider-conflict"
+    assert "anthropic" in str(raised.value)
+
+
+def test_a_disjoint_override_is_honored_as_is() -> None:
+    config = _management(
+        sentinel={
+            "command": "claude --agent upagent-sentinel --model haiku {brief_path}",
+            "expected_agent": "claude",
+            "expected_process": "claude",
+        }
     )
-    assert default_ok is None
+
+    selected = recruiter._resolve_sentinel_role(
+        _order(offering_snapshot={"provider": "openai"}), config
+    )
+
+    assert selected.role is config.sentinel
+    assert selected.sentinel_provider == "anthropic"
 
 
 def test_the_sentinel_brief_makes_stalled_provisional() -> None:
