@@ -1,0 +1,6 @@
+type: skill
+name: writing-for-agents
+description: .shared-llm/public/layers/slash-commands/common/common/writing-for-agents/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/writing-for-agents/command.md
+output: .claude/skills/writing-for-agents/SKILL.md

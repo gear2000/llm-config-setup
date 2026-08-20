@@ -1,0 +1,7 @@
+type: skill
+name: plain-speech
+description: .shared-llm/public/layers/slash-commands/common/common/plain-speech/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/plain-speech/command.md
+- .shared-llm/public/layers/slash-commands/common/common/unslop/command.md
+output: .claude/skills/plain-speech/SKILL.md

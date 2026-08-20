@@ -47,6 +47,8 @@ Recruiter: return ORDER_RECEIPT <json>, or REQUESTER_DECISION_REQUIRED at a work
 leader:    read + validate pass-<p>/stages/<stage-id>/try-<m>/result.json
 ```
 
+Every `instructions.md` the leader authors is a document a fresh worker consumes cold, so write it through the `writing-for-agents` skill: front-load what the worker does, end every step on a checkable and demanding completion criterion, inline what every path needs and point at what only some paths reach, and state the target behavior positively instead of listing prohibitions. The brief must let the worker understand what this leader is trying to convey about the overall agreed work, not just the mechanical step. Protocol-mandated verbatim blocks (result template, phone book, scope leash) are pasted unchanged; the writing rules govern the prose around them.
+
 The public result file is the source of truth; the durable receipt is its wake-up record. `upagent-request` and `upagent-await` call the filesystem ledger directly, so shell keystrokes cannot interleave and no LLM file-polling watchdog is needed. Save the `control_token` from `REQUEST_ACCEPTED`. If `upagent-await` returns `REQUESTER_DECISION_REQUIRED`, inspect the evidence and use `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`; then call `upagent-await` again after an extension. Only this recorded requester may make that decision. `ORDER ... DONE` pane text is display-only and MUST NOT drive a verdict.
 
 

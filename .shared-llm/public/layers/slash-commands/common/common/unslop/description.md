@@ -1,0 +1,1 @@
+Cut AI tells from any writing and add human voice. Apply to every user-facing document, report, plan, commit message, or HTML artifact before delivering it; also on "unslop this", "make this sound human", or "cut the AI tells".

@@ -1,0 +1,1 @@
+How to talk to the user: repo ubiquitous language from CONTEXT.md, Simplified Technical English sentences, and the unslop checklist. Apply to every user-facing message, report, plan, or artifact; also on "plain speech", "say it plainly", or when the user says a message didn't land.

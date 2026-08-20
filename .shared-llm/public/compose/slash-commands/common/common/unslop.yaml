@@ -1,0 +1,6 @@
+type: skill
+name: unslop
+description: .shared-llm/public/layers/slash-commands/common/common/unslop/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/unslop/command.md
+output: .claude/skills/unslop/SKILL.md

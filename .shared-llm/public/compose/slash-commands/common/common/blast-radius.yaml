@@ -1,0 +1,6 @@
+type: skill
+name: blast-radius
+description: .shared-llm/public/layers/slash-commands/common/common/blast-radius/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/blast-radius/command.md
+output: .claude/skills/blast-radius/SKILL.md

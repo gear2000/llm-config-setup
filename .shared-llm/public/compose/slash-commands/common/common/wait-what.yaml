@@ -1,0 +1,6 @@
+type: skill
+name: wait-what
+description: .shared-llm/public/layers/slash-commands/common/common/wait-what/description.md
+inputs:
+- .shared-llm/public/layers/slash-commands/common/common/wait-what/command.md
+output: .claude/skills/wait-what/SKILL.md
