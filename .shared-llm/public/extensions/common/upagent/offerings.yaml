@@ -73,7 +73,9 @@ management:
     expected_process: claude
     timeout_ms: 120000
   # The hub selects the entry opposite the worker offering's pinned provider.
-  # Both use the same sentinel persona and bounded low-effort duty cycle.
+  # The claude sentinel runs the upagent-sentinel persona; the pi renderer carries
+  # no persona flag, so the openai sentinel runs persona-less on its self-contained
+  # brief (the `agent:` field below is roster bookkeeping, not a pi launch flag).
   sentinels:
     anthropic:
       offering: claude-sonnet-5

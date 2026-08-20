@@ -232,3 +232,11 @@ The accepted residual is explicit: the 10-second idle wait makes the final state
 race seconds-scale but does not eliminate it. A full lock reservation, capacity-aware
 same-provider role fallback, and per-order resume-safety contract are not acceptance
 criteria for this shipped increment.
+
+## Migration note (snapshot schema)
+
+`validate_snapshot` now hard-requires the `provider` field, so a pre-§4 in-flight or queued
+order whose persisted `offering_snapshot` lacks `provider` blocks as "invalid offering
+snapshot" rather than merely degrading its sentinel. This retroactive tightening of the
+otherwise-immutable snapshot is machine-local and accepted: drain or re-submit any in-flight
+requests when deploying this change.

@@ -409,7 +409,7 @@ Durable files are the source of truth; terminal text is display-only.
   Both resolved providers are recorded on the durable `sentinel-hired` requester
   event. No environment flag is required. The Sentinel
   never kills anything and never outlives its worker attempt. When the hire fails —
-  including a missing `upagent-sentinel` persona, which is diagnosed before any pane is
+  including a missing `upagent-sentinel` persona for the claude sentinel command (the pi sentinel carries no persona flag and runs on its self-contained brief, so the pre-check does not apply to it), which is diagnosed before any pane is
   created with the exact missing paths named in the degrade event (checked once per
   invocation), and a pane creation refused by a herdr error or limit — supervision
   degrades for that request and the

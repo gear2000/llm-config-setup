@@ -218,3 +218,17 @@ def test_rescuer_brief_forbids_authoritative_actions(tmp_path: Path) -> None:
     assert "Python re-verifies every fact you cite" in text
     assert "The literal request id is `req-abc`" in text
     assert "never derive or substitute an identity" in text
+
+
+def test_default_openai_sentinel_role_expects_the_pi_harness() -> None:
+    """The code-owned fallback (roster without management.sentinels) must be
+    self-consistent: DEFAULT_OPENAI_SENTINEL_COMMAND launches pi, so its health
+    identity must be pi — expecting claude would fail every hire on legacy rosters."""
+    config = management.load_management_config({"management": {}})
+    role = config.sentinels["openai"]
+    assert role.command == management.DEFAULT_OPENAI_SENTINEL_COMMAND
+    assert role.expected_agent == "pi"
+    assert role.expected_process == "pi"
+    anthropic = config.sentinels["anthropic"]
+    assert anthropic.expected_agent == "claude"
+    assert anthropic.expected_process == "claude"

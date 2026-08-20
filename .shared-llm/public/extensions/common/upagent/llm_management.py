@@ -148,8 +148,12 @@ def _sentinel_roles(raw: dict) -> dict[str, ManagementRole]:
     if configured is None:
         return {
             "anthropic": _role(None, "sentinels.anthropic", DEFAULT_SENTINEL_COMMAND),
+            # The openai default launches pi, so its health identity must be pi —
+            # _role's claude defaults would fail every hire on legacy rosters.
             "openai": _role(
-                None, "sentinels.openai", DEFAULT_OPENAI_SENTINEL_COMMAND
+                {"expected_agent": "pi", "expected_process": "pi"},
+                "sentinels.openai",
+                DEFAULT_OPENAI_SENTINEL_COMMAND,
             ),
         }
     if not isinstance(configured, dict) or set(configured) != {"anthropic", "openai"}:

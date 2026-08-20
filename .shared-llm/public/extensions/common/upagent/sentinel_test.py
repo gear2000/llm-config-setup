@@ -2708,3 +2708,16 @@ def test_the_sentinel_brief_makes_stalled_provisional() -> None:
     )
     assert "SENTINEL_STALL_NUDGED" in brief
     assert "PROVISIONAL" in brief
+
+
+def test_an_override_with_unprovable_provider_degrades_typed() -> None:
+    """A management.sentinel command override whose executable proves no provider
+    identity must raise the typed sentinel-provider-unknown selection error —
+    never an approved hire, never a silent fallback."""
+    config = recruiter.llm_management.load_management_config(
+        {"management": {"sentinel": {"command": "/opt/custom/mystery-watcher {brief_path} {output_path} {cwd}"}}}
+    )
+    assert config.sentinel_is_override
+    with pytest.raises(recruiter.SentinelSelectionError) as caught:
+        recruiter._resolve_sentinel_role(_order(harness="codex", model="gpt-5.6"), config)
+    assert caught.value.reason_type == "sentinel-provider-unknown"
