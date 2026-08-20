@@ -241,10 +241,16 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     classified as stalled (they carry no Sentinel), corrupt nudge state falls through
     to the pre-ladder blocked path, and exhausted nudges publish exactly
     one typed requester escalation (durable idempotency flag) before the stall ends
-    the wait as before. An opt-in
-    cross-provider gate (`UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1`) degrades a
-    same-provider (or unprovable) sentinel hire to mechanical supervision with a typed
-    reason rather than hiring silently. The Sentinel
+    the wait as before. Cross-provider supervision is mandatory for every hire and
+    retry: the Recruiter uses the worker's immutable offering provider (falling back
+    to known harness/model identity only when no snapshot provider exists), chooses
+    the configured opposite-provider Sentinel role, and revalidates
+    `worker.provider != sentinel.provider` before launch. An unknown worker provider,
+    missing/unusable opposite role, or explicit `management.sentinel` override whose
+    provider is unknown or matches the worker degrades to mechanical supervision with
+    a typed reason rather than hiring silently. A provably disjoint override is honored
+    as-is, and the resolved providers are durable on the `sentinel-hired` requester
+    event. The Sentinel
     holds no kill switch and never outlives its worker attempt; a failed hire — a
     missing persona (diagnosed pre-pane with the exact paths, once per invocation) or a
     refused pane creation alike — degrades supervision and leaves the

@@ -7,8 +7,9 @@ Scope: WORKERS ONLY.
 
 This document preserves the original proposal's structure, but describes the code that
 actually shipped. **SHIPPED** and **DEFERRED** labels are normative. The implementation
-intentionally did not add a supervision subsystem, offering metadata, a new public
-command, or a new configuration surface.
+intentionally did not add a supervision subsystem or a new public command. The later
+Section 4 follow-up added the narrow provider metadata and Sentinel-role configuration
+needed to make cross-provider supervision the default.
 
 ## Problem
 
@@ -132,34 +133,35 @@ Accordingly, resume remains at-least-once. Workers still must inspect durable st
 reissuing mutations; the nudge ladder reduces a common idle delay, not the general
 exactly-once problem.
 
-## 4. Cross-provider selection - opt-in env gate only
+## 4. Cross-provider selection - default and fail-closed
 
-**SHIPPED, LIMITED GATE.** The implementation uses the one existing process-level opt-in:
+**SHIPPED.** Public worker offerings carry a code-owned provider (`anthropic`, `openai`,
+or deliberately `unknown`) in their immutable snapshots. The public management roster
+also defines one approved Sentinel role for each supported provider. Before every
+Sentinel launch — including a retry attempt — Python resolves the worker provider from
+the pinned snapshot. Legacy orders without snapshot provider metadata alone fall back
+to the known harness/model classifier.
+
+The Recruiter then selects the opposite-provider role:
 
 ```text
-UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1
+anthropic worker → openai Sentinel
+openai worker    → anthropic Sentinel
 ```
 
-When enabled, Python derives the worker provider from known harness/model identity and
-compares it with the shipped Claude/Haiku Sentinel's known Anthropic provider. A matching
-or unknown worker provider degrades to mechanical supervision. Any configured override
-of the Sentinel command also fails closed because its provider cannot be proven. The
-durable `sentinel-hired` event records both worker and Sentinel providers.
+The hub validates `worker.provider != sentinel.provider` on every hire. Unknown worker
+identity and a missing or unusable opposite-provider role use the existing
+`sentinel-degraded` path with a typed `reason_type`; they never fall back to a
+same-provider Sentinel. An explicit `management.sentinel` command override is still
+honored as-is when its command identity proves a provider distinct from that worker. An
+unknown or matching override provider degrades fail-closed with its own typed reason.
+The durable `sentinel-hired` requester event records the resolved worker and Sentinel
+providers.
 
-With the flag absent, default behavior is unchanged; a same-provider Sentinel may be
-hired. This is an operational gate, not a provider-routing system.
-
-**DEFERRED: THE ORIGINAL SECTION 4 IN FULL.** None of the following shipped:
-
-- provider metadata in worker or management offerings;
-- immutable provider snapshots in the offering contract;
-- approved opposite-provider Sentinel offerings;
-- a provider-to-opposite-offering selection policy;
-- capacity-aware fallback among management offerings;
-- public/legacy/specialist/retry-wide provider routing guarantees.
-
-Those changes would generalize offerings and add configuration surface. They remain a
-separate design if strict cross-provider selection becomes worth that cost.
+The former `UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL` opt-in and its environment gating
+are retired. Cross-provider selection is now the invariant, not an operational mode.
+Capacity-aware fallback among multiple roles within the same provider remains deferred;
+the shipped contract needs exactly one approved role per supported provider.
 
 ## 5. Escalation - typed requester event, publish then flag
 
@@ -189,7 +191,7 @@ transaction and does not claim to be one.
 - No broad Python-owned stall detector was added.
 - No public nudge command, arbitrary prompt capability, subsystem, or new config surface
   was added.
-- Full provider-aware offering selection (original section 4) remains deferred.
+- Capacity-aware fallback among multiple Sentinel roles within one provider remains deferred.
 - Per-order resume-safety policy remains deferred.
 
 One Sentinel-contract change was necessary for the ladder itself: `STALLED` is now a
@@ -216,9 +218,10 @@ matrix:
 7. Exhaustion publishes the requester escalation once in ordinary/recovery operation via
    the publish-then-flag scheme; the documented crash window may duplicate but cannot
    lose the first publication.
-8. With `UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1`, matching, unknown, or overridden
-   Sentinel provider identity degrades fail-closed; provider values appear in the
-   existing hire event.
+8. Every hire and retry selects the role opposite the worker offering's pinned provider;
+   unknown workers, unavailable opposite roles, and unknown or matching command overrides
+   degrade fail-closed with typed reasons. Resolved provider values appear in the existing
+   hire event.
 9. A real-machine fire drill submits an actual worker through `just upagent request`,
    injects one valid corroborated `STALLED` closeout, observes
    `worker-nudge-intent` then `worker-nudge-delivered`, sees literal `continue` arrive in
@@ -226,6 +229,6 @@ matrix:
    `follow-ups/2026-08-19-stall-nudge-reviews/live-fire-drill.md`.
 
 The accepted residual is explicit: the 10-second idle wait makes the final state-to-send
-race seconds-scale but does not eliminate it. A full lock reservation, full provider
-metadata/routing design, and per-order resume-safety contract are not acceptance criteria
-for this shipped increment.
+race seconds-scale but does not eliminate it. A full lock reservation, capacity-aware
+same-provider role fallback, and per-order resume-safety contract are not acceptance
+criteria for this shipped increment.

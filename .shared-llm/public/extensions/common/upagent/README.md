@@ -395,14 +395,19 @@ Durable files are the source of truth; terminal text is display-only.
   `escalated` flag in the nudge records, published-then-flagged so a crash risks a
   rare duplicate, never a lost escalation) pointing at the Python-owned
   nudge records and archived closeouts, and only then does the stall end the wait
-  exactly as before. An opt-in cross-provider gate
-  (`UPAGENT_REQUIRE_CROSS_PROVIDER_SENTINEL=1`) refuses to hire a sentinel whose
-  provider matches the worker's or cannot be proven distinct — including any
-  management-config override of the sentinel command, which fails closed —
-  degrading to
-  mechanical supervision with the typed degrade event instead — never a silent
-  same-provider fallback; both providers are recorded on the durable
-  `sentinel-hired` requester event. The Sentinel
+  exactly as before. Cross-provider supervision is mandatory on every hire,
+  including retries. Public worker offerings pin code-owned provider metadata in
+  their immutable snapshots; legacy orders fall back to known harness/model identity
+  only when no snapshot provider exists. The Recruiter selects the configured
+  Sentinel role for the opposite provider (`anthropic` worker → `openai` Sentinel,
+  `openai` worker → `anthropic` Sentinel) before launching its pane and validates
+  disjointness again on each attempt. An unknown worker provider or a missing/unusable
+  opposite-provider role degrades to mechanical supervision through the existing
+  `sentinel-degraded` path with a typed `reason_type`, never a silent same-provider
+  fallback. An explicit `management.sentinel` command remains an override: its command
+  identity must prove a provider distinct from this worker or it degrades fail-closed.
+  Both resolved providers are recorded on the durable `sentinel-hired` requester
+  event. No environment flag is required. The Sentinel
   never kills anything and never outlives its worker attempt. When the hire fails —
   including a missing `upagent-sentinel` persona, which is diagnosed before any pane is
   created with the exact missing paths named in the degrade event (checked once per
