@@ -8,4 +8,5 @@ inputs:
   - .shared-llm/public/layers/llm/common/common/scope-discipline.md
   - .shared-llm/public/layers/llm/common/common/when_done.md
   - .shared-llm/public/layers/llm/common/common/subagents.md
+  - .shared-llm/public/layers/llm/common/common/ascii-communication.md
 output: AGENTS.md

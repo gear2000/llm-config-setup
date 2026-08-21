@@ -50,7 +50,9 @@ Use lavish-axi when the user asks for a visual artifact, HTML explainer, interac
 ## Visual guidance
 
 - Use visual hierarchy to make the most important decisions, risks, tradeoffs, and next actions obvious at a glance
-- Use visual structure such as sections, cards, tables, diagrams, annotated snippets, and side-by-side comparisons instead of long prose
+- Use visual structure such as sections, cards, tables, ASCII trees and flows, annotated snippets, and side-by-side comparisons instead of long prose
+- For decisions, relationships, workflows, architecture, state, and cause and effect, start with an ASCII tree or ASCII flow in a `<pre>` block; multiple short ASCII rows are preferred when one large diagram would be harder to scan
+- Do not use Mermaid unless the user explicitly requests Mermaid; when ASCII cannot represent the subject clearly and accurately, tell the user, "This does not map cleanly to an ASCII tree," then use another suitable visual structure
 - Choose typography, spacing, color, and layout deliberately so the artifact has a clear point of view
 - Prevent horizontal overflow at every nesting level: nested grid/flex children also need minmax(0, 1fr) tracks and min-width: 0, especially when badges, labels, or status text use wide pixel or monospace fonts; wrap, truncate, or contain long unbreakable text deliberately
 - When the artifact would describe existing or current UI or state, show it instead: capture screenshots of the real pages (run the app read-only if needed) and embed them, rather than explaining the current look in prose; reserve prose for what cannot be shown such as rationale, trade-offs, and open questions
@@ -59,7 +61,7 @@ Use lavish-axi when the user asks for a visual artifact, HTML explainer, interac
 
 Run `npx -y lavish-axi playbook <id>` for focused, detailed guidance on any of these.
 One artifact often combines several playbooks (for example a plan that includes a comparison and a diagram), so MUST open each matching playbook before writing HTML.
-For flows, architecture, state, or sequence diagrams, do not hand-build boxes-and-arrows from div/flexbox; open the diagram playbook and use the theme-aware Mermaid snippet from `npx -y lavish-axi design` unless SVG is needed for richly annotated nodes.
+For flows, architecture, state, or sequence diagrams, use an ASCII tree or ASCII flow first. Open the diagram playbook only when ASCII cannot represent the subject clearly and accurately or the user explicitly requests a graphical diagram. Do not hand-build boxes-and-arrows from div/flexbox. Use the theme-aware Mermaid snippet from `npx -y lavish-axi design` only when the user explicitly requests Mermaid.
 
 - `diagram` - Map relationships, flows, state, and architecture
 - `table` - Turn dense records into scan-friendly review surfaces
