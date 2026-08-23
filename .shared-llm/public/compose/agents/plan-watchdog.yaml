@@ -5,4 +5,5 @@ color: orange
 description: .shared-llm/public/layers/agents/common/plan-watchdog.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/plan-watchdog.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/plan-watchdog.md

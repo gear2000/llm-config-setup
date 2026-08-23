@@ -5,4 +5,5 @@ color: yellow
 description: .shared-llm/public/layers/agents/common/upagent-sentinel.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/upagent-sentinel.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/upagent-sentinel.md

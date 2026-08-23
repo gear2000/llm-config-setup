@@ -5,4 +5,5 @@ color: cyan
 description: .shared-llm/public/layers/agents/common/intake-clerk.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/intake-clerk.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/intake-clerk.md

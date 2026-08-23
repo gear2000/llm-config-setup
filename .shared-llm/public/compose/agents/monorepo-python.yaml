@@ -5,4 +5,5 @@ color: blue
 description: .shared-llm/public/layers/agents/common/monorepo-python.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/monorepo-python.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/monorepo-python.md

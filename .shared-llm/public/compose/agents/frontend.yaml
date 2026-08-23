@@ -5,4 +5,5 @@ color: pink
 description: .shared-llm/public/layers/agents/common/frontend.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/frontend.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/frontend.md

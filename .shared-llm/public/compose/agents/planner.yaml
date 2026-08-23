@@ -5,4 +5,5 @@ color: blue
 description: .shared-llm/public/layers/agents/common/planner.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/planner.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/planner.md

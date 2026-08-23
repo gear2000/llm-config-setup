@@ -5,4 +5,5 @@ color: yellow
 description: .shared-llm/public/layers/agents/common/reviewer.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/reviewer.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/reviewer.md

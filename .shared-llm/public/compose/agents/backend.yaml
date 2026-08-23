@@ -5,4 +5,5 @@ color: purple
 description: .shared-llm/public/layers/agents/common/backend.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/backend.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/backend.md

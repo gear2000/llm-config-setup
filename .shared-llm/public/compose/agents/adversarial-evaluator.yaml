@@ -4,4 +4,5 @@ color: red
 description: .shared-llm/public/layers/agents/common/adversarial-evaluator.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/adversarial-evaluator.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/adversarial-evaluator.md

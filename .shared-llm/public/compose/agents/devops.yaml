@@ -5,4 +5,5 @@ color: gray
 description: .shared-llm/public/layers/agents/common/devops.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/devops.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/devops.md

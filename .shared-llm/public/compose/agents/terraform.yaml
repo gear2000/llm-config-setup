@@ -5,4 +5,5 @@ color: orange
 description: .shared-llm/public/layers/agents/common/terraform.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/terraform.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/terraform.md

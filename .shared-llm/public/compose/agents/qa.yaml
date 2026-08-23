@@ -5,4 +5,5 @@ color: green
 description: .shared-llm/public/layers/agents/common/qa.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/qa.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/qa.md

@@ -5,4 +5,5 @@ color: cyan
 description: .shared-llm/public/layers/agents/common/database.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/database.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/database.md
