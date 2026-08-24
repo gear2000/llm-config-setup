@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import re
 import shlex
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import yaml
@@ -22,12 +22,37 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS, "anthropic"),
     "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
-    # Cursor does not expose the backing model provider as a stable contract.
+    # Cursor model ids carry their native effort tier, so each public cursor
+    # offering exposes the canonical default selection only.
     "cursor-composer-2-5": (
         "cursor",
         "composer-2.5",
         (DEFAULT_EFFORT,),
         "unknown",
+    ),
+    "cursor-grok-4-6": (
+        "cursor",
+        "cursor-grok-4.6-high",
+        (DEFAULT_EFFORT,),
+        "xai",
+    ),
+    "cursor-opus-4-6": (
+        "cursor",
+        "claude-4.6-opus-high",
+        (DEFAULT_EFFORT,),
+        "anthropic",
+    ),
+    "cursor-sonnet-4-6": (
+        "cursor",
+        "claude-4.6-sonnet-medium",
+        (DEFAULT_EFFORT,),
+        "anthropic",
+    ),
+    "cursor-fable-5": (
+        "cursor",
+        "claude-fable-5-high",
+        (DEFAULT_EFFORT,),
+        "anthropic",
     ),
     "pi-gpt-5-6-sol": ("pi", "openai-codex/gpt-5.6-sol", EFFORTS, "openai"),
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS, "openai"),

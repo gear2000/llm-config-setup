@@ -1,5 +1,5 @@
 # pyright: reportMissingImports=false
-"""Exact ten-offering roster and child argv tests."""
+"""Exact public offering roster and child argv tests."""
 
 from __future__ import annotations
 
@@ -19,12 +19,15 @@ sys.modules[spec.name] = offerings
 spec.loader.exec_module(offerings)
 
 
-def test_roster_contains_exactly_the_ten_approved_offerings() -> None:
+def test_roster_contains_exactly_the_approved_offerings() -> None:
     roster = offerings.load_roster()
 
     assert list(roster.offerings) == list(offerings.APPROVED)
-    assert len(roster.listing()) == 10
-    assert roster.listing()[5]["rendered_identity"] == "pi:::openai-codex/gpt-5.6-sol"
+    assert len(roster.listing()) == 14
+    assert any(
+        item["rendered_identity"] == "pi:::openai-codex/gpt-5.6-sol"
+        for item in roster.listing()
+    )
     assert roster.management["account_manager"] == {
         "offering": "claude-sonnet-5",
         "effort": "low",
@@ -119,24 +122,41 @@ def test_every_approved_offering_and_effort_renders_without_yaml_commands() -> N
                 assert argv[argv.index("--thinking") + 1] == effort
 
 
-def test_cursor_offering_has_only_default_effort() -> None:
+def test_cursor_offerings_have_only_default_effort() -> None:
     roster = offerings.load_roster()
-    cursor = roster.offerings["cursor-composer-2-5"]
+    cursor_offerings = [
+        item for item in roster.offerings.values() if item.harness == "cursor"
+    ]
 
-    assert cursor.efforts == (offerings.DEFAULT_EFFORT,)
-    for effort in ("low", "medium", "high", "xhigh", "max"):
-        with pytest.raises(offerings.OfferingError, match="does not allow effort"):
-            roster.resolve("cursor-composer-2-5", effort)
+    assert {item.offering_id for item in cursor_offerings} == {
+        "cursor-composer-2-5",
+        "cursor-grok-4-6",
+        "cursor-opus-4-6",
+        "cursor-sonnet-4-6",
+        "cursor-fable-5",
+    }
+    for cursor in cursor_offerings:
+        assert cursor.efforts == (offerings.DEFAULT_EFFORT,)
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+                roster.resolve(cursor.offering_id, effort)
 
 
 def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
     roster = offerings.load_roster()
 
-    omitted = roster.resolve("cursor-composer-2-5", None)
-    explicit = roster.resolve("cursor-composer-2-5", "default")
+    for offering_id in (
+        "cursor-composer-2-5",
+        "cursor-grok-4-6",
+        "cursor-opus-4-6",
+        "cursor-sonnet-4-6",
+        "cursor-fable-5",
+    ):
+        omitted = roster.resolve(offering_id, None)
+        explicit = roster.resolve(offering_id, "default")
 
-    assert omitted == explicit
-    assert omitted["selected_effort"] == "default"
+        assert omitted == explicit
+        assert omitted["selected_effort"] == "default"
 
 
 def test_effortful_offering_still_requires_effort() -> None:
@@ -149,15 +169,27 @@ def test_effortful_offering_still_requires_effort() -> None:
             roster.resolve(offering_id, None)
 
 
-def test_cursor_renderer_is_interactive_trusted_and_has_no_effort_flag() -> None:
-    snapshot = offerings.load_roster().resolve("cursor-composer-2-5", None)
+@pytest.mark.parametrize(
+    ("offering_id", "model"),
+    [
+        ("cursor-composer-2-5", "composer-2.5"),
+        ("cursor-grok-4-6", "cursor-grok-4.6-high"),
+        ("cursor-opus-4-6", "claude-4.6-opus-high"),
+        ("cursor-sonnet-4-6", "claude-4.6-sonnet-medium"),
+        ("cursor-fable-5", "claude-fable-5-high"),
+    ],
+)
+def test_cursor_renderer_is_interactive_trusted_and_has_no_effort_flag(
+    offering_id: str, model: str
+) -> None:
+    snapshot = offerings.load_roster().resolve(offering_id, None)
 
     assert offerings.render_argv(snapshot, "backend", "/lease/instructions.md") == [
         "cursor-agent",
         "--force",
         "--trust",
         "--model",
-        "composer-2.5",
+        model,
         "Read /lease/instructions.md and do exactly that work. Before returning idle, "
         "verify every artifact named in the final Recruiter delivery contract exists "
         "and satisfies that contract.",
@@ -215,6 +247,10 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "claude-opus-4-8": "anthropic",
         "codex-gpt-5-6-sol": "openai",
         "cursor-composer-2-5": "unknown",
+        "cursor-grok-4-6": "xai",
+        "cursor-opus-4-6": "anthropic",
+        "cursor-sonnet-4-6": "anthropic",
+        "cursor-fable-5": "anthropic",
         "pi-gpt-5-6-sol": "openai",
         "pi-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-luna": "openai",

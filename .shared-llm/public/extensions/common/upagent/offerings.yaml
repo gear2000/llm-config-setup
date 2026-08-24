@@ -22,11 +22,31 @@ offerings:
     completion_style: exec
   cursor-composer-2-5:
     harness: cursor
-    # Composer 2.5, deliberately NOT the -fast variant. Cursor CLI exposes no
-    # effort control, so the only allowed selection is the canonical default.
+    # Composer 2.5, deliberately NOT the -fast variant. Cursor model ids carry
+    # their native effort tier, so public cursor offerings expose default only.
     model: composer-2.5
     efforts: [default]
     # Interactive mode preserves Cursor's live TUI and same-worker repair channel.
+    completion_style: interactive
+  cursor-grok-4-6:
+    harness: cursor
+    model: cursor-grok-4.6-high
+    efforts: [default]
+    completion_style: interactive
+  cursor-opus-4-6:
+    harness: cursor
+    model: claude-4.6-opus-high
+    efforts: [default]
+    completion_style: interactive
+  cursor-sonnet-4-6:
+    harness: cursor
+    model: claude-4.6-sonnet-medium
+    efforts: [default]
+    completion_style: interactive
+  cursor-fable-5:
+    harness: cursor
+    model: claude-fable-5-high
+    efforts: [default]
     completion_style: interactive
   pi-gpt-5-6-sol:
     harness: pi
