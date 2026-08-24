@@ -340,9 +340,7 @@ def validate_snapshot(value: object) -> dict[str, object]:
     _strict_keys(value, snapshot_keys, "offering snapshot")
     missing = sorted(snapshot_keys - set(value))
     if missing:
-        raise OfferingError(
-            f"offering snapshot is missing keys: {', '.join(missing)}"
-        )
+        raise OfferingError(f"offering snapshot is missing keys: {', '.join(missing)}")
     offering_id = value.get("id")
     if not isinstance(offering_id, str) or offering_id not in APPROVED:
         raise OfferingError(f"offering snapshot has unknown id {offering_id!r}")

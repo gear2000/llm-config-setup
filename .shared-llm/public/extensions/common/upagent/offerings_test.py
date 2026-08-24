@@ -260,7 +260,9 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
 
     assert {key: item.provider for key, item in roster.offerings.items()} == expected
     for offering_id, offering in roster.offerings.items():
-        assert offering.snapshot(offering.efforts[0])["provider"] == expected[offering_id]
+        assert (
+            offering.snapshot(offering.efforts[0])["provider"] == expected[offering_id]
+        )
 
 
 def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
@@ -276,7 +278,9 @@ def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
         offerings.validate_snapshot(foreign)
 
 
-def test_public_roster_materializes_approved_sentinel_commands_for_both_providers() -> None:
+def test_public_roster_materializes_approved_sentinel_commands_for_both_providers() -> (
+    None
+):
     management = offerings.materialize_management(offerings.load_roster())
 
     assert set(management["sentinels"]) == {"anthropic", "openai"}
