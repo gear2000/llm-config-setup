@@ -3746,9 +3746,16 @@ AGENT_PANE_READY_ATTEMPTS = 20
 AGENT_PANE_READY_INTERVAL_SECONDS = 0.5
 
 
-# Herdr agent kinds this Recruiter launches. `herdr agent start --kind` maps each to its
-# canonical executable itself, so the roster's harness names double as the kind values.
-HERDR_AGENT_KINDS = ("claude", "codex", "cursor", "pi")
+# Herdr agent kinds this Recruiter launches, keyed by the executable each kind runs.
+# `herdr agent start --kind` prepends that executable itself, so the kind must come from the
+# RENDERED command's argv[0], never from the order's harness: support roles (checker, sentinel,
+# manager, rescue) run their own harness inside an order whose harness is the worker's.
+HERDR_AGENT_KINDS = {
+    "claude": "claude",
+    "codex": "codex",
+    "cursor-agent": "cursor",
+    "pi": "pi",
+}
 
 
 def _start_herdr_agent(
@@ -3796,17 +3803,17 @@ def _start_herdr_agent(
                 f"(pane {existing.get('pane_id')}); refusing to launch a duplicate — "
                 "it would adopt another request's pane"
             )
-        harness = order["harness"]
-        if harness not in HERDR_AGENT_KINDS:
-            raise RecruiterError(
-                f"harness {harness!r} is not a Herdr agent kind; known kinds: "
-                f"{', '.join(HERDR_AGENT_KINDS)}"
-            )
-        # Herdr prepends the kind's canonical executable (cursor -> cursor-agent), so the
-        # rendered command's own argv[0] is dropped here rather than passed twice.
+        # Herdr prepends the kind's canonical executable, so the rendered command's own
+        # argv[0] both picks the kind and is dropped rather than passed twice.
         argv = shlex.split(launch)
         if len(argv) < 2:
             raise RecruiterError(f"launch command carries no agent arguments: {launch!r}")
+        kind = HERDR_AGENT_KINDS.get(argv[0])
+        if kind is None:
+            raise RecruiterError(
+                f"launch executable {argv[0]!r} is not a Herdr agent kind; known: "
+                f"{', '.join(sorted(HERDR_AGENT_KINDS))}"
+            )
         # Splitting the cockpit pane itself lands the new pane in the cockpit's tab by
         # construction, which is what the retired `--tab` flag used to buy.
         split_args = [
@@ -3840,7 +3847,7 @@ def _start_herdr_agent(
                         "start",
                         name,
                         "--kind",
-                        harness,
+                        kind,
                         "--pane",
                         created_pane,
                         "--",

@@ -672,6 +672,85 @@ def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) 
     )
 
 
+def test_start_worker_takes_the_kind_from_the_command_not_the_order_harness(
+    monkeypatch, tmp_path
+) -> None:
+    """A checker on a cursor-harness order runs claude; the kind must follow the command."""
+
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "check-pane"}}}
+        return {
+            "result": {
+                "agent": {
+                    "name": "upagent-check-14",
+                    "pane_id": "check-pane",
+                    "workspace_id": "workspace-1",
+                }
+            }
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    recruiter._start_herdr_agent(
+        "upagent-check-14",
+        _order(cockpit_pane="leader-pane", harness="cursor"),
+        "claude --dangerously-skip-permissions --agent upagent-checker "
+        "--model claude-sonnet-5 --effort low 'Read /brief.md'",
+        herdr_session="llm-lab-test",
+    )
+    start = calls[2]
+    assert start[:2] == ("agent", "start")
+    assert start[start.index("--kind") + 1] == "claude"
+    assert start[start.index("--") + 1 :] == (
+        "--dangerously-skip-permissions",
+        "--agent",
+        "upagent-checker",
+        "--model",
+        "claude-sonnet-5",
+        "--effort",
+        "low",
+        "Read /brief.md",
+    )
+
+
+def test_start_worker_maps_cursor_agent_executable_to_the_cursor_kind(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        return {
+            "result": {
+                "agent": {
+                    "name": "worker",
+                    "pane_id": "worker-pane",
+                    "workspace_id": "workspace-1",
+                }
+            }
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    recruiter._start_herdr_agent(
+        "worker",
+        _order(cockpit_pane="leader-pane", harness="cursor"),
+        "cursor-agent --force --trust --model composer-2.5 'do the work'",
+        herdr_session="llm-lab-test",
+    )
+    assert calls[2][calls[2].index("--kind") + 1] == "cursor"
+
+
 def test_start_worker_retries_a_busy_pane_then_succeeds(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     attempts = {"count": 0}
