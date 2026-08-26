@@ -461,13 +461,7 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
                 }
             }
         return {
-            "result": {
-                "agent": {
-                    "name": "phase-leader",
-                    "pane_id": "leader-pane",
-                    "workspace_id": "ws-1",
-                }
-            }
+            "result": {"pane": {"pane_id": "leader-pane", "workspace_id": "ws-1"}}
         }
 
     monkeypatch.setattr(phase_controller.recruiter, "_herdr_json", fake_herdr)
@@ -478,20 +472,17 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
         "phase-leader", "tui-pane", tmp_path, script, "llm-lab-test"
     ) == ("leader-pane", "ws-1")
     assert calls[1] == (
-        "agent",
-        "start",
-        "phase-leader",
+        "pane",
+        "split",
+        "tui-pane",
+        "--direction",
+        "down",
         "--cwd",
         str(tmp_path),
-        "--tab",
-        "tab-1",
-        "--split",
-        "down",
         "--no-focus",
-        "--",
-        "bash",
-        str(script),
     )
+    assert calls[2] == ("pane", "rename", "leader-pane", "phase-leader")
+    assert calls[3] == ("pane", "run", "leader-pane", "bash", str(script))
 
 
 def test_public_roster_has_controller_template_for_every_worker_harness() -> None:

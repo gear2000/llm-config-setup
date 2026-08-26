@@ -330,31 +330,29 @@ def _start_gated_leader(
         .get("result", {})
         .get("pane", {})
     )
-    tab_id = tui.get("tab_id") if isinstance(tui, dict) else None
     workspace_id = tui.get("workspace_id") if isinstance(tui, dict) else None
-    if not isinstance(tab_id, str) or not tab_id:
-        raise PhaseStartError(f"TUI pane {tui_pane} has no tab_id")
-    response = recruiter._herdr_json(
-        "agent",
-        "start",
-        name,
-        "--cwd",
-        str(cwd),
-        "--tab",
-        tab_id,
-        "--split",
-        "down",
-        "--no-focus",
-        "--",
-        "bash",
-        str(script_path),
-        herdr_session=herdr_session,
+    # The leader is a bash gate script, not one of Herdr's supported agent kinds, so it cannot
+    # go through `agent start`. Splitting the TUI pane keeps it in the TUI's tab; `pane run`
+    # then starts the script, and _verify_gated_leader proves it by its process argv.
+    pane = (
+        recruiter._herdr_json(
+            "pane",
+            "split",
+            tui_pane,
+            "--direction",
+            "down",
+            "--cwd",
+            str(cwd),
+            "--no-focus",
+            herdr_session=herdr_session,
+        )
+        .get("result", {})
+        .get("pane", {})
     )
-    agent = response.get("result", {}).get("agent", {})
-    pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
+    pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
-        raise PhaseStartError("herdr agent start returned no phase leader pane_id")
-    returned_workspace = agent.get("workspace_id") if isinstance(agent, dict) else None
+        raise PhaseStartError("herdr pane split returned no phase leader pane_id")
+    returned_workspace = pane.get("workspace_id") if isinstance(pane, dict) else None
     if (
         isinstance(workspace_id, str)
         and isinstance(returned_workspace, str)
@@ -363,6 +361,27 @@ def _start_gated_leader(
         raise PhaseStartError(
             f"phase leader started in workspace {returned_workspace}, expected {workspace_id}"
         )
+    try:
+        recruiter._herdr_json(
+            "pane", "rename", pane_id, name, herdr_session=herdr_session
+        )
+        recruiter._herdr_json(
+            "pane",
+            "run",
+            pane_id,
+            "bash",
+            str(script_path),
+            herdr_session=herdr_session,
+        )
+    except recruiter.RecruiterError as error:
+        detail = f"phase leader {name!r} failed to start in pane {pane_id}: {error}"
+        try:
+            recruiter._herdr_json(
+                "pane", "close", pane_id, herdr_session=herdr_session
+            )
+        except recruiter.RecruiterError as cleanup:
+            detail += f"; closing the split pane also failed: {cleanup}"
+        raise PhaseStartError(detail) from error
     return pane_id, returned_workspace if isinstance(returned_workspace, str) else ""
 
 

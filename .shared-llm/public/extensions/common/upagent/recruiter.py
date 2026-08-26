@@ -3725,6 +3725,11 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
+# Herdr agent kinds this Recruiter launches. `herdr agent start --kind` maps each to its
+# canonical executable itself, so the roster's harness names double as the kind values.
+HERDR_AGENT_KINDS = ("claude", "codex", "cursor", "pi")
+
+
 def _start_herdr_agent(
     name: str,
     order: dict,
@@ -3734,11 +3739,14 @@ def _start_herdr_agent(
     tab_role: str | None = None,
     herdr_session: str | None = None,
 ) -> tuple[str, str | None, str]:
-    """Atomically create a named Herdr pane and start its process.
+    """Create a Herdr pane off the cockpit, then start the named agent inside it.
 
-    ``herdr agent start`` carries argv through the socket in one request; unlike ``pane run`` it
-    cannot interleave launch keystrokes with another command in a shared shell. Role-specific
-    directions form a balanced grid: workers default right; managers and checkers request down.
+    Herdr 0.7.5 split the old single call in two: ``pane split`` makes the pane (carrying cwd
+    and env) and ``herdr agent start --kind <kind> --pane <id> -- <args>`` runs the harness in
+    it, prepending the kind's canonical executable itself. Argv still travels through the
+    socket, so launch keystrokes can never interleave with another command in a shared shell.
+    Role-specific directions form a balanced grid: workers default right; managers and checkers
+    request down. A failed start closes the pane it just made, so no orphan outlives the launch.
     """
     if split_direction not in ("right", "down"):
         raise RecruiterError(
@@ -3767,34 +3775,67 @@ def _start_herdr_agent(
                 f"(pane {existing.get('pane_id')}); refusing to launch a duplicate — "
                 "it would adopt another request's pane"
             )
-        cockpit = (
-            _herdr_json("pane", "get", order["cockpit_pane"], herdr_session=session)
-            .get("result", {})
-            .get("pane", {})
-        )
-        tab_id = cockpit.get("tab_id") if isinstance(cockpit, dict) else None
-        if not isinstance(tab_id, str) or not tab_id:
-            raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
-        args = [
-            "agent",
-            "start",
-            name,
+        harness = order["harness"]
+        if harness not in HERDR_AGENT_KINDS:
+            raise RecruiterError(
+                f"harness {harness!r} is not a Herdr agent kind; known kinds: "
+                f"{', '.join(HERDR_AGENT_KINDS)}"
+            )
+        # Herdr prepends the kind's canonical executable (cursor -> cursor-agent), so the
+        # rendered command's own argv[0] is dropped here rather than passed twice.
+        argv = shlex.split(launch)
+        if len(argv) < 2:
+            raise RecruiterError(f"launch command carries no agent arguments: {launch!r}")
+        # Splitting the cockpit pane itself lands the new pane in the cockpit's tab by
+        # construction, which is what the retired `--tab` flag used to buy.
+        split_args = [
+            "pane",
+            "split",
+            order["cockpit_pane"],
+            "--direction",
+            split_direction,
             "--cwd",
             order["cwd"],
-            "--tab",
-            tab_id,
-            "--split",
-            split_direction,
             "--no-focus",
         ]
         for key, value in (order.get("env") or {}).items():
-            args.extend(("--env", f"{key}={value}"))
-        args.extend(("--", "bash", "-lc", launch))
-        response = _herdr_json(*args, herdr_session=session)
+            split_args.extend(("--env", f"{key}={value}"))
+        split_pane = (
+            _herdr_json(*split_args, herdr_session=session)
+            .get("result", {})
+            .get("pane", {})
+        )
+        created_pane = split_pane.get("pane_id") if isinstance(split_pane, dict) else None
+        if not isinstance(created_pane, str) or not created_pane:
+            raise RecruiterError("herdr pane split returned no pane_id")
+        try:
+            response = _herdr_json(
+                "agent",
+                "start",
+                name,
+                "--kind",
+                harness,
+                "--pane",
+                created_pane,
+                "--",
+                *argv[1:],
+                herdr_session=session,
+            )
+        except RecruiterError as error:
+            detail = f"herdr agent start failed for {name!r} in pane {created_pane}: {error}"
+            try:
+                _herdr("pane", "close", created_pane, herdr_session=session)
+            except RecruiterError as cleanup:
+                detail += f"; closing the split pane also failed: {cleanup}"
+            raise RecruiterError(detail) from error
     agent = response.get("result", {}).get("agent", {})
     pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
         raise RecruiterError("herdr agent start response has no pane_id")
+    if pane_id != created_pane:
+        raise RecruiterError(
+            f"herdr started agent {name!r} in pane {pane_id}, not the created {created_pane}"
+        )
     workspace_id = agent.get("workspace_id") if isinstance(agent, dict) else None
     if not isinstance(workspace_id, str):
         workspace_id = None

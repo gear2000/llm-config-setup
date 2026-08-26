@@ -611,7 +611,7 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
         recruiter._wait_for_worker_health("worker-pane", _order(), 100)
 
 
-def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> None:
+def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls = []
 
@@ -620,10 +620,8 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> 
         assert kwargs == {"herdr_session": "llm-lab-test"}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
-        if args == ("pane", "get", "leader-pane"):
-            return {
-                "result": {"pane": {"tab_id": "tab-1", "workspace_id": "workspace-1"}}
-            }
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
         return {
             "result": {
                 "agent": {
@@ -637,7 +635,7 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
     pane, workspace, address = recruiter._start_herdr_agent(
         "upagent-req-abc-g1",
-        _order(cockpit_pane="leader-pane"),
+        _order(cockpit_pane="leader-pane", env={"HERDR_ENV": "1"}),
         "claude --model some-model",
         herdr_session="llm-lab-test",
     )
@@ -646,10 +644,76 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> 
         "workspace-1",
         "upagent-req-abc-g1",
     )
-    start = calls[2]
-    assert start[:4] == ("agent", "start", "upagent-req-abc-g1", "--cwd")
-    assert "--" in start
-    assert start[-3:] == ("bash", "-lc", "claude --model some-model")
+    assert calls[1] == (
+        "pane",
+        "split",
+        "leader-pane",
+        "--direction",
+        "right",
+        "--cwd",
+        "/tmp/wt",
+        "--no-focus",
+        "--env",
+        "HERDR_ENV=1",
+    )
+    assert calls[2] == (
+        "agent",
+        "start",
+        "upagent-req-abc-g1",
+        "--kind",
+        "claude",
+        "--pane",
+        "worker-pane",
+        "--",
+        "--model",
+        "some-model",
+    )
+
+
+def test_start_worker_closes_the_split_pane_when_agent_start_fails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    closed: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        raise RecruiterError("unsupported_agent_kind")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(
+        recruiter, "_herdr", lambda *args, **kwargs: closed.append(args)
+    )
+
+    with pytest.raises(RecruiterError, match="unsupported_agent_kind"):
+        recruiter._start_herdr_agent(
+            "upagent-req-abc-g1",
+            _order(cockpit_pane="leader-pane"),
+            "claude --model some-model",
+            herdr_session="llm-lab-test",
+        )
+    assert closed == [("pane", "close", "worker-pane")]
+
+
+def test_start_worker_rejects_a_harness_with_no_herdr_kind(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    with pytest.raises(RecruiterError, match="not a Herdr agent kind"):
+        recruiter._start_herdr_agent(
+            "upagent-req-abc-g1",
+            _order(cockpit_pane="leader-pane", harness="bash"),
+            "bash -lc true",
+            herdr_session="llm-lab-test",
+        )
 
 
 def test_start_herdr_agent_honors_downward_role_placement(
@@ -663,8 +727,8 @@ def test_start_herdr_agent_honors_downward_role_placement(
         assert kwargs == {"herdr_session": "llm-lab-test"}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
-        if args == ("pane", "get", "leader-pane"):
-            return {"result": {"pane": {"tab_id": "tab-1"}}}
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "manager-pane"}}}
         return {
             "result": {
                 "agent": {
@@ -685,9 +749,9 @@ def test_start_herdr_agent_honors_downward_role_placement(
         herdr_session="llm-lab-test",
     )
 
-    start = calls[2]
-    split_index = start.index("--split")
-    assert start[split_index + 1] == "down"
+    split = calls[1]
+    assert split[:2] == ("pane", "split")
+    assert split[split.index("--direction") + 1] == "down"
 
 
 def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
@@ -733,8 +797,8 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
                 return {"result": {"agent": {"name": args[2], "pane_id": "pane-first"}}}
             time.sleep(0.05)  # widen the check-then-act window
             raise RecruiterError("agent_not_found")
-        if args[:2] == ("pane", "get"):
-            return {"result": {"pane": {"tab_id": "tab-1"}}}
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "pane-first"}}}
         if args[:2] == ("agent", "start"):
             assert not state["started"], "second start raced past the name lock"
             state["started"] = True
@@ -758,7 +822,7 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
             recruiter._start_herdr_agent(
                 "worker",
                 _order(cockpit_pane="leader-pane"),
-                "claude",
+                "claude --model some-model",
                 herdr_session="llm-lab-test",
             )
         except RecruiterError as error:
@@ -929,11 +993,14 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(
             return {
                 "result": {
                     "pane": {
+                        "pane_id": "worker-pane",
                         "tab_id": "control-tab",
                         "workspace_id": "workspace-1",
                     }
                 }
             }
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
         if args[:2] == ("agent", "start"):
             return {
                 "result": {
@@ -959,7 +1026,7 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(
     started = recruiter._start_herdr_agent(
         "worker",
         _order(cockpit_pane="leader-pane"),
-        "claude",
+        "claude --model some-model",
         tab_role="workers",
         herdr_session="llm-lab-test",
     )
