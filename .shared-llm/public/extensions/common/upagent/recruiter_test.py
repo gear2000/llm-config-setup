@@ -24,6 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import re
+
 import pytest
 
 _spec = importlib.util.spec_from_file_location(
@@ -670,6 +672,40 @@ def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) 
     )
 
 
+def test_start_worker_retries_a_busy_pane_then_succeeds(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    attempts = {"count": 0}
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RecruiterError("agent_pane_busy")
+        return {
+            "result": {
+                "agent": {
+                    "name": "worker",
+                    "pane_id": "worker-pane",
+                    "workspace_id": "workspace-1",
+                }
+            }
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(recruiter, "AGENT_PANE_READY_INTERVAL_SECONDS", 0)
+
+    assert recruiter._start_herdr_agent(
+        "worker",
+        _order(cockpit_pane="leader-pane"),
+        "claude --model some-model",
+        herdr_session="llm-lab-test",
+    ) == ("worker-pane", "workspace-1", "worker")
+    assert attempts["count"] == 3
+
+
 def test_start_worker_closes_the_split_pane_when_agent_start_fails(
     monkeypatch, tmp_path
 ) -> None:
@@ -752,6 +788,18 @@ def test_start_herdr_agent_honors_downward_role_placement(
     split = calls[1]
     assert split[:2] == ("pane", "split")
     assert split[split.index("--direction") + 1] == "down"
+
+
+def test_safe_agent_name_fits_herdr_name_limit_for_every_prefix() -> None:
+    request_id = "801647cf-4a01-41b2-ab4d-2afe16af7f40"
+    names = set()
+    for prefix in ("upagent", "upagent-manager", "upagent-rescue", "upagent-sentinel"):
+        for generation in (1, 12):
+            name = recruiter._safe_agent_name(prefix, request_id, generation)
+            assert len(name) <= recruiter.HERDR_AGENT_NAME_MAX, name
+            assert re.fullmatch(r"[a-z][a-z0-9_-]*", name), name
+            names.add(name)
+    assert len(names) == 8
 
 
 def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
@@ -7112,7 +7160,11 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
         assert ownership["state"] == "launching"
         assert ownership["pane"] is None
         assert ownership["agent_name"] == name
-        assert ownership["lease_token"][:16] in name
+        # Herdr's 32-character name limit leaves no room for the literal token, so the
+        # binding is the recomputed name itself — which is what the Recruiter verifies.
+        assert name == recruiter._intake_clerk_agent_name(
+            ownership["intake_key"], ownership["lease_token"]
+        )
         assert ownership["owner_start_time"]
         started.append((name, order, launch, kwargs))
         return "clerk:pane", "workspace", name

@@ -3524,6 +3524,10 @@ def _worker_inactivity_check_ms(order: dict, configured_ms: int) -> int:
     return min(configured_ms, CURSOR_INACTIVITY_CHECK_MS)
 
 
+# Herdr 0.7.5 caps agent names at 32 characters of [a-z0-9-_], starting with a letter.
+HERDR_AGENT_NAME_MAX = 32
+
+
 def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
     """Derive a Herdr agent name that stays unique even for ids sharing a long prefix.
 
@@ -3536,9 +3540,20 @@ def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
     compact = "".join(
         character if character.isalnum() or character in "-_" else "-"
         for character in request_id
-    )
+    ).lower()
     digest = hashlib.sha256(request_id.encode()).hexdigest()[:10]
-    return f"{prefix}-{compact[:28]}-{digest}-g{generation}"
+    suffix = f"-{digest}-g{generation}"
+    # Herdr 0.7.5 rejects any agent name over HERDR_AGENT_NAME_MAX characters, so the readable
+    # id segment gets whatever room the prefix and the uniqueness suffix leave — down to none.
+    room = HERDR_AGENT_NAME_MAX - len(prefix) - len(suffix)
+    if room < 0:
+        raise RecruiterError(
+            f"agent name prefix {prefix!r} and suffix {suffix!r} exceed Herdr's "
+            f"{HERDR_AGENT_NAME_MAX}-character name limit"
+        )
+    if room < 2:
+        return f"{prefix}{suffix}"
+    return f"{prefix}-{compact[: room - 1]}{suffix}"
 
 
 @contextmanager
@@ -3725,6 +3740,12 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
+# A newly split pane reports `agent_pane_busy` until its shell is available; these bound the
+# wait before a launch is declared failed.
+AGENT_PANE_READY_ATTEMPTS = 20
+AGENT_PANE_READY_INTERVAL_SECONDS = 0.5
+
+
 # Herdr agent kinds this Recruiter launches. `herdr agent start --kind` maps each to its
 # canonical executable itself, so the roster's harness names double as the kind values.
 HERDR_AGENT_KINDS = ("claude", "codex", "cursor", "pi")
@@ -3809,18 +3830,31 @@ def _start_herdr_agent(
         if not isinstance(created_pane, str) or not created_pane:
             raise RecruiterError("herdr pane split returned no pane_id")
         try:
-            response = _herdr_json(
-                "agent",
-                "start",
-                name,
-                "--kind",
-                harness,
-                "--pane",
-                created_pane,
-                "--",
-                *argv[1:],
-                herdr_session=session,
-            )
+            # A freshly split pane can still be reported busy while its shell settles, and
+            # Herdr only starts an agent in an available shell. Retry that one transient
+            # code for a bounded window; every other failure is raised on the first try.
+            for attempt in range(AGENT_PANE_READY_ATTEMPTS):
+                try:
+                    response = _herdr_json(
+                        "agent",
+                        "start",
+                        name,
+                        "--kind",
+                        harness,
+                        "--pane",
+                        created_pane,
+                        "--",
+                        *argv[1:],
+                        herdr_session=session,
+                    )
+                    break
+                except RecruiterError as busy:
+                    if (
+                        "agent_pane_busy" not in str(busy)
+                        or attempt == AGENT_PANE_READY_ATTEMPTS - 1
+                    ):
+                        raise
+                    time.sleep(AGENT_PANE_READY_INTERVAL_SECONDS)
         except RecruiterError as error:
             detail = f"herdr agent start failed for {name!r} in pane {created_pane}: {error}"
             try:
