@@ -3740,17 +3740,14 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
-# `herdr agent start` blocks until the harness is interactively ready and defaults to 30000ms.
-# A cold `pi` start (node plus the TypeScript herdr-agent-state extension) measured 18s on an
-# idle box and blew past 30s while a manager agent was starting alongside it, which timed out
-# every pi launch. The call still returns the moment the agent is ready, so a generous bound
-# costs nothing on a fast start and only covers the slow one. Herdr caps this at 300000ms.
-HERDR_AGENT_START_TIMEOUT_MS = 120_000
-
 # A newly split pane reports `agent_pane_busy` until its shell is available; these bound the
 # wait before a launch is declared failed.
 AGENT_PANE_READY_ATTEMPTS = 20
 AGENT_PANE_READY_INTERVAL_SECONDS = 0.5
+# Herdr's own `agent start` readiness wait defaults to 30s. A pi cold start (skill scan over
+# a large ~/.pi/agent/skills tree plus its update check) was measured at 60-90s under load,
+# so 180s is the floor; it is inside Herdr's 300s cap and costs nothing on the fast path.
+AGENT_START_TIMEOUT_MS = 180_000
 
 
 # Herdr agent kinds this Recruiter launches, keyed by the executable each kind runs.
@@ -3858,7 +3855,7 @@ def _start_herdr_agent(
                         "--pane",
                         created_pane,
                         "--timeout",
-                        str(HERDR_AGENT_START_TIMEOUT_MS),
+                        str(AGENT_START_TIMEOUT_MS),
                         "--",
                         *argv[1:],
                         herdr_session=session,
@@ -4919,11 +4916,12 @@ def _wait_for_agent_status(
         return monitor_finalized is not None and monitor_finalized.is_set()
 
     deadline = time.monotonic() + timeout_ms / 1000
+    # Herdr 0.7.5 folded `wait agent-status` into `agent wait <target> --until <state>`.
     args = (
+        "agent",
         "wait",
-        "agent-status",
         worker_pane,
-        "--status",
+        "--until",
         "done",
         "--timeout",
         str(timeout_ms),
@@ -4979,7 +4977,7 @@ def _wait_for_agent_status(
                     sentinel_watch.note_window_lapsed("landing")
                 return False
             raise AgentWaitTimeout(
-                f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms"
+                f"herdr agent wait {worker_pane} timed out after {timeout_ms} ms"
             )
         if time.monotonic() >= next_pane_probe:
             next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
@@ -7301,7 +7299,7 @@ def _submit_agent_prompt(
             "agent",
             "wait",
             target,
-            "--status",
+            "--until",
             "idle",
             "--timeout",
             str(idle_timeout_ms),
