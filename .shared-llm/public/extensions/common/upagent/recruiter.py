@@ -3744,6 +3744,10 @@ def _place_started_agent_in_role_tab(
 # wait before a launch is declared failed.
 AGENT_PANE_READY_ATTEMPTS = 20
 AGENT_PANE_READY_INTERVAL_SECONDS = 0.5
+# Herdr's own `agent start` readiness wait defaults to 30s. A pi cold start (skill scan over
+# a large ~/.pi/agent/skills tree) alongside another harness launching at the same time was
+# observed to miss that; 90s is well inside Herdr's 300s cap and costs nothing on the fast path.
+AGENT_START_TIMEOUT_MS = 90_000
 
 
 # Herdr agent kinds this Recruiter launches, keyed by the executable each kind runs.
@@ -3850,6 +3854,8 @@ def _start_herdr_agent(
                         kind,
                         "--pane",
                         created_pane,
+                        "--timeout",
+                        str(AGENT_START_TIMEOUT_MS),
                         "--",
                         *argv[1:],
                         herdr_session=session,

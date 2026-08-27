@@ -75,18 +75,25 @@ try:
         emit({"result": {"process_info": {"foreground_processes": [{
             "pid": pane["pid"], "name": "claude", "cmdline": "claude local-smoke"
         }]}}})
+    elif args[:2] == ["pane", "split"]:
+        # Herdr 0.7.5: the pane is made first (carrying cwd/env); the agent starts later.
+        cwd = args[args.index("--cwd") + 1]
+        pane_id = "pane-" + str(len(state["panes"]) + 1)
+        state["panes"][pane_id] = {
+            "agent": None, "agent_name": None, "agent_status": "unknown",
+            "cwd": cwd, "foreground_cwd": cwd, "pane_id": pane_id, "pid": None,
+            "tab_id": "worker-tab", "workspace_id": "w1"
+        }
+        emit({"result": {"pane": dict(state["panes"][pane_id])}})
     elif args[:2] == ["agent", "start"]:
         name = args[2]
-        cwd = args[args.index("--cwd") + 1]
-        command = args[args.index("--") + 1:]
-        process = subprocess.Popen(command, cwd=cwd, env=os.environ.copy(), start_new_session=True)
-        pane_id = "pane-" + name[-16:]
-        state["panes"][pane_id] = {
-            "agent": "claude", "agent_name": name, "agent_status": "working",
-            "cwd": cwd, "foreground_cwd": cwd, "pane_id": pane_id,
-            "pid": process.pid, "tab_id": "worker-tab"
-        }
-        emit({"result": {"agent": {"name": name, "pane_id": pane_id}}})
+        kind = args[args.index("--kind") + 1]
+        pane_id = args[args.index("--pane") + 1]
+        pane = state["panes"][pane_id]
+        command = [kind, *args[args.index("--") + 1:]]
+        process = subprocess.Popen(command, cwd=pane["cwd"], env=os.environ.copy(), start_new_session=True)
+        pane.update({"agent": kind, "agent_name": name, "agent_status": "working", "pid": process.pid})
+        emit({"result": {"agent": {"name": name, "pane_id": pane_id, "workspace_id": "w1"}}})
     elif args[:2] == ["pane", "list"]:
         emit({"result": {"panes": list(state["panes"].values())}})
     elif args[:2] == ["pane", "close"]:
@@ -136,6 +143,14 @@ value("handoff.md").write_text("Local smoke completed.\n")
 PY
 chmod +x "$WORK/fake_worker.py"
 
+# Herdr 0.7.5 starts the kind's canonical executable itself, so the roster command must begin
+# with `claude`; this shim on the fake herdr's PATH stands in for the real harness.
+cat >"$BIN/claude" <<SH
+#!/usr/bin/env bash
+exec python3 "$WORK/fake_worker.py" "\$@"
+SH
+chmod +x "$BIN/claude"
+
 cat >"$WORK/roster.yaml" <<EOF
 management:
   mode: direct
@@ -158,7 +173,7 @@ health:
     expected_agent: claude
     expected_process: claude
 harnesses:
-  claude: "python3 $WORK/fake_worker.py {instructions_path}"
+  claude: "claude {instructions_path}"
 EOF
 
 cat >"$WORK/instructions.md" <<'EOF'
@@ -177,6 +192,7 @@ cat >"$WORK/order.json" <<EOF
   "instructions_path": "$WORK/instructions.md",
   "result_path": "$WORK/result.json",
   "cockpit_pane": "cockpit-pane",
+  "sentinel": false,
   "timeout_ms": 10000
 }
 EOF

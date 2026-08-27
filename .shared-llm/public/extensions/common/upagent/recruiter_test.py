@@ -666,6 +666,8 @@ def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) 
         "claude",
         "--pane",
         "worker-pane",
+        "--timeout",
+        "90000",
         "--",
         "--model",
         "some-model",
