@@ -667,7 +667,7 @@ def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) 
         "--pane",
         "worker-pane",
         "--timeout",
-        "180000",
+        str(recruiter.HERDR_AGENT_START_TIMEOUT_MS),
         "--",
         "--model",
         "some-model",
@@ -751,6 +751,48 @@ def test_start_worker_maps_cursor_agent_executable_to_the_cursor_kind(
         herdr_session="llm-lab-test",
     )
     assert calls[2][calls[2].index("--kind") + 1] == "cursor"
+
+
+def test_start_worker_gives_a_slow_pi_harness_more_than_herdrs_default_readiness(
+    monkeypatch, tmp_path
+) -> None:
+    """A cold pi start outlasts Herdr's 30000ms default, so the launch must pass --timeout."""
+
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls: list[tuple[str, ...]] = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        return {
+            "result": {
+                "agent": {
+                    "name": "worker",
+                    "pane_id": "worker-pane",
+                    "workspace_id": "workspace-1",
+                }
+            }
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    recruiter._start_herdr_agent(
+        "worker",
+        _order(cockpit_pane="leader-pane", harness="pi"),
+        "pi --approve --no-extensions -e /home/x/herdr-agent-state.ts "
+        "--model openai-codex/gpt-5.6-sol --thinking high 'Read /brief.md'",
+        herdr_session="llm-lab-test",
+    )
+    start = calls[2]
+    assert start[start.index("--kind") + 1] == "pi"
+    timeout_ms = int(start[start.index("--timeout") + 1])
+    assert timeout_ms == recruiter.HERDR_AGENT_START_TIMEOUT_MS
+    # Herdr rejects anything at or below 3000ms or above 300000ms.
+    assert 30_000 < timeout_ms <= 300_000
+    # --timeout is a flag on agent start, so it must precede the argv separator.
+    assert start.index("--timeout") < start.index("--")
 
 
 def test_start_worker_retries_a_busy_pane_then_succeeds(monkeypatch, tmp_path) -> None:
@@ -2325,7 +2367,7 @@ def test_submit_agent_prompt_uses_atomic_run_by_default(monkeypatch) -> None:
     recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000)
 
     assert calls == [
-        ("agent", "wait", "manager-name", "--until", "idle", "--timeout", "5000"),
+        ("agent", "wait", "manager-name", "--status", "idle", "--timeout", "5000"),
         ("pane", "run", "manager-pane", "Review evidence."),
     ]
 
@@ -2349,7 +2391,7 @@ def test_submit_agent_prompt_splits_cursor_paste_and_enter(monkeypatch) -> None:
     )
 
     assert calls == [
-        ("agent", "wait", "cursor-name", "--until", "idle", "--timeout", "5000"),
+        ("agent", "wait", "cursor-name", "--status", "idle", "--timeout", "5000"),
         ("pane", "send-text", "cursor-pane", "Repair result.json."),
         ("pane", "send-keys", "cursor-pane", "Enter"),
     ]
@@ -4581,8 +4623,8 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
             return "", ""
 
     def never_done(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[:4] == ["herdr", "--session", "llm-lab-test", "agent"]
-        assert command[4] == "wait"
+        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
+        assert command[4] == "agent-status"
         status_wait_started.set()
         return NeverDoneProcess()
 
