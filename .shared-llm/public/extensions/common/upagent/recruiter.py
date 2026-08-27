@@ -3740,14 +3740,39 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
+# Interactive harnesses are started bare and receive their prompt only after Herdr reports them
+# idle. `herdr agent start` succeeds when the agent is *ready for input*; a harness handed its
+# task on the command line starts working at once, never reaches idle inside any budget, and
+# Herdr times the launch out while a perfectly good worker is mid-task (observed 2026-08-26 on
+# every non-trivial pi order). `codex exec` is non-interactive and keeps its positional prompt.
+PROMPT_AFTER_READY_KINDS = frozenset({"pi", "claude", "cursor"})
+
+
+def _split_deferred_prompt(argv: list[str], kind: str) -> tuple[list[str], str | None]:
+    """Return (argv without its trailing prompt, that prompt) for kinds prompted after start.
+
+    Every managed launch (worker, manager, checker, Sentinel) renders the prompt as the final
+    argv element. A prompt is a sentence, so whitespace tells it apart from a trailing flag
+    value, path, or model id; a bare legacy template such as ``claude {instructions_path}``
+    is left untouched.
+    """
+    if kind not in PROMPT_AFTER_READY_KINDS or len(argv) < 3:
+        return argv, None
+    tail = argv[-1]
+    if tail.startswith("-") or not any(ch.isspace() for ch in tail):
+        return argv, None
+    return argv[:-1], tail
+
+
 # A newly split pane reports `agent_pane_busy` until its shell is available; these bound the
 # wait before a launch is declared failed.
 AGENT_PANE_READY_ATTEMPTS = 20
 AGENT_PANE_READY_INTERVAL_SECONDS = 0.5
 # Herdr's own `agent start` readiness wait defaults to 30s. A pi cold start (skill scan over
 # a large ~/.pi/agent/skills tree plus its update check) was measured at 60-90s under load,
-# so 180s is the floor; it is inside Herdr's 300s cap and costs nothing on the fast path.
-AGENT_START_TIMEOUT_MS = 180_000
+# and 65s was seen for gpt-5.6-sol at high inside a worktree, so 240s is the floor; it is
+# inside Herdr's 300s cap and costs nothing on the fast path.
+AGENT_START_TIMEOUT_MS = 240_000
 
 
 # Herdr agent kinds this Recruiter launches, keyed by the executable each kind runs.
@@ -3775,7 +3800,8 @@ def _start_herdr_agent(
 
     Herdr 0.7.5 split the old single call in two: ``pane split`` makes the pane (carrying cwd
     and env) and ``herdr agent start --kind <kind> --pane <id> -- <args>`` runs the harness in
-    it, prepending the kind's canonical executable itself. Argv still travels through the
+    it, prepending the kind's canonical executable itself. Interactive kinds start without
+    their prompt and receive it once Herdr reports them idle (see PROMPT_AFTER_READY_KINDS). Argv still travels through the
     socket, so launch keystrokes can never interleave with another command in a shared shell.
     Role-specific directions form a balanced grid: workers default right; managers and checkers
     request down. A failed start closes the pane it just made, so no orphan outlives the launch.
@@ -3818,6 +3844,7 @@ def _start_herdr_agent(
                 f"launch executable {argv[0]!r} is not a Herdr agent kind; known: "
                 f"{', '.join(sorted(HERDR_AGENT_KINDS))}"
             )
+        argv, deferred_prompt = _split_deferred_prompt(argv, kind)
         # Splitting the cockpit pane itself lands the new pane in the cockpit's tab by
         # construction, which is what the retired `--tab` flag used to buy.
         split_args = [
@@ -3889,6 +3916,26 @@ def _start_herdr_agent(
     address = agent.get("name") if isinstance(agent, dict) else None
     if not isinstance(address, str) or not address:
         address = name
+    if deferred_prompt is not None:
+        # The agent is idle and named; hand it the task the way a manager gets its brief.
+        # A failed hand-off closes the pane, exactly like a failed start.
+        try:
+            _submit_agent_prompt(
+                address,
+                deferred_prompt,
+                AGENT_START_TIMEOUT_MS,
+                paste_settle_seconds=(
+                    CURSOR_PROMPT_PASTE_SETTLE_SECONDS if kind == "cursor" else 0.0
+                ),
+                herdr_session=session,
+            )
+        except RecruiterError as error:
+            detail = f"prompt hand-off to {name!r} in pane {pane_id} failed: {error}"
+            try:
+                _herdr("pane", "close", pane_id, herdr_session=session)
+            except RecruiterError as cleanup:
+                detail += f"; closing the pane also failed: {cleanup}"
+            raise RecruiterError(detail) from error
     if tab_role is not None:
         if workspace_id is None:
             _layout_warning(
@@ -10949,6 +10996,9 @@ def _spawn_job(key: str, roster_path: str) -> subprocess.Popen[bytes] | None:
     environment = dict(command_runtime.current_environ())
     environment["UPAGENT_HUB_DIR"] = str(ledger.root.resolve())
     environment["UPAGENT_STATE"] = str(STATE_FILE.resolve())
+    # The runner re-parents itself to init (see _reparent_runner); this flag is the only
+    # thing that turns that on, so in-process callers of cmd_run_job never fork.
+    environment[RUNNER_REPARENT_ENV] = "1"
     argv = [
         sys.executable,
         str((HERE / "recruiter.py").resolve()),
@@ -12278,8 +12328,49 @@ def cmd_message_worker(
     return 0
 
 
+RUNNER_REPARENT_ENV = "UPAGENT_RUNNER_REPARENT"
+RUNNER_REPARENT_CLAIM_SECONDS = 30.0
+
+
+def _reparent_runner(key: str) -> None:
+    """Fork so the runner's parent exits and the runner is adopted by init.
+
+    A request is submitted from inside some caller — very often an agent's shell tool with its
+    own timeout. When that tool times out it kills the caller's whole process tree, and a runner
+    that is still a child of that tree dies with it, mid-launch, logging nothing (observed
+    2026-08-26: runner killed ~120s in, worker orphaned, no Sentinel, no validation).
+    `start_new_session` does not help against a tree walk; only a different parent does.
+
+    The child continues as the real runner and records its own pid/start time in the lease. The
+    parent waits until that claim is visible (or the child exits first, in which case its exit
+    code is propagated), then exits 0. The spawner's `_settle_exited_spawn` reads a 0 exit with a
+    live lease as *attached*, so no caller path changes.
+    """
+    os.environ.pop(RUNNER_REPARENT_ENV, None)
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        return
+    ledger = JobLedger()
+    deadline = time.monotonic() + RUNNER_REPARENT_CLAIM_SECONDS
+    while True:
+        exited, status = os.waitpid(child, os.WNOHANG)
+        if exited:
+            os._exit(os.waitstatus_to_exitcode(status) if status >= 0 else 1)
+        lease = _active_claim_for(ledger, key)
+        if lease is not None and lease.get("runner_pid") == child:
+            os._exit(0)
+        if time.monotonic() >= deadline:
+            # The child is alive but has not claimed; leave it to the lease reconciler rather
+            # than hold the caller's tree open any longer.
+            os._exit(0)
+        time.sleep(0.05)
+
+
 def cmd_run_job(key: str, roster_path: str) -> int:
     """Claim one persisted request, then run its existing exclusive worker lifecycle."""
+    if os.environ.get(RUNNER_REPARENT_ENV) == "1":
+        _reparent_runner(key)
     ledger = JobLedger()
     order = ledger.order(key)
     roster = load_roster(roster_path)

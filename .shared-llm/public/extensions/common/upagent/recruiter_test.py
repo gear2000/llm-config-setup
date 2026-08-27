@@ -667,7 +667,7 @@ def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) 
         "--pane",
         "worker-pane",
         "--timeout",
-        "180000",
+        "240000",
         "--",
         "--model",
         "some-model",
@@ -698,6 +698,7 @@ def test_start_worker_takes_the_kind_from_the_command_not_the_order_harness(
             }
         }
 
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", lambda *a, **k: None)
     monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
     recruiter._start_herdr_agent(
         "upagent-check-14",
@@ -717,7 +718,6 @@ def test_start_worker_takes_the_kind_from_the_command_not_the_order_harness(
         "claude-sonnet-5",
         "--effort",
         "low",
-        "Read /brief.md",
     )
 
 
@@ -743,6 +743,7 @@ def test_start_worker_maps_cursor_agent_executable_to_the_cursor_kind(
             }
         }
 
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", lambda *a, **k: None)
     monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
     recruiter._start_herdr_agent(
         "worker",
@@ -9731,3 +9732,189 @@ def test_corrupt_claude_json_fails_loud_instead_of_hanging_launch(
 
     with pytest.raises(RecruiterError, match="pre-trust"):
         recruiter._ensure_claude_folder_trust(str(tmp_path))
+
+
+# --- runner re-parenting -----------------------------------------------------------
+
+
+def test_spawn_job_marks_the_runner_for_reparenting(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    captured: dict = {}
+
+    class Handle:
+        pass
+
+    def fake_popen(argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        captured["start_new_session"] = kwargs["start_new_session"]
+        return Handle()
+
+    monkeypatch.setattr(recruiter.subprocess, "Popen", fake_popen)
+    key = "k" * 64
+    (tmp_path / "hub").mkdir()
+    recruiter._spawn_job(key, str(tmp_path / "roster.yaml"))
+    assert captured["env"][recruiter.RUNNER_REPARENT_ENV] == "1"
+    assert captured["start_new_session"] is True
+
+
+def test_reparent_runner_child_continues_in_its_own_session(monkeypatch) -> None:
+    monkeypatch.setenv(recruiter.RUNNER_REPARENT_ENV, "1")
+    calls: list[str] = []
+    monkeypatch.setattr(recruiter.os, "fork", lambda: 0)
+    monkeypatch.setattr(recruiter.os, "setsid", lambda: calls.append("setsid"))
+    recruiter._reparent_runner("k" * 64)
+    assert calls == ["setsid"]
+    assert recruiter.RUNNER_REPARENT_ENV not in recruiter.os.environ
+
+
+def test_reparent_runner_parent_exits_zero_once_the_child_claims(monkeypatch) -> None:
+    key = "k" * 64
+    monkeypatch.setattr(recruiter.os, "fork", lambda: 4242)
+    monkeypatch.setattr(recruiter.os, "waitpid", lambda pid, flags: (0, 0))
+    monkeypatch.setattr(recruiter, "JobLedger", lambda: object())
+    monkeypatch.setattr(
+        recruiter, "_active_claim_for", lambda ledger, k: {"runner_pid": 4242}
+    )
+    exits: list[int] = []
+
+    def fake_exit(code):
+        exits.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(recruiter.os, "_exit", fake_exit)
+    with pytest.raises(SystemExit):
+        recruiter._reparent_runner(key)
+    assert exits == [0]
+
+
+def test_reparent_runner_parent_propagates_an_early_child_death(monkeypatch) -> None:
+    key = "k" * 64
+    monkeypatch.setattr(recruiter.os, "fork", lambda: 4242)
+    monkeypatch.setattr(recruiter.os, "waitpid", lambda pid, flags: (4242, 256))
+    monkeypatch.setattr(recruiter, "JobLedger", lambda: object())
+    monkeypatch.setattr(recruiter, "_active_claim_for", lambda ledger, k: None)
+    exits: list[int] = []
+
+    def fake_exit(code):
+        exits.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(recruiter.os, "_exit", fake_exit)
+    with pytest.raises(SystemExit):
+        recruiter._reparent_runner(key)
+    assert exits == [1]
+
+
+def test_cmd_run_job_does_not_fork_without_the_flag(monkeypatch) -> None:
+    monkeypatch.delenv(recruiter.RUNNER_REPARENT_ENV, raising=False)
+    monkeypatch.setattr(
+        recruiter, "_reparent_runner", lambda key: (_ for _ in ()).throw(AssertionError("forked"))
+    )
+
+    class Boom(Exception):
+        pass
+
+    def no_ledger():
+        raise Boom()
+
+    monkeypatch.setattr(recruiter, "JobLedger", no_ledger)
+    with pytest.raises(Boom):
+        recruiter.cmd_run_job("k" * 64, "roster.yaml")
+
+
+# --- prompt after ready ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv, kind, expected",
+    [
+        (["pi", "--model", "m", "--thinking", "low", "Read x and do exactly that work."], "pi",
+         (["pi", "--model", "m", "--thinking", "low"], "Read x and do exactly that work.")),
+        (["claude", "--model", "m", "Read x and do that."], "claude",
+         (["claude", "--model", "m"], "Read x and do that.")),
+        (["codex", "exec", "--model", "m", "Read x and do that."], "codex",
+         (["codex", "exec", "--model", "m", "Read x and do that."], None)),
+        (["claude", "/lease/instructions.md"], "claude",
+         (["claude", "/lease/instructions.md"], None)),
+        (["pi", "--model", "m", "--thinking", "low"], "pi",
+         (["pi", "--model", "m", "--thinking", "low"], None)),
+    ],
+)
+def test_split_deferred_prompt(argv, kind, expected) -> None:
+    assert recruiter._split_deferred_prompt(list(argv), kind) == expected
+
+
+def test_start_agent_hands_the_prompt_over_only_after_the_agent_is_idle(
+    monkeypatch, tmp_path
+) -> None:
+    """The pi worker starts bare, gets named, then receives its task via the idle gate."""
+
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls: list[tuple] = []
+
+    def fake_json(*args, herdr_session=None):
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise recruiter.RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane"}}}
+        if args[:2] == ("agent", "start"):
+            return {"result": {"agent": {"pane_id": "worker-pane", "name": args[2],
+                                         "workspace_id": "w1"}}}
+        raise AssertionError(args)
+
+    submitted: list[tuple] = []
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(recruiter, "_recorded_herdr_session", lambda s, w: "s1")
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda target, message, timeout_ms, **kw: submitted.append(
+            (target, message, timeout_ms, kw.get("paste_settle_seconds"))
+        ),
+    )
+    order = {"cockpit_pane": "cockpit", "cwd": "/tmp/wt"}
+    launch = "pi --approve --model m --thinking low 'Read /i.md and do exactly that work.'"
+    pane, _ws, address = recruiter._start_herdr_agent("w-1", order, launch, herdr_session="s1")
+    start = next(c for c in calls if c[:2] == ("agent", "start"))
+    assert "Read /i.md and do exactly that work." not in start
+    assert start[start.index("--") + 1 :] == ("--approve", "--model", "m", "--thinking", "low")
+    assert submitted == [("w-1", "Read /i.md and do exactly that work.",
+                          recruiter.AGENT_START_TIMEOUT_MS, 0.0)]
+    assert (pane, address) == ("worker-pane", "w-1")
+
+
+def test_start_agent_closes_the_pane_when_the_prompt_hand_off_fails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    closed: list[str] = []
+
+    def fake_json(*args, herdr_session=None):
+        if args[:2] == ("agent", "get"):
+            raise recruiter.RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "p9"}}}
+        if args[:2] == ("agent", "start"):
+            return {"result": {"agent": {"pane_id": "p9", "name": args[2]}}}
+        raise AssertionError(args)
+
+    def fake_herdr(*args, herdr_session=None):
+        if args[:2] == ("pane", "close"):
+            closed.append(args[2])
+            return ""
+        raise AssertionError(args)
+
+    def fail_submit(*a, **k):
+        raise recruiter.RecruiterError("idle wait timed out")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    monkeypatch.setattr(recruiter, "_recorded_herdr_session", lambda s, w: "s1")
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", fail_submit)
+    with pytest.raises(recruiter.RecruiterError, match="prompt hand-off"):
+        recruiter._start_herdr_agent(
+            "w-2", {"cockpit_pane": "c", "cwd": "/tmp"}, "pi --model m 'Do the work now.'",
+            herdr_session="s1",
+        )
+    assert closed == ["p9"]
