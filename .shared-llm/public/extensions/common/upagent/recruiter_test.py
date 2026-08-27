@@ -667,7 +667,7 @@ def test_start_worker_splits_then_starts_the_named_agent(monkeypatch, tmp_path) 
         "--pane",
         "worker-pane",
         "--timeout",
-        "90000",
+        "180000",
         "--",
         "--model",
         "some-model",
@@ -2325,7 +2325,7 @@ def test_submit_agent_prompt_uses_atomic_run_by_default(monkeypatch) -> None:
     recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000)
 
     assert calls == [
-        ("agent", "wait", "manager-name", "--status", "idle", "--timeout", "5000"),
+        ("agent", "wait", "manager-name", "--until", "idle", "--timeout", "5000"),
         ("pane", "run", "manager-pane", "Review evidence."),
     ]
 
@@ -2349,7 +2349,7 @@ def test_submit_agent_prompt_splits_cursor_paste_and_enter(monkeypatch) -> None:
     )
 
     assert calls == [
-        ("agent", "wait", "cursor-name", "--status", "idle", "--timeout", "5000"),
+        ("agent", "wait", "cursor-name", "--until", "idle", "--timeout", "5000"),
         ("pane", "send-text", "cursor-pane", "Repair result.json."),
         ("pane", "send-keys", "cursor-pane", "Enter"),
     ]
@@ -4581,8 +4581,8 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
             return "", ""
 
     def never_done(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
-        assert command[4] == "agent-status"
+        assert command[:4] == ["herdr", "--session", "llm-lab-test", "agent"]
+        assert command[4] == "wait"
         status_wait_started.set()
         return NeverDoneProcess()
 

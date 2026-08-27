@@ -3745,9 +3745,9 @@ def _place_started_agent_in_role_tab(
 AGENT_PANE_READY_ATTEMPTS = 20
 AGENT_PANE_READY_INTERVAL_SECONDS = 0.5
 # Herdr's own `agent start` readiness wait defaults to 30s. A pi cold start (skill scan over
-# a large ~/.pi/agent/skills tree) alongside another harness launching at the same time was
-# observed to miss that; 90s is well inside Herdr's 300s cap and costs nothing on the fast path.
-AGENT_START_TIMEOUT_MS = 90_000
+# a large ~/.pi/agent/skills tree plus its update check) was measured at 60-90s under load,
+# so 180s is the floor; it is inside Herdr's 300s cap and costs nothing on the fast path.
+AGENT_START_TIMEOUT_MS = 180_000
 
 
 # Herdr agent kinds this Recruiter launches, keyed by the executable each kind runs.
@@ -4916,11 +4916,12 @@ def _wait_for_agent_status(
         return monitor_finalized is not None and monitor_finalized.is_set()
 
     deadline = time.monotonic() + timeout_ms / 1000
+    # Herdr 0.7.5 folded `wait agent-status` into `agent wait <target> --until <state>`.
     args = (
+        "agent",
         "wait",
-        "agent-status",
         worker_pane,
-        "--status",
+        "--until",
         "done",
         "--timeout",
         str(timeout_ms),
@@ -4976,7 +4977,7 @@ def _wait_for_agent_status(
                     sentinel_watch.note_window_lapsed("landing")
                 return False
             raise AgentWaitTimeout(
-                f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms"
+                f"herdr agent wait {worker_pane} timed out after {timeout_ms} ms"
             )
         if time.monotonic() >= next_pane_probe:
             next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
@@ -7298,7 +7299,7 @@ def _submit_agent_prompt(
             "agent",
             "wait",
             target,
-            "--status",
+            "--until",
             "idle",
             "--timeout",
             str(idle_timeout_ms),

@@ -50,7 +50,7 @@ if args == ["session", "list", "--json"]:
     emit({"sessions": [{"name": os.environ["HERDR_SESSION"], "running": True,
                          "socket_path": os.environ["HERDR_SOCKET_PATH"]}]})
     raise SystemExit(0)
-if args[:2] == ["wait", "agent-status"]:
+if args[:2] == ["agent", "wait"]:
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
     while True:
         time.sleep(1)

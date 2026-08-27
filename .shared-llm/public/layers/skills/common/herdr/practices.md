@@ -14,7 +14,7 @@ this means you can:
 - wait for another agent to finish
 - spawn more agent instances
 
-the `herdr` binary is available in your PATH. its workspace, tab, pane, and wait commands talk to the running herdr instance over a local unix socket.
+the `herdr` binary is available in your PATH. its workspace, tab, pane, and agent commands talk to the running herdr instance over a local unix socket.
 
 if you need the raw protocol or full api reference, read the [socket api docs](https://herdr.dev/docs/socket-api/).
 
@@ -134,13 +134,13 @@ block until specific text appears in a pane. useful for waiting on servers, buil
 for `--source recent`, matching uses unwrapped recent terminal text, so pane width and soft wrapping do not break matches. `pane read --source recent` still shows the pane as rendered. if you want to inspect the same transcript that the waiter matches, use `pane read --source recent-unwrapped`.
 
 ```bash
-herdr wait output 1-3 --match "ready on port 3000" --timeout 30000
+herdr pane wait-output 1-3 --match "ready on port 3000" --timeout 30000
 ```
 
 with regex:
 
 ```bash
-herdr wait output 1-3 --match "server.*ready" --regex --timeout 30000
+herdr pane wait-output 1-3 --regex "server.*ready" --timeout 30000
 ```
 
 if it times out, exit code is `1`.
@@ -150,7 +150,7 @@ if it times out, exit code is `1`.
 block until another agent reaches a specific status:
 
 ```bash
-herdr wait agent-status 1-1 --status done --timeout 60000
+herdr agent wait 1-1 --until done --timeout 60000
 ```
 
 use this when you want the same `done` / `idle` distinction the UI shows.
@@ -228,7 +228,7 @@ herdr pane close 1-3
 ```bash
 NEW_PANE=$(herdr pane split 1-2 --direction right --no-focus | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["pane"]["pane_id"])')
 herdr pane run "$NEW_PANE" "npm run dev"
-herdr wait output "$NEW_PANE" --match "ready" --timeout 30000
+herdr pane wait-output "$NEW_PANE" --match "ready" --timeout 30000
 herdr pane read "$NEW_PANE" --source recent --lines 20
 ```
 
@@ -237,7 +237,7 @@ herdr pane read "$NEW_PANE" --source recent --lines 20
 ```bash
 herdr pane split 1-2 --direction down --no-focus
 herdr pane run 1-3 "cargo test"
-herdr wait output 1-3 --match "test result" --timeout 60000
+herdr pane wait-output 1-3 --match "test result" --timeout 60000
 herdr pane read 1-3 --source recent --lines 30
 ```
 
@@ -257,7 +257,7 @@ use this pattern when you need to coordinate with a sibling pane:
 herdr pane read 1-3 --source recent --lines 40
 
 # wait only for the next output you expect
-herdr wait output 1-3 --match "ready" --timeout 30000
+herdr pane wait-output 1-3 --match "ready" --timeout 30000
 
 # if you need to inspect the same transcript the waiter matched,
 # read the unwrapped recent text directly
@@ -269,20 +269,20 @@ herdr pane read 1-3 --source recent-unwrapped --lines 40
 ```bash
 herdr pane split 1-2 --direction right --no-focus
 herdr pane run 1-3 "claude"
-herdr wait output 1-3 --match ">" --timeout 15000
+herdr pane wait-output 1-3 --match ">" --timeout 15000
 herdr pane run 1-3 "review the test coverage in src/api/"
 ```
 
 ### coordinate with another agent
 
 ```bash
-herdr wait agent-status 1-1 --status done --timeout 120000
+herdr agent wait 1-1 --until done --timeout 120000
 herdr pane read 1-1 --source recent --lines 100
 ```
 
 ## notes
 
-- `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `wait output`, and `wait agent-status` print json on success.
+- `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `pane wait-output`, and `agent wait` print json on success.
 - `pane read` prints text, not json.
 - `pane read --format ansi` or `pane read --ansi` returns a rendered ANSI snapshot for TUI feedback loops.
 - `pane read --source recent-unwrapped` is useful when you want to inspect the same unwrapped transcript that `wait output --source recent` matches against.
