@@ -1,0 +1,6 @@
+# Global (all-projects) create-html skill recipe.
+name: create-html
+description: .shared-llm/public/layers/skills/common/create-html/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/create-html/practices.md
+output: global-staging/skills/create-html/SKILL.md

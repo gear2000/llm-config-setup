@@ -1,1 +1,1 @@
-Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python best practices (no broad try/except, no duplicated utilities, access boundaries), verifies CI pipelines exist, and surfaces violations with file:line citations. Pairs with the package-writing agent: that one writes, this one audits.
+Read-only governance auditor for Python monorepo packages: scaffolding, best practices, utility duplication, access boundaries, CI coverage, and file:line violations.

@@ -5,5 +5,4 @@ color: yellow
 description: .shared-llm/public/layers/agents/common/team-pulse.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/team-pulse.md
-  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/team-pulse.md

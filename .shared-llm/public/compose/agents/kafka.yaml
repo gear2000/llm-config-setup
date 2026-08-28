@@ -1,0 +1,10 @@
+type: agent
+name: kafka
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/agents/common/kafka.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/kafka.md
+  - .shared-llm/public/layers/skills/common/kafka/practices.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
+output: .claude/agents/kafka.md

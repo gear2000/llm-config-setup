@@ -1,1 +1,1 @@
-Interview the user relentlessly about a plan or design until reaching shared understanding, working the design tree in frontier rounds with recommended answers, rendered as annotatable HTML sheets when possible. Pass --docs to write settled decisions into CONTEXT.md and ADRs as you go. Use when user wants to stress-test a plan, get grilled on their design, or mentions "grill me".
+Interview the user about a plan or design until shared understanding is reached. Use frontier rounds, recommended answers, and optional HTML review sheets; --docs records settled decisions.

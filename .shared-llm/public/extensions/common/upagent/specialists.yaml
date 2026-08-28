@@ -16,7 +16,7 @@
 specialists:
   - name: backend
     location: .claude/agents/backend.md
-    description: "Backend services, APIs, request contracts, tests, and failure diagnosis."
+    description: "Backend services and APIs; Kafka client/cluster semantics route to kafka."
     offering: claude-sonnet-5
     effort: medium
     agent: backend
@@ -46,7 +46,7 @@ specialists:
     agent: terraform
   - name: aws
     location: .claude/agents/aws.md
-    description: "AWS architecture, IAM, networking, and read-only operational diagnostics."
+    description: "AWS architecture, IAM, networking, MSK provisioning, and diagnostics."
     offering: claude-sonnet-5
     effort: medium
     agent: aws
@@ -64,10 +64,40 @@ specialists:
     agent: security
   - name: database
     location: .claude/agents/database.md
-    description: "Schema design, migrations, and data-access conventions."
+    description: "Relational/PostgreSQL schemas, migrations, and data access; ClickHouse routes to clickhouse."
     offering: claude-sonnet-5
     effort: medium
     agent: database
+  - name: clickhouse
+    location: .claude/agents/clickhouse.md
+    description: "ClickHouse analytics schemas, ingestion, query tuning, replication, and operations."
+    offering: claude-sonnet-5
+    effort: medium
+    agent: clickhouse
+  - name: kafka
+    location: .claude/agents/kafka.md
+    description: "Kafka topics, producers, consumers, Connect/Streams, schemas, and operations."
+    offering: claude-sonnet-5
+    effort: medium
+    agent: kafka
+  - name: lucidchart
+    location: .claude/agents/lucidchart.md
+    description: "Lucidchart MCP diagrams, Standard Import setup, inspection, and sharing gates."
+    offering: claude-sonnet-5
+    effort: medium
+    agent: lucidchart
+  - name: drawio
+    location: .claude/agents/drawio.md
+    description: "Draw.io native XML diagrams, semantic validation, preservation, and conversion gates."
+    offering: claude-sonnet-5
+    effort: medium
+    agent: drawio
+  - name: create-html
+    location: .claude/agents/create-html.md
+    description: "Self-contained static HTML artifacts, inline assets, accessibility, and local verification."
+    offering: claude-sonnet-5
+    effort: medium
+    agent: create-html
   - name: architecture
     location: .claude/agents/architecture.md
     description: "Module boundaries, package scaffolding, and cross-service design decisions."

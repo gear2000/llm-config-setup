@@ -1,6 +1,6 @@
 ---
 name: cc-research
-description: 'Pure research and exploration. Produces research.md only — no plan, no implementation. Default transport is subagents (fresh context per Explore call); pass --team to run inside TeamCreate (TMUX windows, named members). The leader orchestrates the research, dispatching Explore agents and a synthesizer; the leader does not read code or write the research file itself — it always dispatches a subagent for that work. Invocation: /cc-research [--team] <title>.'
+description: 'Claude Code research only: produce research.md, with no plan or implementation. Use fresh Explore agents by default or --team for a named TeamCreate research group.'
 ---
 
 # cc-research — Research → Stop

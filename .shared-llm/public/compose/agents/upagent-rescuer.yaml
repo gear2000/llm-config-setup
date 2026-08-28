@@ -5,5 +5,4 @@ color: yellow
 description: .shared-llm/public/layers/agents/common/upagent-rescuer.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/upagent-rescuer.md
-  - .shared-llm/public/layers/agents/common/_report-contract.md
 output: .claude/agents/upagent-rescuer.md

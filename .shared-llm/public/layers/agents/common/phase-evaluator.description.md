@@ -1,1 +1,1 @@
-Optional independent evaluator for one plan phase. The phase leader resolves its route profile and places one work order through the UpAgent Recruiter; the Recruiter hires the evaluator as a fresh worker. It reviews durable stage evidence and returns a PASSED, FAILED, or BLOCKED recommendation. The phase leader, not the evaluator, writes the durable phase result.
+Optional independent evaluator for one plan phase. Reviews durable stage evidence from a fresh UpAgent work order and recommends PASSED, FAILED, or BLOCKED.

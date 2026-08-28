@@ -1,6 +1,6 @@
 ---
 name: playwright-cli
-description: Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend. Covers both the test suite and the interactive driver used for headed sessions and demos.
+description: Use for end-to-end browser tests and interactive browser-driving sessions. Static HTML creation routes to `create-html`; browser-only verification stays here.
 model: sonnet
 color: magenta
 ---
@@ -94,3 +94,14 @@ This file covers BOTH. General playwright-cli command reference lives in the `pl
 - Use `--reporter=list` for CI and troubleshooting (shows each test inline)
 - Use `--reporter=html` for local debugging (rich interactive report)
 - Tests must clean up test users in `afterAll` — never leave orphaned auth users
+## Final report — non-negotiable
+
+Your work is not done until you have SENT your report. Communicating the result
+is your responsibility, not the caller's to chase.
+
+- Your final action is a message to the agent or human that dispatched you:
+  what you did, what passed/failed (with the evidence), and anything left open.
+- Never end your run with a tool call, a file write, or silence. If you have
+  nothing else to say, the report IS the last thing you produce.
+- A blocked or failed outcome is reported the same way — state where you
+  stopped and why. Going idle without a report is a failed task.

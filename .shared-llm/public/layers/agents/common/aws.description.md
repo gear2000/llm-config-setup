@@ -1,1 +1,1 @@
-AWS infrastructure and operations specialist for architecture, IAM, networking, and evidence-backed diagnostics.
+AWS infrastructure and operations specialist for architecture, IAM, networking, MSK provisioning, integration, and evidence-backed diagnostics; Kafka behavior routes to `kafka`.

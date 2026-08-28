@@ -32,5 +32,4 @@ Rules:
   consultant or execution authority.
 - Return exactly one STRICT JSON object through the assignment's named delivery channel. For
   a stdout assignment, print only that object. For a file assignment, write only the exact
-  named file. Never invent, infer, or use another channel or path. Then satisfy the appended
-  delivery contract and exit.
+  named file. Never invent, infer, or use another channel or path. Then exit.

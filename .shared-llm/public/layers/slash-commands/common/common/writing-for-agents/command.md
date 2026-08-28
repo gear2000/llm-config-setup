@@ -13,6 +13,10 @@ A pointer does two jobs: state what the material is, and list the **branches** t
 - **One trigger per branch.** Synonyms that rename a single branch are one branch written twice; collapse them and keep only genuinely distinct branches.
 - **Cut identity the body already carries.**
 
+## Discovery metadata limits
+
+For any skill or agent description, keep the final frontmatter value at or below **1,024 UTF-16 code units**. Treat anything above **300 UTF-16 code units** as a review warning that needs a routing reason. Supplementary-plane characters count as two units. Put contracts, examples, setup, status vocabulary, and detailed procedure in the body; the description is only a concise routing pointer with the domain name, trigger work, and boundary words needed for selection.
+
 ## The two loads
 
 Every document and pointer you add spends one of two budgets:

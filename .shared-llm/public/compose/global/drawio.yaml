@@ -1,0 +1,7 @@
+# Global (all-projects) drawio skill recipe.
+name: drawio
+description: .shared-llm/public/layers/skills/common/drawio/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/drawio/practices.md
+resources: .shared-llm/public/layers/skills/common/drawio/resources
+output: global-staging/skills/drawio/SKILL.md

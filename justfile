@@ -49,6 +49,10 @@ reset *args:
 check:
     ${PYTHON_BIN:-python3} tools/harness.py check
 
+# Audit owned skill/agent descriptions without copy, compose, link, manifest, or home writes.
+descriptions *args:
+    ${PYTHON_BIN:-python3} tools/harness.py descriptions {{args}}
+
 # Regenerate the derived inventory block in README.md (skill/agent/slash-command
 # counts + tables) from the compose recipes. Run after adding, removing, or
 # renaming a recipe. Idempotent — a second run is a zero diff.
@@ -86,17 +90,21 @@ pi-extensions:
 
 # ─── Kit self-hosting ─────────────────────────────────
 # The kit tracks its OWN composed slash-command skills under .claude/skills/{cc,do}-*
-# (it self-hosts the workflow suite). Regenerate them after editing a slash-command
-# layer. The common layers ship {{OPS_REPO}} as a placeholder (a real destination
-# fills it from ~/.shared-llm.yaml `placeholders:`); here we fill it with the generic
-# 'your-repo-ops' so the kit's tracked outputs stay byte-identical. Stages into the
-# gitignored examples/ dir, then copies back ONLY the skills the kit already tracks —
-# it never adds untracked composed skills to .claude/skills/.
+# (it self-hosts the workflow suite) and composed generic agents under
+# .claude/agents/. Regenerate them after editing slash-command or agent layers.
+# The common layers ship {{OPS_REPO}} as a placeholder (a real destination fills
+# it from ~/.shared-llm.yaml `placeholders:`); here we fill it with the generic
+# 'your-repo-ops' so the kit's tracked outputs stay byte-identical. Stages into
+# the gitignored examples/ dir, then copies back tracked slash-command skills and
+# the composed generic agent roster.
 selfcompose:
     rm -rf examples/self
     ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/public/compose/slash-commands --target examples/self --placeholder OPS_REPO=your-repo-ops
+    ${PYTHON_BIN:-python3} tools/harness.py compose .shared-llm/public/compose/agents --target examples/self --placeholder OPS_REPO=your-repo-ops
     for d in .claude/skills/*/; do n=$(basename "$d"); case "$n" in lavish) continue ;; esac; cp "examples/self/.claude/skills/$n/SKILL.md" "$d/SKILL.md" || exit 1; done
-    @echo "selfcompose: regenerated the kit's tracked slash-command skills (.claude/skills/{cc,do}-*)"
+    mkdir -p .claude/agents
+    for f in examples/self/.claude/agents/*.md; do n=$(basename "$f"); cp "$f" ".claude/agents/$n" || exit 1; done
+    @echo "selfcompose: regenerated the kit's tracked slash-command skills and agents"
 
 # ─── Tests ────────────────────────────────────────────
 # Python composer/flow tests, plus the zero-dep Node type-stripping unit tests.

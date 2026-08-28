@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import collections
 import hashlib
+import io
 import json
 import os
 import re
@@ -61,7 +62,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, redirect_stderr, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,42 @@ STRUCTURED_TYPES = ("copy", "settings")
 # NOT matching lowercase/dotted/spaced braces, so a `{{ user.name }}` inside an
 # example code fence never trips the fail-loud check.
 PLACEHOLDER_RE = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+
+# Discovery metadata policy. The hard ceiling matches the Agent Skills
+# specification and is applied to this kit's owned agent descriptions too, so
+# all harness discovery surfaces stay predictable. Length is measured in UTF-16
+# code units because that is the conservative cross-harness boundary.
+DESCRIPTION_REVIEW_THRESHOLD = 300
+DESCRIPTION_HARD_MAX = 1024
+
+
+@dataclass(frozen=True)
+class DescriptionItem:
+    """One owned discovery description measured by the audit/preflight."""
+
+    owner: str  # item owner: "public" or "destination"
+    source_owner: str  # description source owner: "public" or "destination"
+    kind: str
+    name: str
+    source: Path
+    length: int
+    location: str
+    destination_index: int | None = None
+
+
+@dataclass(frozen=True)
+class DescriptionError:
+    owner: str
+    kind: str
+    name: str
+    source: Path
+    message: str
+    destination_index: int | None = None
+
+
+def utf16_code_units(text: str) -> int:
+    """Count UTF-16 code units without a BOM; supplementary chars count as 2."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 def load_compose_yaml(path: Path) -> dict[str, Any]:
@@ -585,10 +622,21 @@ class Composer:
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            public_root = self.repo_root / ".shared-llm" / PUBLIC_DIR
+            ignored_common_rels = _git_ignored_common_rels(public_root)
             for item in src_dir.rglob("*"):
                 if item.is_dir():
                     continue
-                dest = output_path.parent / item.relative_to(src_dir)
+                resource_rel = item.relative_to(src_dir)
+                if _is_artifact_rel(resource_rel):
+                    continue
+                try:
+                    common_rel = item.relative_to(public_root)
+                except ValueError:
+                    common_rel = None
+                if common_rel is not None and str(common_rel) in ignored_common_rels:
+                    continue
+                dest = output_path.parent / resource_rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(item, dest)
 
@@ -1097,6 +1145,7 @@ def wants_codex_surface(harnesses) -> bool:
     CLI read those same paths, so 'cursor' is an alias at the plumbing level."""
     return "codex" in harnesses or "cursor" in harnesses
 
+
 # The ONLY trees `copy` propagates wholesale: pure common layer + runtime
 # content. It never touches a destination's this_repo/ overlays. In the split
 # destination layout (see below) these land under <dest>/.shared-llm/public/.
@@ -1337,21 +1386,58 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 # --- copy ------------------------------------------------------------------
 
-# Build-artifact directory names never propagated by the common copy (a fresh
-# machine builds its own). node_modules can be huge; a compiled binary can be a
-# running process (copying over it fails EBUSY / "Text file busy").
-ARTIFACT_DIR_NAMES = frozenset({"node_modules", "__pycache__"})
+# Build/cache artifacts never propagated by common copies or packaged skill
+# resources (a fresh machine builds its own). node_modules can be huge; a
+# compiled binary can be a running process (copying over it fails EBUSY /
+# "Text file busy").
+ARTIFACT_DIR_NAMES = frozenset(
+    {"node_modules", "__pycache__", ".ruff_cache", ".pytest_cache"}
+)
+ARTIFACT_FILE_SUFFIXES = (".pyc", ".pyo", ".pyd")
+
+
+def _is_artifact_rel(rel: Path) -> bool:
+    return bool(
+        ARTIFACT_DIR_NAMES.intersection(rel.parts)
+        or rel.name == ".DS_Store"
+        or rel.name.endswith(ARTIFACT_FILE_SUFFIXES)
+    )
 
 
 def _git_ignored_common_rels(kit_shared: Path) -> frozenset[str]:
     """Relative paths (under the kit's public content root) that git ignores in
     the KIT — build artifacts (e.g. a compiled hub binary the kit .gitignore
-    lists) that must never propagate to the hub or a destination. Computed from
-    the kit (the ultimate source and a git repo); empty if git is unavailable."""
+    lists) that must never propagate to the hub or a destination.
+
+    Git discovery is authoritative when the kit is a worktree. Archive/non-git
+    checkouts are supported, but the missing discovery is announced on stderr so
+    ignored-resource filtering can never be mistaken for having succeeded.
+    """
     # kit_shared is <kit>/.shared-llm/public; its parent (.shared-llm) is inside
     # the git repo, so `git -C` discovers the repo and lists paths relative to
     # that cwd — i.e. prefixed with `public/`, which we strip below.
     cwd = kit_shared.parent
+    try:
+        in_worktree = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        print(
+            "warning: git discovery unavailable for public resource exclusions; "
+            "continuing as an archive/non-git checkout without gitignored-path filtering",
+            file=sys.stderr,
+        )
+        return frozenset()
+    if in_worktree.returncode != 0 or in_worktree.stdout.strip() != "true":
+        print(
+            "warning: git discovery unavailable for public resource exclusions; "
+            "continuing as an archive/non-git checkout without gitignored-path filtering",
+            file=sys.stderr,
+        )
+        return frozenset()
     try:
         out = subprocess.run(
             [
@@ -1371,7 +1457,10 @@ def _git_ignored_common_rels(kit_shared: Path) -> frozenset[str]:
             check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
-        return frozenset()
+        sys.exit(
+            "error: git ignored-path discovery failed for public resources; "
+            "cannot safely apply .gitignore exclusions"
+        )
     prefix = kit_shared.name + "/"  # "public/"
     return frozenset(p[len(prefix) :] for p in out.split("\0") if p.startswith(prefix))
 
@@ -1388,10 +1477,9 @@ def _iter_common_rels(shared: Path, exclude_rels: frozenset[str] = frozenset()):
         for p in sorted(base.rglob("*")):
             if not p.is_file():
                 continue
-            parts = p.relative_to(shared).parts
-            if "this_repo" in parts or ARTIFACT_DIR_NAMES.intersection(parts):
-                continue
             rel = p.relative_to(shared)
+            if "this_repo" in rel.parts or _is_artifact_rel(rel):
+                continue
             if str(rel) in exclude_rels:
                 continue
             yield rel
@@ -1930,10 +2018,14 @@ def _reconcile_global(
         if dest.is_symlink():
             if os.readlink(dest) == str(src):
                 continue
-            was_ours = (
-                prior_owned is not None and os.readlink(dest) == prior_owned.get(dest)
+            was_ours = prior_owned is not None and os.readlink(dest) == prior_owned.get(
+                dest
             )
-            if was_ours or _resolves_into(dest, owned_roots) or _link_points_generated(dest):
+            if (
+                was_ours
+                or _resolves_into(dest, owned_roots)
+                or _link_points_generated(dest)
+            ):
                 dest.unlink()
                 dest.symlink_to(src)
                 counts["repoint"] += 1
@@ -1976,7 +2068,9 @@ def _cleanup_repo_scoped_pi(dests: list[Path], log: RunLog) -> int:
     return removed
 
 
-def destination_home_skills(cfg: dict) -> tuple[dict[str, Path], dict[str, Path], list[str]]:
+def destination_home_skills(
+    cfg: dict,
+) -> tuple[dict[str, Path], dict[str, Path], list[str]]:
     """The home skill links every configured DESTINATION wants: (pi, codex,
     collisions), each keyed by skill name.
 
@@ -2626,7 +2720,9 @@ class HomeManifest:
             # schema on the next run, quarantining forever instead of recovering.
             record = {"kind": "link", "source": _absolute_link_target(entry)}
             if not self._valid_entry(key, record):
-                log.always(f"  manifest: not re-adopting {entry} — cannot record it safely")
+                log.always(
+                    f"  manifest: not re-adopting {entry} — cannot record it safely"
+                )
                 continue
             self.entries[key] = record
             found += 1
@@ -2829,6 +2925,11 @@ GLOBAL_CONVENTION_SKILLS = {
     "backend": "compose/global/backend.yaml",
     "golang": "compose/global/golang.yaml",
     "herdr": "compose/global/herdr.yaml",
+    "clickhouse": "compose/global/clickhouse.yaml",
+    "kafka": "compose/global/kafka.yaml",
+    "lucidchart": "compose/global/lucidchart.yaml",
+    "drawio": "compose/global/drawio.yaml",
+    "create-html": "compose/global/create-html.yaml",
 }
 
 # Home-dir skill names to prune when found (matched by their SKILL.md `name:` so we
@@ -2918,8 +3019,7 @@ def _link_skill_dir(
         if os.readlink(target) == str(generated):
             return "uptodate"
         if _link_points_generated(target) or (
-            reclaimable is not None
-            and os.readlink(target) == reclaimable.get(target)
+            reclaimable is not None and os.readlink(target) == reclaimable.get(target)
         ):
             target.unlink()
             target.symlink_to(generated)
@@ -2992,7 +3092,11 @@ def _prune_deprecated_global(home_dirs: dict[str, Path], log: RunLog) -> int:
                 continue
             if not target.exists():
                 continue
-            if target.is_dir() and generated.is_dir() and _dirs_equal(generated, target):
+            if (
+                target.is_dir()
+                and generated.is_dir()
+                and _dirs_equal(generated, target)
+            ):
                 shutil.rmtree(target)
                 removed += 1
                 log(f"    removed deprecated copy {target}")
@@ -3013,6 +3117,446 @@ def _prune_deprecated_global(home_dirs: dict[str, Path], log: RunLog) -> int:
 # tracked outputs stay generic (byte-identical to what they were before the token was
 # introduced) and never trip the unfilled-placeholder fail-loud check.
 KIT_SELF_PLACEHOLDERS = {"OPS_REPO": "your-repo-ops"}
+
+
+def _fill_text_placeholders(text: str, placeholders: dict[str, str]) -> str:
+    return PLACEHOLDER_RE.sub(lambda m: placeholders.get(m.group(1), m.group(0)), text)
+
+
+def _frontmatter_description(path: Path) -> tuple[str | None, str | None]:
+    """Return a markdown frontmatter description, or a parse error.
+
+    This parser is deliberately narrow: only a leading YAML frontmatter block is
+    accepted. It is shared by the description audit for standalone skills,
+    tracked generated outputs, and whole-file Pi personas.
+    """
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        return None, str(exc)
+    if not text.startswith("---\n"):
+        return None, "missing leading YAML frontmatter"
+    end = text.find("\n---", 4)
+    if end == -1:
+        return None, "unterminated YAML frontmatter"
+    raw = text[4:end]
+    try:
+        data = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        return None, f"invalid YAML frontmatter: {exc}"
+    if not isinstance(data, dict):
+        return None, "YAML frontmatter must be a mapping"
+    description = data.get("description")
+    if not isinstance(description, str):
+        return None, "frontmatter description must be a string"
+    return description.strip(), None
+
+
+def _recipe_description_source_owner(desc_rel: str, fallback_owner: str) -> str:
+    public_prefix = f".shared-llm/{PUBLIC_DIR}/"
+    if desc_rel == f".shared-llm/{PUBLIC_DIR}" or desc_rel.startswith(public_prefix):
+        return "public"
+    return fallback_owner
+
+
+def _recipe_description_source(repo_root: Path, desc_rel: str) -> Path:
+    """Resolve a recipe description source for dry-run auditing.
+
+    Destination-owned recipes can legitimately point at kit-owned public layers
+    before the destination's .shared-llm/public/ tree has been copied. Resolve
+    those public references against the kit source that will be copied, while
+    keeping destination-owned references relative to the destination source.
+    """
+    desc_path = Path(desc_rel)
+    if desc_path.is_absolute():
+        return desc_path
+    public_prefix = f".shared-llm/{PUBLIC_DIR}/"
+    if desc_rel == f".shared-llm/{PUBLIC_DIR}" or desc_rel.startswith(public_prefix):
+        return project_root() / desc_rel
+    return repo_root / desc_rel
+
+
+def _recipe_description_item(
+    *,
+    repo_root: Path,
+    recipe: Path,
+    owner: str,
+    placeholders: dict[str, str],
+    destination_index: int | None = None,
+) -> tuple[DescriptionItem | None, DescriptionError | None]:
+    try:
+        if owner == "destination":
+            with redirect_stderr(io.StringIO()):
+                data = load_compose_yaml(recipe)
+        else:
+            data = load_compose_yaml(recipe)
+    except SystemExit as exc:
+        return None, DescriptionError(
+            owner,
+            "recipe",
+            recipe.stem,
+            recipe,
+            str(exc) or "invalid recipe",
+            destination_index,
+        )
+    compose_type = data.get("type") or ("agent" if "model" in data else "skill")
+    if compose_type in PLAIN_TYPES or compose_type in STRUCTURED_TYPES:
+        return None, None
+    desc_rel = data.get("description")
+    name = str(data.get("name") or recipe.stem)
+    if not isinstance(desc_rel, str):
+        return None, DescriptionError(
+            owner,
+            compose_type,
+            name,
+            recipe,
+            "missing description path",
+            destination_index,
+        )
+    desc_path = _recipe_description_source(repo_root, desc_rel)
+    try:
+        description = _fill_text_placeholders(
+            desc_path.read_text().strip(), placeholders
+        )
+    except OSError as exc:
+        return None, DescriptionError(
+            owner, compose_type, name, desc_path, str(exc), destination_index
+        )
+    return (
+        DescriptionItem(
+            owner=owner,
+            source_owner=_recipe_description_source_owner(desc_rel, owner),
+            kind=compose_type,
+            name=name,
+            source=desc_path,
+            length=utf16_code_units(description),
+            location=str(data.get("output", "")),
+            destination_index=destination_index,
+        ),
+        None,
+    )
+
+
+def _public_recipe_description_items() -> tuple[
+    list[DescriptionItem], list[DescriptionError]
+]:
+    root = project_root()
+    compose = root / ".shared-llm" / PUBLIC_DIR / "compose"
+    items: list[DescriptionItem] = []
+    errors: list[DescriptionError] = []
+    for recipe in sorted(list(compose.rglob("*.yaml")) + list(compose.rglob("*.yml"))):
+        item, error = _recipe_description_item(
+            repo_root=root,
+            recipe=recipe,
+            owner="public",
+            placeholders=KIT_SELF_PLACEHOLDERS,
+        )
+        if item:
+            items.append(item)
+        if error:
+            errors.append(error)
+    return items, errors
+
+
+def _destination_recipe_description_items(
+    dest: Path, placeholders: dict[str, str], destination_index: int
+) -> tuple[list[DescriptionItem], list[DescriptionError]]:
+    compose = dest / ".shared-llm" / THIS_REPO_DIR / "compose"
+    items: list[DescriptionItem] = []
+    errors: list[DescriptionError] = []
+    if not compose.is_dir():
+        return items, errors
+    for recipe in sorted(list(compose.rglob("*.yaml")) + list(compose.rglob("*.yml"))):
+        item, error = _recipe_description_item(
+            repo_root=dest,
+            recipe=recipe,
+            owner="destination",
+            placeholders=placeholders,
+            destination_index=destination_index,
+        )
+        if item:
+            items.append(item)
+        if error:
+            errors.append(error)
+    return items, errors
+
+
+def _frontmatter_description_item(
+    path: Path,
+    *,
+    owner: str,
+    kind: str,
+    name: str | None = None,
+    destination_index: int | None = None,
+) -> tuple[DescriptionItem | None, DescriptionError | None]:
+    description, error = _frontmatter_description(path)
+    item_name = name or path.stem
+    if error:
+        return None, DescriptionError(
+            owner, kind, item_name, path, error, destination_index
+        )
+    assert description is not None
+    return (
+        DescriptionItem(
+            owner=owner,
+            source_owner=owner,
+            kind=kind,
+            name=item_name,
+            source=path,
+            length=utf16_code_units(description),
+            location=str(path),
+            destination_index=destination_index,
+        ),
+        None,
+    )
+
+
+def _source_pi_agent_description_items() -> tuple[
+    list[DescriptionItem], list[DescriptionError]
+]:
+    base = project_root() / ".shared-llm" / PUBLIC_DIR / "llm/pi/common/agents"
+    items: list[DescriptionItem] = []
+    errors: list[DescriptionError] = []
+    if not base.is_dir():
+        return items, errors
+    for path in sorted(base.glob("*.md")):
+        item, error = _frontmatter_description_item(
+            path, owner="public", kind="pi-agent", name=path.stem
+        )
+        if item:
+            items.append(item)
+        if error:
+            errors.append(error)
+    return items, errors
+
+
+def _tracked_generated_description_items() -> tuple[
+    list[DescriptionItem], list[DescriptionError]
+]:
+    """Tracked generated discovery outputs owned by this public kit.
+
+    These are not home files. They are committed outputs in the kit checkout and
+    are checked separately so self-compose can catch drift in the artifacts this
+    repository intentionally tracks.
+    """
+    root = project_root()
+    generated_roots = (root / ".claude/agents", root / ".claude/skills")
+    if not any(path.exists() for path in generated_roots):
+        return [], []
+    candidates: list[Path] = []
+    items: list[DescriptionItem] = []
+    errors: list[DescriptionError] = []
+    try:
+        listed_paths: set[str] = set()
+        for git_args in (("ls-files",), ("ls-files", "--others", "--exclude-standard")):
+            out = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    *git_args,
+                    "-z",
+                    "--",
+                    ".claude/agents",
+                    ".claude/skills",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout.decode()
+            listed_paths.update(p for p in out.split("\0") if p.endswith(".md"))
+        candidates = [root / p for p in listed_paths]
+    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
+        return [], [
+            DescriptionError(
+                "public",
+                "tracked-generated",
+                "git-discovery",
+                Path(".claude"),
+                "git discovery failed; cannot safely enumerate generated descriptions with --exclude-standard",
+            )
+        ]
+    for path in sorted(candidates):
+        if path.name != "SKILL.md" and path.parent.name != "agents":
+            continue
+        if path.name == "SKILL.md":
+            kind = "tracked-skill"
+            name = path.parent.name
+        else:
+            kind = "tracked-agent"
+            name = path.stem
+        item, error = _frontmatter_description_item(
+            path, owner="public", kind=kind, name=name
+        )
+        if item:
+            items.append(item)
+        if error:
+            errors.append(error)
+    return items, errors
+
+
+def _destination_standalone_description_items(
+    dest: Path, destination_index: int
+) -> tuple[list[DescriptionItem], list[DescriptionError]]:
+    base = dest / ".shared-llm" / THIS_REPO_DIR / "skills"
+    items: list[DescriptionItem] = []
+    errors: list[DescriptionError] = []
+    if not base.is_dir():
+        return items, errors
+    for skill in sorted(base.iterdir()):
+        if not skill.is_dir() or skill.name.startswith("."):
+            continue
+        path = skill / "SKILL.md"
+        if not path.is_file():
+            errors.append(
+                DescriptionError(
+                    "destination",
+                    "standalone-skill",
+                    skill.name,
+                    path,
+                    "missing SKILL.md",
+                    destination_index,
+                )
+            )
+            continue
+        item, error = _frontmatter_description_item(
+            path,
+            owner="destination",
+            kind="standalone-skill",
+            name=skill.name,
+            destination_index=destination_index,
+        )
+        if item:
+            items.append(item)
+        if error:
+            errors.append(error)
+    return items, errors
+
+
+def build_description_corpus(
+    cfg: dict,
+) -> tuple[list[DescriptionItem], list[DescriptionError]]:
+    """Dry-run corpus builder for description audit/enforcement.
+
+    It reads source recipe description files and standalone source SKILL.md files
+    only. It does not compose, copy, link, reconcile home paths, or scan foreign
+    home/generated directories.
+    """
+    items: list[DescriptionItem] = []
+    errors: list[DescriptionError] = []
+
+    for producer in (
+        _public_recipe_description_items,
+        _source_pi_agent_description_items,
+        _tracked_generated_description_items,
+    ):
+        got, bad = producer()
+        items.extend(got)
+        errors.extend(bad)
+
+    for destination_index, dest_cfg in enumerate(cfg.get("destinations", []), start=1):
+        dest = Path(dest_cfg.get("path", "")).expanduser()
+        placeholders = dest_cfg.get("placeholders") or {}
+        if not isinstance(placeholders, dict):
+            placeholders = {}
+        got, bad = _destination_recipe_description_items(
+            dest, placeholders, destination_index
+        )
+        items.extend(got)
+        errors.extend(bad)
+        got, bad = _destination_standalone_description_items(dest, destination_index)
+        items.extend(got)
+        errors.extend(bad)
+
+    return items, errors
+
+
+def _destination_report_label(index: int | None) -> str:
+    return f"destination#{index}" if index is not None else "destination#?"
+
+
+def print_description_report(
+    items: list[DescriptionItem],
+    errors: list[DescriptionError],
+    *,
+    enforce_destinations: bool,
+) -> bool:
+    """Print a private-safe report and return True if enforcement passes."""
+    hard_owners = {"public"} | ({"destination"} if enforce_destinations else set())
+    warnings = [i for i in items if i.length > DESCRIPTION_REVIEW_THRESHOLD]
+    hard = [
+        i
+        for i in items
+        if i.length > DESCRIPTION_HARD_MAX
+        and (i.owner in hard_owners or i.source_owner in hard_owners)
+    ]
+    staged_over = [
+        i
+        for i in items
+        if i.length > DESCRIPTION_HARD_MAX
+        and i.owner == "destination"
+        and i.source_owner == "destination"
+        and not enforce_destinations
+    ]
+    total = sum(i.length for i in items)
+
+    print(
+        f"descriptions: checked {len(items)} item(s), total discovery metadata {total} UTF-16 code units"
+    )
+    for item in sorted(warnings, key=lambda i: (i.owner, i.length, str(i.source))):
+        level = "FAIL" if item in hard else "WARN"
+        if item.owner == "destination":
+            print(
+                f"  {level} {_destination_report_label(item.destination_index)} "
+                f"{item.kind}: {item.length} units (status=over-threshold)"
+            )
+            continue
+        owner_note = (
+            f" source-owner={item.source_owner}"
+            if item.source_owner != item.owner
+            else ""
+        )
+        print(
+            f"  {level} {item.owner} {item.kind} {item.name}: {item.length} units "
+            f"({item.source}{owner_note})"
+        )
+    for item in sorted(staged_over, key=lambda i: (i.length, str(i.source))):
+        print(
+            f"  STAGED {_destination_report_label(item.destination_index)} "
+            f"{item.kind}: {item.length} units "
+            f"(status=warn-only until Phase 2 follow-up)"
+        )
+    for error in sorted(errors, key=lambda e: str(e.source)):
+        if error.owner == "destination":
+            print(
+                f"  FAIL {_destination_report_label(error.destination_index)} "
+                f"{error.kind}: status=parse/source-error"
+            )
+            continue
+        print(
+            f"  FAIL {error.owner} {error.kind} {error.name}: {error.message} ({error.source})"
+        )
+
+    if hard or errors:
+        print(
+            f"descriptions: FAILED ({len(hard)} over {DESCRIPTION_HARD_MAX}; {len(errors)} parse/source error(s))",
+            file=sys.stderr,
+        )
+        return False
+    print(
+        f"descriptions: OK ({len(warnings)} warning(s) above {DESCRIPTION_REVIEW_THRESHOLD}; "
+        f"destination hard-limit enforcement {'on' if enforce_destinations else 'staged/warn-only'})"
+    )
+    return True
+
+
+def enforce_description_preflight(
+    cfg: dict, *, enforce_destinations: bool = False
+) -> None:
+    items, errors = build_description_corpus(cfg)
+    if not print_description_report(
+        items, errors, enforce_destinations=enforce_destinations
+    ):
+        sys.exit("description preflight blocked before copy/compose/link/home writes")
 
 
 def _clear_staging(*dirs: Path) -> None:
@@ -3287,7 +3831,9 @@ def _migrate_legacy_pi_agents(kit: Path, staged_agents: Path, log: RunLog) -> No
     log.always(f"  legacy ~/.pi/agents: migrated {removed}, removed empty dir")
 
 
-def do_home_runtime(cfg: dict, log: RunLog, manifest: HomeManifest | None = None) -> None:
+def do_home_runtime(
+    cfg: dict, log: RunLog, manifest: HomeManifest | None = None
+) -> None:
     if manifest is None:
         manifest = HomeManifest()
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
@@ -3493,7 +4039,18 @@ def cmd_link(args: argparse.Namespace) -> None:
 
 
 def cmd_global(args: argparse.Namespace) -> None:
-    do_global_flow(load_config(), RunLog(verbose=True))
+    cfg = load_config()
+    enforce_description_preflight(cfg, enforce_destinations=False)
+    do_global_flow(cfg, RunLog(verbose=True))
+
+
+def cmd_descriptions(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    items, errors = build_description_corpus(cfg)
+    if not print_description_report(
+        items, errors, enforce_destinations=args.enforce_destinations
+    ):
+        sys.exit(1)
 
 
 def do_check(cfg: dict, log: RunLog) -> bool:
@@ -3567,6 +4124,8 @@ def cmd_update(args: argparse.Namespace) -> None:
     log_path = _log_path()
     log = RunLog(verbose=args.verbose, path=log_path)
     log.always(f"update: log -> {log_path}")
+    enforce_destinations = os.environ.get("SHARED_LLM_ENFORCE_DEST_DESCRIPTIONS") == "1"
+    enforce_description_preflight(cfg, enforce_destinations=enforce_destinations)
     if cfg["destinations"]:
         log.always("=== copy ===")
         do_copy(cfg, log)
@@ -3724,6 +4283,20 @@ def main() -> None:
         help="Verify skill placement per harness (do-* Pi-only, cc-* Claude-only).",
     )
     pck.set_defaults(func=cmd_check)
+
+    pd = sub.add_parser(
+        "descriptions",
+        help="Audit owned skill/agent discovery descriptions without writing files.",
+    )
+    pd.add_argument(
+        "--enforce-destinations",
+        action="store_true",
+        help=(
+            "Enable the future Phase 2 hard-fail mode for destination-owned "
+            "descriptions. Default is public hard-fail plus destination warn-only."
+        ),
+    )
+    pd.set_defaults(func=cmd_descriptions)
 
     pup = sub.add_parser(
         "update",

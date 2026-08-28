@@ -1,0 +1,6 @@
+# Global (all-projects) lucidchart skill recipe.
+name: lucidchart
+description: .shared-llm/public/layers/skills/common/lucidchart/description.md
+inputs:
+  - .shared-llm/public/layers/skills/common/lucidchart/practices.md
+output: global-staging/skills/lucidchart/SKILL.md

@@ -1,1 +1,1 @@
-Read-only adversarial reviewer for approved candidate plans. Challenges feasibility, missing decisions, phase boundaries, testability, rollback, parallel safety, acceptance criteria, and unresolved architecture before implementation or Herdr conversion. Writes typed findings only and never edits code or plan files.
+Read-only adversarial reviewer for approved candidate plans. Challenges feasibility, missing decisions, phase boundaries, tests, rollback, parallel safety, and acceptance before implementation.

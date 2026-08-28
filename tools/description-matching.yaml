@@ -1,0 +1,231 @@
+# Public routing checklist for descriptions rewritten or added in the specialist rollout.
+# Prompts are generic; keep destination-specific examples in destination repositories.
+boundary_cases:
+  kafka_msk_mixed: "Provision Amazon MSK and choose Kafka topic partitions, keys, and consumer retry semantics."
+  kafka_generic_queue: "Add a generic in-process background queue for slow email sends."
+  kafka_unrelated_event_system: "Model DOM click events in a browser component without brokers or streams."
+items:
+  - name: adversarial-evaluator
+    source: .shared-llm/public/layers/agents/common/adversarial-evaluator.description.md
+    should_match:
+      - "Perform the mandatory adversarial review before closing this plan phase."
+      - "Check finished phase work for scope drift and unsupported done claims."
+    should_not_match: "Advise during an in-progress phase without making a gate decision."
+    routing_words: [adversarial, phase, plan, CLEARED]
+  - name: aws-agent
+    source: .shared-llm/public/layers/agents/common/aws.description.md
+    should_match:
+      - "Review IAM and networking for an AWS service."
+      - "Provision Amazon MSK networking with Terraform."
+    should_not_match: "Choose Kafka partition keys and consumer retry semantics."
+    routing_words: [AWS, IAM, MSK, Kafka]
+  - name: backend-agent
+    source: .shared-llm/public/layers/agents/common/backend.description.md
+    should_match:
+      - "Add a new JSON API endpoint and unit tests."
+      - "Refactor a worker handler and audit its error handling."
+    should_not_match: "Tune Kafka consumer lag and offset commits."
+    routing_words: [backend, APIs, Kafka, fail-loud]
+  - name: clickhouse-agent
+    source: .shared-llm/public/layers/agents/common/clickhouse.description.md
+    should_match:
+      - "Design ClickHouse schemas for analytics retention."
+      - "Diagnose ClickHouse replication and backup behavior."
+    should_not_match: "Create a simple PostgreSQL foreign key migration."
+    routing_words: [ClickHouse, analytics, ingestion, replication]
+  - name: create-html-agent
+    source: .shared-llm/public/layers/agents/common/create-html.description.md
+    should_match:
+      - "Create a self-contained static HTML report."
+      - "Verify a responsive accessible local HTML artifact."
+    should_not_match: "Build a frontend application with routing and API state."
+    routing_words: [HTML, static, responsive, verification]
+  - name: database-agent
+    source: .shared-llm/public/layers/agents/common/database.description.md
+    should_match:
+      - "Create a PostgreSQL migration with RLS tests."
+      - "Design relational tables and data-access queries."
+    should_not_match: "Design a ClickHouse MergeTree table for analytics retention."
+    routing_words: [relational, PostgreSQL, RLS, ClickHouse]
+  - name: deployer
+    source: .shared-llm/public/layers/agents/common/deployer.description.md
+    should_match:
+      - "Run a deployment and verify the live endpoint."
+      - "Trigger a sync job, read logs, and report evidence."
+    should_not_match: "Design a deployment architecture without touching live systems."
+    routing_words: [deployment, sync, live-verification, evidence]
+  - name: drawio-agent
+    source: .shared-llm/public/layers/agents/common/drawio.description.md
+    should_match:
+      - "Create a native .drawio XML architecture diagram."
+      - "Fix semantic validation errors in a diagrams.net file."
+    should_not_match: "Create a Lucidchart document through MCP."
+    routing_words: [Draw.io, XML, validation, conversion]
+  - name: kafka-agent
+    source: .shared-llm/public/layers/agents/common/kafka.description.md
+    should_match:
+      - "Set Kafka producer idempotence and retry behavior."
+      - "Provision Amazon MSK and tune Kafka topic partitions and consumer semantics."
+    should_not_match: "Add a generic in-process background queue."
+    routing_words: [Kafka, topics, producers, consumers]
+  - name: lucidchart-agent
+    source: .shared-llm/public/layers/agents/common/lucidchart.description.md
+    should_match:
+      - "Create a Lucidchart diagram through the Lucid MCP connection."
+      - "Use Standard Import fallback and inspect the created diagram."
+    should_not_match: "Write a Draw.io XML diagram file."
+    routing_words: [Lucidchart, MCP, Standard Import, sharing]
+  - name: monorepo-pkgs
+    source: .shared-llm/public/layers/agents/common/monorepo-pkgs.description.md
+    should_match:
+      - "Audit Python monorepo package boundaries."
+      - "Find utility duplication and CI coverage gaps across packages."
+    should_not_match: "Implement a new package feature."
+    routing_words: [Python, monorepo, packages, CI]
+  - name: phase-evaluator
+    source: .shared-llm/public/layers/agents/common/phase-evaluator.description.md
+    should_match:
+      - "Evaluate durable evidence for one completed plan phase."
+      - "Recommend PASSED, FAILED, or BLOCKED for an UpAgent stage."
+    should_not_match: "Lead the phase implementation cockpit."
+    routing_words: [phase, evidence, PASSED, BLOCKED]
+  - name: plan-adversary
+    source: .shared-llm/public/layers/agents/common/plan-adversary.description.md
+    should_match:
+      - "Challenge an approved candidate plan for missing decisions."
+      - "Review phase boundaries and acceptance criteria before implementation."
+    should_not_match: "Implement the accepted plan."
+    routing_words: [adversarial, plans, phase, acceptance]
+  - name: plan-watchdog
+    source: .shared-llm/public/layers/agents/common/plan-watchdog.description.md
+    should_match:
+      - "Check whether a managed phase is still on track."
+      - "Review durable evidence and return ON_TRACK, REWORK, or BLOCKED."
+    should_not_match: "Continuously patrol all plan activity."
+    routing_words: [plan-phase, conformance, ON_TRACK, REWORK]
+  - name: playwright-cli-agent
+    source: .shared-llm/public/layers/agents/common/playwright-cli.description.md
+    should_match:
+      - "Run an end-to-end browser test and capture a screenshot."
+      - "Interactively drive a browser session to inspect a page."
+    should_not_match: "Create a polished standalone HTML report from scratch."
+    routing_words: [browser, tests, Static HTML, create-html]
+  - name: team-pulse
+    source: .shared-llm/public/layers/agents/common/team-pulse.description.md
+    should_match:
+      - "Watch one durable result path for a terminal result."
+      - "Alert the owner when the assigned plan run result appears."
+    should_not_match: "Evaluate whether the phase result is acceptable."
+    routing_words: [watcher, plan, result, alerts]
+  - name: backend-skill
+    source: .shared-llm/public/layers/skills/common/backend/description.md
+    should_match:
+      - "Apply backend code conventions to an API service."
+      - "Review contracts, auth, response shapes, and tests."
+    should_not_match: "Debug Kafka broker retention and consumer groups."
+    routing_words: [backend, services, APIs, Kafka]
+  - name: clickhouse-skill
+    source: .shared-llm/public/layers/skills/common/clickhouse/description.md
+    should_match:
+      - "Design a MergeTree table and materialized view for analytics queries."
+      - "Diagnose slow ClickHouse queries using system tables."
+    should_not_match: "Create a simple PostgreSQL foreign key migration."
+    routing_words: [ClickHouse, MergeTree, ingestion, backup]
+  - name: create-html-skill
+    source: .shared-llm/public/layers/skills/common/create-html/description.md
+    should_match:
+      - "Build a self-contained static HTML explainer."
+      - "Create a local HTML artifact with inline assets and verification."
+    should_not_match: "Run a browser-only end-to-end test."
+    routing_words: [HTML, self-contained, responsive, verification]
+  - name: drawio-skill
+    source: .shared-llm/public/layers/skills/common/drawio/description.md
+    should_match:
+      - "Author a native .drawio XML diagram."
+      - "Edit an existing Draw.io file while preserving pages and metadata."
+    should_not_match: "Create a Lucidchart document through MCP."
+    routing_words: [Draw.io, .drawio, XML, validate]
+  - name: kafka-skill
+    source: .shared-llm/public/layers/skills/common/kafka/description.md
+    should_match:
+      - "Tune Kafka consumer groups and delivery semantics."
+      - "Review Amazon MSK plus Kafka partitions, keys, and producers."
+    should_not_match: "Use a generic queue abstraction for a background job."
+    routing_words: [Kafka, topics, producers, consumers]
+  - name: lucidchart-skill
+    source: .shared-llm/public/layers/skills/common/lucidchart/description.md
+    should_match:
+      - "Create and inspect a Lucidchart diagram through MCP."
+      - "Set up local auth for Lucid Standard Import fallback."
+    should_not_match: "Generate a diagrams.net XML file."
+    routing_words: [Lucidchart, MCP, Standard Import, sharing]
+  - name: update-shared-llm
+    source: .shared-llm/public/layers/skills/common/update-shared-llm/description.md
+    should_match:
+      - "Update shared-llm layers and recompose generated instructions."
+      - "Review public versus this_repo ownership for a skill change."
+    should_not_match: "Change application source code in a destination repo."
+    routing_words: [shared-llm, skills, agents, public]
+  - name: cc-research
+    source: .shared-llm/public/layers/slash-commands/common/claude/cc-research/description.md
+    should_match:
+      - "Use Claude Code to produce only research.md."
+      - "Launch fresh Explore agents for an investigation with no implementation."
+    should_not_match: "Write the implementation after planning."
+    routing_words: [Claude Code, research.md, Explore, team]
+  - name: codex-delegate
+    source: .shared-llm/public/layers/slash-commands/common/claude/codex-delegate/description.md
+    should_match:
+      - "Delegate a routine refactor slice to Codex CLI."
+      - "Ask Codex for peer investigation help."
+    should_not_match: "Rescue an emergency failure with a watchdog."
+    routing_words: [Delegate, Codex, refactor, investigation]
+  - name: do-research
+    source: .shared-llm/public/layers/slash-commands/common/common/do-research/description.md
+    should_match:
+      - "Use Pi to produce only research.md."
+      - "Run TeamCreate research without planning or implementation."
+    should_not_match: "Implement changes after research."
+    routing_words: [Pi, research.md, Explore, TeamCreate]
+  - name: grill-me
+    source: .shared-llm/public/layers/slash-commands/common/common/grill-me/description.md
+    should_match:
+      - "Interview me until we agree on a design."
+      - "Use frontier rounds and record settled decisions with --docs."
+    should_not_match: "Implement the design without further questions."
+    routing_words: [Interview, plan, frontier, docs]
+  - name: phase-leader
+    source: .shared-llm/public/layers/slash-commands/common/common/phase-leader/description.md
+    should_match:
+      - "Run one canonical plan phase in a cockpit pane."
+      - "Place durable UpAgent stage orders and write phase-result.json."
+    should_not_match: "Draft a new plan from scratch."
+    routing_words: [phase, HERDR_ENV, UpAgent, phase-result.json]
+  - name: playwright-cli-command
+    source: .shared-llm/public/layers/slash-commands/common/common/playwright-cli/description.md
+    should_match:
+      - "Automate browser form interactions and screenshots."
+      - "Verify an existing local HTML file in the browser only."
+    should_not_match: "Create the HTML artifact itself."
+    routing_words: [browser, screenshots, Static HTML, create-html]
+  - name: tui-control
+    source: .shared-llm/public/layers/slash-commands/common/common/tui-control/description.md
+    should_match:
+      - "Control a checked plan.md and route.yaml under HERDR_ENV."
+      - "Run phase leaders and update run-status.md."
+    should_not_match: "Implement a plan phase directly."
+    routing_words: [TUI, plan.md, route.yaml, HERDR_ENV]
+  - name: writing-for-agents
+    source: .shared-llm/public/layers/slash-commands/common/common/writing-for-agents/description.md
+    should_match:
+      - "Write concise routing pointers for agent-facing docs."
+      - "Explain skill mechanics and completion criteria for work-order briefs."
+    should_not_match: "Run a browser test for an HTML file."
+    routing_words: [Writing, agents, routing, skills]
+  - name: tf-reviewer
+    source: .shared-llm/public/llm/pi/common/agents/tf-reviewer.md
+    should_match:
+      - "Summarize a Terraform plan before approval."
+      - "Review generated Terraform code for correctness."
+    should_not_match: "Write a new Terraform module."
+    routing_words: [Terraform, plan, code, approval]

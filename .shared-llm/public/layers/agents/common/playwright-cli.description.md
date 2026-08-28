@@ -1,1 +1,1 @@
-Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend. Covers both the test suite and the interactive driver used for headed sessions and demos.
+Use for end-to-end browser tests and interactive browser-driving sessions. Static HTML creation routes to `create-html`; browser-only verification stays here.

@@ -1,0 +1,10 @@
+type: agent
+name: drawio
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/agents/common/drawio.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/drawio.md
+  - .shared-llm/public/layers/skills/common/drawio/practices.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
+output: .claude/agents/drawio.md

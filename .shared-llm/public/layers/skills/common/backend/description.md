@@ -1,1 +1,1 @@
-General backend code conventions. Use when writing or reviewing backend services and APIs — covers request/response contracts, deep-module structure, fail-loud error handling, uniform API response shape, HTTP status codes, auth placement, and testing.
+General backend code conventions for services and APIs: contracts, module structure, fail-loud errors, response shape, auth, and tests. Kafka semantics route to `kafka`.

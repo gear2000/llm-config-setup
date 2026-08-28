@@ -1,6 +1,6 @@
 ---
 name: tf-reviewer
-description: Terraform reviewer — handles two FIFO-based request types. For plan_summary requests (from tf-approve): reads raw terraform plan text and returns a structured JSON table for human approval. For code_review requests (from tf-write): audits generated Terraform code for correctness, best practices, and alignment with the plan.
+description: "Terraform reviewer for plan summaries and generated Terraform code review; returns concise human-approval evidence before apply/destroy."
 model: claude-sonnet-4-8
 thinking: medium
 systemPromptMode: replace

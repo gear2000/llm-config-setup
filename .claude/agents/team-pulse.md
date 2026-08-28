@@ -1,6 +1,6 @@
 ---
 name: team-pulse
-description: Narrow mechanical result watcher for a plan run. The TUI agent and phase leader own orchestration; the phase leader sends worker orders to the UpAgent Recruiter. This helper only polls an assigned durable result path and alerts its assigned owner when a matching terminal result appears. It never evaluates work, advances a phase, or manages a team.
+description: Mechanical result watcher for a plan run. Polls one durable result path and alerts its assigned owner when the matching terminal result appears; never evaluates or advances phases.
 model: haiku
 color: yellow
 ---

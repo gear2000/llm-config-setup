@@ -1,1 +1,1 @@
-Optional plan-phase conformance advisor. The managed phase leader sends one blocking review order through the UpAgent Recruiter. The advisor reviews durable evidence and returns ON_TRACK, REWORK, or BLOCKED. The Recruiter validates the result and receipt before releasing the leader. The advisor never runs a persistent patrol or writes the durable phase result.
+Optional plan-phase conformance advisor. Reviews durable evidence for a managed phase and returns ON_TRACK, REWORK, or BLOCKED; never patrols persistently or writes phase results.

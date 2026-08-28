@@ -1,1 +1,1 @@
-Use when designing or modifying database schemas, writing schema definitions, creating migrations, or working with a data-access layer. Writes the schema, applies it, validates it works, and iterates until clean.
+Use for relational/PostgreSQL schema design, migrations, RLS, SQL, and data-access layers. ClickHouse-specific analytics design routes to `clickhouse`; mixed work uses both.

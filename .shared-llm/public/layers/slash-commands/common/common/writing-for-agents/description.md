@@ -1,1 +1,1 @@
-Writing documents for agents: context pointers, progressive disclosure, completion criteria, leading words, and skill mechanics. Use when creating or editing skills, slash-command layers, AGENTS.md or CLAUDE.md — and when authoring any UpAgent work-order brief, stage instructions.md, or worker prompt.md.
+Writing documents for agents: concise routing pointers, progressive disclosure, completion criteria, leading words, and skill mechanics for skills, AGENTS.md, CLAUDE.md, and work-order briefs.

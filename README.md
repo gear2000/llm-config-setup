@@ -31,12 +31,14 @@ just init -o mac|ubuntu          # one-time OS prereq check (python3 + just)
 just configure -s ~/.shared-llm  # set the source hub (default; run once)
 just configure -d /path/to/repo -l cc,pi   # register a destination repo + its harness list
 just configure -g cc,pi          # set the GLOBAL (home / all-projects) harness list
+just descriptions                # audit owned discovery descriptions without writing files
 just update                      # the headline command: copy → compose → link (+ global), every destination
 just update -v                   # same, with per-file detail printed
 just reset                       # heavy hammer: delete all kit-owned state, then rebuild via update
 ```
 
 - **Harness tokens** are `cc` (Claude Code), `pi` (Pi), `codex` (Codex), and `cursor` (Cursor Agent CLI, `cursor-agent`). A destination's `-l` list defaults to `cc,pi`. `cursor` is a surface alias of `codex`: the Cursor Agent CLI reads the same root `AGENTS.md` and discovers skills from the same `~/.agents/skills/` home dir (plus `.claude/skills/` for compat), so it rides the codex plumbing end to end — no cursor-specific files are generated.
+- `just descriptions` audits owned skill/agent descriptions without copying, composing, linking, writing the manifest, or touching home directories. Public-kit descriptions hard-fail above 1,024 UTF-16 code units; destination-owned descriptions are reported with anonymized destination indexes by default and remain warn-only until those external repositories complete their own `.shared-llm/this_repo/` migration. Use `just descriptions --enforce-destinations` (or `SHARED_LLM_ENFORCE_DEST_DESCRIPTIONS=1 just update`) after that follow-up to enable full-roster hard enforcement.
 - `just update` always writes a full run log under `/tmp/.shared-llm/log/<timestamp>.log`; `-v` also prints the per-file detail to the terminal.
 - **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and — when a `global:` list is set — `just global`.
 - `just pi-extensions` installs the pinned third-party Pi extensions via the `pi` CLI (a network step; no-op if `pi` is absent).
@@ -249,7 +251,7 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 
 When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
-1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`) and the routed slash-command skills, syncs each into the durable per-machine generated tree (`~/.shared-llm/generated/skills/`), and **symlinks** it into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). `readlink` on any home skill answers "generated or handwritten"; a byte-identical pre-existing copy from the old copy mechanism is upgraded to a link in place. The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
+1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`, `herdr`, `clickhouse`, `kafka`, `lucidchart`, `drawio`, `create-html`) and the routed slash-command skills, syncs each into the durable per-machine generated tree (`~/.shared-llm/generated/skills/`), and **symlinks** it into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). `readlink` on any home skill answers "generated or handwritten"; a byte-identical pre-existing copy from the old copy mechanism is upgraded to a link in place. The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section), syncs each persona into `~/.shared-llm/generated/agents/`, and symlinks it into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — copies the bundled Pi extensions + agent personas into `~/.shared-llm/generated/` and symlinks them from there into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks and the statusline into the generated tree and links them into `~/.claude/hooks/` and `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent — settings stays a **real file** on purpose: Claude Code mutates it at runtime, and a rename-style save would silently replace a symlink.
@@ -264,6 +266,10 @@ Third-party Pi extensions are a separate network step — `just pi-extensions`. 
 ### Pi global-vs-repo skill precedence
 
 Pi loads a **global** skill before a repo-local one of the same name and keeps the first it finds. The **link** step prunes the stale global Pi links it created in earlier versions (so an obsolete global link can't shadow a new repo-local one), and **warns** when a repo-local skill name still collides with a global one it does not own — it surfaces the collision but does not police it.
+
+### Reusable specialist skills and agents
+
+The global step also installs reusable ClickHouse, Kafka, Lucidchart, Draw.io, and Create HTML skills and matching generic agents. Claude Code and Pi receive both global skills and agent personas. Codex/`cursor` receive the global skills through `~/.agents/skills/`; this kit does not create a Codex agent-persona directory, so UpAgent is the routed way to use the matching specialist persona. Lucidchart authentication belongs in user-local harness settings (OAuth MCP for interactive use, user-local API/MCP credentials for unattended use). Draw.io output uses semantic `.drawio` XML validation before delivery. Create HTML owns static presentation artifacts; frontend applications and browser-only automation stay with `frontend` and `playwright-cli`.
 
 ## Inventory
 
@@ -286,78 +292,90 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | --- | --- |
 | `golang` | General Go conventions. Use when writing, reviewing, or scaffolding Go code — covers core idioms,… |
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
-| `update-shared-llm` | Update a skill, agent definition, CLAUDE.md rule, or any shared-llm layer. Runs the full workflow:… |
+| `update-shared-llm` | Update shared-llm skills, agents, CLAUDE.md/AGENTS.md rules, or layers. Edit source layers/recipes,… |
 
-### Generic agents (29)
+### Generic agents (36)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.
 
 | Name | Description |
 | --- | --- |
-| `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a plan phase. NOT a watchdog and NOT a live monitor —… |
+| `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a completed plan phase. Reviews finished work against… |
 | `architecture` | Use when designing new modules, defining package boundaries, making architectural decisions, or… |
-| `aws` | AWS infrastructure and operations specialist for architecture, IAM, networking, and evidence-backed… |
-| `backend` | Use when writing or modifying backend services — serverless functions, API routes, or worker… |
+| `aws` | AWS infrastructure and operations specialist for architecture, IAM, networking, MSK provisioning,… |
+| `backend` | Use for backend services, APIs, worker handlers, tests, and fail-loud error handling. Kafka client… |
 | `ci-pipeline` | Use when creating or modifying CI pipeline configurations. Writes configs, validates syntax, and… |
 | `ci-trigger` | Use when creating or managing trigger jobs on a dashboard that fronts a separate CI system,… |
+| `clickhouse` | ClickHouse specialist for analytics schemas, ingestion, query tuning, replication, backup/restore,… |
 | `code-review` | Use to review code written by other agents or by hand for quality, modularity, consistency, and… |
-| `database` | Use when designing or modifying database schemas, writing schema definitions, creating migrations,… |
-| `deployer` | Use as a dedicated team member that handles all deployment, sync, and live verification — getting… |
+| `create-html` | Create HTML specialist for self-contained static presentation artifacts, inline assets, responsive… |
+| `database` | Use for relational/PostgreSQL schema design, migrations, RLS, SQL, and data-access layers.… |
+| `deployer` | Dedicated deployment, sync, and live-verification specialist: triggers deploy jobs, reads logs,… |
 | `devops` | Use for infrastructure-as-code, cloud infrastructure (IAM, serverless functions, object storage),… |
 | `docs-writer` | Use when writing or updating documentation pages. Reads current code to verify accuracy, writes and… |
+| `drawio` | Draw.io specialist for native .drawio XML authoring/editing, semantic validation, preservation, and… |
 | `frontend` | Use when building or modifying the frontend — pages, components, auth flows, or data fetching. |
 | `github` | GitHub specialist for repository state, issues, pull requests, Actions, and evidence-backed… |
 | `intake-clerk` | Normalizes imperfect broker envelopes without inventing or changing task, addressee, or execution… |
-| `monorepo-pkgs` | Read-only governance agent for Python packages in a monorepo. Audits scaffolding, enforces Python… |
+| `kafka` | Kafka specialist for topics, partitions, producers, consumers, delivery semantics, Connect/Streams,… |
+| `lucidchart` | Lucidchart specialist for MCP-backed diagram creation/inspection, Standard Import fallback, setup… |
+| `monorepo-pkgs` | Read-only governance auditor for Python monorepo packages: scaffolding, best practices, utility… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
-| `phase-evaluator` | Optional independent evaluator for one plan phase. The phase leader resolves its route profile and… |
+| `phase-evaluator` | Optional independent evaluator for one plan phase. Reviews durable stage evidence from a fresh… |
 | `plan-adversary` | Read-only adversarial reviewer for approved candidate plans. Challenges feasibility, missing… |
-| `plan-watchdog` | Optional plan-phase conformance advisor. The managed phase leader sends one blocking review order… |
+| `plan-watchdog` | Optional plan-phase conformance advisor. Reviews durable evidence for a managed phase and returns… |
 | `planner` | Writes one small tracer-bullet implementation plan for a single issue from its issue and research… |
-| `playwright-cli` | Use to run end-to-end browser tests and interactive browser-driving sessions for a web frontend.… |
+| `playwright-cli` | Use for end-to-end browser tests and interactive browser-driving sessions. Static HTML creation… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
 | `researcher` | Bounded read-only investigator for one issue. Reads the issue inside the given worktree and writes… |
 | `reviewer` | Independent read-only reviewer for code, infrastructure, plans, and durable execution evidence. |
 | `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
-| `team-pulse` | Narrow mechanical result watcher for a plan run. The TUI agent and phase leader own orchestration;… |
-| `terraform` | Terraform infrastructure specialist that writes and validates IaC, produces plans, and keeps apply… |
+| `team-pulse` | Mechanical result watcher for a plan run. Polls one durable result path and alerts its assigned… |
+| `terraform` | Terraform infrastructure specialist that writes and validates IaC, produces plans, and gates… |
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
 | `upagent-checker` | Short-lived advisory observer that interprets one bounded UpAgent pane/process/result evidence… |
+| `upagent-rescuer` | Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished… |
+| `upagent-sentinel` | Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout;… |
 
-### Slash-command skills (28)
+### Slash-command skills (33)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
 | Name | Description |
 | --- | --- |
+| `blast-radius` | Find what a change could break somewhere else before it ships, beyond the diff, and prove the one… |
 | `cc-convert` | Claude Code converter: `/cc-convert --herdr <plan.md>` idempotently decomposes an approved big plan… |
 | `cc-full` | Phone-friendly Claude Code composer: run `/cc-plan` exactly once, then either `/cc-implement` once… |
 | `cc-implement` | Claude Code direct implementation: implement an approved `plan.md` in one fresh interactive TUI… |
 | `cc-plan` | Claude Code planning front door: research, conditionally resolve design, grill with Planish, run… |
 | `cc-plan-and-grill` | Deprecated alias for `/cc-plan`. Warns, then delegates to the new Claude Code planning front door;… |
 | `cc-planish` | Deprecated alias for `/cc-plan`. Warns, then delegates; Planish remains the visual grill renderer… |
-| `cc-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
-| `codex-delegate` | Hand a routine substantive coding task to Codex CLI as a peer subagent. Same underlying runtime as… |
+| `cc-research` | Claude Code research only: produce research.md, with no plan or implementation. Use fresh Explore… |
+| `codex-delegate` | Delegate a routine coding, refactor, investigation, or review slice to Codex CLI as a peer… |
 | `do-convert` | Pi converter: `/do-convert --herdr <plan.md>` idempotently decomposes an approved big plan into… |
 | `do-full` | Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for… |
 | `do-implement` | Pi direct implementation: implement an approved `plan.md` in one fresh interactive TUI path. It… |
 | `do-plan` | Pi planning front door: research, conditionally resolve design, grill with Planish, run exactly two… |
 | `do-plan-and-grill` | Deprecated alias for `/do-plan`. Warns, then delegates to the new Pi planning front door; it no… |
-| `do-research` | Pure research and exploration. Produces research.md only — no plan, no implementation. Default… |
+| `do-research` | Pi research only: produce research.md, with no plan or implementation. Use fresh Explore agents by… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
-| `grill-me` | Interview the user relentlessly about a plan or design until reaching shared understanding,… |
-| `phase-leader` | Run one canonical plan phase as the phase leader, sent to a cockpit pane by `/tui-control`.… |
-| `playwright-cli` | Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use… |
+| `grill-me` | Interview the user about a plan or design until shared understanding is reached. Use frontier… |
+| `phase-leader` | Run one canonical plan phase in a cockpit pane under HERDR_ENV=1. Validates route safety, places… |
+| `plain-speech` | How to talk to the user: repo ubiquitous language from CONTEXT.md, Simplified Technical English… |
+| `playwright-cli` | Automates browser interactions for testing, forms, screenshots, and extraction. Static HTML… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
 | `security` | Generic security best practices. Use when implementing auth flows, secrets management, IAM… |
-| `tui-control` | Internal TUI plan controller for a checked runnable `plan.md + route.yaml` pair. Requires… |
+| `tui-control` | Internal TUI plan controller for a checked plan.md and route.yaml under HERDR_ENV=1. Runs phase… |
+| `unslop` | Cut AI tells from any writing and add human voice. Apply to every user-facing document, report,… |
 | `upagent-cancel` | Authenticate and cancel one active UpAgent request at any lifecycle point using its existing… |
 | `upagent-cleanup` | Dry-run or explicitly apply terminal-only UpAgent history pruning while retaining auditable,… |
 | `upagent-get` | Read one UpAgent request's state, retained result, receipt, and typed artifact pointers, including… |
 | `upagent-ls` | List active, terminal, or all requests known to the canonical machine-local UpAgent Recruiter… |
 | `upagent-pipeline` | Run one issue-sized change end to end through a registry pipeline: optional research and plan… |
-| `upagent-run` | Run one bounded ad-hoc task through the canonical machine-local UpAgent Recruiter with an explicit… |
+| `upagent-run` | Run one UpAgent task, anchored to your verified live caller pane when invoked inside Herdr, with an… |
+| `wait-what` | Stop. That last message did not land: re-pitch it in plain speech. |
+| `writing-for-agents` | Writing documents for agents: concise routing pointers, progressive disclosure, completion… |
 <!-- END:inventory -->
 
 ## The compose engine
@@ -376,6 +394,8 @@ python3 tools/harness.py compose .shared-llm/public/compose/agents --target /tmp
 ```
 
 ## Quickstart
+
+Want an LLM to drive setup safely? After cloning this kit, give it [INSTALL-PROMPT.md](INSTALL-PROMPT.md); it distinguishes the checkout from the generated source hub, asks before destination edits, and verifies two idempotent updates.
 
 ```bash
 # 1. Python 3 + one dependency for the engine
