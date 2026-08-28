@@ -68,6 +68,10 @@ offerings:
     harness: pi
     model: openai-codex/gpt-5.4-mini
     efforts: [low, medium, high, xhigh]
+  pi-glm-5-3-flash:
+    harness: pi
+    model: openrouter/z-ai/glm-5.3-flash
+    efforts: [low, high, max]
 
 # Legacy route orders default direct; each public request pins dedicated management. References
 # are offering-based so the advisory Account Manager resolves exactly claude-sonnet-5/low with

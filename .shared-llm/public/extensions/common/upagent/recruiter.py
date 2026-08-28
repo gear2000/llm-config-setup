@@ -5535,7 +5535,12 @@ def _sentinel_command_provider(command: str) -> str:
 def _resolve_sentinel_role(order: dict, config: Any) -> SentinelSelection:
     """Select and validate a provider-disjoint Sentinel for this worker attempt."""
     worker_provider = _worker_provider(order)
-    if worker_provider not in {"anthropic", "openai"}:
+    sentinel_provider_by_worker_provider = {
+        "anthropic": "openai",
+        "openai": "anthropic",
+        "openrouter": "anthropic",
+    }
+    if worker_provider not in sentinel_provider_by_worker_provider:
         raise SentinelSelectionError(
             "worker-provider-unknown",
             f"worker provider is {worker_provider!r}; cross-provider disjointness cannot be proven",
@@ -5551,10 +5556,7 @@ def _resolve_sentinel_role(order: dict, config: Any) -> SentinelSelection:
                 "cross-provider disjointness cannot be proven",
             )
     else:
-        opposite_provider = {
-            "anthropic": "openai",
-            "openai": "anthropic",
-        }[worker_provider]
+        opposite_provider = sentinel_provider_by_worker_provider[worker_provider]
         role = config.sentinels.get(opposite_provider)
         sentinel_provider = opposite_provider
         if role is None or not all(

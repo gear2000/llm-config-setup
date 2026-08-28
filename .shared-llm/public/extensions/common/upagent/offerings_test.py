@@ -23,11 +23,10 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     roster = offerings.load_roster()
 
     assert list(roster.offerings) == list(offerings.APPROVED)
-    assert len(roster.listing()) == 14
-    assert any(
-        item["rendered_identity"] == "pi:::openai-codex/gpt-5.6-sol"
-        for item in roster.listing()
-    )
+    assert len(roster.listing()) == 15
+    rendered_identities = {item["rendered_identity"] for item in roster.listing()}
+    assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
+    assert "pi:::openrouter/z-ai/glm-5.3-flash" in rendered_identities
     assert roster.management["account_manager"] == {
         "offering": "claude-sonnet-5",
         "effort": "low",
@@ -90,6 +89,23 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "Read /lease/instructions.md and do exactly that work.",
             ],
         ),
+        (
+            "pi-glm-5-3-flash",
+            "max",
+            "backend",
+            [
+                "pi",
+                "--approve",
+                "--no-extensions",
+                "-e",
+                str(Path.home() / ".pi/agent/extensions/herdr-agent-state.ts"),
+                "--model",
+                "openrouter/z-ai/glm-5.3-flash",
+                "--thinking",
+                "max",
+                "Read /lease/instructions.md and do exactly that work.",
+            ],
+        ),
     ],
 )
 def test_code_owned_renderer_emits_exact_tokens(
@@ -118,8 +134,32 @@ def test_every_approved_offering_and_effort_renders_without_yaml_commands() -> N
             }
             assert argv[0] == harness_binaries[offering.harness]
             if offering.harness == "pi":
-                assert argv[argv.index("--model") + 1].startswith("openai-codex/")
+                assert argv[argv.index("--model") + 1] == offering.model
                 assert argv[argv.index("--thinking") + 1] == effort
+
+
+def test_glm_offering_has_only_the_pi_catalog_supported_efforts(
+    tmp_path: Path,
+) -> None:
+    roster = offerings.load_roster()
+    glm = roster.offerings["pi-glm-5-3-flash"]
+
+    assert glm.efforts == ("low", "high", "max")
+    for effort in ("medium", "xhigh"):
+        with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+            roster.resolve(glm.offering_id, effort)
+
+    source = offerings.yaml.safe_load((HERE / "offerings.yaml").read_text())
+    source["offerings"][glm.offering_id]["efforts"] = [
+        "low",
+        "medium",
+        "high",
+        "max",
+    ]
+    path = tmp_path / "offerings.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    with pytest.raises(offerings.OfferingError, match="efforts must be exactly"):
+        offerings.load_roster(path)
 
 
 def test_cursor_offerings_have_only_default_effort() -> None:
@@ -162,7 +202,12 @@ def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
 def test_effortful_offering_still_requires_effort() -> None:
     roster = offerings.load_roster()
 
-    for offering_id in ("claude-sonnet-5", "codex-gpt-5-6-sol", "pi-gpt-5-6-sol"):
+    for offering_id in (
+        "claude-sonnet-5",
+        "codex-gpt-5-6-sol",
+        "pi-gpt-5-6-sol",
+        "pi-glm-5-3-flash",
+    ):
         with pytest.raises(
             offerings.OfferingError, match="requires an explicit effort"
         ):
@@ -256,6 +301,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "pi-gpt-5-6-luna": "openai",
         "pi-gpt-5-5": "openai",
         "pi-gpt-5-4-mini": "openai",
+        "pi-glm-5-3-flash": "openrouter",
     }
 
     assert {key: item.provider for key, item in roster.offerings.items()} == expected

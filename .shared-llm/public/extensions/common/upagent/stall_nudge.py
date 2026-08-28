@@ -24,7 +24,12 @@ NUDGE_CAP = 3
 NUDGE_BACKOFF_SECONDS = (0.0, 300.0, 900.0)
 
 _PROVIDER_BY_HARNESS = {"claude": "anthropic", "codex": "openai"}
-_MODEL_PREFIX_PROVIDERS = (("claude", "anthropic"), ("gpt", "openai"), ("o", "openai"))
+_MODEL_PREFIX_PROVIDERS = (
+    ("openrouter/", "openrouter"),
+    ("claude", "anthropic"),
+    ("gpt", "openai"),
+    ("o", "openai"),
+)
 
 
 class StallNudgeError(ValueError):

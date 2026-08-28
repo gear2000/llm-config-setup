@@ -2003,6 +2003,13 @@ def _pre_write_closeout(
             "anthropic",
             recruiter.llm_management.DEFAULT_SENTINEL_COMMAND,
         ),
+        (
+            "pi",
+            "openrouter/z-ai/glm-5.3-flash",
+            "openrouter",
+            "anthropic",
+            recruiter.llm_management.DEFAULT_SENTINEL_COMMAND,
+        ),
     ),
 )
 def test_each_retry_revalidates_and_hires_the_opposite_provider_sentinel(
@@ -2438,12 +2445,32 @@ def test_openai_worker_selects_the_anthropic_sentinel_command() -> None:
     assert selected.role.command == recruiter.llm_management.DEFAULT_SENTINEL_COMMAND
 
 
-def test_worker_provider_falls_back_to_identity_only_without_snapshot_provider() -> None:
+def test_openrouter_worker_selects_the_anthropic_sentinel_command() -> None:
     selected = recruiter._resolve_sentinel_role(
-        _order(harness="codex", model="gpt-5.6"), _management()
+        _order(offering_snapshot={"provider": "openrouter"}), _management()
     )
 
-    assert selected.worker_provider == "openai"
+    assert selected.worker_provider == "openrouter"
+    assert selected.sentinel_provider == "anthropic"
+    assert selected.role.command == recruiter.llm_management.DEFAULT_SENTINEL_COMMAND
+    assert set(_management().sentinels) == {"anthropic", "openai"}
+
+
+@pytest.mark.parametrize(
+    ("harness", "model", "worker_provider"),
+    (
+        ("codex", "gpt-5.6", "openai"),
+        ("pi", "openrouter/z-ai/glm-5.3-flash", "openrouter"),
+    ),
+)
+def test_worker_provider_falls_back_to_identity_only_without_snapshot_provider(
+    harness: str, model: str, worker_provider: str
+) -> None:
+    selected = recruiter._resolve_sentinel_role(
+        _order(harness=harness, model=model), _management()
+    )
+
+    assert selected.worker_provider == worker_provider
     assert selected.sentinel_provider == "anthropic"
 
 

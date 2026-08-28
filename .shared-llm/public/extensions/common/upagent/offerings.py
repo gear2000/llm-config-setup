@@ -64,6 +64,12 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         EFFORTS[:-1],
         "openai",
     ),
+    "pi-glm-5-3-flash": (
+        "pi",
+        "openrouter/z-ai/glm-5.3-flash",
+        ("low", "high", "max"),
+        "openrouter",
+    ),
 }
 
 
