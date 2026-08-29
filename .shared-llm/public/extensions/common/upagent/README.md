@@ -188,8 +188,8 @@ authenticated terminal cancellation, audit, identical reattachment, and changed-
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
 no-op that also retries removal of a previously swapped runtime-owned residual.
 
-`offerings.yaml` contains exactly ten validated stable ids: three Claude, one Codex, one Cursor,
-and five Pi.
+`offerings.yaml` contains exactly eighteen validated stable ids: three Claude, one Codex,
+eight Cursor, and six Pi.
 The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,
 and the immutable order snapshot. YAML selects only harness, model, allowed efforts, and the
 optional declared `completion_style` (validated against code-owned policy). It cannot
@@ -498,8 +498,8 @@ directly is not consultation evidence.
 persona and MERGES: the kit base is
 `.shared-llm/public/extensions/common/upagent/specialists.yaml`; a destination may add the
 repo-owned overlay `.shared-llm/this_repo/extensions/common/upagent/specialists.yaml` (template:
-`specialists.yml.sample`). Every specialist pins `offering` plus `effort`; both must resolve the
-nine approved entries. A destination that overrides one specialist keeps every other kit entry.
+`specialists.yml.sample`). Every specialist pins `offering` plus `effort`; both must resolve
+against the approved offering roster. A destination that overrides one specialist keeps every other kit entry.
 The roster is loaded only for specialist requests and specialist listing: an invalid specialist
 overlay cannot block an ordinary worker request.
 
@@ -630,7 +630,7 @@ letting liveness checks silently fail open.
 ## Tests
 
 `just test` covers the closed public schema, zero-launch rejection, prompt hashing/snapshotting,
-UUID/ULID idempotency and conflict behavior, the exact ten-entry text/JSON roster, exact Claude /
+UUID/ULID idempotency and conflict behavior, the exact 18-entry text/JSON roster, exact Claude /
 Codex / Cursor / Pi child tokens, Cursor default-effort canonicalization and interactive repair,
 role-aware launch-state transitions, Codex exec-style no-live-repair completion, specialist
 offering resolution, request mailboxes, identity/lease fencing,

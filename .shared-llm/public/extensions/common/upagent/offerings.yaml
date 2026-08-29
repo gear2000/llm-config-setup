@@ -48,6 +48,21 @@ offerings:
     model: claude-fable-5-high
     efforts: [default]
     completion_style: interactive
+  cursor-gpt-5-5:
+    harness: cursor
+    model: gpt-5.5-high
+    efforts: [default]
+    completion_style: interactive
+  cursor-gpt-5-6-sol:
+    harness: cursor
+    model: gpt-5.6-sol-high
+    efforts: [default]
+    completion_style: interactive
+  cursor-gpt-5-6-terra:
+    harness: cursor
+    model: gpt-5.6-terra-high
+    efforts: [default]
+    completion_style: interactive
   pi-gpt-5-6-sol:
     harness: pi
     model: openai-codex/gpt-5.6-sol
