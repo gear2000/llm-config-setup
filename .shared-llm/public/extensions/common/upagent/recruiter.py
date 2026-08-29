@@ -265,6 +265,8 @@ def _first_action_deadline_ms(timeout_ms: int) -> int:
     margin leaves the remaining half of the cap for the classification and retry to run.
     """
     return min(FIRST_ACTION_DEADLINE_MS, timeout_ms // 2)
+
+
 COCKPIT_TAB_ROLES = frozenset(("workers", "oversight", "services", "control"))
 COCKPIT_LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
@@ -2650,7 +2652,19 @@ def load_roster(path: str | Path) -> dict:
         # Surface an unreadable file or invalid YAML as a RecruiterError so cmd_recruit's
         # fallback catches it (a blocked result + DONE) instead of it escaping past main().
         raise RecruiterError(f"roster {p} is unreadable or invalid YAML: {e}") from e
-    if "offerings" in data:
+    is_public_roster = "offerings" in data
+    if not is_public_roster:
+        raw_management = data.get("management", {})
+        if isinstance(raw_management, dict):
+            for role_name in ("account_manager", "sentinel"):
+                role = raw_management.get(role_name)
+                if isinstance(role, dict) and "candidates" in role:
+                    raise RecruiterError(
+                        f"{p} management.{role_name}.candidates is reserved for the "
+                        "validated public offering roster; legacy raw rosters must keep "
+                        "their singular command role"
+                    )
+    if is_public_roster:
         try:
             public_roster = offering_catalog.load_roster(p)
         except OfferingError as error:
@@ -4595,9 +4609,7 @@ SENTINEL_CLOSEOUT_GRACE_SECONDS = 180.0
 # The nudged landing window must be at least one full pulse block: a Sentinel that
 # (wrongly) re-sleeps after a valid-bundle wake still gets one more wake-wait return
 # inside the window, so a lapse can never be guaranteed by arithmetic alone.
-SENTINEL_LANDING_WINDOW_SECONDS = float(
-    llm_management.SENTINEL_PULSE_MINUTES * 60 + 60
-)
+SENTINEL_LANDING_WINDOW_SECONDS = float(llm_management.SENTINEL_PULSE_MINUTES * 60 + 60)
 assert SENTINEL_LANDING_WINDOW_SECONDS >= llm_management.SENTINEL_PULSE_MINUTES * 60
 
 
@@ -4616,9 +4628,7 @@ def _await_sentinel_closeout_after_worker_gone(
     Every no-closeout exit records the typed `closeout` window lapse, so the ledger
     alone always says why the supervised wait ended.
     """
-    grace_deadline = min(
-        deadline, time.monotonic() + SENTINEL_CLOSEOUT_GRACE_SECONDS
-    )
+    grace_deadline = min(deadline, time.monotonic() + SENTINEL_CLOSEOUT_GRACE_SECONDS)
     next_sentinel_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while True:
         # Published at entry — the window starts with an awake Sentinel — and
@@ -4941,7 +4951,11 @@ def _wait_for_agent_status(
         ):
             return False
         return True
-    if monitor_finalized is not None and monitor_finalized.is_set() and not _supervised():
+    if (
+        monitor_finalized is not None
+        and monitor_finalized.is_set()
+        and not _supervised()
+    ):
         return False
     # A pane that was already gone when the wait started makes herdr fail fast with a decode
     # error. Confirm with two positive probes and fall through to the completion reactor.
@@ -5272,13 +5286,10 @@ def _never_started_deadline_fired(
     watcher emits a marker still invalidates the prior attempt's deadline proof.
     """
     events = ledger.events(key)
-    markers = [
-        item for item in events if item.get("event") in _STARTUP_MARKER_EVENTS
-    ]
+    markers = [item for item in events if item.get("event") in _STARTUP_MARKER_EVENTS]
     if attempt is not None:
         return any(
-            item.get("event") == NEVER_STARTED_EVENT
-            and item.get("attempt") == attempt
+            item.get("event") == NEVER_STARTED_EVENT and item.get("attempt") == attempt
             for item in markers
         )
     if not markers or markers[-1].get("event") != NEVER_STARTED_EVENT:
@@ -5497,6 +5508,7 @@ class SentinelSelection(NamedTuple):
     role: Any
     worker_provider: str
     sentinel_provider: str
+    offering_id: str | None
 
 
 def _worker_provider(order: dict) -> str:
@@ -5532,9 +5544,33 @@ def _sentinel_command_provider(command: str) -> str:
     return "unknown"
 
 
-def _resolve_sentinel_role(order: dict, config: Any) -> SentinelSelection:
-    """Select and validate a provider-disjoint Sentinel for this worker attempt."""
+def _resolve_sentinel_roles(order: dict, config: Any) -> list[SentinelSelection]:
+    """Return every eligible Sentinel in YAML order for this worker attempt."""
     worker_provider = _worker_provider(order)
+    if worker_provider == "unknown":
+        raise SentinelSelectionError(
+            "worker-provider-unknown",
+            f"worker provider is {worker_provider!r}; cross-provider disjointness cannot be proven",
+        )
+
+    if config.sentinel_candidates:
+        eligible = [
+            SentinelSelection(
+                candidate.role,
+                worker_provider,
+                candidate.provider,
+                candidate.offering_id,
+            )
+            for candidate in config.sentinel_candidates
+            if candidate.provider != worker_provider
+        ]
+        if not eligible:
+            raise SentinelSelectionError(
+                "sentinel-candidates-exhausted",
+                f"all configured Sentinel candidates use worker provider {worker_provider!r}",
+            )
+        return eligible
+
     sentinel_provider_by_worker_provider = {
         "anthropic": "openai",
         "openai": "anthropic",
@@ -5579,7 +5615,12 @@ def _resolve_sentinel_role(order: dict, config: Any) -> SentinelSelection:
             f"worker provider {worker_provider} matches the Sentinel provider "
             f"{sentinel_provider}; cross-provider supervision is required",
         )
-    return SentinelSelection(role, worker_provider, sentinel_provider)
+    return [SentinelSelection(role, worker_provider, sentinel_provider, None)]
+
+
+def _resolve_sentinel_role(order: dict, config: Any) -> SentinelSelection:
+    """Compatibility helper returning the first provider-disjoint Sentinel."""
+    return _resolve_sentinel_roles(order, config)[0]
 
 
 # Per-process-invocation cache for the Sentinel persona pre-check, keyed by
@@ -5707,14 +5748,14 @@ def _start_sentinel(
         herdr_session=herdr_session,
         metadata={"generation": generation, "worker_pane": worker_pane},
     )
-    _resize_started_pane(
-        pane,
-        split_direction="down",
-        target_fraction=SUPPORT_PANE_FRACTION,
-        role="sentinel",
-        herdr_session=herdr_session,
-    )
     try:
+        _resize_started_pane(
+            pane,
+            split_direction="down",
+            target_fraction=SUPPORT_PANE_FRACTION,
+            role="sentinel",
+            herdr_session=herdr_session,
+        )
         _wait_for_agent_health(
             pane,
             expected_agent=sentinel_role.expected_agent,
@@ -5745,6 +5786,58 @@ def _start_sentinel(
         # The supervised worker's pane, kept for the uncorroborated-STALLED re-probe.
         "worker_pane": worker_pane,
     }
+
+
+def _start_sentinel_candidates(
+    ledger: JobLedger,
+    key: str,
+    token: str,
+    order: dict,
+    config: Any,
+    selections: Sequence[SentinelSelection],
+    worker_pane: str,
+    closeout_path: Path,
+    generation: int,
+    attempt: int,
+    *,
+    herdr_session: str,
+    liftoff_deadline_ms: int,
+) -> tuple[dict[str, object], SentinelSelection]:
+    """Try eligible Sentinels in roster order and fail explicitly after exhaustion."""
+    failures: list[str] = []
+    for candidate_number, candidate in enumerate(selections, start=1):
+        try:
+            started = _start_sentinel(
+                ledger,
+                key,
+                token,
+                order,
+                config,
+                candidate.role,
+                worker_pane,
+                closeout_path,
+                generation,
+                herdr_session=herdr_session,
+                liftoff_deadline_ms=liftoff_deadline_ms,
+            )
+        except (RecruiterError, OSError) as error:
+            identity = candidate.offering_id or candidate.sentinel_provider
+            failures.append(f"{identity} ({candidate.sentinel_provider}): {error}")
+            ledger._event(
+                key,
+                "sentinel-candidate-failed",
+                attempt=attempt,
+                candidate_number=candidate_number,
+                offering_id=candidate.offering_id,
+                provider=candidate.sentinel_provider,
+                reason=str(error),
+            )
+            continue
+        return started, candidate
+    raise SentinelSelectionError(
+        "sentinel-candidates-exhausted",
+        "all eligible Sentinel candidates failed: " + "; ".join(failures),
+    )
 
 
 def _sentinel_blocking_question(ledger: JobLedger, key: str) -> str | None:
@@ -6015,10 +6108,7 @@ class _SentinelWatch:
         attempt = cast(int, self.sentinel_state.get("attempt", 1))
         # The cheap fence: the started journal must be THIS watch's worker — a
         # replacement attempt or a bumped generation keeps the pre-ladder behavior.
-        if (
-            journal.get("attempt") != attempt
-            or journal.get("generation") != generation
-        ):
+        if journal.get("attempt") != attempt or journal.get("generation") != generation:
             return False
         # Only a POSITIVELY present worker pane may be nudged: a gone pane — or probe
         # uncertainty — keeps the exact pre-ladder behavior (the stall ends the wait).
@@ -6044,9 +6134,7 @@ class _SentinelWatch:
         except CompletionError:
             pass
         else:
-            archived = self.closeout_path.with_name(
-                "closeout.stalled-superseded.json"
-            )
+            archived = self.closeout_path.with_name("closeout.stalled-superseded.json")
             os.replace(self.closeout_path, archived)
             self.ledger._event(
                 self.key,
@@ -6108,9 +6196,7 @@ class _SentinelWatch:
         )
         # Intent before delivery: a crash between these two writes leaves a spent,
         # undelivered intent — the safe direction (at most one delivery per intent).
-        stall_nudge.record_nudge(
-            state, at=time.time(), digest=digest, delivered=False
-        )
+        stall_nudge.record_nudge(state, at=time.time(), digest=digest, delivered=False)
         stall_nudge.save_state(state_path, state)
         self.ledger._event(
             self.key,
@@ -6161,9 +6247,7 @@ class _SentinelWatch:
         if outcome == "delivered":
             stall_nudge.mark_delivered(state, digest)
             stall_nudge.save_state(state_path, state)
-            self.ledger._event(
-                self.key, "worker-nudge-delivered", digest=digest
-            )
+            self.ledger._event(self.key, "worker-nudge-delivered", digest=digest)
         archived = self.closeout_path.with_name(
             f"closeout.stalled-nudged-{ordinal}.json"
         )
@@ -6254,8 +6338,9 @@ class _SentinelWatch:
         corroborated, uncorroborated = contracts_sentinel.verify_citations(
             cast(list, closeout["citations"]),
             file_exists=lambda path: Path(path).is_file(),
-            commit_exists=lambda sha: worktree is not None
-            and commit_exists_in_worktree(worktree, sha),
+            commit_exists=lambda sha: (
+                worktree is not None and commit_exists_in_worktree(worktree, sha)
+            ),
             scope_roots=scope_roots,
         )
         outcome = closeout["outcome"]
@@ -6278,9 +6363,7 @@ class _SentinelWatch:
             # agree — the recorded worker-never-started deadline event, no staged result,
             # no landed commit, no recorded first action, and a clean worktree. A Sentinel
             # claim without the deadline proof lands in the ordinary blocked path.
-            raise WorkerNeverStartedError(
-                f"sentinel closeout NEVER_STARTED: {reason}"
-            )
+            raise WorkerNeverStartedError(f"sentinel closeout NEVER_STARTED: {reason}")
         if outcome == "STALLED":
             # An uncorroborated STALLED claim may not terminalize a possibly-healthy
             # worker on the Sentinel's word alone: when EVERY citation failed
@@ -6464,7 +6547,9 @@ def inspect_salvage(ledger: JobLedger, key: str, order: dict, manifest: Any) -> 
 
     if landed or staged_state == "valid":
         outcome = "salvageable"
-    elif staged_state in ("unparseable", "invalid", "inconsistent") or artifacts_written:
+    elif (
+        staged_state in ("unparseable", "invalid", "inconsistent") or artifacts_written
+    ):
         outcome = "ambiguous"
     else:
         outcome = "empty"
@@ -7354,6 +7439,33 @@ def _direct_manager(
     }
 
 
+def _account_manager_candidates(order: dict, config: Any) -> list[Any]:
+    """Return provider-disjoint public candidates, or the unchanged legacy role."""
+    candidates = list(config.account_manager_candidates)
+    if candidates:
+        worker_provider = _worker_provider(order)
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.provider != worker_provider
+        ]
+        if not eligible:
+            raise RecruiterError(
+                "all configured Account Manager candidates use worker provider "
+                f"{worker_provider!r}"
+            )
+        return eligible
+    # Legacy raw upagent.yaml has one executable role and no approved-offering
+    # metadata. Preserve that trusted compatibility path exactly as configured.
+    return [
+        llm_management.ManagementCandidate(
+            config.account_manager,
+            "legacy-unclassified",
+            "legacy-raw-account-manager",
+        )
+    ]
+
+
 def _start_account_manager(
     ledger: JobLedger,
     key: str,
@@ -7377,60 +7489,103 @@ def _start_account_manager(
             request_id, generation, order, decision_path, mechanical_validation
         ),
     )
-    command = llm_management.render_role_command(
-        config.account_manager, brief_path, order["cwd"], decision_path
-    )
+    candidates = _account_manager_candidates(order, config)
+
     name = _safe_agent_name("upagent-manager", request_id, generation)
     manager_order = {
         **order,
         "cockpit_pane": _manager_anchor_pane(order, herdr_session=session),
     }
-    manager_pane, workspace_id, manager_address, launch_id = _start_fenced_ledger_agent(
-        ledger,
-        key,
-        token,
-        "manager",
-        name,
-        manager_order,
-        command,
-        split_direction="down",
-        tab_role="oversight",
-        herdr_session=session,
-        metadata={"generation": generation},
-    )
-    _resize_started_pane(
-        manager_pane,
-        split_direction="down",
-        target_fraction=SUPPORT_PANE_FRACTION,
-        role="account manager",
-        herdr_session=session,
-    )
-    try:
-        health = _wait_for_agent_health(
-            manager_pane,
-            expected_agent=config.account_manager.expected_agent,
-            expected_process=config.account_manager.expected_process,
-            expected_cwd=order["cwd"],
-            timeout_ms=config.startup_timeout_ms,
-            herdr_session=session,
+    failures: list[str] = []
+    for candidate_number, candidate in enumerate(candidates, start=1):
+        decision_path.unlink(missing_ok=True)
+        role = candidate.role
+        command = llm_management.render_role_command(
+            role, brief_path, order["cwd"], decision_path
         )
-        decision = _wait_typed_file(
-            decision_path,
-            config.account_manager.timeout_ms,
-            lambda text_value: lifecycle.parse_manager_decision(
-                text_value, request_id, generation
-            ),
+        manager_pane: str | None = None
+        launch_id: str | None = None
+        try:
+            manager_pane, workspace_id, manager_address, launch_id = (
+                _start_fenced_ledger_agent(
+                    ledger,
+                    key,
+                    token,
+                    "manager",
+                    name,
+                    manager_order,
+                    command,
+                    split_direction="down",
+                    tab_role="oversight",
+                    herdr_session=session,
+                    metadata={
+                        "candidate_number": candidate_number,
+                        "generation": generation,
+                        "offering_id": candidate.offering_id,
+                        "provider": candidate.provider,
+                    },
+                )
+            )
+            _resize_started_pane(
+                manager_pane,
+                split_direction="down",
+                target_fraction=SUPPORT_PANE_FRACTION,
+                role="account manager",
+                herdr_session=session,
+            )
+            health = _wait_for_agent_health(
+                manager_pane,
+                expected_agent=role.expected_agent,
+                expected_process=role.expected_process,
+                expected_cwd=order["cwd"],
+                timeout_ms=config.startup_timeout_ms,
+                herdr_session=session,
+            )
+            decision = _wait_typed_file(
+                decision_path,
+                role.timeout_ms,
+                lambda text_value: lifecycle.parse_manager_decision(
+                    text_value, request_id, generation
+                ),
+            )
+        except (RecruiterError, OSError) as error:
+            cleanup: dict[str, object] | None = None
+            if manager_pane is not None:
+                cleanup = _close_worker_pane(manager_pane, herdr_session=session)
+            if launch_id is not None:
+                ledger.mark_launch_closed(
+                    key,
+                    launch_id,
+                    manager_pane,
+                    cleanup
+                    or {
+                        "status": "not-created",
+                        "worker_pane": None,
+                        "verified_absent": True,
+                    },
+                    expected_lease_token=token,
+                )
+            reason = f"{candidate.offering_id} ({candidate.provider}): {error}"
+            failures.append(reason)
+            ledger._event(
+                key,
+                "account-manager-candidate-failed",
+                candidate_number=candidate_number,
+                offering_id=candidate.offering_id,
+                provider=candidate.provider,
+                reason=str(error),
+            )
+            continue
+        break
+    else:
+        raise RecruiterError(
+            "all eligible Account Manager candidates failed: " + "; ".join(failures)
         )
-    except (RecruiterError, OSError):
-        cleanup = _close_worker_pane(manager_pane, herdr_session=session)
-        ledger.mark_launch_closed(
-            key,
-            launch_id,
-            manager_pane,
-            cleanup,
-            expected_lease_token=token,
+
+    if manager_pane is None or launch_id is None:
+        raise RecruiterError(
+            "Account Manager candidate succeeded without a pane and launch identity"
         )
-        raise
     if not ledger.mark_manager_ready(key, token, decision):
         cleanup = _close_worker_pane(manager_pane, herdr_session=session)
         ledger.mark_launch_closed(
@@ -7463,6 +7618,8 @@ def _start_account_manager(
         "generation": generation,
         "health": health,
         "herdr_session": session,
+        "management_offering_id": candidate.offering_id,
+        "management_provider": candidate.provider,
         "launch_id": launch_id,
         "lease_token": token,
         "pane": manager_pane,
@@ -10518,7 +10675,9 @@ def _salvage_or_blocked(
     # Python-authored terminal here, so retry tooling reads it off the published result.
     blocking_question = _sentinel_blocking_question(ledger, key)
     dirty = evidence.get("dirty_worktree")
-    dirty_worktree = isinstance(dirty, dict) and cast(int, dirty.get("dirty_path_count", 0)) > 0
+    dirty_worktree = (
+        isinstance(dirty, dict) and cast(int, dirty.get("dirty_path_count", 0)) > 0
+    )
     if (
         evidence["staged_result_state"] == "absent"
         and not evidence["staged_artifact_files"]
@@ -12361,7 +12520,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             thread.join()
         first_action_watch.clear()
 
-    # Sentinel plumbing (Phase 2): one duty-bound haiku pane per supervised worker attempt.
+    # Sentinel plumbing (Phase 2): one provider-disjoint pane per supervised worker attempt.
     # `sentinel_state` holds the live hire (shared with the closeout watch for landing-retry
     # prompts); `sentinel_context` carries the current attempt's closeout path from
     # `run_order_once` to the `worker_healthy` hire; every attempt's cleanup evidence is
@@ -12379,7 +12538,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         pane = sentinel_state.get("pane")
         if not isinstance(pane, str):
             sentinel_state.clear()
-            return {"status": "not-created", "worker_pane": None, "verified_absent": True}
+            return {
+                "status": "not-created",
+                "worker_pane": None,
+                "verified_absent": True,
+            }
         launch_id = sentinel_state.get("launch_id")
         try:
             sentinel_cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
@@ -12578,24 +12741,24 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             try:
                 # Resolve afresh for every worker attempt. Retry cannot inherit an old
                 # attempt's provider decision or bypass the disjointness invariant.
-                selection = _resolve_sentinel_role(order, management_config)
-                sentinel_state.update(
-                    _start_sentinel(
-                        ledger,
-                        key,
-                        token,
-                        order,
-                        management_config,
-                        selection.role,
-                        cast(str, owned_worker_pane),
-                        closeout_path,
-                        generation,
-                        herdr_session=herdr_session,
-                        # The Sentinel's LIFTOFF brief carries the same clamped
-                        # deadline the mechanical watcher enforces.
-                        liftoff_deadline_ms=_first_action_deadline_ms(timeout_ms),
-                    )
+                selections = _resolve_sentinel_roles(order, management_config)
+                started, selection = _start_sentinel_candidates(
+                    ledger,
+                    key,
+                    token,
+                    order,
+                    management_config,
+                    selections,
+                    cast(str, owned_worker_pane),
+                    closeout_path,
+                    generation,
+                    attempt_state["number"],
+                    herdr_session=herdr_session,
+                    # The Sentinel's LIFTOFF brief carries the same clamped
+                    # deadline the mechanical watcher enforces.
+                    liftoff_deadline_ms=_first_action_deadline_ms(timeout_ms),
                 )
+                sentinel_state.update(started)
             except (RecruiterError, OSError) as error:
                 # Any hire failure — persona missing, pane creation refused by a herdr
                 # error or concurrency limit — degrades supervision for this request
@@ -14022,7 +14185,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_message.add_argument("order", help="path to order.json")
     p_message.add_argument(
-        "control_token_file", help="absolute path to the private requester control token"
+        "control_token_file",
+        help="absolute path to the private requester control token",
     )
     p_message.add_argument(
         "message_file", help="absolute path to the message text to deliver"

@@ -28,7 +28,7 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         "cursor",
         "composer-2.5",
         (DEFAULT_EFFORT,),
-        "unknown",
+        "cursor",
     ),
     "cursor-grok-4-6": (
         "cursor",
@@ -82,6 +82,15 @@ COMPLETION_STYLES: dict[str, str] = {
     "codex": "exec",
     "cursor": "interactive",
     "pi": "interactive",
+}
+
+# Herdr health identity is code-owned for the same reason command rendering is:
+# public YAML selects offerings, but cannot select an executable or process identity.
+MANAGEMENT_HEALTH: dict[str, tuple[str, str]] = {
+    "claude": ("claude", "claude"),
+    "codex": ("codex", "codex"),
+    "cursor": ("cursor", "cursor-agent"),
+    "pi": ("pi", "pi"),
 }
 
 
@@ -244,92 +253,85 @@ def _validate_management(
         "requester_grace_ms",
         "account_manager",
         "checker",
-        "sentinels",
+        "sentinel",
     }
     _strict_keys(management, allowed, "management")
-    for role_name in ("account_manager", "checker"):
+    for role_name in ("account_manager", "sentinel"):
         role = management.get(role_name)
         if not isinstance(role, dict):
             raise OfferingError(f"management.{role_name} must be an object")
         _strict_keys(
             role,
-            {
-                "offering",
-                "effort",
-                "agent",
-                "expected_agent",
-                "expected_process",
-                "timeout_ms",
-            },
+            {"candidates", "agent", "timeout_ms"},
             f"management.{role_name}",
         )
-        for field in (
+        agent = role.get("agent")
+        if not isinstance(agent, str) or not agent:
+            raise OfferingError(
+                f"management.{role_name}.agent must be a non-empty string"
+            )
+        candidates = role.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise OfferingError(
+                f"management.{role_name}.candidates must be a non-empty list"
+            )
+        seen: set[tuple[str, str]] = set()
+        for index, candidate in enumerate(candidates):
+            where = f"management.{role_name}.candidates[{index}]"
+            if not isinstance(candidate, dict):
+                raise OfferingError(f"{where} must be an object")
+            _strict_keys(candidate, {"offering", "effort"}, where)
+            offering_id = candidate.get("offering")
+            effort = candidate.get("effort")
+            if not isinstance(offering_id, str) or not offering_id:
+                raise OfferingError(f"{where}.offering must be a non-empty string")
+            if not isinstance(effort, str) or not effort:
+                raise OfferingError(f"{where}.effort must be a non-empty string")
+            offering = offerings.get(offering_id)
+            if offering is None:
+                raise OfferingError(
+                    f"{where} references unknown offering {offering_id!r}"
+                )
+            if effort not in offering.efforts:
+                raise OfferingError(
+                    f"{where} effort {effort!r} is not allowed by {offering_id!r}"
+                )
+            identity = (offering_id, effort)
+            if identity in seen:
+                raise OfferingError(
+                    f"{where} duplicates candidate {offering_id!r}/{effort}"
+                )
+            seen.add(identity)
+
+    role = management.get("checker")
+    if not isinstance(role, dict):
+        raise OfferingError("management.checker must be an object")
+    _strict_keys(
+        role,
+        {
             "offering",
             "effort",
             "agent",
             "expected_agent",
             "expected_process",
-        ):
-            if not isinstance(role.get(field), str) or not role[field]:
-                raise OfferingError(
-                    f"management.{role_name}.{field} must be a non-empty string"
-                )
-        offering = offerings.get(role["offering"])
-        if offering is None:
+            "timeout_ms",
+        },
+        "management.checker",
+    )
+    for field in ("offering", "effort", "agent", "expected_agent", "expected_process"):
+        if not isinstance(role.get(field), str) or not role[field]:
             raise OfferingError(
-                f"management.{role_name} references unknown offering {role['offering']!r}"
+                f"management.checker.{field} must be a non-empty string"
             )
-        if role["effort"] not in offering.efforts:
-            raise OfferingError(
-                f"management.{role_name} effort {role['effort']!r} is not allowed by {role['offering']!r}"
-            )
-    sentinels = management.get("sentinels")
-    if not isinstance(sentinels, dict) or set(sentinels) != {"anthropic", "openai"}:
+    offering = offerings.get(role["offering"])
+    if offering is None:
         raise OfferingError(
-            "management.sentinels must define exactly anthropic and openai"
+            f"management.checker references unknown offering {role['offering']!r}"
         )
-    for provider, role in sentinels.items():
-        if not isinstance(role, dict):
-            raise OfferingError(f"management.sentinels.{provider} must be an object")
-        _strict_keys(
-            role,
-            {
-                "offering",
-                "effort",
-                "agent",
-                "expected_agent",
-                "expected_process",
-                "timeout_ms",
-            },
-            f"management.sentinels.{provider}",
+    if role["effort"] not in offering.efforts:
+        raise OfferingError(
+            f"management.checker effort {role['effort']!r} is not allowed by {role['offering']!r}"
         )
-        for field in (
-            "offering",
-            "effort",
-            "agent",
-            "expected_agent",
-            "expected_process",
-        ):
-            if not isinstance(role.get(field), str) or not role[field]:
-                raise OfferingError(
-                    f"management.sentinels.{provider}.{field} must be a non-empty string"
-                )
-        offering = offerings.get(role["offering"])
-        if offering is None:
-            raise OfferingError(
-                f"management.sentinels.{provider} references unknown offering "
-                f"{role['offering']!r}"
-            )
-        if offering.provider != provider:
-            raise OfferingError(
-                f"management.sentinels.{provider} offering {role['offering']!r} "
-                f"has provider {offering.provider!r}"
-            )
-        if role["effort"] not in offering.efforts:
-            raise OfferingError(
-                f"management.sentinels.{provider} effort {role['effort']!r} is not "
-                f"allowed by {role['offering']!r}"
-            )
 
 
 def validate_snapshot(value: object) -> dict[str, object]:
@@ -438,35 +440,58 @@ def render_shell(snapshot: object, persona: str, instructions_path: str) -> str:
     return shlex.join(render_argv(snapshot, persona, instructions_path))
 
 
+def _materialize_candidate_role(
+    roster: OfferingRoster, raw_value: dict[str, object], prompt: str
+) -> dict[str, object]:
+    """Render an ordered public candidate list without trusting YAML for commands."""
+    raw = dict(raw_value)
+    candidate_values = cast(list[dict[str, str]], raw.pop("candidates"))
+    agent = str(raw.pop("agent"))
+    candidates: list[dict[str, object]] = []
+    for value in candidate_values:
+        snapshot = roster.resolve(value["offering"], value["effort"])
+        harness = str(snapshot["harness"])
+        expected_agent, expected_process = MANAGEMENT_HEALTH[harness]
+        argv = render_argv(snapshot, agent, "{brief_path}")
+        argv[-1] = prompt
+        candidates.append(
+            {
+                **raw,
+                "command": shlex.join(argv),
+                "expected_agent": expected_agent,
+                "expected_process": expected_process,
+                "offering_id": snapshot["id"],
+                "provider": snapshot["provider"],
+            }
+        )
+    # Keep the historical singular role shape available to lifecycle code and external
+    # readers. Runtime candidate selection uses `candidates`; this mirror is never read
+    # from public YAML and always equals the first code-rendered candidate.
+    return {**candidates[0], "candidates": candidates}
+
+
 def materialize_management(roster: OfferingRoster) -> dict[str, object]:
     """Translate validated offering references into code-owned lifecycle commands."""
     management = dict(roster.management)
-    prompts = {
-        "account_manager": "Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available.",
-        "checker": "Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit.",
-    }
-    for role_name, prompt in prompts.items():
-        raw = dict(cast(dict[str, object], management[role_name]))
-        snapshot = roster.resolve(str(raw.pop("offering")), str(raw.pop("effort")))
-        agent = str(raw.pop("agent"))
-        argv = render_argv(snapshot, agent, "{brief_path}")
-        argv[-1] = prompt
-        raw["command"] = shlex.join(argv)
-        management[role_name] = raw
-    sentinel_prompt = (
-        "Read {brief_path}, perform that one sentinel duty cycle for its worker, "
-        "write {output_path} when the worker lifecycle ends, then exit."
+    management["account_manager"] = _materialize_candidate_role(
+        roster,
+        cast(dict[str, object], management["account_manager"]),
+        "Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available.",
     )
-    sentinels: dict[str, object] = {}
-    for provider, value in cast(
-        dict[str, dict[str, object]], management["sentinels"]
-    ).items():
-        raw = dict(value)
-        snapshot = roster.resolve(str(raw.pop("offering")), str(raw.pop("effort")))
-        agent = str(raw.pop("agent"))
-        argv = render_argv(snapshot, agent, "{brief_path}")
-        argv[-1] = sentinel_prompt
-        raw["command"] = shlex.join(argv)
-        sentinels[provider] = raw
-    management["sentinels"] = sentinels
+
+    raw = dict(cast(dict[str, object], management["checker"]))
+    snapshot = roster.resolve(str(raw.pop("offering")), str(raw.pop("effort")))
+    agent = str(raw.pop("agent"))
+    argv = render_argv(snapshot, agent, "{brief_path}")
+    argv[-1] = (
+        "Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."
+    )
+    raw["command"] = shlex.join(argv)
+    management["checker"] = raw
+
+    management["sentinel"] = _materialize_candidate_role(
+        roster,
+        cast(dict[str, object], management["sentinel"]),
+        "Read {brief_path}, perform that one sentinel duty cycle for its worker, write {output_path} when the worker lifecycle ends, then exit.",
+    )
     return management

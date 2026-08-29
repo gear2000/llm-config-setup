@@ -256,10 +256,12 @@ Durable files are the source of truth; terminal text is display-only.
   shape, executable presence, and (for Claude `--agent` routes) the actual persona file. Those
   facts are given to the manager. A bad request is explained to the requester and terminalized
   without ever creating a worker, even if the LLM mistakenly recommends approval.
-- Public requests use one dedicated advisory Account Manager resolved through the approved
-  `claude-sonnet-5` offering at `low` effort with persona `upagent-account-manager`. Manager
-  failure degrades supervision only: it cannot veto Python-valid startup, mutate a lease,
-  publish artifacts, invent success, or terminalize the request. Fable remains explicit-only.
+- Public requests use one dedicated advisory Account Manager selected from the ordered approved
+  candidates in `offerings.yaml`: `cursor-composer-2-5` at `default`, then
+  `pi-gpt-5-4-mini` at `low`, both with the `upagent-account-manager` brief. The Recruiter removes
+  same-provider candidates, tries the first eligible candidate, and records each startup failure
+  before trying the next. Exhaustion degrades supervision only: it cannot veto Python-valid
+  startup, mutate a lease, publish artifacts, invent success, or terminalize the request.
 - Every accepted order carries `artifact_publication`. Compatibility/controller orders that omit it
   receive deterministic result-adjacent paths and an explicit mandatory-consult list before the
   first ledger mutation. The Recruiter writes a closed-schema typed manifest
@@ -313,7 +315,7 @@ Durable files are the source of truth; terminal text is display-only.
   as "a valid staged result".
 - On top of those gates, every ordinary request is Sentinel-supervised by default
   (`--no-sentinel` opts out; watchdogs and retained review workers never get one). The
-  Recruiter hires one haiku Herdr pane per worker attempt, duty-bound to that worker:
+  Recruiter hires one provider-disjoint Herdr pane per worker attempt, duty-bound to that worker:
   LIFTOFF corroborates the startup marker and, once a first real tool action is proven, the
   requester receives the worker's live pane address; PULSE is event-driven on the
   attempt's wake file (beside its closeout.json — Python is the only writer, touching it
@@ -398,13 +400,12 @@ Durable files are the source of truth; terminal text is display-only.
   exactly as before. Cross-provider supervision is mandatory on every hire,
   including retries. Public worker offerings pin code-owned provider metadata in
   their immutable snapshots; legacy orders fall back to known harness/model identity
-  only when no snapshot provider exists. The Recruiter selects the configured
-  Sentinel role for the opposite provider (`anthropic` worker → `openai` Sentinel,
-  `openai` worker → `anthropic` Sentinel) before launching its pane and validates
-  disjointness again on each attempt. An unknown worker provider or a missing/unusable
-  opposite-provider role degrades to mechanical supervision through the existing
-  `sentinel-degraded` path with a typed `reason_type`, never a silent same-provider
-  fallback. An explicit `management.sentinel` command remains an override: its command
+  only when no snapshot provider exists. For the public roster, the Recruiter filters the
+  YAML-ordered Sentinel candidates (`cursor-composer-2-5`/default, then
+  `pi-gpt-5-4-mini`/low) by provider and tries every eligible startup in order. Each failure is
+  recorded; only exhaustion degrades to mechanical supervision through the existing
+  `sentinel-degraded` path with a typed `reason_type`. An explicit legacy
+  `management.sentinel` command remains an override: its command
   identity must prove a provider distinct from this worker or it degrades fail-closed.
   Both resolved providers are recorded on the durable `sentinel-hired` requester
   event. No environment flag is required. The Sentinel
@@ -504,12 +505,14 @@ overlay cannot block an ordinary worker request.
 
 ## Public offerings and legacy controller roster
 
-Public workers and their Account Managers never read a YAML launch command. `offerings.yaml`
-selects exactly one approved harness/model identity and effort allowlist, and `offerings.py` renders
-the exact child argv. Public Account Managers are always rendered from `claude-sonnet-5`, `low`,
-and `upagent-account-manager`, even when a legacy `upagent.yaml` exists. That legacy file remains
-only for explicitly route-driven controller compatibility, where existing phase routes still
-provide raw harness/model profiles and may configure raw lifecycle-role commands. Four launch
+Public workers and management candidates never read a YAML launch command. `offerings.yaml`
+selects approved harness/model identities and effort allowlists, plus the candidate order;
+`offerings.py` validates every reference and renders the exact child argv. Public Account Manager
+and Sentinel candidates are `cursor-composer-2-5`/default first, then
+`pi-gpt-5-4-mini`/low. The Recruiter filters the worker's provider and falls back on startup
+failure. A legacy `upagent.yaml` remains only for explicitly route-driven controller compatibility,
+where existing phase routes still provide raw harness/model profiles and may configure singular
+raw lifecycle-role commands; the public candidate-list schema is rejected there. Four launch
 properties remain load-bearing:
 
 1. **Unattended.** Workers start without operator input — every template bypasses

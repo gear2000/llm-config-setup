@@ -63,6 +63,15 @@ class ManagementRole:
     timeout_ms: int
 
 
+@dataclass(frozen=True)
+class ManagementCandidate:
+    """One code-materialized public management candidate in YAML-owned order."""
+
+    role: ManagementRole
+    provider: str
+    offering_id: str
+
+
 # How each request lifecycle is owned. KEEP IN SYNC with contracts.MANAGEMENT_MODES
 # (both modules load standalone by path).
 MANAGEMENT_MODES = ("direct", "dedicated")
@@ -71,6 +80,7 @@ MANAGEMENT_MODES = ("direct", "dedicated")
 @dataclass(frozen=True)
 class ManagementConfig:
     account_manager: ManagementRole
+    account_manager_candidates: tuple[ManagementCandidate, ...]
     checker: ManagementRole
     # Hired ONLY when the Recruiter's mechanical salvage inspection finds contradictory
     # evidence about a vanished worker. A clean hit and a clean miss are both decided in
@@ -80,6 +90,7 @@ class ManagementConfig:
     # from liftoff to closeout. Eyes and interpretation only — it holds no kill switch and
     # its closeout citations are re-verified in Python before they count.
     sentinel: ManagementRole
+    sentinel_candidates: tuple[ManagementCandidate, ...]
     sentinels: dict[str, ManagementRole]
     sentinel_is_override: bool
     intake_clerk: ManagementRole
@@ -143,6 +154,40 @@ def _role(
     return ManagementRole(command, expected_agent, expected_process, timeout_ms)
 
 
+def _management_candidates(raw: object, name: str) -> tuple[ManagementCandidate, ...]:
+    """Parse only code-materialized candidates; legacy raw singular roles stay singular."""
+    if not isinstance(raw, dict) or "candidates" not in raw:
+        return ()
+    configured = raw["candidates"]
+    if not isinstance(configured, list) or not configured:
+        raise ManagementConfigError(
+            f"management.{name}.candidates must be a non-empty list"
+        )
+    parsed: list[ManagementCandidate] = []
+    for index, value in enumerate(configured):
+        where = f"{name}.candidates[{index}]"
+        if not isinstance(value, dict):
+            raise ManagementConfigError(f"management.{where} must be an object")
+        provider = value.get("provider")
+        offering_id = value.get("offering_id")
+        if not isinstance(provider, str) or not provider:
+            raise ManagementConfigError(
+                f"management.{where}.provider must be a non-empty string"
+            )
+        if not isinstance(offering_id, str) or not offering_id:
+            raise ManagementConfigError(
+                f"management.{where}.offering_id must be a non-empty string"
+            )
+        parsed.append(
+            ManagementCandidate(
+                role=_role(value, where, ""),
+                provider=provider,
+                offering_id=offering_id,
+            )
+        )
+    return tuple(parsed)
+
+
 def _sentinel_roles(raw: dict) -> dict[str, ManagementRole]:
     configured = raw.get("sentinels")
     if configured is None:
@@ -180,17 +225,26 @@ def load_management_config(roster: dict) -> ManagementConfig:
         raise ManagementConfigError(
             "management.rescue_on_startup_failure must be a boolean"
         )
+    account_manager = raw.get("account_manager")
+    sentinel = raw.get("sentinel")
     return ManagementConfig(
         account_manager=_role(
-            raw.get("account_manager"),
+            account_manager,
             "account_manager",
             DEFAULT_ACCOUNT_MANAGER_COMMAND,
         ),
+        account_manager_candidates=_management_candidates(
+            account_manager, "account_manager"
+        ),
         checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
         rescuer=_role(raw.get("rescuer"), "rescuer", DEFAULT_RESCUER_COMMAND),
-        sentinel=_role(raw.get("sentinel"), "sentinel", DEFAULT_SENTINEL_COMMAND),
+        sentinel=_role(sentinel, "sentinel", DEFAULT_SENTINEL_COMMAND),
+        sentinel_candidates=_management_candidates(sentinel, "sentinel"),
         sentinels=_sentinel_roles(raw),
-        sentinel_is_override="sentinel" in raw,
+        sentinel_is_override=(
+            "sentinel" in raw
+            and not (isinstance(sentinel, dict) and "candidates" in sentinel)
+        ),
         intake_clerk=_role(
             raw.get("intake_clerk"),
             "intake_clerk",
@@ -429,7 +483,7 @@ Write exactly one JSON object to `{output_path}`:
 {{
   "request_id": "{request_id}",
   "order_id": "{order_id}",
-  "verdict": "{'|'.join(RESCUER_VERDICTS)}",
+  "verdict": "{"|".join(RESCUER_VERDICTS)}",
   "cited_commits": ["full 40-character SHA observed in the evidence bundle"],
   "cited_files": ["absolute path observed in the evidence bundle"],
   "message": "concise explanation naming the evidence you relied on"

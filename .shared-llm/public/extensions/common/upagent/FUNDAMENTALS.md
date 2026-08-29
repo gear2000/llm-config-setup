@@ -35,8 +35,10 @@ PYTHON RECRUITER
 ├─ makes same-id/same-payload retries idempotent and rejects same-id/changed-payload conflicts
 ├─ assigns a globally unique request identity and generation
 ├─ persists ownership, deadlines, and an event ledger atomically
-└─ attempts one code-rendered `claude-sonnet-5`/low Dedicated Account Manager;
-   manager failure records degraded supervision and does not stop the worker lifecycle
+└─ filters the public Account Manager candidates by worker provider, then attempts
+   code-rendered `cursor-composer-2-5`/default followed by `pi-gpt-5-4-mini`/low;
+   each startup failure is recorded before fallback, and exhaustion records degraded
+   supervision without stopping the worker lifecycle
    │
    ▼
 DEDICATED ACCOUNT MANAGER (LLM)
@@ -243,10 +245,11 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     one typed requester escalation (durable idempotency flag) before the stall ends
     the wait as before. Cross-provider supervision is mandatory for every hire and
     retry: the Recruiter uses the worker's immutable offering provider (falling back
-    to known harness/model identity only when no snapshot provider exists), chooses
-    the configured opposite-provider Sentinel role, and revalidates
-    `worker.provider != sentinel.provider` before launch. An unknown worker provider,
-    missing/unusable opposite role, or explicit `management.sentinel` override whose
+    to known harness/model identity only when no snapshot provider exists), filters the
+    ordered public Sentinel candidates by `worker.provider != sentinel.provider`, and
+    tries each eligible startup in YAML order. Only exhaustion degrades to mechanical
+    supervision, with each candidate failure recorded first. An unknown worker provider
+    or explicit legacy `management.sentinel` override whose
     provider is unknown or matches the worker degrades to mechanical supervision with
     a typed reason rather than hiring silently. A provably disjoint override is honored
     as-is, and the resolved providers are durable on the `sentinel-hired` requester

@@ -73,9 +73,9 @@ offerings:
     model: openrouter/z-ai/glm-5.3-flash
     efforts: [low, high, max]
 
-# Legacy route orders default direct; each public request pins dedicated management. References
-# are offering-based so the advisory Account Manager resolves exactly claude-sonnet-5/low with
-# upagent-account-manager and cannot escape the approved roster or inject a public-path command.
+# Legacy route orders default direct; each public request pins dedicated management. Candidate
+# order is policy owned by this roster, while offerings.py validates every reference and renders
+# every command. The public YAML never carries executable commands.
 management:
   mode: direct
   rescue_on_startup_failure: true
@@ -83,11 +83,12 @@ management:
   inactivity_check_ms: 900000
   requester_grace_ms: 300000
   account_manager:
-    offering: claude-sonnet-5
-    effort: low
+    candidates:
+      - offering: cursor-composer-2-5
+        effort: default
+      - offering: pi-gpt-5-4-mini
+        effort: low
     agent: upagent-account-manager
-    expected_agent: claude
-    expected_process: claude
     timeout_ms: 120000
   checker:
     offering: claude-sonnet-5
@@ -96,22 +97,11 @@ management:
     expected_agent: claude
     expected_process: claude
     timeout_ms: 120000
-  # The hub selects the entry opposite the worker offering's pinned provider.
-  # The claude sentinel runs the upagent-sentinel persona; the pi renderer carries
-  # no persona flag, so the openai sentinel runs persona-less on its self-contained
-  # brief (the `agent:` field below is roster bookkeeping, not a pi launch flag).
-  sentinels:
-    anthropic:
-      offering: claude-sonnet-5
-      effort: low
-      agent: upagent-sentinel
-      expected_agent: claude
-      expected_process: claude
-      timeout_ms: 120000
-    openai:
-      offering: pi-gpt-5-4-mini
-      effort: low
-      agent: upagent-sentinel
-      expected_agent: pi
-      expected_process: pi
-      timeout_ms: 120000
+  sentinel:
+    candidates:
+      - offering: cursor-composer-2-5
+        effort: default
+      - offering: pi-gpt-5-4-mini
+        effort: low
+    agent: upagent-sentinel
+    timeout_ms: 120000

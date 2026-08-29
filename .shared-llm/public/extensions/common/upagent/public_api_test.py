@@ -877,10 +877,11 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
 
     assert submitted_rosters == [str(HERE / "offerings.yaml")]
     public_roster = public_api.recruiter.load_roster(submitted_rosters[0])
-    manager_command = public_roster["management"]["account_manager"]["command"]
-    assert "legacy-manager" not in manager_command
-    assert "--agent upagent-account-manager" in manager_command
-    assert "--model claude-sonnet-5 --effort low" in manager_command
+    manager = public_roster["management"]["account_manager"]
+    commands = [candidate["command"] for candidate in manager["candidates"]]
+    assert all("legacy-manager" not in command for command in commands)
+    assert commands[0].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert "--model openai-codex/gpt-5.4-mini --thinking low" in commands[1]
 
 
 def test_same_id_same_hash_attaches_without_second_launch_and_changed_prompt_conflicts(

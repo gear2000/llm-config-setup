@@ -313,7 +313,9 @@ def test_sentinel_supervision_is_default_on_with_a_typed_opt_out() -> None:
 
 
 def test_parse_order_types_the_sentinel_flag() -> None:
-    assert contracts.parse_order(json.dumps(_order(sentinel=False)))["sentinel"] is False
+    assert (
+        contracts.parse_order(json.dumps(_order(sentinel=False)))["sentinel"] is False
+    )
     with pytest.raises(ContractError, match="sentinel"):
         contracts.parse_order(json.dumps(_order(sentinel="no")))
 
@@ -1625,9 +1627,7 @@ def test_staging_activity_tolerates_concurrent_replacement(
     real = tmp_path / "staged.md"
     real.write_text("content\n")
 
-    watch.manifest = type(
-        "M", (), {"artifacts": [_Artifact(_VanishingPath())]}
-    )()
+    watch.manifest = type("M", (), {"artifacts": [_Artifact(_VanishingPath())]})()
     assert watch.staging_activity() is False
 
     watch.manifest = type(
@@ -1741,9 +1741,7 @@ def test_a_failed_sentinel_hire_degrades_supervision_and_notifies_once(
     receipt = ledger.completed_receipt(key, order)
     assert receipt["verdict"] == "never-started"
     degrades = [
-        item
-        for item in ledger.events(key)
-        if item.get("event") == "sentinel-degraded"
+        item for item in ledger.events(key) if item.get("event") == "sentinel-degraded"
     ]
     assert [item["attempt"] for item in degrades] == [1, 2]
     assert all("pane limit" in item["reason"] for item in degrades)
@@ -1887,6 +1885,7 @@ def _drill_job(
     monkeypatch.setattr(
         recruiter, "_worker_process_confirmed_gone", lambda *args, **kwargs: False
     )
+
     def fake_start(
         name: str, execution_order: dict, launch: str, **kwargs: object
     ) -> tuple[str, str, str]:
@@ -2140,9 +2139,7 @@ def test_drill_worker_dead_before_bundle_lands_finalization_failed_with_evidence
 ) -> None:
     """Drill: kill the worker after the work but before the bundle. FINALIZATION_FAILED
     blocks with the corroborated commit citation and the landed commit in the epilogue."""
-    ledger, order, key, roster_path, drill = _drill_job(
-        tmp_path, monkeypatch, git=True
-    )
+    ledger, order, key, roster_path, drill = _drill_job(tmp_path, monkeypatch, git=True)
     sha = _commit(Path(order["cwd"]), "finished-work.txt")
     _pre_write_closeout(
         ledger,
@@ -2420,9 +2417,126 @@ def test_a_stall_without_a_live_worker_journal_raises_exactly_as_before(
 
 
 def _management(**management: object) -> Any:
-    return recruiter.llm_management.load_management_config(
-        {"management": management}
+    return recruiter.llm_management.load_management_config({"management": management})
+
+
+def _public_management() -> Any:
+    roster = recruiter.load_roster(Path(__file__).with_name("offerings.yaml"))
+    return recruiter.llm_management.load_management_config(roster)
+
+
+def test_public_sentinel_candidates_preserve_order_and_filter_the_worker_provider() -> (
+    None
+):
+    config = _public_management()
+
+    anthropic = recruiter._resolve_sentinel_roles(
+        _order(offering_snapshot={"provider": "anthropic"}), config
     )
+    cursor = recruiter._resolve_sentinel_roles(
+        _order(offering_snapshot={"provider": "cursor"}), config
+    )
+    openai = recruiter._resolve_sentinel_roles(
+        _order(offering_snapshot={"provider": "openai"}), config
+    )
+
+    assert [item.offering_id for item in anthropic] == [
+        "cursor-composer-2-5",
+        "pi-gpt-5-4-mini",
+    ]
+    assert [item.offering_id for item in cursor] == ["pi-gpt-5-4-mini"]
+    assert [item.offering_id for item in openai] == ["cursor-composer-2-5"]
+
+
+def test_sentinel_startup_failure_falls_back_in_candidate_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, _manifest = _claimed_request(tmp_path, monkeypatch)
+    order["offering_snapshot"] = {"provider": "anthropic"}
+    config = _public_management()
+    selections = recruiter._resolve_sentinel_roles(order, config)
+    attempted: list[str] = []
+
+    def start(*args: object, **kwargs: object) -> dict[str, object]:
+        role = args[5]
+        attempted.append(role.expected_process)
+        if role.expected_process == "cursor-agent":
+            raise recruiter.RecruiterError("cursor startup refused")
+        return {"pane": "sentinel-pi"}
+
+    monkeypatch.setattr(recruiter, "_start_sentinel", start)
+    started, selected = recruiter._start_sentinel_candidates(
+        ledger,
+        key,
+        "lease-token",
+        order,
+        config,
+        selections,
+        "worker-pane",
+        tmp_path / "closeout.json",
+        1,
+        1,
+        herdr_session="default",
+        liftoff_deadline_ms=300_000,
+    )
+
+    assert attempted == ["cursor-agent", "pi"]
+    assert started == {"pane": "sentinel-pi"}
+    assert selected.offering_id == "pi-gpt-5-4-mini"
+    failures = [
+        item
+        for item in ledger.events(key)
+        if item["event"] == "sentinel-candidate-failed"
+    ]
+    assert [(item["offering_id"], item["reason"]) for item in failures] == [
+        ("cursor-composer-2-5", "cursor startup refused")
+    ]
+
+
+def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, _manifest = _claimed_request(tmp_path, monkeypatch)
+    order["offering_snapshot"] = {"provider": "anthropic"}
+    config = _public_management()
+    selections = recruiter._resolve_sentinel_roles(order, config)
+    monkeypatch.setattr(
+        recruiter,
+        "_start_sentinel",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            recruiter.RecruiterError(f"{args[5].expected_process} failed")
+        ),
+    )
+
+    with pytest.raises(recruiter.SentinelSelectionError) as raised:
+        recruiter._start_sentinel_candidates(
+            ledger,
+            key,
+            "lease-token",
+            order,
+            config,
+            selections,
+            "worker-pane",
+            tmp_path / "closeout.json",
+            1,
+            2,
+            herdr_session="default",
+            liftoff_deadline_ms=300_000,
+        )
+
+    assert raised.value.reason_type == "sentinel-candidates-exhausted"
+    assert "cursor-agent failed" in str(raised.value)
+    assert "pi failed" in str(raised.value)
+    failures = [
+        item
+        for item in ledger.events(key)
+        if item["event"] == "sentinel-candidate-failed"
+    ]
+    assert [item["offering_id"] for item in failures] == [
+        "cursor-composer-2-5",
+        "pi-gpt-5-4-mini",
+    ]
+    assert all(item["attempt"] == 2 for item in failures)
 
 
 def test_anthropic_worker_selects_the_openai_sentinel_command() -> None:
@@ -2432,7 +2546,10 @@ def test_anthropic_worker_selects_the_openai_sentinel_command() -> None:
 
     assert selected.worker_provider == "anthropic"
     assert selected.sentinel_provider == "openai"
-    assert selected.role.command == recruiter.llm_management.DEFAULT_OPENAI_SENTINEL_COMMAND
+    assert (
+        selected.role.command
+        == recruiter.llm_management.DEFAULT_OPENAI_SENTINEL_COMMAND
+    )
 
 
 def test_openai_worker_selects_the_anthropic_sentinel_command() -> None:
@@ -2667,16 +2784,22 @@ def test_a_cursor_worker_nudge_uses_the_paste_settle_delivery(
     monkeypatch.setattr(
         recruiter,
         "_submit_agent_prompt",
-        lambda address, message, **kwargs: calls.append(
-            {"address": address, **kwargs}
-        ),
+        lambda address, message, **kwargs: calls.append({"address": address, **kwargs}),
     )
     closeout_path = recruiter._sentinel_closeout_path(ledger, key, 1)
     closeout_path.parent.mkdir(parents=True, exist_ok=True)
     watch = recruiter._SentinelWatch(
-        ledger, key, order, manifest, closeout_path,
-        {"address": "sentinel-address", "worker_pane": "worker-pane",
-         "attempt": 1, "generation": 1},
+        ledger,
+        key,
+        order,
+        manifest,
+        closeout_path,
+        {
+            "address": "sentinel-address",
+            "worker_pane": "worker-pane",
+            "attempt": 1,
+            "generation": 1,
+        },
         herdr_session="default",
     )
     watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
@@ -2742,9 +2865,17 @@ def test_an_override_with_unprovable_provider_degrades_typed() -> None:
     identity must raise the typed sentinel-provider-unknown selection error —
     never an approved hire, never a silent fallback."""
     config = recruiter.llm_management.load_management_config(
-        {"management": {"sentinel": {"command": "/opt/custom/mystery-watcher {brief_path} {output_path} {cwd}"}}}
+        {
+            "management": {
+                "sentinel": {
+                    "command": "/opt/custom/mystery-watcher {brief_path} {output_path} {cwd}"
+                }
+            }
+        }
     )
     assert config.sentinel_is_override
     with pytest.raises(recruiter.SentinelSelectionError) as caught:
-        recruiter._resolve_sentinel_role(_order(harness="codex", model="gpt-5.6"), config)
+        recruiter._resolve_sentinel_role(
+            _order(harness="codex", model="gpt-5.6"), config
+        )
     assert caught.value.reason_type == "sentinel-provider-unknown"
