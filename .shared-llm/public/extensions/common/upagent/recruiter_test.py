@@ -1768,12 +1768,16 @@ def test_legacy_raw_roster_keeps_singular_management_commands_and_rejects_candid
         "legacy-manager"
     )
 
-    p.write_text(
-        "harnesses:\n  claude: 'claude --model {model}'\n"
-        "management:\n  account_manager:\n    candidates: []\n"
-    )
-    with pytest.raises(RecruiterError, match="reserved for the validated public"):
-        recruiter.load_roster(p)
+    for role_name in ("account_manager", "checker", "sentinel"):
+        p.write_text(
+            "harnesses:\n  claude: 'claude --model {model}'\n"
+            f"management:\n  {role_name}:\n    candidates: []\n"
+        )
+        with pytest.raises(
+            RecruiterError,
+            match=rf"management\.{role_name}\.candidates is reserved",
+        ):
+            recruiter.load_roster(p)
 
 
 def test_load_roster_rejects_incomplete_health_override(tmp_path: Path) -> None:
@@ -4079,6 +4083,171 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
     ]
     assert [candidate.offering_id for candidate in cursor] == ["pi-gpt-5-4-mini"]
     assert [candidate.offering_id for candidate in openai] == ["cursor-composer-2-5"]
+
+
+def test_public_checker_candidates_filter_same_provider_and_preserve_order() -> None:
+    roster = recruiter.load_roster(Path(__file__).with_name("offerings.yaml"))
+    config = recruiter.llm_management.load_management_config(roster)
+
+    anthropic = recruiter._checker_candidates(
+        _order(offering_snapshot={"provider": "anthropic"}), config
+    )
+    cursor = recruiter._checker_candidates(
+        _order(offering_snapshot={"provider": "cursor"}), config
+    )
+    openai = recruiter._checker_candidates(
+        _order(offering_snapshot={"provider": "openai"}), config
+    )
+
+    assert [candidate.offering_id for candidate in anthropic] == [
+        "cursor-composer-2-5",
+        "pi-gpt-5-4-mini",
+    ]
+    assert [candidate.offering_id for candidate in cursor] == ["pi-gpt-5-4-mini"]
+    assert [candidate.offering_id for candidate in openai] == ["cursor-composer-2-5"]
+
+
+def test_checker_startup_failure_tries_the_next_eligible_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = _order(
+        cwd=str(tmp_path),
+        offering_snapshot={"provider": "anthropic"},
+    )
+    worker_result = tmp_path / "worker-result.json"
+    worker_result.write_text(json.dumps(_result(order["order_id"])))
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 60_000)
+    assert token
+    roster = recruiter.load_roster(Path(__file__).with_name("offerings.yaml"))
+    config = recruiter.llm_management.load_management_config(roster)
+    manager = {
+        "address": None,
+        "config": config,
+        "generation": 1,
+        "herdr_session": "llm-lab-test",
+        "lease_token": token,
+        "pane": None,
+    }
+    attempted: list[str] = []
+
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {"result": {"pane": {}, "process_info": {}}},
+    )
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *args, **kwargs: "")
+
+    def start(*args: object, **kwargs: object) -> tuple[str, str, str, str]:
+        attempted.append(str(args[6]))
+        number = len(attempted)
+        return (
+            f"checker-pane-{number}",
+            "workspace",
+            f"checker-address-{number}",
+            f"launch-{number}",
+        )
+
+    def health(pane: str, **kwargs: object) -> dict[str, object]:
+        if pane == "checker-pane-1":
+            raise recruiter.RecruiterError("composer startup failed")
+        return {"healthy": True}
+
+    assessment = SimpleNamespace(
+        assessment="healthy",
+        confidence="high",
+        recommended_action="continue",
+        message="healthy",
+    )
+    monkeypatch.setattr(recruiter, "_start_fenced_ledger_agent", start)
+    monkeypatch.setattr(recruiter, "_resize_started_pane", lambda *a, **k: None)
+    monkeypatch.setattr(recruiter, "_wait_for_agent_health", health)
+    monkeypatch.setattr(recruiter, "_wait_typed_file", lambda *a, **k: assessment)
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **k: _cleanup(pane)
+    )
+    monkeypatch.setattr(ledger, "mark_launch_closed", lambda *a, **k: None)
+
+    result = recruiter._run_one_shot_checker(
+        ledger, key, order, manager, "worker-pane", worker_result, 1
+    )
+
+    assert result is assessment
+    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert "--model openai-codex/gpt-5.4-mini --thinking low" in attempted[1]
+    failures = [
+        event
+        for event in ledger.events(key)
+        if event["event"] == "checker-candidate-failed"
+    ]
+    assert [(event["offering_id"], event["reason"]) for event in failures] == [
+        ("cursor-composer-2-5", "composer startup failed")
+    ]
+
+
+def test_checker_cleanup_failure_stops_before_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = _order(
+        cwd=str(tmp_path),
+        offering_snapshot={"provider": "anthropic"},
+    )
+    worker_result = tmp_path / "worker-result.json"
+    worker_result.write_text(json.dumps(_result(order["order_id"])))
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 60_000)
+    assert token
+    roster = recruiter.load_roster(Path(__file__).with_name("offerings.yaml"))
+    manager = {
+        "address": None,
+        "config": recruiter.llm_management.load_management_config(roster),
+        "generation": 1,
+        "herdr_session": "llm-lab-test",
+        "lease_token": token,
+        "pane": None,
+    }
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {"result": {"pane": {}, "process_info": {}}},
+    )
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *args, **kwargs: "")
+
+    def start(*args: object, **kwargs: object) -> tuple[str, str, str, str]:
+        attempted.append(str(args[6]))
+        return ("checker-pane", "workspace", "checker-address", "launch")
+
+    monkeypatch.setattr(recruiter, "_start_fenced_ledger_agent", start)
+    monkeypatch.setattr(recruiter, "_resize_started_pane", lambda *a, **k: None)
+    monkeypatch.setattr(
+        recruiter,
+        "_wait_for_agent_health",
+        lambda *a, **k: (_ for _ in ()).throw(
+            recruiter.RecruiterError("composer startup failed")
+        ),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_close_worker_pane",
+        lambda *a, **k: (_ for _ in ()).throw(
+            recruiter.RecruiterError("checker cleanup unverified")
+        ),
+    )
+
+    with pytest.raises(recruiter.RecruiterError, match="checker cleanup unverified"):
+        recruiter._run_one_shot_checker(
+            ledger, key, order, manager, "worker-pane", worker_result, 1
+        )
+
+    assert len(attempted) == 1
+    assert not [
+        event
+        for event in ledger.events(key)
+        if event["event"] == "checker-candidate-failed"
+    ]
 
 
 def test_account_manager_startup_failure_tries_the_next_eligible_candidate(

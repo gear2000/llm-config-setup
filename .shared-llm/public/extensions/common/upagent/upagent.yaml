@@ -75,8 +75,8 @@
 # LEGACY/NON-PUBLIC LLM lifecycle roles are separate from work routes. They interpret
 # configuration and bounded health evidence; Python remains the only pane/process executor. Role
 # commands may use {brief_path}, {cwd}, and {output_path}. Public façade requests NEVER use these
-# raw commands: they always load `offerings.yaml`, whose code-owned renderer pins the Account
-# Manager to `claude-sonnet-5` / low / `upagent-account-manager`, even when this file exists.
+# raw commands: they always load `offerings.yaml`, whose code-owned renderer applies the ordered
+# Account Manager, Checker, and Sentinel candidates declared there, even when this file exists.
 #
 # mode: direct (legacy route default) — route/controller orders have no standing manager unless
 # their order opts in. Python still owns lease, validation, publication, and terminality; any

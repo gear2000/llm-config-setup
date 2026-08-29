@@ -507,13 +507,31 @@ overlay cannot block an ordinary worker request.
 
 Public workers and management candidates never read a YAML launch command. `offerings.yaml`
 selects approved harness/model identities and effort allowlists, plus the candidate order;
-`offerings.py` validates every reference and renders the exact child argv. Public Account Manager
-and Sentinel candidates are `cursor-composer-2-5`/default first, then
+`offerings.py` validates every reference and renders the exact child argv. Public Account Manager,
+Checker, and Sentinel candidates are `cursor-composer-2-5`/default first, then
 `pi-gpt-5-4-mini`/low. The Recruiter filters the worker's provider and falls back on startup
 failure. A legacy `upagent.yaml` remains only for explicitly route-driven controller compatibility,
 where existing phase routes still provide raw harness/model profiles and may configure singular
 raw lifecycle-role commands; the public candidate-list schema is rejected there. Four launch
 properties remain load-bearing:
+
+### Changing models and management defaults
+
+Edit the kit source, not a generated hub or destination copy:
+
+- `offerings.yaml` is the human-edited roster. Its `offerings:` map lists available worker models;
+  its `management:` block sets the ordered Account Manager, Checker, and Sentinel candidates.
+- `offerings.py` owns the matching `APPROVED` allowlist and command renderer. Adding, removing, or
+  renaming an offering requires the YAML entry and this allowlist to change together; YAML cannot
+  supply executable commands.
+- `offerings_test.py` covers exact roster membership, provider metadata, effort policy, candidate
+  order, and rendered command tokens. Recruiter tests cover provider filtering and startup fallback.
+- For Cursor, run `cursor-agent models` and copy the exact model id, including its embedded effort
+  tier. Cursor offerings use `efforts: [default]` because the model id already selects that tier.
+
+After a change, run the focused offering and Recruiter tests, run `just update` twice, confirm the
+second update reports zero changes, then run `just test`. The update copies this source into the
+shared hub and every registered destination.
 
 1. **Unattended.** Workers start without operator input — every template bypasses
    trust/permission prompts (`claude --dangerously-skip-permissions`,

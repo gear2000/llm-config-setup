@@ -82,6 +82,7 @@ class ManagementConfig:
     account_manager: ManagementRole
     account_manager_candidates: tuple[ManagementCandidate, ...]
     checker: ManagementRole
+    checker_candidates: tuple[ManagementCandidate, ...]
     # Hired ONLY when the Recruiter's mechanical salvage inspection finds contradictory
     # evidence about a vanished worker. A clean hit and a clean miss are both decided in
     # Python and never spawn this role.
@@ -226,6 +227,7 @@ def load_management_config(roster: dict) -> ManagementConfig:
             "management.rescue_on_startup_failure must be a boolean"
         )
     account_manager = raw.get("account_manager")
+    checker = raw.get("checker")
     sentinel = raw.get("sentinel")
     return ManagementConfig(
         account_manager=_role(
@@ -236,7 +238,8 @@ def load_management_config(roster: dict) -> ManagementConfig:
         account_manager_candidates=_management_candidates(
             account_manager, "account_manager"
         ),
-        checker=_role(raw.get("checker"), "checker", DEFAULT_CHECKER_COMMAND),
+        checker=_role(checker, "checker", DEFAULT_CHECKER_COMMAND),
+        checker_candidates=_management_candidates(checker, "checker"),
         rescuer=_role(raw.get("rescuer"), "rescuer", DEFAULT_RESCUER_COMMAND),
         sentinel=_role(sentinel, "sentinel", DEFAULT_SENTINEL_COMMAND),
         sentinel_candidates=_management_candidates(sentinel, "sentinel"),

@@ -106,11 +106,12 @@ management:
     agent: upagent-account-manager
     timeout_ms: 120000
   checker:
-    offering: claude-sonnet-5
-    effort: low
+    candidates:
+      - offering: cursor-composer-2-5
+        effort: default
+      - offering: pi-gpt-5-4-mini
+        effort: low
     agent: upagent-checker
-    expected_agent: claude
-    expected_process: claude
     timeout_ms: 120000
   sentinel:
     candidates:

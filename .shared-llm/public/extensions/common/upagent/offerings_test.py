@@ -35,10 +35,11 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
         {"offering": "pi-gpt-5-4-mini", "effort": "low"},
     ]
     assert roster.management["account_manager"]["candidates"] == expected_candidates
+    assert roster.management["checker"]["candidates"] == expected_candidates
     assert roster.management["sentinel"]["candidates"] == expected_candidates
     assert all(
         candidate["offering"] != "pi-glm-5-3-flash"
-        for role in ("account_manager", "sentinel")
+        for role in ("account_manager", "checker", "sentinel")
         for candidate in roster.management[role]["candidates"]
     )
 
@@ -342,7 +343,7 @@ def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
         offerings.validate_snapshot(foreign)
 
 
-@pytest.mark.parametrize("role_name", ["account_manager", "sentinel"])
+@pytest.mark.parametrize("role_name", ["account_manager", "checker", "sentinel"])
 def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_commands(
     role_name: str,
 ) -> None:

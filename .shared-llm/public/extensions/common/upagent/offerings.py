@@ -274,7 +274,7 @@ def _validate_management(
         "sentinel",
     }
     _strict_keys(management, allowed, "management")
-    for role_name in ("account_manager", "sentinel"):
+    for role_name in ("account_manager", "checker", "sentinel"):
         role = management.get(role_name)
         if not isinstance(role, dict):
             raise OfferingError(f"management.{role_name} must be an object")
@@ -320,36 +320,6 @@ def _validate_management(
                     f"{where} duplicates candidate {offering_id!r}/{effort}"
                 )
             seen.add(identity)
-
-    role = management.get("checker")
-    if not isinstance(role, dict):
-        raise OfferingError("management.checker must be an object")
-    _strict_keys(
-        role,
-        {
-            "offering",
-            "effort",
-            "agent",
-            "expected_agent",
-            "expected_process",
-            "timeout_ms",
-        },
-        "management.checker",
-    )
-    for field in ("offering", "effort", "agent", "expected_agent", "expected_process"):
-        if not isinstance(role.get(field), str) or not role[field]:
-            raise OfferingError(
-                f"management.checker.{field} must be a non-empty string"
-            )
-    offering = offerings.get(role["offering"])
-    if offering is None:
-        raise OfferingError(
-            f"management.checker references unknown offering {role['offering']!r}"
-        )
-    if role["effort"] not in offering.efforts:
-        raise OfferingError(
-            f"management.checker effort {role['effort']!r} is not allowed by {role['offering']!r}"
-        )
 
 
 def validate_snapshot(value: object) -> dict[str, object]:
@@ -497,15 +467,11 @@ def materialize_management(roster: OfferingRoster) -> dict[str, object]:
         "Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available.",
     )
 
-    raw = dict(cast(dict[str, object], management["checker"]))
-    snapshot = roster.resolve(str(raw.pop("offering")), str(raw.pop("effort")))
-    agent = str(raw.pop("agent"))
-    argv = render_argv(snapshot, agent, "{brief_path}")
-    argv[-1] = (
-        "Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."
+    management["checker"] = _materialize_candidate_role(
+        roster,
+        cast(dict[str, object], management["checker"]),
+        "Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit.",
     )
-    raw["command"] = shlex.join(argv)
-    management["checker"] = raw
 
     management["sentinel"] = _materialize_candidate_role(
         roster,

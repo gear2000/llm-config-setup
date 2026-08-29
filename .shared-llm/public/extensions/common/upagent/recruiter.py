@@ -2656,7 +2656,7 @@ def load_roster(path: str | Path) -> dict:
     if not is_public_roster:
         raw_management = data.get("management", {})
         if isinstance(raw_management, dict):
-            for role_name in ("account_manager", "sentinel"):
+            for role_name in ("account_manager", "checker", "sentinel"):
                 role = raw_management.get(role_name)
                 if isinstance(role, dict) and "candidates" in role:
                     raise RecruiterError(
@@ -7668,6 +7668,31 @@ def _ask_manager_about_startup(
     return assessment
 
 
+def _checker_candidates(order: dict, config: Any) -> list[Any]:
+    """Return provider-disjoint public Checker candidates, or the legacy role."""
+    candidates = list(config.checker_candidates)
+    if candidates:
+        worker_provider = _worker_provider(order)
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.provider != worker_provider
+        ]
+        if not eligible:
+            raise RecruiterError(
+                "all configured Checker candidates use worker provider "
+                f"{worker_provider!r}"
+            )
+        return eligible
+    return [
+        llm_management.ManagementCandidate(
+            config.checker,
+            "legacy-unclassified",
+            "legacy-raw-checker",
+        )
+    ]
+
+
 def _run_one_shot_checker(
     ledger: JobLedger,
     key: str,
@@ -7725,9 +7750,7 @@ def _run_one_shot_checker(
             request_id, generation, evidence_path, output_path
         ),
     )
-    command = llm_management.render_role_command(
-        config.checker, brief_path, order["cwd"], output_path
-    )
+    candidates = _checker_candidates(order, config)
     name = _safe_agent_name(f"upagent-check-{check_number}", request_id, generation)
     checker_anchor = (
         manager["pane"] if manager["pane"] is not None else order["cockpit_pane"]
@@ -7736,51 +7759,97 @@ def _run_one_shot_checker(
     lease_token = manager.get("lease_token")
     if not isinstance(lease_token, str) or not lease_token:
         raise RecruiterError("one-shot checker requires the owning lease token")
-    checker_pane, _, _, launch_id = _start_fenced_ledger_agent(
-        ledger,
-        key,
-        lease_token,
-        "checker",
-        name,
-        checker_order,
-        command,
-        split_direction="down",
-        tab_role="oversight",
-        herdr_session=herdr_session,
-        metadata={"check_number": check_number, "generation": generation},
-    )
-    try:
-        _resize_started_pane(
-            checker_pane,
-            split_direction="down",
-            target_fraction=SUPPORT_PANE_FRACTION,
-            role="one-shot checker",
-            herdr_session=herdr_session,
+    failures: list[str] = []
+    assessment: Any | None = None
+    for candidate_number, candidate in enumerate(candidates, start=1):
+        output_path.unlink(missing_ok=True)
+        role = candidate.role
+        command = llm_management.render_role_command(
+            role, brief_path, order["cwd"], output_path
         )
-        _wait_for_agent_health(
-            checker_pane,
-            expected_agent=config.checker.expected_agent,
-            expected_process=config.checker.expected_process,
-            expected_cwd=order["cwd"],
-            timeout_ms=config.startup_timeout_ms,
-            herdr_session=herdr_session,
+        try:
+            checker_pane, _, _, launch_id = _start_fenced_ledger_agent(
+                ledger,
+                key,
+                lease_token,
+                "checker",
+                name,
+                checker_order,
+                command,
+                split_direction="down",
+                tab_role="oversight",
+                herdr_session=herdr_session,
+                metadata={
+                    "candidate_number": candidate_number,
+                    "check_number": check_number,
+                    "generation": generation,
+                    "offering_id": candidate.offering_id,
+                    "provider": candidate.provider,
+                },
+            )
+        except (RecruiterError, OSError) as error:
+            candidate_error = error
+        else:
+            candidate_error = None
+            try:
+                _resize_started_pane(
+                    checker_pane,
+                    split_direction="down",
+                    target_fraction=SUPPORT_PANE_FRACTION,
+                    role="one-shot checker",
+                    herdr_session=herdr_session,
+                )
+                _wait_for_agent_health(
+                    checker_pane,
+                    expected_agent=role.expected_agent,
+                    expected_process=role.expected_process,
+                    expected_cwd=order["cwd"],
+                    timeout_ms=config.startup_timeout_ms,
+                    herdr_session=herdr_session,
+                )
+                assessment = _wait_typed_file(
+                    output_path,
+                    role.timeout_ms,
+                    lambda text_value: lifecycle.parse_check_assessment(
+                        text_value, request_id, generation
+                    ),
+                )
+            except (RecruiterError, OSError) as error:
+                candidate_error = error
+            finally:
+                # Cleanup is a safety boundary, not a candidate failure. If it cannot
+                # prove the old pane absent, stop instead of launching a second Checker.
+                checker_cleanup = _close_worker_pane(
+                    checker_pane, herdr_session=herdr_session
+                )
+                ledger.mark_launch_closed(
+                    key,
+                    launch_id,
+                    checker_pane,
+                    checker_cleanup,
+                    expected_lease_token=lease_token,
+                )
+        if candidate_error is not None:
+            failures.append(
+                f"{candidate.offering_id} ({candidate.provider}): {candidate_error}"
+            )
+            ledger._event(
+                key,
+                "checker-candidate-failed",
+                candidate_number=candidate_number,
+                check_number=check_number,
+                offering_id=candidate.offering_id,
+                provider=candidate.provider,
+                reason=str(candidate_error),
+            )
+            continue
+        break
+    else:
+        raise RecruiterError(
+            "all eligible Checker candidates failed: " + "; ".join(failures)
         )
-        assessment = _wait_typed_file(
-            output_path,
-            config.checker.timeout_ms,
-            lambda text_value: lifecycle.parse_check_assessment(
-                text_value, request_id, generation
-            ),
-        )
-    finally:
-        checker_cleanup = _close_worker_pane(checker_pane, herdr_session=herdr_session)
-        ledger.mark_launch_closed(
-            key,
-            launch_id,
-            checker_pane,
-            checker_cleanup,
-            expected_lease_token=cast(str, manager["lease_token"]),
-        )
+    if assessment is None:
+        raise RecruiterError("Checker candidate succeeded without an assessment")
     ledger._event(
         key,
         "worker-checked",
