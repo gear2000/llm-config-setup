@@ -117,6 +117,10 @@ keys, types, offerings, efforts, personas, specialists, relative/unreadable path
 flags fail before the ledger, manager, pane, or worker. There is no intake LLM, prose repair,
 arbitrary argument materialization, or empty-request acceptance on this path.
 
+Offering policy is resolved from the repository where the UpAgent request starts. A `--cwd` target
+chooses where the worker runs; it does not opt the request into or out of ClaudeX by pointing at
+another registered destination.
+
 `--cockpit-pane` is an invocation-only override for anchoring the order to the caller's own pane.
 It may accompany named flags or `--file`, but it is not a request-defining flag, does not enter the
 closed request object or immutable payload hash, and is not an allowed key inside a request file.
@@ -190,7 +194,7 @@ no-op that also retries removal of a previously swapped runtime-owned residual.
 
 The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing eighteen stable ids: three Claude, one Codex, eight Cursor, and six Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-5-6-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
 
-The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references, and the immutable order snapshot. YAML contains declarations only. Code pins every approved set member, harness, model, provider, effort list, completion style, health identity, executable, command renderer, and preflight. Unknown sets, partial sets, duplicate ids, changed fields, commands in YAML, and management references to absent offerings fail loudly. The runtime roster resolves from the current repository, then the main checkout for a linked worktree, then the generated home roster.
+The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references, and the immutable order snapshot. YAML contains declarations only. Code pins every approved set member, harness, model, provider, effort list, completion style, health identity, executable, command renderer, and preflight. Unknown sets, partial sets, duplicate ids, changed fields, commands in YAML, and management references to absent offerings fail loudly. The runtime roster resolves from the request's starting repository, then the main checkout for a linked worktree, then the generated home roster.
 
 `offerings.py` renders child tokens: Claude uses `--effort`, Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit `--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default` effort. ClaudeX uses the `claudex` executable with the exact `gpt-5.6-sol` model and remains interactive; because the wrapper uses `exec`, Herdr health still requires the final `claude` process. Before any ClaudeX worker pane is created, UpAgent requires both `claudex` and `claudex-doctor`, runs `claudex-doctor gpt-5.6-sol`, and blocks on a missing executable, proxy/OAuth failure, or absent model. It never substitutes native Claude. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass no lifecycle validation.
 

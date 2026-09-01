@@ -8494,6 +8494,30 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     assert "management" not in order
 
 
+def test_consult_dispatch_uses_active_public_roster_for_snapshot_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _specialist_world(tmp_path, monkeypatch)
+    public_roster = (
+        repo
+        / ".shared-llm/public/extensions/common/upagent/offerings.yaml"
+    )
+    public_roster.parent.mkdir(parents=True)
+    public_roster.write_text(recruiter.offering_catalog.render_roster(["standard"]))
+    consult = _consult_file(tmp_path)
+    roster_paths: list[str] = []
+
+    def dispatch(order_path: str, roster_path: str) -> int:
+        roster_paths.append(roster_path)
+        return _answering_dispatch(_cited_answer(), [])(order_path, roster_path)
+
+    monkeypatch.setattr(recruiter, "cmd_dispatch", dispatch)
+
+    recruiter.cmd_consult(str(consult), "legacy-upagent.yaml")
+
+    assert roster_paths == [str(public_roster)]
+
+
 def test_a_consult_order_is_not_filed_under_the_callers_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

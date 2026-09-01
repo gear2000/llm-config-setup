@@ -1189,6 +1189,10 @@ def selected_offering_sets(
     return _validated_upagent_block(destination["upagent"], "destination")
 
 
+def has_configured_update_work(cfg: dict[str, Any]) -> bool:
+    return bool(cfg["destinations"] or cfg["global"] or "upagent" in cfg)
+
+
 def _write_if_changed(path: Path, content: str) -> bool:
     # A leaf symlink is not a managed generated file even when its target has
     # equal bytes. Replace the link itself instead of adopting its external target.
@@ -4319,8 +4323,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     # manifest exists, a previous run deployed something and update must still
     # take the lock and prune it, exactly as the docs promise. The informational
     # error is only for a machine that never deployed anything at all.
-    empty = not cfg["destinations"] and not cfg["global"]
-    if empty and not manifest_path().is_file():
+    if not has_configured_update_work(cfg) and not manifest_path().is_file():
         sys.exit(
             "error: nothing configured. Run `just configure -d <repo> -l cc,pi` first."
         )

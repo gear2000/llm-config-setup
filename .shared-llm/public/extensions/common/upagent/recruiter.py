@@ -2637,11 +2637,17 @@ class JobLedger:
 # --- pure, unit-testable core ------------------------------------------------
 
 
-def _resolved_public_offering_roster() -> Any:
+def _resolved_public_offering_roster_path() -> Path:
     home = Path(command_runtime.getenv("HOME", str(Path.home())))
     try:
-        path = offering_catalog.resolve_roster_path(command_runtime.current_cwd(), home)
-        return offering_catalog.load_roster(path)
+        return offering_catalog.resolve_roster_path(command_runtime.current_cwd(), home)
+    except OfferingError as error:
+        raise RecruiterError(str(error)) from error
+
+
+def _resolved_public_offering_roster() -> Any:
+    try:
+        return offering_catalog.load_roster(_resolved_public_offering_roster_path())
     except OfferingError as error:
         raise RecruiterError(str(error)) from error
 
@@ -14155,7 +14161,7 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
 
         # In-process, no subprocess hop: the door is a caller of the ordinary lifecycle, not a
         # second one. This blocks until the durable ORDER_RECEIPT exists.
-        cmd_dispatch(str(artifacts["order"]), roster_path)
+        cmd_dispatch(str(artifacts["order"]), str(_resolved_public_offering_roster_path()))
         receipt["order_receipt_state"] = "finished"
         _log_request_event(
             "CONSULT_WORKER_DONE",

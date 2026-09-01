@@ -705,6 +705,28 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     assert c["create"] == 0 and c["repoint"] == 0 and c["prune"] == 0
 
 
+def test_update_materializes_home_roster_for_upagent_only_config(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    m.save_config(
+        {
+            "source": str(m.DEFAULT_SOURCE),
+            "global": [],
+            "destinations": [],
+            "upagent": {"offering_sets": ["standard", "claudex"]},
+        }
+    )
+
+    m.cmd_update(argparse.Namespace(verbose=False))
+
+    path = home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    roster = m._upagent_offerings_module().load_roster(path)
+    assert roster.selected_sets == ("standard", "claudex")
+
+
 # --- global home-skill routing ---------------------------------------------
 
 
