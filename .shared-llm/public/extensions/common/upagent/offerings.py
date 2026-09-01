@@ -146,6 +146,7 @@ DEFAULT_SETS = ("standard",)
 ROSTER_RELATIVE_PATH = Path(
     ".shared-llm/public/extensions/common/upagent/offerings.yaml"
 )
+MAIN_BRANCH_REF = "refs/heads/main"
 
 
 # Harness completion semantics. "exec" harnesses run one non-interactive
@@ -362,6 +363,46 @@ def load_roster(path: str | Path) -> OfferingRoster:
     return _parse_roster(raw, source)
 
 
+def _worktree_records(porcelain: str) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in porcelain.splitlines():
+        if not line:
+            if current:
+                records.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value
+    if current:
+        records.append(current)
+    return records
+
+
+def _roster_in_main_worktree(current: Path) -> Path | None:
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(current), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if probe.returncode != 0:
+        return None
+    for record in _worktree_records(probe.stdout):
+        if "bare" in record or record.get("branch") != MAIN_BRANCH_REF:
+            continue
+        worktree = record.get("worktree")
+        if not worktree:
+            continue
+        candidate = Path(worktree).resolve() / ROSTER_RELATIVE_PATH
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def resolve_roster_path(cwd: Path, home: Path | None = None) -> Path:
     """Resolve current repo, linked main checkout, then machine home roster."""
     current = cwd.resolve()
@@ -369,28 +410,9 @@ def resolve_roster_path(cwd: Path, home: Path | None = None) -> Path:
         candidate = parent / ROSTER_RELATIVE_PATH
         if candidate.is_file():
             return candidate
-    probe: subprocess.CompletedProcess[str] | None = None
-    probe_error: OSError | subprocess.TimeoutExpired | None = None
-    try:
-        probe = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(current),
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        probe_error = error
-    if probe is not None and probe.returncode == 0 and probe.stdout.strip():
-        candidate = Path(probe.stdout.strip()).parent / ROSTER_RELATIVE_PATH
-        if candidate.is_file():
-            return candidate
+    main_roster = _roster_in_main_worktree(current)
+    if main_roster is not None:
+        return main_roster
     machine_home = home or Path(os.environ.get("HOME", str(Path.home())))
     candidate = (
         machine_home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
@@ -403,10 +425,9 @@ def resolve_roster_path(cwd: Path, home: Path | None = None) -> Path:
     canonical_sibling = Path(__file__).resolve().with_name("offerings.yaml")
     if canonical_sibling.is_file():
         return canonical_sibling
-    detail = f"; git worktree probe failed: {probe_error}" if probe_error else ""
     raise OfferingError(
         "no generated UpAgent offering roster found in the current repository, "
-        f"its main checkout, or the home runtime; run `just update`{detail}"
+        "its main checkout, or the home runtime; run `just update`"
     )
 
 
