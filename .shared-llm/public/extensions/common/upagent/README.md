@@ -188,18 +188,11 @@ authenticated terminal cancellation, audit, identical reattachment, and changed-
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
 no-op that also retries removal of a previously swapped runtime-owned residual.
 
-`offerings.yaml` contains exactly eighteen validated stable ids: three Claude, one Codex,
-eight Cursor, and six Pi.
-The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,
-and the immutable order snapshot. YAML selects only harness, model, allowed efforts, and the
-optional declared `completion_style` (validated against code-owned policy). It cannot
-supply a public worker or Account Manager shell command. `offerings.py` renders child tokens:
-Claude uses `--effort`,
-Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit
-`--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default`
-effort (an omitted `--effort` normalizes to it, producing an identical payload hash) and the
-renderer emits no effort token. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass
-no lifecycle validation.
+The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing eighteen stable ids: three Claude, one Codex, eight Cursor, and six Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-5-6-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
+
+The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references, and the immutable order snapshot. YAML contains declarations only. Code pins every approved set member, harness, model, provider, effort list, completion style, health identity, executable, command renderer, and preflight. Unknown sets, partial sets, duplicate ids, changed fields, commands in YAML, and management references to absent offerings fail loudly. The runtime roster resolves from the current repository, then the main checkout for a linked worktree, then the generated home roster.
+
+`offerings.py` renders child tokens: Claude uses `--effort`, Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit `--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default` effort. ClaudeX uses the `claudex` executable with the exact `gpt-5.6-sol` model and remains interactive; because the wrapper uses `exec`, Herdr health still requires the final `claude` process. Before any ClaudeX worker pane is created, UpAgent requires both `claudex` and `claudex-doctor`, runs `claudex-doctor gpt-5.6-sol`, and blocks on a missing executable, proxy/OAuth failure, or absent model. It never substitutes native Claude. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass no lifecycle validation.
 
 A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
 atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
@@ -253,7 +246,7 @@ Durable files are the source of truth; terminal text is display-only.
   foreground process, detected harness, and cwd—not merely pane creation. Manager health and its
   typed assessment are reported separately and may degrade without vetoing worker startup.
 - Before launch, Python checks absolute paths, required model/effort values, harness-native model
-  shape, executable presence, and (for Claude `--agent` routes) the actual persona file. Those
+  shape, executable presence, ClaudeX proxy/OAuth/model readiness, and (for Claude `--agent` routes) the actual persona file. Those
   facts are given to the manager. A bad request is explained to the requester and terminalized
   without ever creating a worker, even if the LLM mistakenly recommends approval.
 - Public requests use one dedicated advisory Account Manager selected from the ordered approved

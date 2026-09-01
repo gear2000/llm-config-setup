@@ -209,12 +209,14 @@ CURSOR_RECONNECT_ATTEMPT_RE = re.compile(
 )
 EXPECTED_HARNESS_AGENT = {
     "claude": "claude",
+    "claudex": "claude",
     "codex": "codex",
     "pi": "pi",
     "cursor": "cursor",
 }
 EXPECTED_HARNESS_PROCESS = {
     "claude": "claude",
+    "claudex": "claude",
     "codex": "codex",
     "pi": "pi",
     "cursor": "cursor-agent",
@@ -2635,6 +2637,15 @@ class JobLedger:
 # --- pure, unit-testable core ------------------------------------------------
 
 
+def _resolved_public_offering_roster() -> Any:
+    home = Path(command_runtime.getenv("HOME", str(Path.home())))
+    try:
+        path = offering_catalog.resolve_roster_path(command_runtime.current_cwd(), home)
+        return offering_catalog.load_roster(path)
+    except OfferingError as error:
+        raise RecruiterError(str(error)) from error
+
+
 def load_roster(path: str | Path) -> dict:
     """Read + validate the launch-template roster (upagent.yaml). Fail-loud.
 
@@ -2677,10 +2688,18 @@ def load_roster(path: str | Path) -> dict:
             sorted({item.harness for item in public_roster.offerings.values()}),
             "__code_owned_offering_renderer__",
         )
+        # Immutable snapshots prevent later mutation, but they must still belong
+        # to this generated roster. Keep the enabled ID set in memory only.
+        data["_public_offering_ids"] = frozenset(public_roster.offerings)
         data["management"] = offering_catalog.materialize_management(public_roster)
     harnesses = data.get("harnesses")
     if not isinstance(harnesses, dict) or not harnesses:
         raise RecruiterError(f"{p} must define a non-empty `harnesses:` map")
+    if not is_public_roster and "claudex" in harnesses:
+        raise RecruiterError(
+            f"{p} legacy roster cannot define `claudex`; ClaudeX requires a "
+            "validated public offering snapshot and preflight"
+        )
     for name, tmpl in harnesses.items():
         if name not in KNOWN_HARNESSES:
             raise RecruiterError(
@@ -2893,7 +2912,7 @@ def _validate_specialist(entry: dict) -> None:
         if not isinstance(entry.get(key), str) or not entry[key]:
             raise RecruiterError(f"every specialist needs a non-empty `{key}`: {entry}")
     try:
-        offering_catalog.load_roster().resolve(entry["offering"], entry["effort"])
+        _resolved_public_offering_roster().resolve(entry["offering"], entry["effort"])
     except OfferingError as error:
         raise RecruiterError(
             f"specialist {entry['name']!r} has invalid offering selection: {error}"
@@ -3016,7 +3035,7 @@ def _specialist_description(roster: dict, entry: dict) -> str:
 def _specialist_index(roster: dict) -> dict[str, dict]:
     """The merged roster keyed by name, with descriptions resolved. In memory only — it is
     cheap to compute, and a persisted copy is a cache with a staleness problem and no owner."""
-    offering_roster = offering_catalog.load_roster()
+    offering_roster = _resolved_public_offering_roster()
     return {
         entry["name"]: {
             "name": entry["name"],
@@ -3209,6 +3228,14 @@ def resolve_launch_command(order: dict, roster: dict) -> str:
     if snapshot is not None:
         try:
             selected = offering_catalog.validate_snapshot(snapshot)
+            enabled_ids = roster.get("_public_offering_ids")
+            if (
+                not isinstance(enabled_ids, frozenset)
+                or selected["id"] not in enabled_ids
+            ):
+                raise RecruiterError(
+                    f"offering {selected['id']!r} is not enabled by this runtime roster"
+                )
             if (
                 order.get("harness") != selected["harness"]
                 or order.get("model") != selected["model"]
@@ -3222,6 +3249,14 @@ def resolve_launch_command(order: dict, roster: dict) -> str:
             )
         except OfferingError as error:
             raise RecruiterError(f"invalid offering snapshot: {error}") from error
+    if "_public_offering_ids" in roster:
+        raise RecruiterError(
+            "public offering roster requires an immutable offering_snapshot"
+        )
+    if order.get("harness") == "claudex":
+        raise RecruiterError(
+            "ClaudeX requires a validated public offering snapshot and preflight"
+        )
     harness = order["harness"]
     template = roster.get("harnesses", {}).get(harness)
     if template is None:
@@ -3263,7 +3298,7 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
         errors.append(
             "Pi model must use provider/id form; effort is a separate --thinking token"
         )
-    if order["harness"] in ("claude", "codex") and "/" in model:
+    if order["harness"] in ("claude", "claudex", "codex") and "/" in model:
         errors.append(
             f"{order['harness']} model must use a harness-native id without provider/"
         )
@@ -3277,6 +3312,12 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
     binary = words[0] if words else None
     if binary and shutil.which(binary) is None:
         errors.append(f"launch executable is not on PATH: {binary}")
+    snapshot = order.get("offering_snapshot")
+    if snapshot is not None:
+        try:
+            offering_catalog.preflight_snapshot(snapshot)
+        except OfferingError as error:
+            errors.append(str(error))
     agent_candidates: list[str] = []
     if order["harness"] == "claude" and "--agent {agent}" in template:
         agent_file = f"{order['agent']}.md"
@@ -4024,7 +4065,7 @@ def _start_fenced_ledger_agent(
 
     # Every managed pane (worker, manager, checker, rescue) passes through here.
     # Claude launches need the cwd pre-trusted or the pane hangs at the dialog.
-    if launch.lstrip().startswith("claude"):
+    if launch.lstrip().startswith(("claude", "claudex")):
         _ensure_claude_folder_trust(order["cwd"])
 
     launch_id = ledger.begin_launch(
@@ -8174,6 +8215,9 @@ def _run_order(
         )
         execution_order["instructions_path"] = str(effective_instructions)
         launch = resolve_launch_command(execution_order, roster)
+        snapshot = execution_order.get("offering_snapshot")
+        if snapshot is not None:
+            offering_catalog.preflight_snapshot(snapshot)
         management_config = llm_management.load_management_config(roster)
         request_id = lifecycle.request_identity(order)
         # The attempt number keeps a rescue relaunch's agent name distinct from attempt 1's.

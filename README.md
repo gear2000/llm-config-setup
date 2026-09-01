@@ -31,6 +31,7 @@ just init -o mac|ubuntu          # one-time OS prereq check (python3 + just)
 just configure -s ~/.shared-llm  # set the source hub (default; run once)
 just configure -d /path/to/repo -l cc,pi   # register a destination repo + its harness list
 just configure -g cc,pi          # set the GLOBAL (home / all-projects) harness list
+just configure --offering-sets standard,claudex  # optional machine UpAgent roster
 just descriptions                # audit owned discovery descriptions without writing files
 just update                      # the headline command: copy → compose → link (+ global), every destination
 just update -v                   # same, with per-file detail printed
@@ -52,6 +53,9 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 ```yaml
 source: ~/.shared-llm            # the local hub: kit common content is copied here, then to each dest
 global: [cc, pi]                 # home / all-projects harnesses to set up (omit to skip the global step)
+upagent:
+  offering_sets: [standard]      # optional; omission is exactly the same safe default
+
 destinations:
   - path: ~/project/repo/foo
     harnesses: [cc, pi]
@@ -59,9 +63,17 @@ destinations:
       PROJECT_NAME: Foo
   - path: ~/project/repo/bar
     harnesses: [cc, pi, codex]
+    upagent:
+      offering_sets: [standard]  # optional replacement, not a merge with machine policy
 ```
 
 `just update` reads this file and runs every operation centrally against the paths it lists. Because the engine is never copied into a destination, it can never drift out of sync with a per-repo copy of itself.
+
+### Optional UpAgent offering sets
+
+UpAgent offering selection is a focused allowlist, not a generic YAML merge. The field may contain only code-approved set names. Omission means `[standard]`. A machine can opt in with `just configure --offering-sets standard,claudex`; `just configure -d /path/to/repo --offering-sets standard` gives that destination a replacement and removes ClaudeX there. Unknown, duplicate, empty, or malformed selections stop the update.
+
+The engine generates one deterministic `offerings.yaml` for each destination and one under `~/.shared-llm/generated/extensions/common/upagent/`. YAML can select approved sets only. Offering ids, harness commands, executables, models, providers, effort lists, completion semantics, health identities, management candidates, and preflights remain code-owned. UpAgent resolves the roster from the current repository, the main checkout for a linked worktree, then the home runtime. It does not silently fall back to another offering.
 
 > **Skill placement per harness** (`do-*` → Pi, `cc-*` → Claude, common → both) and how to verify it on any machine: see **[HARNESS-ROUTING.md](HARNESS-ROUTING.md)**.
 
@@ -153,6 +165,9 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
       agents/<name>.yaml          — recipe: one generic agent persona (roster count in Inventory)
     llm/pi/common/                — Pi harness runtime config (NOT a compose input; see below)
     llm/claude/common/            — Claude harness runtime config (NOT a compose input; see below)
+    extensions/common/upagent/    — UpAgent runtime plus code-owned offering-set renderer
+      offerings.d/                — approved `standard` and optional `claudex` declarations
+      offerings-management.yaml   — fixed lifecycle candidates, separate from set selection
     extensions/this_repo/         — tool-module extensions (pi-hub, tf); justfile-imported
 tools/
   harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
@@ -256,6 +271,7 @@ When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` 
 3. **Pi runtime** — copies the bundled Pi extensions + agent personas into `~/.shared-llm/generated/` and symlinks them from there into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks and the statusline into the generated tree and links them into `~/.claude/hooks/` and `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent — settings stays a **real file** on purpose: Claude Code mutates it at runtime, and a rename-style save would silently replace a symlink.
 5. **Herdr config** — deploys `herdr-config.toml` the same way, as a generated copy linked at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning.
+6. **UpAgent offering roster** — always materializes the machine-selected, code-validated roster at `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml`, even when no global harness is selected, so repository-independent calls have the same explicit machine policy.
 
 Home links always point into `~/.shared-llm/generated/`, never into the kit checkout, so moving or deleting the repository never breaks a live runtime.
 

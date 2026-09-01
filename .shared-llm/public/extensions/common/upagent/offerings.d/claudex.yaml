@@ -1,0 +1,8 @@
+# Optional ClaudeX offering set. Selection is machine-local; the command, provider,
+# model, effort allowlist, health identity, and preflight stay code-owned.
+schema_version: 1
+offerings:
+  claudex-gpt-5-6-sol:
+    harness: claudex
+    model: gpt-5.6-sol
+    efforts: [low, medium, high, xhigh, max]

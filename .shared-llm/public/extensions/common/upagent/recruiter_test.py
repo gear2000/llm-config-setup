@@ -1679,6 +1679,45 @@ def test_resolve_effort_absent_substitutes_empty() -> None:
     assert "effort:[]" in cmd
 
 
+def test_resolve_rejects_snapshot_not_enabled_by_runtime_roster(
+    tmp_path: Path,
+) -> None:
+    roster_path = tmp_path / "offerings.yaml"
+    roster_path.write_text(recruiter.offering_catalog.render_roster(["standard"]))
+    roster = recruiter.load_roster(roster_path)
+    snapshot = recruiter.offering_catalog.load_selected_roster(
+        ["standard", "claudex"]
+    ).resolve("claudex-gpt-5-6-sol", "high")
+    order = _order(
+        harness="claudex",
+        model="gpt-5.6-sol",
+        effort="high",
+        offering_snapshot=snapshot,
+    )
+
+    with pytest.raises(RecruiterError, match="not enabled"):
+        recruiter.resolve_launch_command(order, roster)
+
+
+def test_resolve_rejects_snapshotless_order_with_public_roster(
+    tmp_path: Path,
+) -> None:
+    roster_path = tmp_path / "offerings.yaml"
+    roster_path.write_text(recruiter.offering_catalog.render_roster(["standard"]))
+    roster = recruiter.load_roster(roster_path)
+
+    with pytest.raises(RecruiterError, match="requires an immutable offering_snapshot"):
+        recruiter.resolve_launch_command(_order(), roster)
+
+
+def test_legacy_roster_cannot_define_claudex(tmp_path: Path) -> None:
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text("harnesses:\n  claudex: claudex {model} --effort {effort}\n")
+
+    with pytest.raises(RecruiterError, match="legacy roster cannot define `claudex`"):
+        recruiter.load_roster(roster_path)
+
+
 def test_configuration_inspection_finds_missing_agent_before_launch(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1716,6 +1755,45 @@ def test_configuration_inspection_accepts_existing_agent_and_binary(
     roster = {"harnesses": {"claude": "claude --agent {agent} --model {model}"}}
 
     assert recruiter.inspect_worker_configuration(order, roster)["valid"] is True
+
+
+def test_configuration_inspection_blocks_claudex_when_preflight_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Do work.\n")
+    snapshot = recruiter.offering_catalog.load_selected_roster(
+        ["standard", "claudex"]
+    ).resolve("claudex-gpt-5-6-sol", "high")
+    order = _order(
+        harness="claudex",
+        model="gpt-5.6-sol",
+        effort="high",
+        cwd=str(tmp_path),
+        instructions_path=str(instructions),
+        result_path=str(tmp_path / "result.json"),
+        offering_snapshot=snapshot,
+    )
+    roster_path = tmp_path / "offerings.yaml"
+    roster_path.write_text(
+        recruiter.offering_catalog.render_roster(["standard", "claudex"])
+    )
+    roster = recruiter.load_roster(roster_path)
+    monkeypatch.setattr(recruiter.shutil, "which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr(
+        recruiter.offering_catalog,
+        "preflight_snapshot",
+        lambda _snapshot: (_ for _ in ()).throw(
+            recruiter.OfferingError("ClaudeX preflight failed: proxy unavailable")
+        ),
+    )
+
+    evidence = recruiter.inspect_worker_configuration(order, roster)
+
+    assert evidence["valid"] is False
+    assert str(evidence["binary"]) == "claudex"
+    assert any("proxy unavailable" in error for error in evidence["errors"])
+    assert str(evidence["launch_resolved"]) == "True"
 
 
 def test_resolve_unknown_placeholder_fails() -> None:

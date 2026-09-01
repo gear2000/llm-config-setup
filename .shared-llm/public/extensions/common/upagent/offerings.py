@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +19,47 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Omitted and explicit "default" requests normalize to the same snapshot/hash.
 DEFAULT_EFFORT = "default"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys at every level."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    result: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in result
+        except TypeError as error:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
+
+
+def _load_yaml(text: str) -> object:
+    return yaml.load(text, Loader=_UniqueKeyLoader)
+
 
 APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-fable-5": ("claude", "claude-fable-5", EFFORTS, "anthropic"),
@@ -88,7 +132,20 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         ("low", "high", "max"),
         "openrouter",
     ),
+    "claudex-gpt-5-6-sol": ("claudex", "gpt-5.6-sol", EFFORTS, "openai"),
 }
+
+STANDARD_IDS = tuple(
+    offering_id for offering_id in APPROVED if offering_id != "claudex-gpt-5-6-sol"
+)
+APPROVED_SETS: dict[str, tuple[str, ...]] = {
+    "standard": STANDARD_IDS,
+    "claudex": ("claudex-gpt-5-6-sol",),
+}
+DEFAULT_SETS = ("standard",)
+ROSTER_RELATIVE_PATH = Path(
+    ".shared-llm/public/extensions/common/upagent/offerings.yaml"
+)
 
 
 # Harness completion semantics. "exec" harnesses run one non-interactive
@@ -97,6 +154,7 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
 # addressable agent that can accept exactly one same-worker repair prompt.
 COMPLETION_STYLES: dict[str, str] = {
     "claude": "interactive",
+    "claudex": "interactive",
     "codex": "exec",
     "cursor": "interactive",
     "pi": "interactive",
@@ -106,6 +164,8 @@ COMPLETION_STYLES: dict[str, str] = {
 # public YAML selects offerings, but cannot select an executable or process identity.
 MANAGEMENT_HEALTH: dict[str, tuple[str, str]] = {
     "claude": ("claude", "claude"),
+    # The wrapper execs Claude Code, so Herdr observes the final `claude` process.
+    "claudex": ("claude", "claude"),
     "codex": ("codex", "codex"),
     "cursor": ("cursor", "cursor-agent"),
     "pi": ("pi", "pi"),
@@ -152,6 +212,7 @@ class OfferingRoster:
     offerings: dict[str, Offering]
     management: dict[str, object]
     source: Path
+    selected_sets: tuple[str, ...]
 
     def resolve(self, offering_id: str, effort: str | None) -> dict[str, object]:
         offering = self.offerings.get(offering_id)
@@ -190,14 +251,49 @@ def _strict_keys(value: dict[str, Any], allowed: set[str], where: str) -> None:
         raise OfferingError(f"{where} has unknown keys: {', '.join(unknown)}")
 
 
-def load_roster(path: str | Path | None = None) -> OfferingRoster:
-    source = Path(path or Path(__file__).with_name("offerings.yaml")).resolve()
-    try:
-        raw = yaml.safe_load(source.read_text())
-    except (OSError, yaml.YAMLError) as error:
+def normalize_offering_sets(value: object) -> tuple[str, ...]:
+    """Validate one machine/destination selection and return code-owned order."""
+    if not isinstance(value, (list, tuple)) or not value:
+        raise OfferingError("upagent.offering_sets must be a non-empty list")
+    if not all(isinstance(item, str) and item for item in value):
+        raise OfferingError("upagent.offering_sets must contain non-empty strings")
+    if len(set(value)) != len(value):
+        raise OfferingError("upagent.offering_sets must not contain duplicates")
+    unknown = sorted(set(value) - set(APPROVED_SETS))
+    if unknown:
         raise OfferingError(
-            f"offering roster {source} is unreadable or invalid YAML: {error}"
-        ) from error
+            "unknown UpAgent offering set(s): "
+            + ", ".join(unknown)
+            + "; expected one or more of "
+            + ", ".join(APPROVED_SETS)
+        )
+    return tuple(name for name in APPROVED_SETS if name in value)
+
+
+def _selected_sets_for_ids(ids: set[str]) -> tuple[str, ...]:
+    unknown = sorted(ids - set(APPROVED))
+    if unknown:
+        raise OfferingError("offering roster has unknown ids: " + ", ".join(unknown))
+    selected: list[str] = []
+    covered: set[str] = set()
+    for name, approved_ids in APPROVED_SETS.items():
+        approved = set(approved_ids)
+        present = ids & approved
+        if present and present != approved:
+            missing = sorted(approved - present)
+            raise OfferingError(
+                f"offering roster contains only part of approved set {name!r}; "
+                f"missing {', '.join(missing)}"
+            )
+        if present:
+            selected.append(name)
+            covered.update(approved)
+    if not selected or covered != ids:
+        raise OfferingError("offering roster does not equal an approved set union")
+    return tuple(selected)
+
+
+def _parse_roster(raw: object, source: Path) -> OfferingRoster:
     if not isinstance(raw, dict):
         raise OfferingError(f"offering roster {source} must be one YAML object")
     _strict_keys(raw, {"schema_version", "offerings", "management"}, "offering roster")
@@ -206,20 +302,15 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
     values = raw.get("offerings")
     if not isinstance(values, dict):
         raise OfferingError("offering roster must define an offerings object")
-    if set(values) != set(APPROVED):
-        missing = sorted(set(APPROVED) - set(values))
-        extra = sorted(set(values) - set(APPROVED))
-        detail = []
-        if missing:
-            detail.append("missing " + ", ".join(missing))
-        if extra:
-            detail.append("unknown " + ", ".join(extra))
-        raise OfferingError(
-            f"offering roster must contain exactly the {len(APPROVED)} approved ids: "
-            + "; ".join(detail)
-        )
+    selected_sets = _selected_sets_for_ids(set(values))
+    expected_order = [
+        offering_id
+        for set_name in selected_sets
+        for offering_id in APPROVED_SETS[set_name]
+    ]
     parsed: dict[str, Offering] = {}
-    for offering_id, expected in APPROVED.items():
+    for offering_id in expected_order:
+        expected = APPROVED[offering_id]
         value = values[offering_id]
         if _ID_RE.fullmatch(offering_id) is None or not isinstance(value, dict):
             raise OfferingError(
@@ -257,7 +348,152 @@ def load_roster(path: str | Path | None = None) -> OfferingRoster:
     if not isinstance(management, dict):
         raise OfferingError("offering roster management must be an object")
     _validate_management(management, parsed)
-    return OfferingRoster(parsed, dict(management), source)
+    return OfferingRoster(parsed, dict(management), source, selected_sets)
+
+
+def load_roster(path: str | Path) -> OfferingRoster:
+    source = Path(path).resolve()
+    try:
+        raw = _load_yaml(source.read_text())
+    except (OSError, yaml.YAMLError) as error:
+        raise OfferingError(
+            f"offering roster {source} is unreadable or invalid YAML: {error}"
+        ) from error
+    return _parse_roster(raw, source)
+
+
+def resolve_roster_path(cwd: Path, home: Path | None = None) -> Path:
+    """Resolve current repo, linked main checkout, then machine home roster."""
+    current = cwd.resolve()
+    for parent in (current, *current.parents):
+        candidate = parent / ROSTER_RELATIVE_PATH
+        if candidate.is_file():
+            return candidate
+    probe: subprocess.CompletedProcess[str] | None = None
+    probe_error: OSError | subprocess.TimeoutExpired | None = None
+    try:
+        probe = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(current),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        probe_error = error
+    if probe is not None and probe.returncode == 0 and probe.stdout.strip():
+        candidate = Path(probe.stdout.strip()).parent / ROSTER_RELATIVE_PATH
+        if candidate.is_file():
+            return candidate
+    machine_home = home or Path(os.environ.get("HOME", str(Path.home())))
+    candidate = (
+        machine_home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    )
+    if candidate.is_file():
+        return candidate
+    # Source-tree tests materialize the same generated sibling that a deployed
+    # canonical main-checkout module has. It is checked only after the documented
+    # repository/worktree/home chain, so it never shadows machine policy.
+    canonical_sibling = Path(__file__).resolve().with_name("offerings.yaml")
+    if canonical_sibling.is_file():
+        return canonical_sibling
+    detail = f"; git worktree probe failed: {probe_error}" if probe_error else ""
+    raise OfferingError(
+        "no generated UpAgent offering roster found in the current repository, "
+        f"its main checkout, or the home runtime; run `just update`{detail}"
+    )
+
+
+def _read_set(path: Path, expected_ids: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+    try:
+        text = path.read_text()
+        raw = _load_yaml(text)
+    except (OSError, yaml.YAMLError) as error:
+        raise OfferingError(
+            f"offering set {path} is unreadable or invalid YAML: {error}"
+        ) from error
+    if not isinstance(raw, dict):
+        raise OfferingError(f"offering set {path} must be one YAML object")
+    _strict_keys(raw, {"schema_version", "offerings"}, f"offering set {path.name}")
+    if raw.get("schema_version") != 1 or not isinstance(raw.get("offerings"), dict):
+        raise OfferingError(f"offering set {path.name} has invalid schema")
+    values = cast(dict[str, Any], raw["offerings"])
+    if list(values) != list(expected_ids):
+        raise OfferingError(
+            f"offering set {path.name} must contain exactly: {', '.join(expected_ids)}"
+        )
+    return text, values
+
+
+def render_roster(
+    selected_sets: object,
+    source_dir: Path | None = None,
+) -> str:
+    """Render an exact, deterministic union of approved offering fragments."""
+    selected = normalize_offering_sets(selected_sets)
+    root = source_dir or Path(__file__).resolve().parent
+    merged: dict[str, Any] = {}
+    texts: dict[str, str] = {}
+    for name in selected:
+        text, values = _read_set(
+            root / "offerings.d" / f"{name}.yaml", APPROVED_SETS[name]
+        )
+        duplicate_ids = set(merged) & set(values)
+        if duplicate_ids:
+            raise OfferingError(
+                f"offering set {name!r} duplicates ids: {', '.join(sorted(duplicate_ids))}"
+            )
+        merged.update(values)
+        texts[name] = text
+    management_path = root / "offerings-management.yaml"
+    try:
+        management_text = management_path.read_text()
+        management_raw = _load_yaml(management_text)
+    except (OSError, yaml.YAMLError) as error:
+        raise OfferingError(
+            f"offering management policy {management_path} is unreadable or invalid YAML: {error}"
+        ) from error
+    if not isinstance(management_raw, dict):
+        raise OfferingError("offering management policy must be one YAML object")
+    _strict_keys(management_raw, {"management"}, "offering management policy")
+
+    # Standard is required by the fixed management candidates. Keeping its authored text as
+    # the base preserves the pre-offering-set standard roster byte-for-byte.
+    if "standard" not in texts:
+        raise OfferingError(
+            "selected offering sets must include standard management candidates"
+        )
+    body = texts["standard"].rstrip()
+    for name in selected:
+        if name == "standard":
+            continue
+        marker = "offerings:\n"
+        if marker not in texts[name]:
+            raise OfferingError(f"offering set {name!r} has no offerings mapping")
+        body += "\n" + texts[name].split(marker, 1)[1].rstrip()
+    rendered = body + "\n\n" + management_text.lstrip("\n")
+    parsed = _load_yaml(rendered)
+    roster = _parse_roster(parsed, Path("<rendered-offering-roster>"))
+    if roster.selected_sets != selected or list(roster.offerings) != list(merged):
+        raise OfferingError(
+            "rendered offering roster does not equal the selected set union"
+        )
+    return rendered
+
+
+def load_selected_roster(
+    selected_sets: object = DEFAULT_SETS,
+    source_dir: Path | None = None,
+) -> OfferingRoster:
+    """Assemble and parse approved source fragments without writing an output."""
+    rendered = render_roster(selected_sets, source_dir)
+    return _parse_roster(_load_yaml(rendered), Path("<approved-offering-sets>"))
 
 
 def _validate_management(
@@ -376,6 +612,17 @@ def render_argv(snapshot: object, persona: str, instructions_path: str) -> list[
             effort,
             prompt,
         ]
+    if harness == "claudex":
+        return [
+            "claudex",
+            model,
+            "--dangerously-skip-permissions",
+            "--agent",
+            persona,
+            "--effort",
+            effort,
+            prompt,
+        ]
     if harness == "codex":
         return [
             "codex",
@@ -422,6 +669,38 @@ def render_argv(snapshot: object, persona: str, instructions_path: str) -> list[
             cursor_prompt,
         ]
     raise OfferingError(f"offering snapshot has unsupported harness {harness!r}")
+
+
+def preflight_snapshot(snapshot: object) -> dict[str, object]:
+    """Run the code-owned ClaudeX doctor before any worker pane is created."""
+    selected = validate_snapshot(snapshot)
+    if selected["harness"] != "claudex":
+        return {"required": False, "validated": True}
+    model = str(selected["model"])
+    if shutil.which("claudex") is None:
+        raise OfferingError("ClaudeX preflight failed: `claudex` is not on PATH")
+    doctor = shutil.which("claudex-doctor")
+    if doctor is None:
+        raise OfferingError("ClaudeX preflight failed: `claudex-doctor` is not on PATH")
+    try:
+        result = subprocess.run(
+            [doctor, model], capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OfferingError(
+            f"ClaudeX preflight for model {model!r} could not run: {error}"
+        ) from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or "doctor returned no detail"
+        raise OfferingError(
+            f"ClaudeX preflight for required model {model!r} failed: {detail}"
+        )
+    return {
+        "required": True,
+        "validated": True,
+        "doctor": doctor,
+        "model": model,
+    }
 
 
 def render_shell(snapshot: object, persona: str, instructions_path: str) -> str:

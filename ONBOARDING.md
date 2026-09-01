@@ -39,6 +39,8 @@ The engine lives **only** in the kit and is never copied into your repo. You dri
 
      (If a kit-synced `public/` layer carries a `{{TOKEN}}`, add a `placeholders:` map to this repo's entry in `~/.shared-llm.yaml` — see group B below and the README's *Placeholder convention*.)
 
+   - **Optional ClaudeX offering.** The safe default is the `standard` UpAgent roster. To enable the one approved ClaudeX offering for every inherited destination on this machine, run `just configure --offering-sets standard,claudex`. To remove it from one destination, run `just configure -d /path/to/your/repo --offering-sets standard`. The destination value replaces the machine value. Do not put commands, models, providers, health checks, or preflight commands in `~/.shared-llm.yaml`; those fields are code-owned and unsupported configuration fails loudly.
+
 3. **Import the tool-module justfiles into your repo's root justfile.** `just update` copies these modules into your repo, but nothing wires them up — without the import line the recipes simply do not exist, and any skill that shells out to one fails at its first step. The UpAgent module is the one to add if you add only one: the `/upagent-pipeline` skill opens with `just upagent-list-pipelines --json`, which lives there.
 
    ```just

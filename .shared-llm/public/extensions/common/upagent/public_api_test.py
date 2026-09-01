@@ -36,9 +36,14 @@ REQUEST_ID = "01957f4e-7f7f-7f8b-9c42-6e7f52f9321a"
 
 
 @pytest.fixture(autouse=True)
-def _accept_public_recruiter_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Public API tests isolate Herdr; Recruiter intake behavior has its own test suite."""
+def _accept_public_recruiter_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolate Herdr and provide the generated standard roster each caller expects."""
     monkeypatch.setattr(recruiter, "verify_cockpit_pane", lambda _order: None)
+    roster = tmp_path / public_api.offerings.ROSTER_RELATIVE_PATH
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    roster.write_text(public_api.offerings.render_roster(["standard"]))
 
 
 def _prompt(tmp_path: Path, text: str = "Do the bounded task.\n") -> Path:

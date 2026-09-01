@@ -23,7 +23,11 @@ NUDGE_CAP = 3
 # eligible immediately on a confirmed stall).
 NUDGE_BACKOFF_SECONDS = (0.0, 300.0, 900.0)
 
-_PROVIDER_BY_HARNESS = {"claude": "anthropic", "codex": "openai"}
+_PROVIDER_BY_HARNESS = {
+    "claude": "anthropic",
+    "claudex": "openai",
+    "codex": "openai",
+}
 _MODEL_PREFIX_PROVIDERS = (
     ("openrouter/", "openrouter"),
     ("claude", "anthropic"),
