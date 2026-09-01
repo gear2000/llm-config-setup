@@ -253,6 +253,42 @@ def test_missing_phase_leader_template_fails_before_creating_a_pane(
         )
 
 
+def test_claudex_phase_profile_is_rejected_before_controller_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root, route, roster = _inputs(tmp_path)
+    route.write_text(
+        "llm_profiles:\n"
+        "  lead:\n"
+        "    harness: claudex\n"
+        "    model: gpt-5.6-sol\n"
+        "    effort: high\n"
+        "finalization_defaults: {}\n"
+        "phases:\n"
+        "  phase-0:\n"
+        "    lead:\n"
+        "      llm_profile: lead\n"
+        "      agent: phase-leader\n"
+    )
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
+
+    with pytest.raises(PhaseStartError) as error:
+        phase_controller.start_phase(
+            route_path=route,
+            run_root=run_root,
+            phase_id="phase-0",
+            pass_number=1,
+            tui_pane="tui-pane",
+            cwd=tmp_path,
+            roster_path=str(roster),
+        )
+
+    message = str(error.value)
+    assert "claude, codex, pi, cursor" in message
+    assert "claudex" not in message
+
+
 def test_live_prior_leader_is_never_destroyed_by_a_new_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -593,6 +593,70 @@ def test_roster_resolution_finds_main_checkout_from_bare_worktree(
     assert offerings.resolve_roster_path(linked, home) == main_roster
 
 
+def test_roster_resolution_honors_explicit_canonical_repo_before_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home_roster = (
+        home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    )
+    home_roster.parent.mkdir(parents=True)
+    home_roster.write_text(offerings.render_roster(["standard", "claudex"]))
+
+    source = tmp_path / "source"
+    bare = tmp_path / "repo.git"
+    canonical = tmp_path / "canonical"
+    linked = tmp_path / "linked"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "initial"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(["git", "clone", "--bare", str(source), str(bare)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "canonical",
+            str(canonical),
+            "main",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            str(linked),
+            "main",
+        ],
+        check=True,
+    )
+    canonical_roster = canonical / offerings.ROSTER_RELATIVE_PATH
+    canonical_roster.parent.mkdir(parents=True)
+    canonical_roster.write_text(offerings.render_roster(["standard"]))
+    monkeypatch.setenv(offerings.CANONICAL_REPO_ENV, str(canonical))
+
+    assert offerings.resolve_roster_path(linked, home) == canonical_roster
+
+
 def test_claudex_preflight_failure_never_substitutes_native_claude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

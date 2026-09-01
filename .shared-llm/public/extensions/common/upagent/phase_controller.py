@@ -194,9 +194,9 @@ def _load_route(route_path: Path, phase_id: str) -> dict[str, Any]:
 
 def _validated_profile(profile: dict[str, Any], name: str) -> dict[str, str]:
     harness = _string(profile.get("harness"), f"route.llm_profiles.{name}.harness")
-    if harness not in recruiter.KNOWN_HARNESSES:
+    if harness not in recruiter.LEGACY_CONTROLLER_HARNESSES:
         raise PhaseStartError(
-            f"route.llm_profiles.{name}.harness must be one of {', '.join(recruiter.KNOWN_HARNESSES)}"
+            f"route.llm_profiles.{name}.harness must be one of {', '.join(recruiter.LEGACY_CONTROLLER_HARNESSES)}"
         )
     return {
         "effort": _string(

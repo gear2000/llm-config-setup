@@ -19,6 +19,7 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Omitted and explicit "default" requests normalize to the same snapshot/hash.
 DEFAULT_EFFORT = "default"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+CANONICAL_REPO_ENV = "UPAGENT_CANONICAL_REPO"
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -379,10 +380,10 @@ def _worktree_records(porcelain: str) -> list[dict[str, str]]:
     return records
 
 
-def _roster_in_main_worktree(current: Path) -> Path | None:
+def _git_stdout(current: Path, *args: str) -> str | None:
     try:
         probe = subprocess.run(
-            ["git", "-C", str(current), "worktree", "list", "--porcelain"],
+            ["git", "-C", str(current), *args],
             capture_output=True,
             text=True,
             timeout=10,
@@ -391,7 +392,58 @@ def _roster_in_main_worktree(current: Path) -> Path | None:
         return None
     if probe.returncode != 0:
         return None
-    for record in _worktree_records(probe.stdout):
+    output = probe.stdout.strip()
+    return output or None
+
+
+def _git_common_dir(current: Path) -> Path | None:
+    output = _git_stdout(
+        current, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    )
+    return Path(output).resolve() if output is not None else None
+
+
+def _git_checkout_root(current: Path) -> Path | None:
+    output = _git_stdout(
+        current, "rev-parse", "--path-format=absolute", "--show-toplevel"
+    )
+    return Path(output).resolve() if output is not None else None
+
+
+def _roster_in_explicit_canonical_repo(current: Path) -> Path | None:
+    current_common = _git_common_dir(current)
+    if current_common is None:
+        return None
+    value = os.environ.get(CANONICAL_REPO_ENV)
+    if not value:
+        return None
+    root = Path(value).expanduser()
+    if not root.is_absolute():
+        raise OfferingError(f"{CANONICAL_REPO_ENV} must be absolute")
+    root = root.resolve()
+    checkout_root = _git_checkout_root(root)
+    if checkout_root is None:
+        raise OfferingError(f"{CANONICAL_REPO_ENV} must be a git checkout root: {root}")
+    if checkout_root != root:
+        raise OfferingError(
+            f"{CANONICAL_REPO_ENV} must be a git checkout root, got {root}"
+        )
+    canonical_common = _git_common_dir(root)
+    if canonical_common != current_common:
+        return None
+    candidate = root / ROSTER_RELATIVE_PATH
+    if candidate.is_file():
+        return candidate
+    raise OfferingError(
+        f"{CANONICAL_REPO_ENV} roster not found: {candidate}; run `just update`"
+    )
+
+
+def _roster_in_main_worktree(current: Path) -> Path | None:
+    output = _git_stdout(current, "worktree", "list", "--porcelain")
+    if output is None:
+        return None
+    for record in _worktree_records(output):
         if "bare" in record or record.get("branch") != MAIN_BRANCH_REF:
             continue
         worktree = record.get("worktree")
@@ -404,12 +456,15 @@ def _roster_in_main_worktree(current: Path) -> Path | None:
 
 
 def resolve_roster_path(cwd: Path, home: Path | None = None) -> Path:
-    """Resolve current repo, linked main checkout, then machine home roster."""
+    """Resolve current repo, explicit/main checkout, then machine home roster."""
     current = cwd.resolve()
     for parent in (current, *current.parents):
         candidate = parent / ROSTER_RELATIVE_PATH
         if candidate.is_file():
             return candidate
+    canonical_roster = _roster_in_explicit_canonical_repo(current)
+    if canonical_roster is not None:
+        return canonical_roster
     main_roster = _roster_in_main_worktree(current)
     if main_roster is not None:
         return main_roster
