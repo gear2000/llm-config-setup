@@ -269,6 +269,8 @@ def normalize_offering_sets(value: object) -> tuple[str, ...]:
             + "; expected one or more of "
             + ", ".join(APPROVED_SETS)
         )
+    if "standard" not in value:
+        raise OfferingError("upagent.offering_sets must include standard")
     return tuple(name for name in APPROVED_SETS if name in value)
 
 

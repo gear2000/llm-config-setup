@@ -267,7 +267,12 @@ def test_config_rejects_unknown_malformed_and_duplicate_offering_sets(
 ) -> None:
     m = _load()
     _patch_home(m, tmp_path / "home")
-    for value in (["standard", "foreign"], "standard", ["standard", "standard"]):
+    for value in (
+        ["standard", "foreign"],
+        "standard",
+        ["standard", "standard"],
+        ["claudex"],
+    ):
         m.CONFIG_PATH.write_text(yaml.safe_dump({"upagent": {"offering_sets": value}}))
         with pytest.raises(SystemExit, match="offering|UpAgent"):
             m.load_config()

@@ -441,6 +441,8 @@ def test_offering_set_selection_rejects_unknown_duplicates_and_partial_union(
         offerings.render_roster(["standard", "foreign"])
     with pytest.raises(offerings.OfferingError, match="duplicates"):
         offerings.render_roster(["standard", "standard"])
+    with pytest.raises(offerings.OfferingError, match="must include standard"):
+        offerings.render_roster(["claudex"])
 
     raw = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
     raw["offerings"].pop("claude-fable-5")
