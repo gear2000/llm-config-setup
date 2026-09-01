@@ -646,8 +646,8 @@ letting liveness checks silently fail open.
 ## Tests
 
 `just test` covers the closed public schema, zero-launch rejection, prompt hashing/snapshotting,
-UUID/ULID idempotency and conflict behavior, the exact 18-entry text/JSON roster, exact Claude /
-Codex / Cursor / Pi child tokens, Cursor default-effort canonicalization and interactive repair,
+UUID/ULID idempotency and conflict behavior, the exact standard text/JSON roster, optional ClaudeX
+union, exact Claude / ClaudeX / Codex / Cursor / Pi child tokens, Cursor default-effort canonicalization and interactive repair,
 role-aware launch-state transitions, Codex exec-style no-live-repair completion, specialist
 offering resolution, request mailboxes, identity/lease fencing,
 startup health, timeout authority, typed manifests, every missing/malformed artifact, one bounded

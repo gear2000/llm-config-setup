@@ -4085,7 +4085,7 @@ def _start_fenced_ledger_agent(
     """Journal before create; failed commit returns only truthful cleanup evidence."""
 
     # Every managed pane (worker, manager, checker, rescue) passes through here.
-    # Claude launches need the cwd pre-trusted or the pane hangs at the dialog.
+    # Claude and ClaudeX launches need the cwd pre-trusted or the pane hangs at the dialog.
     if launch.lstrip().startswith(("claude", "claudex")):
         _ensure_claude_folder_trust(order["cwd"])
 

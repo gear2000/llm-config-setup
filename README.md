@@ -41,7 +41,7 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 - **Harness tokens** are `cc` (Claude Code), `pi` (Pi), `codex` (Codex), and `cursor` (Cursor Agent CLI, `cursor-agent`). A destination's `-l` list defaults to `cc,pi`. `cursor` is a surface alias of `codex`: the Cursor Agent CLI reads the same root `AGENTS.md` and discovers skills from the same `~/.agents/skills/` home dir (plus `.claude/skills/` for compat), so it rides the codex plumbing end to end — no cursor-specific files are generated.
 - `just descriptions` audits owned skill/agent descriptions without copying, composing, linking, writing the manifest, or touching home directories. Public-kit descriptions hard-fail above 1,024 UTF-16 code units; destination-owned descriptions are reported with anonymized destination indexes by default and remain warn-only until those external repositories complete their own `.shared-llm/this_repo/` migration. Use `just descriptions --enforce-destinations` (or `SHARED_LLM_ENFORCE_DEST_DESCRIPTIONS=1 just update`) after that follow-up to enable full-roster hard enforcement.
 - `just update` always writes a full run log under `/tmp/.shared-llm/log/<timestamp>.log`; `-v` also prints the per-file detail to the terminal.
-- **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and — when a `global:` list is set — `just global`.
+- **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and `just global` for home roster/runtime reconciliation.
 - `just pi-extensions` installs the pinned third-party Pi extensions via the `pi` CLI (a network step; no-op if `pi` is absent).
 - `just test` runs the composer/flow test suite.
 - The Pi launch group — `just hub`, `just builder`, `just pi-status`, `just pi-clean` — and the terraform workflow recipes (`just tf-implement`, `just tf-approve`, `just tf-auto`, `just tf-reviewer-cc` / `-pi`) are covered under "Pi harness runtime config" below.
@@ -52,7 +52,7 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 
 ```yaml
 source: ~/.shared-llm            # the local hub: kit common content is copied here, then to each dest
-global: [cc, pi]                 # home / all-projects harnesses to set up (omit to skip the global step)
+global: [cc, pi]                 # home / all-projects harnesses to set up (omit to skip home links)
 upagent:
   offering_sets: [standard]      # optional; omission is exactly the same safe default
 
@@ -73,7 +73,7 @@ destinations:
 
 UpAgent offering selection is a focused allowlist, not a generic YAML merge. The field may contain only code-approved set names. Omission means `[standard]`. A machine can opt in with `just configure --offering-sets standard,claudex`; `just configure -d /path/to/repo --offering-sets standard` gives that destination a replacement and removes ClaudeX there. Unknown, duplicate, empty, or malformed selections stop the update.
 
-The engine generates one deterministic `offerings.yaml` for each destination and one under `~/.shared-llm/generated/extensions/common/upagent/`. YAML can select approved sets only. Offering ids, harness commands, executables, models, providers, effort lists, completion semantics, health identities, management candidates, and preflights remain code-owned. UpAgent resolves the roster from the repository where the request starts, the main checkout for a linked worktree, then the home runtime. A request `--cwd` only selects the worker directory; it does not replace the active roster with the target directory's destination policy. It does not silently fall back to another offering.
+The engine generates one deterministic `offerings.yaml` for each destination and one under `~/.shared-llm/generated/extensions/common/upagent/`. YAML can select approved sets only. Offering ids, harness commands, executables, models, providers, effort lists, completion semantics, health identities, management candidates, and preflights remain code-owned. UpAgent resolves the roster from the repository where the request starts, `$UPAGENT_CANONICAL_REPO` for the same git repo, the main checkout for a linked worktree, then the home runtime. A request `--cwd` only selects the worker directory; it does not replace the active roster with the target directory's destination policy. It does not silently fall back to another offering.
 
 > **Skill placement per harness** (`do-*` → Pi, `cc-*` → Claude, common → both) and how to verify it on any machine: see **[HARNESS-ROUTING.md](HARNESS-ROUTING.md)**.
 
@@ -94,7 +94,7 @@ Every destination's `.shared-llm/` is split into two trees with an explicit owne
    - everything else (**common**) → all harnesses (`.claude/skills` for Claude; symlinked into `~/.pi/agent/skills/` and `~/.agents/skills/` for Pi/Codex).
 
    Global dirs are used (not Pi's project-local `.pi/skills/`) because project-local skills load **only after a project is "trusted"** — that silently hid them. All destinations reconcile into each global dir together, so one never prunes another's links; a same-name collision across destinations warns (last wins). **Claude Code needs no link** — it reads `<repo>/.claude/` directly.
-4. **global** (only when `global:` is set) — installs the home / all-projects pieces: the general home skills, the generic agents (roster in the Inventory section below), and the Pi + Claude runtime. See "The global step" below.
+4. **global** — reconciles home-owned state. It materializes the machine UpAgent offering roster (default `[standard]`, or the `upagent:` override) and installs home / all-projects skills, agents, and runtime when `global:` is set. See "The global step" below.
 
 ### Recipe path resolution — one rule
 
@@ -264,7 +264,7 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 
 ## The global step — home skills + runtime
 
-When `~/.shared-llm.yaml` has a `global:` list, `just update` (or `just global` on its own) installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
+`just update` (or `just global` on its own) materializes the machine-wide UpAgent offering policy, using `[standard]` unless `upagent:` overrides it. When `~/.shared-llm.yaml` also has a `global:` list, it installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
 1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`, `herdr`, `clickhouse`, `kafka`, `lucidchart`, `drawio`, `create-html`) and the routed slash-command skills, syncs each into the durable per-machine generated tree (`~/.shared-llm/generated/skills/`), and **symlinks** it into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). `readlink` on any home skill answers "generated or handwritten"; a byte-identical pre-existing copy from the old copy mechanism is upgraded to a link in place. The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section), syncs each persona into `~/.shared-llm/generated/agents/`, and symlinks it into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
