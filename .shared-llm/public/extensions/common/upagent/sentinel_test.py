@@ -2440,12 +2440,27 @@ def test_public_sentinel_candidates_preserve_order_and_filter_the_worker_provide
         _order(offering_snapshot={"provider": "openai"}), config
     )
 
+    openrouter = recruiter._resolve_sentinel_roles(
+        _order(offering_snapshot={"provider": "openrouter"}), config
+    )
+
     assert [item.offering_id for item in anthropic] == [
+        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]
-    assert [item.offering_id for item in cursor] == ["pi-gpt-5-4-mini"]
-    assert [item.offering_id for item in openai] == ["cursor-composer-2-5"]
+    assert [item.offering_id for item in cursor] == [
+        "pi-glm-5-3-flash",
+        "pi-gpt-5-4-mini",
+    ]
+    assert [item.offering_id for item in openai] == [
+        "pi-glm-5-3-flash",
+        "cursor-composer-2-5",
+    ]
+    assert [item.offering_id for item in openrouter] == [
+        "cursor-composer-2-5",
+        "pi-gpt-5-4-mini",
+    ]
 
 
 def test_sentinel_startup_failure_falls_back_in_candidate_order(
@@ -2460,9 +2475,9 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
     def start(*args: object, **kwargs: object) -> dict[str, object]:
         role = args[5]
         attempted.append(role.expected_process)
-        if role.expected_process == "cursor-agent":
-            raise recruiter.RecruiterError("cursor startup refused")
-        return {"pane": "sentinel-pi"}
+        if "glm-5.3-flash" in role.command:
+            raise recruiter.RecruiterError("glm startup refused")
+        return {"pane": "sentinel-cursor"}
 
     monkeypatch.setattr(recruiter, "_start_sentinel", start)
     started, selected = recruiter._start_sentinel_candidates(
@@ -2480,16 +2495,16 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
         liftoff_deadline_ms=300_000,
     )
 
-    assert attempted == ["cursor-agent", "pi"]
-    assert started == {"pane": "sentinel-pi"}
-    assert selected.offering_id == "pi-gpt-5-4-mini"
+    assert attempted == ["pi", "cursor-agent"]
+    assert started == {"pane": "sentinel-cursor"}
+    assert selected.offering_id == "cursor-composer-2-5"
     failures = [
         item
         for item in ledger.events(key)
         if item["event"] == "sentinel-candidate-failed"
     ]
     assert [(item["offering_id"], item["reason"]) for item in failures] == [
-        ("cursor-composer-2-5", "cursor startup refused")
+        ("pi-glm-5-3-flash", "glm startup refused")
     ]
 
 
@@ -2533,6 +2548,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
         if item["event"] == "sentinel-candidate-failed"
     ]
     assert [item["offering_id"] for item in failures] == [
+        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]

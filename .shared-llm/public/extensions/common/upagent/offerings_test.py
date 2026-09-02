@@ -35,6 +35,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" in rendered_identities
     expected_candidates = [
+        {"offering": "pi-glm-5-3-flash", "effort": "low"},
         {"offering": "cursor-composer-2-5", "effort": "default"},
         {"offering": "pi-gpt-5-4-mini", "effort": "low"},
     ]
@@ -42,9 +43,8 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert roster.management["checker"]["candidates"] == expected_candidates
     assert roster.management["sentinel"]["candidates"] == expected_candidates
     assert all(
-        candidate["offering"] != "pi-glm-5-3-flash"
+        roster.management[role]["candidates"][0]["offering"] == "pi-glm-5-3-flash"
         for role in ("account_manager", "checker", "sentinel")
-        for candidate in roster.management[role]["candidates"]
     )
 
 
@@ -371,22 +371,28 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     candidates = role["candidates"]
 
     assert [candidate["offering_id"] for candidate in candidates] == [
+        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]
     assert [candidate["provider"] for candidate in candidates] == [
+        "openrouter",
         "cursor",
         "openai",
     ]
-    assert candidates[0]["expected_agent"] == "cursor"
-    assert candidates[0]["expected_process"] == "cursor-agent"
-    assert candidates[0]["command"].startswith(
+    assert candidates[0]["expected_agent"] == "pi"
+    assert candidates[0]["expected_process"] == "pi"
+    assert "openrouter/z-ai/glm-5.3-flash" in candidates[0]["command"]
+    assert "--thinking low" in candidates[0]["command"]
+    assert candidates[1]["expected_agent"] == "cursor"
+    assert candidates[1]["expected_process"] == "cursor-agent"
+    assert candidates[1]["command"].startswith(
         "cursor-agent --force --trust --model composer-2.5"
     )
-    assert candidates[1]["expected_agent"] == "pi"
-    assert candidates[1]["expected_process"] == "pi"
-    assert "openai-codex/gpt-5.4-mini" in candidates[1]["command"]
-    assert "--thinking low" in candidates[1]["command"]
+    assert candidates[2]["expected_agent"] == "pi"
+    assert candidates[2]["expected_process"] == "pi"
+    assert "openai-codex/gpt-5.4-mini" in candidates[2]["command"]
+    assert "--thinking low" in candidates[2]["command"]
     assert role["command"] == candidates[0]["command"]
 
 
@@ -410,7 +416,7 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
         offerings.load_roster(path)
 
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["management"]["sentinel"]["candidates"][0]["effort"] = "low"
+    source["management"]["sentinel"]["candidates"][0]["effort"] = "medium"
     path = tmp_path / "effort.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
     with pytest.raises(offerings.OfferingError, match="not allowed"):
@@ -421,7 +427,7 @@ def test_standard_render_is_the_pre_set_roster_byte_for_byte() -> None:
     rendered = offerings.render_roster(["standard"])
 
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "895f367add73b895c0df315d4e182fa8abf229370ec62e340aeca9ce2e486424"
+        "eb86e24dba86e26da4dea344ec8e9cb82a2e0bd827800b6c1f6fc04499ebd441"
     )
 
 
