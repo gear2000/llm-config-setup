@@ -885,8 +885,9 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
     manager = public_roster["management"]["account_manager"]
     commands = [candidate["command"] for candidate in manager["candidates"]]
     assert all("legacy-manager" not in command for command in commands)
-    assert commands[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.4-mini --thinking low" in commands[1]
+    assert "--model openrouter/z-ai/glm-5.3-flash --thinking low" in commands[0]
+    assert commands[1].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert "--model openai-codex/gpt-5.4-mini --thinking low" in commands[2]
 
 
 def test_same_id_same_hash_attaches_without_second_launch_and_changed_prompt_conflicts(
