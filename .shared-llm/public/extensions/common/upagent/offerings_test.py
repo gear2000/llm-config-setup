@@ -184,7 +184,7 @@ def test_cursor_offerings_have_only_default_effort() -> None:
         "cursor-grok-4-6",
         "cursor-opus-4-6",
         "cursor-sonnet-4-6",
-        "cursor-fable-5",
+        "cursor-fable-5-1",
         "cursor-gpt-5-5",
         "cursor-gpt-5-6-sol",
         "cursor-gpt-5-6-terra",
@@ -204,7 +204,7 @@ def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
         "cursor-grok-4-6",
         "cursor-opus-4-6",
         "cursor-sonnet-4-6",
-        "cursor-fable-5",
+        "cursor-fable-5-1",
         "cursor-gpt-5-5",
         "cursor-gpt-5-6-sol",
         "cursor-gpt-5-6-terra",
@@ -238,7 +238,7 @@ def test_effortful_offering_still_requires_effort() -> None:
         ("cursor-grok-4-6", "cursor-grok-4.6-high"),
         ("cursor-opus-4-6", "claude-4.6-opus-high"),
         ("cursor-sonnet-4-6", "claude-4.6-sonnet-medium"),
-        ("cursor-fable-5", "claude-fable-5-high"),
+        ("cursor-fable-5-1", "claude-fable-5-1-high"),
         ("cursor-gpt-5-5", "gpt-5.5-high"),
         ("cursor-gpt-5-6-sol", "gpt-5.6-sol-high"),
         ("cursor-gpt-5-6-terra", "gpt-5.6-terra-high"),
@@ -297,9 +297,9 @@ def test_roster_rejects_even_one_extra_offering(tmp_path: Path) -> None:
 def test_roster_rejects_duplicate_offering_ids(tmp_path: Path) -> None:
     rendered = offerings.render_roster(["standard"])
     duplicate = (
-        "  claude-fable-5:\n"
+        "  claude-fable-5-1:\n"
         "    harness: claude\n"
-        "    model: claude-fable-5\n"
+        "    model: claude-fable-5-1\n"
         "    efforts: [low, medium, high, xhigh, max]\n"
     )
     path = tmp_path / "offerings.yaml"
@@ -322,7 +322,7 @@ def test_public_offering_yaml_cannot_inject_a_launch_command(tmp_path: Path) -> 
 def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
     roster = offerings.load_selected_roster()
     expected = {
-        "claude-fable-5": "anthropic",
+        "claude-fable-5-1": "anthropic",
         "claude-sonnet-5": "anthropic",
         "claude-opus-4-8": "anthropic",
         "codex-gpt-5-6-sol": "openai",
@@ -330,7 +330,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "cursor-grok-4-6": "xai",
         "cursor-opus-4-6": "anthropic",
         "cursor-sonnet-4-6": "anthropic",
-        "cursor-fable-5": "anthropic",
+        "cursor-fable-5-1": "anthropic",
         "cursor-gpt-5-5": "openai",
         "cursor-gpt-5-6-sol": "openai",
         "cursor-gpt-5-6-terra": "openai",
@@ -421,7 +421,7 @@ def test_standard_render_is_the_pre_set_roster_byte_for_byte() -> None:
     rendered = offerings.render_roster(["standard"])
 
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "8327ee4696bdf0ffd5883be3f94ddb4e4d713f1a49e5abf218de01742a643fc5"
+        "895f367add73b895c0df315d4e182fa8abf229370ec62e340aeca9ce2e486424"
     )
 
 
@@ -445,7 +445,7 @@ def test_offering_set_selection_rejects_unknown_duplicates_and_partial_union(
         offerings.render_roster(["claudex"])
 
     raw = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    raw["offerings"].pop("claude-fable-5")
+    raw["offerings"].pop("claude-fable-5-1")
     path = tmp_path / "partial.yaml"
     path.write_text(offerings.yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(offerings.OfferingError, match="only part of approved set"):
