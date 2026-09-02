@@ -87,37 +87,3 @@ offerings:
     harness: pi
     model: openrouter/z-ai/glm-5.3-flash
     efforts: [low, high, max]
-
-# Legacy route orders default direct; each public request pins dedicated management. Candidate
-# order is policy owned by this roster, while offerings.py validates every reference and renders
-# every command. The public YAML never carries executable commands.
-management:
-  mode: direct
-  rescue_on_startup_failure: true
-  startup_timeout_ms: 45000
-  inactivity_check_ms: 900000
-  requester_grace_ms: 300000
-  account_manager:
-    candidates:
-      - offering: cursor-composer-2-5
-        effort: default
-      - offering: pi-gpt-5-4-mini
-        effort: low
-    agent: upagent-account-manager
-    timeout_ms: 120000
-  checker:
-    candidates:
-      - offering: cursor-composer-2-5
-        effort: default
-      - offering: pi-gpt-5-4-mini
-        effort: low
-    agent: upagent-checker
-    timeout_ms: 120000
-  sentinel:
-    candidates:
-      - offering: cursor-composer-2-5
-        effort: default
-      - offering: pi-gpt-5-4-mini
-        effort: low
-    agent: upagent-sentinel
-    timeout_ms: 120000

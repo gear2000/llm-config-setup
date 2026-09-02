@@ -160,6 +160,154 @@ def test_configure_rejects_unknown_harness(tmp_path: Path) -> None:
         m.cmd_configure(args)
 
 
+def test_offering_sets_default_machine_opt_in_and_destination_replacement(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    destination = {"path": str(tmp_path / "repo"), "harnesses": ["pi"]}
+    cfg = {"source": str(m.DEFAULT_SOURCE), "global": [], "destinations": [destination]}
+
+    assert m.selected_offering_sets(cfg) == ("standard",)
+    assert m.selected_offering_sets(cfg, destination) == ("standard",)
+
+    cfg["upagent"] = {"offering_sets": ["standard", "claudex"]}
+    assert m.selected_offering_sets(cfg, destination) == ("standard", "claudex")
+
+    destination["upagent"] = {"offering_sets": ["standard"]}
+    assert m.selected_offering_sets(cfg, destination) == ("standard",)
+
+
+def test_roster_materialization_is_deterministic_and_replacement_removes_claudex(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    policy = m._upagent_offerings_module()
+    inherited = tmp_path / "inherited.yaml"
+    replaced = tmp_path / "replaced.yaml"
+
+    assert m.materialize_offering_roster(("standard", "claudex"), inherited)
+    assert not m.materialize_offering_roster(("standard", "claudex"), inherited)
+    assert m.materialize_offering_roster(("standard",), replaced)
+
+    assert list(policy.load_roster(inherited).offerings)[-1] == "claudex-gpt-5-6-sol"
+    assert "claudex-gpt-5-6-sol" not in policy.load_roster(replaced).offerings
+
+
+def test_configure_sets_machine_and_destination_offering_replacements(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    common = {
+        "source": None,
+        "list": None,
+        "global_list": None,
+        "exclude": None,
+    }
+    m.cmd_configure(
+        argparse.Namespace(
+            **common,
+            dest=None,
+            offering_sets="standard,claudex",
+        )
+    )
+    dest = tmp_path / "repo"
+    m.cmd_configure(
+        argparse.Namespace(
+            **common,
+            dest=str(dest),
+            offering_sets="standard",
+        )
+    )
+
+    cfg = yaml.safe_load(m.CONFIG_PATH.read_text())
+    assert cfg["upagent"] == {"offering_sets": ["standard", "claudex"]}
+    assert cfg["destinations"][0]["upagent"] == {"offering_sets": ["standard"]}
+
+
+def test_configure_destination_offering_sets_preserves_existing_harnesses(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    destination = tmp_path / "repo"
+    m.CONFIG_PATH.write_text(
+        yaml.safe_dump(
+            {
+                "destinations": [
+                    {
+                        "path": str(destination),
+                        "harnesses": ["cc", "pi", "codex"],
+                    }
+                ]
+            }
+        )
+    )
+
+    m.cmd_configure(
+        argparse.Namespace(
+            source=None,
+            list=None,
+            global_list=None,
+            exclude=None,
+            dest=str(destination),
+            offering_sets="standard",
+        )
+    )
+
+    cfg = yaml.safe_load(m.CONFIG_PATH.read_text())
+    assert cfg["destinations"][0]["harnesses"] == ["cc", "pi", "codex"]
+    assert cfg["destinations"][0]["upagent"] == {"offering_sets": ["standard"]}
+
+
+def test_config_rejects_unknown_malformed_and_duplicate_offering_sets(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    for value in (
+        ["standard", "foreign"],
+        "standard",
+        ["standard", "standard"],
+        ["claudex"],
+    ):
+        m.CONFIG_PATH.write_text(yaml.safe_dump({"upagent": {"offering_sets": value}}))
+        with pytest.raises(SystemExit, match="offering|UpAgent"):
+            m.load_config()
+    for block in ({}, None):
+        m.CONFIG_PATH.write_text(yaml.safe_dump({"upagent": block}))
+        with pytest.raises(SystemExit, match="upagent"):
+            m.load_config()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        (
+            "upagent:\n  offering_sets: [standard]\n"
+            "upagent:\n  offering_sets: [standard, claudex]\n"
+        ),
+        (
+            "destinations:\n"
+            "  - path: /tmp/repo\n"
+            "    harnesses: [pi]\n"
+            "    upagent:\n"
+            "      offering_sets: [standard]\n"
+            "      offering_sets: [standard, claudex]\n"
+        ),
+    ],
+)
+def test_config_rejects_duplicate_yaml_keys(tmp_path: Path, content: str) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    m.CONFIG_PATH.write_text(content)
+
+    with pytest.raises(SystemExit, match="duplicate key"):
+        m.load_config()
+
+
 # --- copy ------------------------------------------------------------------
 
 
@@ -192,6 +340,12 @@ def test_copy_propagates_new_and_flags_changed(tmp_path: Path) -> None:
     assert (
         dest / ".shared-llm/this_repo/layers/skills/this_repo/demo.md"
     ).read_text() == "THIS_REPO overlay body.\n"
+    generated_roster = (
+        dest / ".shared-llm/public/extensions/common/upagent/offerings.yaml"
+    )
+    assert m._upagent_offerings_module().load_roster(
+        generated_roster
+    ).selected_sets == ("standard",)
 
 
 def test_copy_prunes_retired_hub_slash_command_layer(tmp_path: Path) -> None:
@@ -556,6 +710,28 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     assert c["create"] == 0 and c["repoint"] == 0 and c["prune"] == 0
 
 
+def test_update_materializes_home_roster_for_upagent_only_config(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    m.save_config(
+        {
+            "source": str(m.DEFAULT_SOURCE),
+            "global": [],
+            "destinations": [],
+            "upagent": {"offering_sets": ["standard", "claudex"]},
+        }
+    )
+
+    m.cmd_update(argparse.Namespace(verbose=False))
+
+    path = home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    roster = m._upagent_offerings_module().load_roster(path)
+    assert roster.selected_sets == ("standard", "claudex")
+
+
 # --- global home-skill routing ---------------------------------------------
 
 
@@ -824,6 +1000,59 @@ def test_check_passes_after_update_and_fails_on_violation(tmp_path: Path) -> Non
 # --- global home runtime (agents + claude/pi runtime) ----------------------
 
 
+def test_home_runtime_generates_machine_roster_without_global_harnesses(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": [],
+        "destinations": [],
+        "upagent": {"offering_sets": ["standard", "claudex"]},
+    }
+
+    m.do_home_runtime(cfg, _quiet(m))
+
+    path = home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    roster = m._upagent_offerings_module().load_roster(path)
+    assert roster.selected_sets == ("standard", "claudex")
+
+
+def test_home_roster_refuses_symlinked_generated_parent(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    generated = home / ".shared-llm/generated"
+    generated.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (generated / "extensions").symlink_to(outside, target_is_directory=True)
+    target = generated / "extensions/common/upagent/offerings.yaml"
+
+    with pytest.raises(m.GeneratedTreeError, match="symlink"):
+        m.materialize_offering_roster(("standard",), target)
+    assert not (outside / "common/upagent/offerings.yaml").exists()
+
+
+def test_home_roster_replaces_equal_content_leaf_symlink(tmp_path: Path) -> None:
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    target = home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.yaml"
+    expected = m._upagent_offerings_module().render_roster(["standard"])
+    outside.write_text(expected)
+    target.symlink_to(outside)
+
+    assert m.materialize_offering_roster(("standard",), target)
+    assert target.is_file() and not target.is_symlink()
+    assert target.read_text() == expected
+    assert outside.read_text() == expected
+
+
 def test_home_runtime_copies_agents_and_excludes_codex(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
@@ -927,8 +1156,7 @@ def test_home_runtime_reconciles_managed_herdr_config(tmp_path: Path) -> None:
     generated = home / ".shared-llm/generated/herdr-config.toml"
     assert target.resolve() == generated.resolve()
     assert (
-        generated.read_bytes()
-        == (m.project_root() / "herdr-config.toml").read_bytes()
+        generated.read_bytes() == (m.project_root() / "herdr-config.toml").read_bytes()
     )
 
     counts = m.reconcile(

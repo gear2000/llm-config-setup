@@ -117,6 +117,10 @@ keys, types, offerings, efforts, personas, specialists, relative/unreadable path
 flags fail before the ledger, manager, pane, or worker. There is no intake LLM, prose repair,
 arbitrary argument materialization, or empty-request acceptance on this path.
 
+Offering policy is resolved from the repository where the UpAgent request starts. A `--cwd` target
+chooses where the worker runs; it does not opt the request into or out of ClaudeX by pointing at
+another registered destination.
+
 `--cockpit-pane` is an invocation-only override for anchoring the order to the caller's own pane.
 It may accompany named flags or `--file`, but it is not a request-defining flag, does not enter the
 closed request object or immutable payload hash, and is not an allowed key inside a request file.
@@ -188,18 +192,11 @@ authenticated terminal cancellation, audit, identical reattachment, and changed-
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
 no-op that also retries removal of a previously swapped runtime-owned residual.
 
-`offerings.yaml` contains exactly eighteen validated stable ids: three Claude, one Codex,
-eight Cursor, and six Pi.
-The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references,
-and the immutable order snapshot. YAML selects only harness, model, allowed efforts, and the
-optional declared `completion_style` (validated against code-owned policy). It cannot
-supply a public worker or Account Manager shell command. `offerings.py` renders child tokens:
-Claude uses `--effort`,
-Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit
-`--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default`
-effort (an omitted `--effort` normalizes to it, producing an identical payload hash) and the
-renderer emits no effort token. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass
-no lifecycle validation.
+The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing eighteen stable ids: three Claude, one Codex, eight Cursor, and six Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-5-6-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
+
+The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references, and the immutable order snapshot. YAML contains declarations only. Code pins every approved set member, harness, model, provider, effort list, completion style, health identity, executable, command renderer, and preflight. Unknown sets, partial sets, duplicate ids, changed fields, commands in YAML, and management references to absent offerings fail loudly. The runtime roster resolves from the request's starting repository, then `$UPAGENT_CANONICAL_REPO` for the same git repo, then the main checkout for a linked worktree, then the generated home roster.
+
+`offerings.py` renders child tokens: Claude uses `--effort`, Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit `--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default` effort. ClaudeX uses the `claudex` executable with the exact `gpt-5.6-sol` model and remains interactive; because the wrapper uses `exec`, Herdr health still requires the final `claude` process. Before any ClaudeX worker pane is created, UpAgent requires both `claudex` and `claudex-doctor`, runs `claudex-doctor gpt-5.6-sol`, and blocks on a missing executable, proxy/OAuth failure, or absent model. It never substitutes native Claude. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass no lifecycle validation, but ClaudeX is accepted only through public offering snapshots.
 
 A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
 atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
@@ -253,7 +250,7 @@ Durable files are the source of truth; terminal text is display-only.
   foreground process, detected harness, and cwd—not merely pane creation. Manager health and its
   typed assessment are reported separately and may degrade without vetoing worker startup.
 - Before launch, Python checks absolute paths, required model/effort values, harness-native model
-  shape, executable presence, and (for Claude `--agent` routes) the actual persona file. Those
+  shape, executable presence, ClaudeX proxy/OAuth/model readiness, and (for Claude `--agent` routes) the actual persona file. Those
   facts are given to the manager. A bad request is explained to the requester and terminalized
   without ever creating a worker, even if the LLM mistakenly recommends approval.
 - Public requests use one dedicated advisory Account Manager selected from the ordered approved
@@ -519,11 +516,12 @@ properties remain load-bearing:
 
 Edit the kit source, not a generated hub or destination copy:
 
-- `offerings.yaml` is the human-edited roster. Its `offerings:` map lists available worker models;
-  its `management:` block sets the ordered Account Manager, Checker, and Sentinel candidates.
-- `offerings.py` owns the matching `APPROVED` allowlist and command renderer. Adding, removing, or
-  renaming an offering requires the YAML entry and this allowlist to change together; YAML cannot
-  supply executable commands.
+- `offerings.d/standard.yaml` and `offerings.d/claudex.yaml` are the human-edited offering-set
+  fragments. `offerings-management.yaml` sets the ordered Account Manager, Checker, and Sentinel
+  candidates. `offerings.yaml` is generated by `just update`.
+- `offerings.py` owns the matching `APPROVED` and `APPROVED_SETS` allowlists plus the command
+  renderer. Adding, removing, or renaming an offering requires the fragment entry and these
+  allowlists to change together; YAML cannot supply executable commands.
 - `offerings_test.py` covers exact roster membership, provider metadata, effort policy, candidate
   order, and rendered command tokens. Recruiter tests cover provider filtering and startup fallback.
 - For Cursor, run `cursor-agent models` and copy the exact model id, including its embedded effort
@@ -630,9 +628,9 @@ shorten a phone book. Adding an overlay later is additive; removing one is not.
 
 1. Copy this whole directory to the same relative path (public tool modules land under a
    destination's `.shared-llm/public/extensions/common/upagent/` via `just update`).
-2. Use the shipped `offerings.yaml` unchanged for the public façade. Copy
-   `upagent.yaml.example` → the repo-owned `this_repo` path only when legacy route/controller
-   profiles still need it.
+2. Let `just update` generate `offerings.yaml` for the public façade from the configured
+   offering sets. Copy `upagent.yaml.example` → the repo-owned `this_repo` path only when legacy
+   route/controller profiles still need it.
 3. Add `import '.shared-llm/public/extensions/common/upagent/justfile'` to the root justfile.
 
 ### Platform support
@@ -648,8 +646,8 @@ letting liveness checks silently fail open.
 ## Tests
 
 `just test` covers the closed public schema, zero-launch rejection, prompt hashing/snapshotting,
-UUID/ULID idempotency and conflict behavior, the exact 18-entry text/JSON roster, exact Claude /
-Codex / Cursor / Pi child tokens, Cursor default-effort canonicalization and interactive repair,
+UUID/ULID idempotency and conflict behavior, the exact standard text/JSON roster, optional ClaudeX
+union, exact Claude / ClaudeX / Codex / Cursor / Pi child tokens, Cursor default-effort canonicalization and interactive repair,
 role-aware launch-state transitions, Codex exec-style no-live-repair completion, specialist
 offering resolution, request mailboxes, identity/lease fencing,
 startup health, timeout authority, typed manifests, every missing/malformed artifact, one bounded

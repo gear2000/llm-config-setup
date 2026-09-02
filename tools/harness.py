@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import collections
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -1131,12 +1132,108 @@ def cmd_compose(args: argparse.Namespace) -> None:
 
 CONFIG_PATH = HOME / ".shared-llm.yaml"
 DEFAULT_SOURCE = HOME / ".shared-llm"
+ENGINE_ROOT = Path(__file__).resolve().parent.parent
 # "cursor" is the Cursor Agent CLI (`cursor-agent`). It consumes exactly the
 # Codex surfaces — the root AGENTS.md instruction file and skills discovered
 # from ~/.agents/skills (plus .claude/skills for compat) — so everywhere the
 # plumbing routes by harness, cursor rides the codex path (see
 # wants_codex_surface / _codex_surface_tokens). No cursor-specific dirs exist.
 VALID_HARNESSES = ("cc", "pi", "codex", "cursor")
+UPAGENT_ROSTER_REL = Path("extensions/common/upagent/offerings.yaml")
+_UPAGENT_OFFERINGS_MODULE: Any | None = None
+
+
+def _upagent_offerings_module() -> Any:
+    """Load the code-owned offering-set policy from this kit checkout."""
+    global _UPAGENT_OFFERINGS_MODULE
+    if _UPAGENT_OFFERINGS_MODULE is not None:
+        return _UPAGENT_OFFERINGS_MODULE
+    path = ENGINE_ROOT / ".shared-llm/public/extensions/common/upagent/offerings.py"
+    spec = importlib.util.spec_from_file_location("llm_config_setup_offerings", path)
+    if spec is None or spec.loader is None:
+        sys.exit(f"error: could not load UpAgent offering policy: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _UPAGENT_OFFERINGS_MODULE = module
+    return module
+
+
+def _validated_upagent_block(value: object, where: str) -> tuple[str, ...]:
+    offerings = _upagent_offerings_module()
+    if not isinstance(value, dict):
+        sys.exit(f"error: {where}.upagent must be a mapping")
+    unknown = sorted(set(value) - {"offering_sets"})
+    if unknown:
+        sys.exit(f"error: {where}.upagent has unknown keys: {', '.join(unknown)}")
+    if "offering_sets" not in value:
+        sys.exit(f"error: {where}.upagent must define offering_sets")
+    raw_sets = value["offering_sets"]
+    try:
+        return tuple(offerings.normalize_offering_sets(raw_sets))
+    except offerings.OfferingError as error:
+        raise SystemExit(f"error: {where}: {error}") from error
+
+
+def selected_offering_sets(
+    cfg: dict[str, Any], destination: dict[str, Any] | None = None
+) -> tuple[str, ...]:
+    offerings = _upagent_offerings_module()
+    machine = (
+        _validated_upagent_block(cfg["upagent"], "config")
+        if "upagent" in cfg
+        else tuple(offerings.DEFAULT_SETS)
+    )
+    if destination is None or "upagent" not in destination:
+        return machine
+    return _validated_upagent_block(destination["upagent"], "destination")
+
+
+def has_configured_update_work(cfg: dict[str, Any]) -> bool:
+    return bool(cfg["destinations"] or cfg["global"] or "upagent" in cfg)
+
+
+def _write_if_changed(path: Path, content: str) -> bool:
+    # A leaf symlink is not a managed generated file even when its target has
+    # equal bytes. Replace the link itself instead of adopting its external target.
+    if path.is_file() and not path.is_symlink() and path.read_text() == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(temporary_name)
+        raise
+    _fsync_dir(path.parent)
+    return True
+
+
+def materialize_offering_roster(selected_sets: tuple[str, ...], target: Path) -> bool:
+    # Home rosters live in the managed generated tree. Apply the same symlink
+    # and ownership guard as every other generated artifact before writing.
+    try:
+        target.relative_to(generated_root())
+    except ValueError:
+        pass
+    else:
+        _require_generated_path(target)
+    offerings = _upagent_offerings_module()
+    source_dir = ENGINE_ROOT / ".shared-llm/public/extensions/common/upagent"
+    try:
+        rendered = offerings.render_roster(selected_sets, source_dir)
+    except offerings.OfferingError as error:
+        raise SystemExit(
+            f"error: could not render UpAgent offering roster: {error}"
+        ) from error
+    return _write_if_changed(target, rendered)
 
 
 def wants_codex_surface(harnesses) -> bool:
@@ -1277,14 +1374,68 @@ class RunLog:
             self._fh.close()
 
 
+class _NoDuplicateKeyLoader(yaml.SafeLoader):
+    """Safe machine-config loader that rejects duplicate keys at every level."""
+
+
+def _construct_unique_config_mapping(
+    loader: _NoDuplicateKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    result: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in result
+        except TypeError as error:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_NoDuplicateKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_config_mapping
+)
+
+
 def load_config() -> dict:
     cfg: dict = {}
     if CONFIG_PATH.exists():
-        cfg = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+        try:
+            loaded = (
+                yaml.load(CONFIG_PATH.read_text(), Loader=_NoDuplicateKeyLoader) or {}
+            )
+        except (OSError, yaml.YAMLError) as error:
+            sys.exit(
+                f"error: config {CONFIG_PATH} is unreadable or invalid YAML: {error}"
+            )
+        if not isinstance(loaded, dict):
+            sys.exit(f"error: config {CONFIG_PATH} must be a YAML mapping")
+        cfg = loaded
     cfg.setdefault("source", str(DEFAULT_SOURCE))
     cfg.setdefault("global", [])
     cfg.setdefault("destinations", [])
     cfg.setdefault("exclude", [])
+    if not isinstance(cfg["destinations"], list) or not all(
+        isinstance(destination, dict) for destination in cfg["destinations"]
+    ):
+        sys.exit("error: config destinations must be a list of mappings")
+    selected_offering_sets(cfg)
+    for index, destination in enumerate(cfg["destinations"], start=1):
+        if "upagent" in destination:
+            _validated_upagent_block(destination["upagent"], f"destinations[{index}]")
     return cfg
 
 
@@ -1328,10 +1479,18 @@ def _print_config(cfg: dict) -> None:
     print(f"  source: {cfg['source']}")
     print(f"  global: {', '.join(cfg['global']) or '(none)'}")
     print(f"  exclude: {', '.join(cfg.get('exclude', [])) or '(none)'}")
+    print(f"  upagent offering sets: {', '.join(selected_offering_sets(cfg))}")
     if not cfg["destinations"]:
         print("  destinations: (none)")
     for d in cfg["destinations"]:
-        print(f"  dest: {d['path']}  [{', '.join(d.get('harnesses', []))}]")
+        replacement = (
+            f"  upagent=[{', '.join(selected_offering_sets(cfg, d))}]"
+            if "upagent" in d
+            else ""
+        )
+        print(
+            f"  dest: {d['path']}  [{', '.join(d.get('harnesses', []))}]{replacement}"
+        )
 
 
 def cmd_configure(args: argparse.Namespace) -> None:
@@ -1345,15 +1504,37 @@ def cmd_configure(args: argparse.Namespace) -> None:
         cfg["exclude"] = [
             p.strip().strip("/") for p in args.exclude.split(",") if p.strip()
         ]
+    offering_sets_arg = getattr(args, "offering_sets", None)
+    parsed_offering_sets = None
+    if offering_sets_arg is not None:
+        raw_sets = [
+            item.strip() for item in offering_sets_arg.split(",") if item.strip()
+        ]
+        offerings = _upagent_offerings_module()
+        try:
+            parsed_offering_sets = list(offerings.normalize_offering_sets(raw_sets))
+        except offerings.OfferingError as error:
+            raise SystemExit(f"error: {error}") from error
     if args.dest:
         path = str(Path(args.dest).expanduser().resolve())
-        harnesses = parse_harnesses(args.list) if args.list else ["cc", "pi"]
+        requested_harnesses = parse_harnesses(args.list) if args.list else None
         for d in cfg["destinations"]:
             if d.get("path") == path:
-                d["harnesses"] = harnesses
+                # Setting only a destination offering-set replacement must not
+                # silently reset its existing harness list to the configure default.
+                if requested_harnesses is not None:
+                    d["harnesses"] = requested_harnesses
+                if parsed_offering_sets is not None:
+                    d["upagent"] = {"offering_sets": parsed_offering_sets}
                 break
         else:
-            cfg["destinations"].append({"path": path, "harnesses": harnesses})
+            harnesses = requested_harnesses or ["cc", "pi"]
+            destination: dict[str, Any] = {"path": path, "harnesses": harnesses}
+            if parsed_offering_sets is not None:
+                destination["upagent"] = {"offering_sets": parsed_offering_sets}
+            cfg["destinations"].append(destination)
+    elif parsed_offering_sets is not None:
+        cfg["upagent"] = {"offering_sets": parsed_offering_sets}
     save_config(cfg)
     print(f"{'updated' if existed else 'created'} {CONFIG_PATH}")
     _print_config(cfg)
@@ -1721,6 +1902,13 @@ def do_copy(cfg: dict, log: RunLog) -> None:
         log.always(
             f"  {name} public recipes: {r['new']} new, {r['changed']} updated, "
             f"{r['same']} unchanged, {r['pruned']} pruned, {r['skipped']} skipped"
+        )
+        roster_target = dest_shared / PUBLIC_DIR / UPAGENT_ROSTER_REL
+        selected_sets = selected_offering_sets(cfg, d)
+        changed = materialize_offering_roster(selected_sets, roster_target)
+        log.always(
+            f"  {name} UpAgent offerings: {', '.join(selected_sets)} "
+            f"({'updated' if changed else 'unchanged'})"
         )
 
 
@@ -2202,7 +2390,11 @@ GENERATED_DIR_NAMESPACES = (
     "pi/extensions",
     "pi/agents",
 )
-GENERATED_FILES = ("claude/statusline.sh", "herdr-config.toml")
+GENERATED_FILES = (
+    "claude/statusline.sh",
+    "extensions/common/upagent/offerings.yaml",
+    "herdr-config.toml",
+)
 
 
 def managed_home_roots() -> list[Path]:
@@ -3836,6 +4028,21 @@ def do_home_runtime(
 ) -> None:
     if manifest is None:
         manifest = HomeManifest()
+    selected_sets = selected_offering_sets(cfg)
+    home_roster = generated_root() / "extensions/common/upagent/offerings.yaml"
+    if _generated_ancestors_safe(home_roster):
+        roster_changed = materialize_offering_roster(selected_sets, home_roster)
+        manifest.mark_generated(home_roster)
+        log.always(
+            f"  home UpAgent offerings: {', '.join(selected_sets)} "
+            f"({'updated' if roster_changed else 'unchanged'})"
+        )
+    else:
+        # Preserve the global flow's existing foreign-symlink contract. The
+        # manifest finalizer reports the refusal and leaves the path untouched.
+        log.always(
+            f"  home UpAgent offerings: skipped unsafe generated path {home_roster}"
+        )
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
     # cursor shares codex's home surface (~/.agents/skills) — collapse it so the
     # same dir is never reconciled twice under two tokens.
@@ -4116,8 +4323,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     # manifest exists, a previous run deployed something and update must still
     # take the lock and prune it, exactly as the docs promise. The informational
     # error is only for a machine that never deployed anything at all.
-    empty = not cfg["destinations"] and not cfg["global"]
-    if empty and not manifest_path().is_file():
+    if not has_configured_update_work(cfg) and not manifest_path().is_file():
         sys.exit(
             "error: nothing configured. Run `just configure -d <repo> -l cc,pi` first."
         )
@@ -4246,6 +4452,13 @@ def main() -> None:
         "-x",
         "--exclude",
         help="Set the home-install exclude list: source paths under .shared-llm/ (comma-separated).",
+    )
+    pcfg.add_argument(
+        "--offering-sets",
+        help=(
+            "Replace the machine UpAgent offering sets, or with -d replace that "
+            "destination's sets (comma-separated: standard,claudex)."
+        ),
     )
     pcfg.set_defaults(func=cmd_configure)
 

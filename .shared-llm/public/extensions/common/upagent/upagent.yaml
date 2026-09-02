@@ -82,7 +82,8 @@
 # their order opts in. Python still owns lease, validation, publication, and terminality; any
 # manager is advisory and a manager crash degrades supervision rather than blocking a mechanically
 # valid worker. An explicitly legacy raw order may opt in with
-# `"management": {"mode": "dedicated"}`. Legacy consult-door orders follow this roster default.
+# `"management": {"mode": "dedicated"}`. Consult-door orders carry public offering snapshots and
+# launch through the active public offering roster, not this legacy roster.
 #
 # rescue_on_startup_failure (default true) — when a worker launch fails or stalls before
 # health verification, hire one bounded broker (the checker role) to read the failure and

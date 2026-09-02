@@ -105,12 +105,19 @@ def test_public_self_healing_up_is_silent(
 
     monkeypatch.setattr(public.recruiter, "_recruiter_pane_from_state", state)
     monkeypatch.setattr(public.recruiter, "cmd_up", up)
+    home = tmp_path / "home"
+    roster_path = (
+        home / ".shared-llm/generated/extensions/common/upagent/offerings.yaml"
+    )
+    roster_path.parent.mkdir(parents=True)
+    roster_path.write_text(public.offerings.render_roster(["standard"]))
+    environment = {**_environment(tmp_path), "HOME": str(home)}
 
-    with client.command_runtime.activate(tmp_path, _environment(tmp_path)):
+    with client.command_runtime.activate(tmp_path, environment):
         assert public._cockpit_pane() == "pane-1"
 
     captured = capsys.readouterr()
-    assert calls == [str(HERE / "offerings.yaml")]
+    assert calls == [str(roster_path)]
     assert captured.out == ""
     assert captured.err == ""
 

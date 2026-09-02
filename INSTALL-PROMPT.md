@@ -16,10 +16,10 @@ First inspect before asking questions:
 - destination repository roots the user names;
 - any repository-root `.shared-llm.yaml` or `.shared-llm.yaml.example` for optional work-log settings.
 
-Ask only for unresolved facts: OS, kit checkout path, source hub path (default `~/.shared-llm`), desired global harnesses (`cc`, `codex`, `pi`, or `cursor`, which uses the Codex surface), destination repository paths and harnesses, project placeholder values, optional work-log config, optional Pi extensions, and optional justfile module imports.
+Ask only for unresolved facts: OS, kit checkout path, source hub path (default `~/.shared-llm`), desired global harnesses (`cc`, `codex`, `pi`, or `cursor`, which uses the Codex surface), destination repository paths and harnesses, project placeholder values, optional UpAgent offering sets (`standard` by default, or `standard,claudex` by explicit opt-in), optional work-log config, optional Pi extensions, and optional justfile module imports.
 
 Keep these files distinct:
-- `~/.shared-llm.yaml` is the per-machine source/global/destination roster maintained by `just configure`.
+- `~/.shared-llm.yaml` is the per-machine source/global/destination roster and UpAgent offering policy maintained by `just configure`.
 - A repository-root `.shared-llm.yaml` or `.shared-llm.yaml.example` configures work-log output for planning flows; it is not the machine roster.
 
 Prerequisites:
@@ -32,6 +32,7 @@ Commands, always run from the kit checkout:
 - Omit `-s` to accept the default source hub, or run `just configure -s <deliberate-hub-path>` such as `~/.shared-llm` when the user deliberately chooses a hub path. Do not pass the kit checkout path to `-s`; the checkout is code, while `source:` is the generated hub copied into by the engine.
 - `just configure -g <harnesses>` for global home skills/agents/runtime.
 - `just configure -d <repo> -l <harnesses>` for each destination.
+- `just configure --offering-sets standard,claudex` only when the machine should opt into ClaudeX; use `just configure -d <repo> --offering-sets standard` when one destination should replace the machine choice with the standard roster.
 - `just descriptions` before update.
 - `just update` to build, then run it a second time to verify idempotence.
 
@@ -45,5 +46,5 @@ Before changing a destination repository:
 
 Fail loudly on unresolved placeholders, malformed config, missing prerequisites, conflicting non-owned files/links, or missing credentials for optional features. Do not overwrite foreign files.
 
-Finish only after `just descriptions` passes, `just update` passes twice, the second update is idempotent, `~/.shared-llm.yaml` has the intended source/global/destinations, generated destination files and home links point to the intended generated source, and the manifest is consistent. Summarize changed files, installed harnesses, registered repositories, and optional next steps.
+Finish only after `just descriptions` passes, `just update` passes twice, the second update is idempotent, `~/.shared-llm.yaml` has the intended source/global/destinations/UpAgent offering policy, generated destination files and home links point to the intended generated source, and the manifest is consistent. Summarize changed files, installed harnesses, registered repositories, selected offering sets, and optional next steps.
 ```

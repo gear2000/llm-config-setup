@@ -75,6 +75,16 @@ TERMINAL_STATES = {"finished", "cleanup-failed"}
 SUBMISSION_STATES = frozenset(("registered", "submitting", "submitted"))
 
 
+def _offering_roster(cwd: Path | None = None) -> Any:
+    current = cwd or command_runtime.current_cwd()
+    home = Path(command_runtime.getenv("HOME", str(Path.home())))
+    try:
+        path = offerings.resolve_roster_path(current, home)
+        return offerings.load_roster(path)
+    except offerings.OfferingError as error:
+        raise PublicError(str(error)) from error
+
+
 class PublicError(RuntimeError):
     """A closed-schema request or public operation is invalid."""
 
@@ -378,7 +388,7 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     cwd = _absolute_directory(raw.get("cwd"), caller_cwd)
     request_id = _canonical_request_id(raw.get("request_id"))
 
-    roster = offerings.load_roster()
+    roster = _offering_roster(caller_cwd)
     specialist_entry: dict[str, object] | None = None
 
     if request_type == "worker":
@@ -746,11 +756,7 @@ class PublicRequestStore:
                     if payload.get("keep_open") is True
                     else {}
                 ),
-                **(
-                    {"sentinel": False}
-                    if payload.get("sentinel") is False
-                    else {}
-                ),
+                **({"sentinel": False} if payload.get("sentinel") is False else {}),
                 "artifact_publication": {
                     "schema_version": 1,
                     "compacted_path": str(final_compacted),
@@ -862,8 +868,13 @@ class PublicRequestStore:
 
 
 def _public_lifecycle_roster_path() -> str:
-    """Return the code-owned public roster, never a legacy configurable roster."""
-    return str(HERE / "offerings.yaml")
+    """Return the resolved generated public roster, never a raw legacy roster."""
+    current = command_runtime.current_cwd()
+    home = Path(command_runtime.getenv("HOME", str(Path.home())))
+    try:
+        return str(offerings.resolve_roster_path(current, home))
+    except offerings.OfferingError as error:
+        raise PublicError(str(error)) from error
 
 
 def _cockpit_pane() -> str:
@@ -1856,7 +1867,7 @@ def execute(args: Any, cwd: Path) -> int:
         return 0
     if args.command == "lists":
         if args.type == "offerings":
-            rows = offerings.load_roster().listing()
+            rows = _offering_roster(cwd).listing()
             human = "\n".join(
                 f"{row['id']}  {row['rendered_identity']}  {','.join(cast(list[str], row['efforts']))}"
                 for row in rows
@@ -1918,7 +1929,7 @@ def execute(args: Any, cwd: Path) -> int:
         registered = store.load(args.request)
         if registered.pruned:
             raise PublicError("cannot verify a pruned terminal request")
-        roster = offerings.load_roster()
+        roster = _offering_roster(cwd)
         try:
             snapshot = roster.resolve(args.offering, args.effort)
         except offerings.OfferingError as error:

@@ -63,8 +63,9 @@ RECOGNIZED_STAGE_IDS = (
     "stage-5-finalization",
 )
 
-# Harnesses the roster (upagent.yaml) may map a launch template for.
-KNOWN_HARNESSES = ("claude", "codex", "pi", "cursor")
+# Harnesses a validated order may carry. ClaudeX is public-offering-only.
+KNOWN_HARNESSES = ("claude", "claudex", "codex", "pi", "cursor")
+LEGACY_CONTROLLER_HARNESSES = ("claude", "codex", "pi", "cursor")
 MANAGER_PLACEMENT_MODES = ("shared", "requester", "workspace")
 # Per-order lifecycle-ownership override. KEEP IN SYNC with
 # llm_management.MANAGEMENT_MODES (both modules load standalone by path).
@@ -495,7 +496,9 @@ def parse_result(
         if isinstance(revisit, str):
             revisit = []
         elif isinstance(revisit, list):
-            revisit = [s for s in revisit if isinstance(s, str) and s in RECOGNIZED_STAGE_IDS]
+            revisit = [
+                s for s in revisit if isinstance(s, str) and s in RECOGNIZED_STAGE_IDS
+            ]
     if revisit != original_revisit:
         result["revisit_normalized"] = original_revisit
     if "revisit" in result:
