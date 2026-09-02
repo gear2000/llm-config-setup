@@ -2,9 +2,9 @@
 # allowlists are validated against code-owned policy before they can be listed or launched.
 schema_version: 1
 offerings:
-  claude-fable-5:
+  claude-fable-5-1:
     harness: claude
-    model: claude-fable-5
+    model: claude-fable-5-1
     efforts: [low, medium, high, xhigh, max]
   claude-sonnet-5:
     harness: claude
@@ -43,9 +43,9 @@ offerings:
     model: claude-4.6-sonnet-medium
     efforts: [default]
     completion_style: interactive
-  cursor-fable-5:
+  cursor-fable-5-1:
     harness: cursor
-    model: claude-fable-5-high
+    model: claude-fable-5-1-high
     efforts: [default]
     completion_style: interactive
   cursor-gpt-5-5:

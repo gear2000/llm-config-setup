@@ -63,7 +63,7 @@ def _load_yaml(text: str) -> object:
 
 
 APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
-    "claude-fable-5": ("claude", "claude-fable-5", EFFORTS, "anthropic"),
+    "claude-fable-5-1": ("claude", "claude-fable-5-1", EFFORTS, "anthropic"),
     "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS, "anthropic"),
     "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
@@ -93,9 +93,9 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         (DEFAULT_EFFORT,),
         "anthropic",
     ),
-    "cursor-fable-5": (
+    "cursor-fable-5-1": (
         "cursor",
-        "claude-fable-5-high",
+        "claude-fable-5-1-high",
         (DEFAULT_EFFORT,),
         "anthropic",
     ),
