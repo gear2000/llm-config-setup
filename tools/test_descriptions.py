@@ -745,7 +745,7 @@ def test_global_skill_documentation_lists_match_registered_conventions() -> None
     expected_readme = "`, `".join(module.GLOBAL_CONVENTION_SKILLS)
     assert f"`{expected_readme}`" in (REPO / "README.md").read_text()
     expected_onboarding = "`/`".join(module.GLOBAL_CONVENTION_SKILLS)
-    assert f"`{expected_onboarding}`" in (REPO / "ONBOARDING.md").read_text()
+    assert f"`{expected_onboarding}`" in (REPO / "docs/ONBOARDING.md").read_text()
 
 
 def test_upagent_roster_contains_new_specialists_with_required_offering_and_locations() -> (

@@ -75,7 +75,7 @@ UpAgent offering selection is a focused allowlist, not a generic YAML merge. The
 
 The engine generates one deterministic `offerings.yaml` for each destination and one under `~/.shared-llm/generated/extensions/common/upagent/`. YAML can select approved sets only. Offering ids, harness commands, executables, models, providers, effort lists, completion semantics, health identities, management candidates, and preflights remain code-owned. UpAgent resolves the roster from the repository where the request starts, `$UPAGENT_CANONICAL_REPO` for the same git repo, the main checkout for a linked worktree, then the home runtime. A request `--cwd` only selects the worker directory; it does not replace the active roster with the target directory's destination policy. It does not silently fall back to another offering.
 
-> **Skill placement per harness** (`do-*` → Pi, `cc-*` → Claude, common → both) and how to verify it on any machine: see **[HARNESS-ROUTING.md](HARNESS-ROUTING.md)**.
+> **Skill placement per harness** (`do-*` → Pi, `cc-*` → Claude, common → both) and how to verify it on any machine: see **[docs/HARNESS-ROUTING.md](docs/HARNESS-ROUTING.md)**.
 
 ## The three operations
 
@@ -173,7 +173,14 @@ tools/
   harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
   install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
 justfile                          — init / configure / update, the building blocks, tests, and the Pi launch group
-ONBOARDING.md                     — token-by-token checklist for filling the TEMPLATE stubs
+docs/
+  ONBOARDING.md                   — token-by-token checklist for filling the TEMPLATE stubs
+  HARNESS-ROUTING.md              — skill placement per harness (`do-*`, `cc-*`, common)
+  SKILL-CUSTOMIZATIONS.md         — preserve local changes when updating third-party skills
+  design/improvements.md          — historical Herdr lifecycle design proposal
+prompts/
+  UPDATE_UPAGENT_OFFERINGS.md     — maintainer prompt for adding/changing UpAgent offerings
+INSTALL-PROMPT.md                 — copy-paste prompt for LLM-guided kit install
 ```
 
 **layers vs compose vs llm/pi:**
@@ -187,10 +194,10 @@ ONBOARDING.md                     — token-by-token checklist for filling the T
 There is no scaffolding command — a destination is set up by hand once, then driven by `just update` forever after:
 
 1. **Seed the repo-owned tree.** Copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and any repo-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. You do **not** create `public/` — the engine builds it in step 4.
-2. **Fill the `TEMPLATE.*` stubs** (see `ONBOARDING.md`), deleting the `TEMPLATE.` prefix from each as you finish it.
+2. **Fill the `TEMPLATE.*` stubs** (see [docs/ONBOARDING.md](docs/ONBOARDING.md)), deleting the `TEMPLATE.` prefix from each as you finish it.
 3. **Register it:** `just configure -d /path/to/repo -l cc,pi` (add a `placeholders:` map to its entry in `~/.shared-llm.yaml` if any kit-synced layer carries a `{{TOKEN}}` — see [Placeholder convention](#placeholder-convention)).
 4. **Build it:** `just update` — this creates the `public/` tree from the kit and composes the outputs.
-5. **Import the tool-module justfiles** you intend to use into the repo's root justfile — starting with `import '.shared-llm/public/extensions/common/upagent/justfile'`, which the `/upagent-pipeline` skill needs. `just update` copies the modules in but does not wire them up; see `ONBOARDING.md` step 3.
+5. **Import the tool-module justfiles** you intend to use into the repo's root justfile — starting with `import '.shared-llm/public/extensions/common/upagent/justfile'`, which the `/upagent-pipeline` skill needs. `just update` copies the modules in but does not wire them up; see [docs/ONBOARDING.md](docs/ONBOARDING.md) step 3.
 
 From then on, `just update` keeps every registered destination in sync: it rebuilds `public/` from the kit (your `this_repo/` tree is never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
 
@@ -425,7 +432,7 @@ just configure -s ~/.shared-llm
 just configure -g cc,pi
 
 # 4. Set up a destination repo: copy .shared-llm/ into it, fill the TEMPLATE.* stubs
-#    (see ONBOARDING.md), then register it
+#    (see docs/ONBOARDING.md), then register it
 just configure -d /path/to/your/repo -l cc,pi
 
 # 5. Build everything — every destination, plus the global home pieces
@@ -455,7 +462,7 @@ There are **two** ways a `{{TOKEN}}` gets its value:
 
    During compose, each `{{TOKEN}}` in a composed output is replaced from this map. **Any unfilled `{{TOKEN}}` in composed output stops the build** with a clear error naming the token and the file — kit-synced layers can therefore safely ship a placeholder, because a destination that forgets to supply the value fails loud instead of shipping a literal `{{TOKEN}}`. A recipe that pulls a `TEMPLATE.*` stub is exempt (a stub is deliberately unfilled). Placeholder **values live only in `~/.shared-llm.yaml`** (your home config), never in a committed layer.
 
-See `ONBOARDING.md` for the ordered, token-by-token fill checklist.
+See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the ordered, token-by-token fill checklist.
 
 ## Claude harness runtime config
 

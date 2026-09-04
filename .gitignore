@@ -50,3 +50,7 @@ build/
 .work-log
 .memsearch
 work-log
+
+# Local session scratch — ongoing investigation and progress notes; never committed.
+/context.md
+/progress.md
