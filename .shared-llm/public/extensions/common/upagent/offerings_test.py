@@ -27,11 +27,14 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 18
+    assert len(roster.listing()) == 17
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
-    assert "cursor:::gpt-5.5-high" in rendered_identities
-    assert "cursor:::gpt-5.6-sol-high" in rendered_identities
-    assert "cursor:::gpt-5.6-terra-high" in rendered_identities
+    assert "claude:::claude-sonnet-4-6" in rendered_identities
+    assert "codex:::gpt-5.5" in rendered_identities
+    assert "codex:::gpt-5.4-mini" in rendered_identities
+    assert "codex:::gpt-6-astra" in rendered_identities
+    assert "cursor:::composer-2.5" in rendered_identities
+    assert "cursor:::cursor-grok-4.6-high" in rendered_identities
     assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" in rendered_identities
     expected_candidates = [
@@ -182,12 +185,6 @@ def test_cursor_offerings_have_only_default_effort() -> None:
     assert {item.offering_id for item in cursor_offerings} == {
         "cursor-composer-2-5",
         "cursor-grok-4-6",
-        "cursor-opus-4-6",
-        "cursor-sonnet-4-6",
-        "cursor-fable-5-1",
-        "cursor-gpt-5-5",
-        "cursor-gpt-5-6-sol",
-        "cursor-gpt-5-6-terra",
     }
     for cursor in cursor_offerings:
         assert cursor.efforts == (offerings.DEFAULT_EFFORT,)
@@ -202,12 +199,6 @@ def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
     for offering_id in (
         "cursor-composer-2-5",
         "cursor-grok-4-6",
-        "cursor-opus-4-6",
-        "cursor-sonnet-4-6",
-        "cursor-fable-5-1",
-        "cursor-gpt-5-5",
-        "cursor-gpt-5-6-sol",
-        "cursor-gpt-5-6-terra",
     ):
         omitted = roster.resolve(offering_id, None)
         explicit = roster.resolve(offering_id, "default")
@@ -236,12 +227,6 @@ def test_effortful_offering_still_requires_effort() -> None:
     [
         ("cursor-composer-2-5", "composer-2.5"),
         ("cursor-grok-4-6", "cursor-grok-4.6-high"),
-        ("cursor-opus-4-6", "claude-4.6-opus-high"),
-        ("cursor-sonnet-4-6", "claude-4.6-sonnet-medium"),
-        ("cursor-fable-5-1", "claude-fable-5-1-high"),
-        ("cursor-gpt-5-5", "gpt-5.5-high"),
-        ("cursor-gpt-5-6-sol", "gpt-5.6-sol-high"),
-        ("cursor-gpt-5-6-terra", "gpt-5.6-terra-high"),
     ],
 )
 def test_cursor_renderer_is_interactive_trusted_and_has_no_effort_flag(
@@ -324,19 +309,18 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
     expected = {
         "claude-fable-5-1": "anthropic",
         "claude-sonnet-5": "anthropic",
+        "claude-sonnet-4-6": "anthropic",
         "claude-opus-4-8": "anthropic",
         "codex-gpt-5-6-sol": "openai",
+        "codex-gpt-6-astra": "openai",
+        "codex-gpt-5-5": "openai",
+        "codex-gpt-5-4-mini": "openai",
         "cursor-composer-2-5": "cursor",
         "cursor-grok-4-6": "xai",
-        "cursor-opus-4-6": "anthropic",
-        "cursor-sonnet-4-6": "anthropic",
-        "cursor-fable-5-1": "anthropic",
-        "cursor-gpt-5-5": "openai",
-        "cursor-gpt-5-6-sol": "openai",
-        "cursor-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-sol": "openai",
         "pi-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-luna": "openai",
+        "pi-gpt-6-astra": "openai",
         "pi-gpt-5-5": "openai",
         "pi-gpt-5-4-mini": "openai",
         "pi-glm-5-3-flash": "openrouter",
@@ -427,7 +411,7 @@ def test_standard_render_is_the_pre_set_roster_byte_for_byte() -> None:
     rendered = offerings.render_roster(["standard"])
 
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "eb86e24dba86e26da4dea344ec8e9cb82a2e0bd827800b6c1f6fc04499ebd441"
+        "9d6ace4a27c22bbb5aaeac21304c41e153b9815d5b70b8702e8f3ee80913e411"
     )
 
 

@@ -10,6 +10,10 @@ offerings:
     harness: claude
     model: claude-sonnet-5
     efforts: [low, medium, high, xhigh, max]
+  claude-sonnet-4-6:
+    harness: claude
+    model: claude-sonnet-4-6
+    efforts: [low, medium, high, xhigh, max]
   claude-opus-4-8:
     harness: claude
     model: claude-opus-4-8
@@ -19,6 +23,21 @@ offerings:
     model: gpt-5.6-sol
     efforts: [low, medium, high, xhigh, max]
     # codex exec exits when done; no live repair prompt is possible.
+    completion_style: exec
+  codex-gpt-6-astra:
+    harness: codex
+    model: gpt-6-astra
+    efforts: [low, medium, high, xhigh, max]
+    completion_style: exec
+  codex-gpt-5-5:
+    harness: codex
+    model: gpt-5.5
+    efforts: [low, medium, high, xhigh]
+    completion_style: exec
+  codex-gpt-5-4-mini:
+    harness: codex
+    model: gpt-5.4-mini
+    efforts: [low, medium, high, xhigh]
     completion_style: exec
   cursor-composer-2-5:
     harness: cursor
@@ -33,36 +52,6 @@ offerings:
     model: cursor-grok-4.6-high
     efforts: [default]
     completion_style: interactive
-  cursor-opus-4-6:
-    harness: cursor
-    model: claude-4.6-opus-high
-    efforts: [default]
-    completion_style: interactive
-  cursor-sonnet-4-6:
-    harness: cursor
-    model: claude-4.6-sonnet-medium
-    efforts: [default]
-    completion_style: interactive
-  cursor-fable-5-1:
-    harness: cursor
-    model: claude-fable-5-1-high
-    efforts: [default]
-    completion_style: interactive
-  cursor-gpt-5-5:
-    harness: cursor
-    model: gpt-5.5-high
-    efforts: [default]
-    completion_style: interactive
-  cursor-gpt-5-6-sol:
-    harness: cursor
-    model: gpt-5.6-sol-high
-    efforts: [default]
-    completion_style: interactive
-  cursor-gpt-5-6-terra:
-    harness: cursor
-    model: gpt-5.6-terra-high
-    efforts: [default]
-    completion_style: interactive
   pi-gpt-5-6-sol:
     harness: pi
     model: openai-codex/gpt-5.6-sol
@@ -74,6 +63,10 @@ offerings:
   pi-gpt-5-6-luna:
     harness: pi
     model: openai-codex/gpt-5.6-luna
+    efforts: [low, medium, high, xhigh, max]
+  pi-gpt-6-astra:
+    harness: pi
+    model: openai-codex/gpt-6-astra
     efforts: [low, medium, high, xhigh, max]
   pi-gpt-5-5:
     harness: pi

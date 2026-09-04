@@ -65,8 +65,12 @@ def _load_yaml(text: str) -> object:
 APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-fable-5-1": ("claude", "claude-fable-5-1", EFFORTS, "anthropic"),
     "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS, "anthropic"),
+    "claude-sonnet-4-6": ("claude", "claude-sonnet-4-6", EFFORTS, "anthropic"),
     "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
+    "codex-gpt-6-astra": ("codex", "gpt-6-astra", EFFORTS, "openai"),
+    "codex-gpt-5-5": ("codex", "gpt-5.5", EFFORTS[:-1], "openai"),
+    "codex-gpt-5-4-mini": ("codex", "gpt-5.4-mini", EFFORTS[:-1], "openai"),
     # Cursor model ids carry their native effort tier, so each public cursor
     # offering exposes the canonical default selection only.
     "cursor-composer-2-5": (
@@ -81,45 +85,10 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         (DEFAULT_EFFORT,),
         "xai",
     ),
-    "cursor-opus-4-6": (
-        "cursor",
-        "claude-4.6-opus-high",
-        (DEFAULT_EFFORT,),
-        "anthropic",
-    ),
-    "cursor-sonnet-4-6": (
-        "cursor",
-        "claude-4.6-sonnet-medium",
-        (DEFAULT_EFFORT,),
-        "anthropic",
-    ),
-    "cursor-fable-5-1": (
-        "cursor",
-        "claude-fable-5-1-high",
-        (DEFAULT_EFFORT,),
-        "anthropic",
-    ),
-    "cursor-gpt-5-5": (
-        "cursor",
-        "gpt-5.5-high",
-        (DEFAULT_EFFORT,),
-        "openai",
-    ),
-    "cursor-gpt-5-6-sol": (
-        "cursor",
-        "gpt-5.6-sol-high",
-        (DEFAULT_EFFORT,),
-        "openai",
-    ),
-    "cursor-gpt-5-6-terra": (
-        "cursor",
-        "gpt-5.6-terra-high",
-        (DEFAULT_EFFORT,),
-        "openai",
-    ),
     "pi-gpt-5-6-sol": ("pi", "openai-codex/gpt-5.6-sol", EFFORTS, "openai"),
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS, "openai"),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS, "openai"),
+    "pi-gpt-6-astra": ("pi", "openai-codex/gpt-6-astra", EFFORTS, "openai"),
     "pi-gpt-5-5": ("pi", "openai-codex/gpt-5.5", EFFORTS[:-1], "openai"),
     "pi-gpt-5-4-mini": (
         "pi",
