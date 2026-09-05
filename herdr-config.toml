@@ -1,5 +1,10 @@
 onboarding = false
 
+# This kit is tested against Herdr 0.7.1. Do not `herdr update`.
+# tools/install-herdr.sh pins that release; a newer binary breaks UpAgent.
+[update]
+version_check = false
+
 [theme]
 name = "catppuccin-latte"
 

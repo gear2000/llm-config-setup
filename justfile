@@ -88,6 +88,18 @@ pi-extensions:
     @command -v pi >/dev/null || { echo "pi not found — skipping"; exit 0; }
     bash tools/install-pi-extensions.sh
 
+# Pin Herdr to 0.7.1 (the version the UpAgent hub is tested against). Newer Herdr
+# breaks the hub. Do not run `herdr update`.
+#   just herdr-pin
+#   just herdr-pin --check
+herdr-pin *args:
+    bash tools/install-herdr.sh {{args}}
+
+# Third-party skills this kit does not compose: Lavish, quota-axi, Impeccable,
+# Plannotator. unslop is kit-composed via `just update`, not this recipe.
+misc:
+    bash tools/install-misc.sh
+
 # ─── Kit self-hosting ─────────────────────────────────
 # The kit tracks its OWN composed slash-command skills under .claude/skills/{cc,do}-*
 # (it self-hosts the workflow suite) and composed generic agents under

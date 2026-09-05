@@ -526,9 +526,10 @@ class Composer:
 
         Pass an explicit `root` (e.g. <shared>/compose/agents) to compose only a
         SUBSET of recipes — this is how a consumer install composes the
-        consumer-relevant recipes (root CLAUDE.md/AGENTS.md, skills, agents) while
-        leaving the home-only `global/` skills and the `example-*` demo samples out
-        of the consumer's tree.
+        consumer-relevant recipes (root CLAUDE.md/AGENTS.md, dest-owned nested
+        md recipes under this_repo/compose/{claude,agents}-md/, skills, agents)
+        while leaving the home-only `global/` skills and the public `example-*`
+        demo samples out of the consumer's tree.
         """
         compose_dir = root if root is not None else self.shared / "public" / "compose"
         if not compose_dir.is_dir():
@@ -1558,10 +1559,16 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"error: missing prerequisite(s): {', '.join(missing)}  (try: {hint} {' '.join(missing)})"
         )
     print(
-        "init: all prerequisites present. Next: `just configure -d <repo> -l cc,pi` then `just update`."
+        "init: all prerequisites present. Next: `just configure -s ~/.shared-llm`, `just configure -g cc,pi`, then `just update`."
     )
     print(
-        "init: for the Pi harness, also run `just pi-extensions` to install the pinned third-party extensions."
+        "init: pin Herdr 0.7.1 with `just herdr-pin` (do not `herdr update`; newer Herdr breaks UpAgent)."
+    )
+    print(
+        "init: for the Pi harness, `npm install -g @earendil-works/pi-coding-agent` then `just pi-extensions`."
+    )
+    print(
+        "init: third-party skills (Lavish, Impeccable, …): `just misc`. unslop comes from `just update`."
     )
 
 
@@ -1915,6 +1922,10 @@ def do_copy(cfg: dict, log: RunLog) -> None:
 # --- compose (config-driven, per destination) ------------------------------
 
 # Consumer recipe groups composed for a destination (never global/ or example-*).
+# File groups named …/root.yaml compose that public file only, so kit
+# example-package / example-service recipes stay out of consumer trees. For the
+# matching this_repo/ tree, the whole sibling directory is composed instead
+# (root.yaml override plus dest-owned nested CLAUDE.md / AGENTS.md recipes).
 CONSUMER_RECIPE_GROUPS = (
     "compose/claude-md/root.yaml",
     "compose/agents-md/root.yaml",
@@ -1925,6 +1936,12 @@ CONSUMER_RECIPE_GROUPS = (
     "compose/hooks",
     "compose/statusline",
 )
+
+# public file group → this_repo directory that owns nested md recipes.
+THIS_REPO_NESTED_MD_GROUPS = {
+    "compose/claude-md/root.yaml": "claude-md",
+    "compose/agents-md/root.yaml": "agents-md",
+}
 
 
 # Per-harness skill routing is by NAME PREFIX (matches the retired install-global):
@@ -2059,8 +2076,12 @@ def _compose_destination(
         # tree — same-output recipes let the this_repo copy win, so a repo can
         # override a kit recipe by name. A group absent from a tree is skipped.
         rel = group[len("compose/") :]
+        nested_rel = THIS_REPO_NESTED_MD_GROUPS.get(group)
         for tree in (PUBLIC_DIR, THIS_REPO_DIR):
-            path = shared / tree / "compose" / rel
+            if tree == THIS_REPO_DIR and nested_rel is not None:
+                path = shared / THIS_REPO_DIR / "compose" / nested_rel
+            else:
+                path = shared / tree / "compose" / rel
             if path.is_dir():
                 for yp in composer.discover(path):
                     composer.compose_one(yp)

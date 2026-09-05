@@ -43,6 +43,8 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 - `just update` always writes a full run log under `/tmp/.shared-llm/log/<timestamp>.log`; `-v` also prints the per-file detail to the terminal.
 - **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and `just global` for home roster/runtime reconciliation.
 - `just pi-extensions` installs the pinned third-party Pi extensions via the `pi` CLI (a network step; no-op if `pi` is absent).
+- `just herdr-pin` installs Herdr **0.7.1** from the GitHub release (`tools/install-herdr.sh`). Newer Herdr breaks the UpAgent hub; do not run `herdr update` or the unpinned `herdr.dev/install.sh`.
+- `just misc` installs third-party skills this kit does not compose (Lavish, quota-axi, Impeccable, Plannotator). `unslop` is kit-composed by `just update`.
 - `just test` runs the composer/flow test suite.
 - The Pi launch group — `just hub`, `just builder`, `just pi-status`, `just pi-clean` — and the terraform workflow recipes (`just tf-implement`, `just tf-approve`, `just tf-auto`, `just tf-reviewer-cc` / `-pi`) are covered under "Pi harness runtime config" below.
 
@@ -87,7 +89,7 @@ Every destination's `.shared-llm/` is split into two trees with an explicit owne
 `just update` is three operations (plus an optional fourth):
 
 1. **copy** — kit → hub (`~/.shared-llm`) → each destination's **`public/`** tree. It copies the **common** layers and runtime, and syncs the kit's **compose recipes** into `public/compose/` (translating their layer paths into split form). It **never** touches a destination's `this_repo/` tree. `public/layers/` and `public/compose/` are **swept wholesale** — a file the kit no longer ships is pruned; `public/llm/` runtime is copy-overwrite (it keeps build artifacts like `node_modules`). Build artifacts the kit `.gitignore`s (e.g. a compiled hub binary) never propagate.
-2. **compose** — each destination composes from **both** trees: `public/compose/` (kit recipes) first, then `this_repo/compose/` (repo-owned recipes). A recipe references layers across both trees by explicit path (`.shared-llm/public/...`, `.shared-llm/this_repo/...`). Composing public first lets a `this_repo/compose/` recipe **override** a kit recipe at the same output path (last writer wins). Any `{{TOKEN}}` in a `public/` layer is filled at build time from the destination's `placeholders:` map (see [Placeholder convention](#placeholder-convention)); an unfilled token stops the build. Outputs land at the destination's root (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`).
+2. **compose** — each destination composes from **both** trees: `public/compose/` (kit recipes) first, then `this_repo/compose/` (repo-owned recipes). A recipe references layers across both trees by explicit path (`.shared-llm/public/...`, `.shared-llm/this_repo/...`). Composing public first lets a `this_repo/compose/` recipe **override** a kit recipe at the same output path (last writer wins). Any `{{TOKEN}}` in a `public/` layer is filled at build time from the destination's `placeholders:` map (see [Placeholder convention](#placeholder-convention)); an unfilled token stops the build. Outputs land at each recipe's dest-root-relative `output:` path (`CLAUDE.md` and `AGENTS.md` at the root, nested md files where dest-owned recipes point, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`).
 3. **link** — routes skills per harness **by name prefix**, then symlinks into each harness's **global** skill dir:
    - `do-*` → **Pi only**. During compose, `do-*` skills are moved out of `.claude/skills` (which Claude Code reads) into a Pi-only `<repo>/.pi-skills/` dir, so Claude never sees them; `link` then symlinks them into `~/.pi/agent/skills/`.
    - `cc-*` → **Claude Code only** (stays in `<repo>/.claude/skills/`, never linked to Pi/Codex).
@@ -172,15 +174,19 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
 tools/
   harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
   install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
+  install-herdr.sh                — pin Herdr 0.7.1 (UpAgent hub; do not `herdr update`)
+  install-misc.sh                 — Lavish, quota-axi, Impeccable, Plannotator (not kit-composed)
 justfile                          — init / configure / update, the building blocks, tests, and the Pi launch group
 docs/
-  ONBOARDING.md                   — token-by-token checklist for filling the TEMPLATE stubs
+  ONBOARDING.md                   — redirect to UPINSTALL.md / SETUP-DESTINATION.md
   HARNESS-ROUTING.md              — skill placement per harness (`do-*`, `cc-*`, common)
   SKILL-CUSTOMIZATIONS.md         — preserve local changes when updating third-party skills
   design/improvements.md          — historical Herdr lifecycle design proposal
 prompts/
   UPDATE_UPAGENT_OFFERINGS.md     — maintainer prompt for adding/changing UpAgent offerings
-INSTALL-PROMPT.md                 — copy-paste prompt for LLM-guided kit install
+UPINSTALL.md                      — kit install-or-update guide for humans and LLMs
+SETUP-DESTINATION.md              — add one destination: file map, optional LLM-friendliness score, this_repo seed
+SETUP-SPECIALISTS.md              — dest-contextual UpAgent specialists (this-repo practice, hub overlay)
 ```
 
 **layers vs compose vs llm/pi:**
@@ -191,15 +197,17 @@ INSTALL-PROMPT.md                 — copy-paste prompt for LLM-guided kit insta
 
 ## Setting up a destination repo
 
-There is no scaffolding command — a destination is set up by hand once, then driven by `just update` forever after:
+Want an LLM to do this? Give it [SETUP-DESTINATION.md](SETUP-DESTINATION.md). It asks where LLM md files should land, optionally scores how LLM-friendly the repo is (and does not restructure it), then registers the dest and deposits `.shared-llm/this_repo/` so `just update` generates the files.
 
-1. **Seed the repo-owned tree.** Copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and any repo-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. You do **not** create `public/` — the engine builds it in step 4.
-2. **Fill the `TEMPLATE.*` stubs** (see [docs/ONBOARDING.md](docs/ONBOARDING.md)), deleting the `TEMPLATE.` prefix from each as you finish it.
+There is no scaffolding command — a destination is set up once, then driven by `just update` forever after:
+
+1. **Seed the repo-owned tree.** Copy the kit's `this_repo/` layer stubs under `<repo>/.shared-llm/this_repo/layers/` (mirroring the kit's `layers/*/this_repo/` structure) and dest-owned recipes under `<repo>/.shared-llm/this_repo/compose/`. They arrive as fillable `TEMPLATE.*` stubs. You do **not** create `public/` — the engine builds it in step 4.
+2. **Fill the `TEMPLATE.*` stubs** (see [SETUP-DESTINATION.md](SETUP-DESTINATION.md) Appendix), deleting the `TEMPLATE.` prefix from each as you finish it.
 3. **Register it:** `just configure -d /path/to/repo -l cc,pi` (add a `placeholders:` map to its entry in `~/.shared-llm.yaml` if any kit-synced layer carries a `{{TOKEN}}` — see [Placeholder convention](#placeholder-convention)).
-4. **Build it:** `just update` — this creates the `public/` tree from the kit and composes the outputs.
-5. **Import the tool-module justfiles** you intend to use into the repo's root justfile — starting with `import '.shared-llm/public/extensions/common/upagent/justfile'`, which the `/upagent-pipeline` skill needs. `just update` copies the modules in but does not wire them up; see [docs/ONBOARDING.md](docs/ONBOARDING.md) step 3.
+4. **Build it:** `just update` — this creates the `public/` tree from the kit and composes the outputs, including dest-owned nested `CLAUDE.md` / `AGENTS.md` recipes under `this_repo/compose/claude-md/` and `this_repo/compose/agents-md/`.
+5. **Import the tool-module justfiles** you intend to use into the repo's root justfile — starting with `import '.shared-llm/public/extensions/common/upagent/justfile'`, which the `/upagent-pipeline` skill needs. `just update` copies the modules in but does not wire them up; see [SETUP-DESTINATION.md](SETUP-DESTINATION.md).
 
-From then on, `just update` keeps every registered destination in sync: it rebuilds `public/` from the kit (your `this_repo/` tree is never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the repo root, ready to commit.
+From then on, `just update` keeps every registered destination in sync: it rebuilds `public/` from the kit (your `this_repo/` tree is never touched), recomposes, and re-links. The generated `CLAUDE.md`, `AGENTS.md`, skill, and agent files land at the recipe `output:` paths, ready to commit.
 
 ## Troubleshooting — `just update` succeeds but a repo stays stale
 
@@ -263,9 +271,9 @@ In the affected repo, after `just update -v`:
 
 ## Where compose outputs land
 
-**Recipe `output:` paths are root-relative**, and they resolve against the destination's root. So a real destination's generated files land exactly where each harness reads them — `CLAUDE.md` and `AGENTS.md` at the root, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md` — with no manual move.
+**Recipe `output:` paths are root-relative**, and they resolve against the destination's root. Generated files land where each harness reads them — `CLAUDE.md` and `AGENTS.md` at the root, nested md files at dest-owned recipe paths, `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md` — with no manual move.
 
-A destination composes only the **consumer-relevant** recipe groups (root `CLAUDE.md`/`AGENTS.md`, the skills, the agents, the slash commands). It deliberately does **not** compose the home-only `global/` skills (those install into `~/` via the global step) or the `example-package` / `example-service` **demo** recipes (illustrative samples only — a consumer repo never gets a stray `src/packages/example_package/CLAUDE.md`).
+A destination composes the **consumer-relevant** recipe groups: public root `CLAUDE.md`/`AGENTS.md`, dest-owned recipes under `this_repo/compose/claude-md/` and `this_repo/compose/agents-md/` (nested paths included), plus the skills, agents, and slash commands. It does **not** compose the home-only `global/` skills (those install into `~/` via the global step) or the kit `example-package` / `example-service` **demo** recipes in `public/` (illustrative samples only — a consumer repo never gets a stray `src/packages/example_package/CLAUDE.md`).
 
 **The kit never clobbers its own files when it composes itself.** This repo ships its `this_repo` layers as `TEMPLATE.*` stubs and keeps a hand-maintained `CLAUDE.md` / `README`. When the global step composes the kit's own home skills and agents, it stages them under `examples/` — a **gitignored** staging dir — before copying them into `$HOME`, so a self-compose never overwrites the kit's real root files. The `example-package` / `example-service` demo recipes compose under a gitignored `samples/` area and are excluded from every consumer install.
 
@@ -277,14 +285,14 @@ A destination composes only the **consumer-relevant** recipe groups (root `CLAUD
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section), syncs each persona into `~/.shared-llm/generated/agents/`, and symlinks it into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — copies the bundled Pi extensions + agent personas into `~/.shared-llm/generated/` and symlinks them from there into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks and the statusline into the generated tree and links them into `~/.claude/hooks/` and `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent — settings stays a **real file** on purpose: Claude Code mutates it at runtime, and a rename-style save would silently replace a symlink.
-5. **Herdr config** — deploys `herdr-config.toml` the same way, as a generated copy linked at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning.
+5. **Herdr config** — deploys `herdr-config.toml` the same way, as a generated copy linked at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning. That file does not install the `herdr` binary. Pin **0.7.1** with `just herdr-pin`; newer Herdr breaks the UpAgent hub.
 6. **UpAgent offering roster** — always materializes the machine-selected, code-validated roster at `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml`, even when no global harness is selected, so repository-independent calls have the same explicit machine policy.
 
 Home links always point into `~/.shared-llm/generated/`, never into the kit checkout, so moving or deleting the repository never breaks a live runtime.
 
 Every path the global step deploys is recorded in `~/.shared-llm/manifest.json`. On the next run, a manifest entry whose recipe no longer produces it is **pruned** — but only when the deployed path is a symlink provably ours (one resolving into the generated tree). Scaffolded mutable settings stay real files and are **retained**: the engine deletes no real file, and drift in one is logged, never acted on. `just prune` runs the same reconciliation on demand. Composed `CLAUDE.md` / `AGENTS.md` in destination repos stay real committed files (portable to clones without the kit) and carry a `GENERATED by llm-config-setup` header instead.
 
-Third-party Pi extensions are a separate network step — `just pi-extensions`. It reconciles the pinned manifest through the Pi CLI (installs missing entries and removes the one explicitly retired package) but deliberately leaves unrelated user-installed packages untouched.
+Third-party Pi extensions are a separate network step — `just pi-extensions`. It reconciles the pinned manifest through the Pi CLI (installs missing entries and removes the one explicitly retired package) but deliberately leaves unrelated user-installed packages untouched. Third-party skills this kit does not compose (Lavish, Impeccable, quota-axi, Plannotator) are `just misc`. `unslop` is kit-composed by the global step.
 
 ### Pi global-vs-repo skill precedence
 
@@ -418,7 +426,7 @@ python3 tools/harness.py compose .shared-llm/public/compose/agents --target /tmp
 
 ## Quickstart
 
-Want an LLM to drive setup safely? After cloning this kit, give it [INSTALL-PROMPT.md](INSTALL-PROMPT.md); it distinguishes the checkout from the generated source hub, asks before destination edits, and verifies two idempotent updates.
+Want an LLM to drive setup safely? After cloning this kit, give it [UPINSTALL.md](UPINSTALL.md) for the machine (fresh vs existing install, source hub vs checkout, two idempotent updates). To add a destination repo, give it [SETUP-DESTINATION.md](SETUP-DESTINATION.md).
 
 ```bash
 # 1. Python 3 + one dependency for the engine
@@ -431,8 +439,8 @@ just init -o ubuntu        # or: just init -o mac
 just configure -s ~/.shared-llm
 just configure -g cc,pi
 
-# 4. Set up a destination repo: copy .shared-llm/ into it, fill the TEMPLATE.* stubs
-#    (see docs/ONBOARDING.md), then register it
+# 4. Set up a destination repo (see SETUP-DESTINATION.md): seed this_repo/,
+#    fill TEMPLATE.* stubs, register it
 just configure -d /path/to/your/repo -l cc,pi
 
 # 5. Build everything — every destination, plus the global home pieces
@@ -462,7 +470,7 @@ There are **two** ways a `{{TOKEN}}` gets its value:
 
    During compose, each `{{TOKEN}}` in a composed output is replaced from this map. **Any unfilled `{{TOKEN}}` in composed output stops the build** with a clear error naming the token and the file — kit-synced layers can therefore safely ship a placeholder, because a destination that forgets to supply the value fails loud instead of shipping a literal `{{TOKEN}}`. A recipe that pulls a `TEMPLATE.*` stub is exempt (a stub is deliberately unfilled). Placeholder **values live only in `~/.shared-llm.yaml`** (your home config), never in a committed layer.
 
-See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the ordered, token-by-token fill checklist.
+See [SETUP-DESTINATION.md](SETUP-DESTINATION.md) for the ordered, token-by-token fill checklist (Appendix).
 
 ## Claude harness runtime config
 

@@ -565,6 +565,73 @@ def test_compose_prunes_removed_legacy_runner_skill(tmp_path: Path) -> None:
     assert not generated.exists()
 
 
+def test_compose_this_repo_nested_md_recipes_and_skips_public_examples(
+    tmp_path: Path,
+) -> None:
+    """Dest-owned claude-md/agents-md recipes under this_repo/compose/ all run.
+    Kit example-* recipes in public/compose/claude-md/ do not land in the dest."""
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    s = dest / ".shared-llm"
+    _write(s / "public/layers/llm/common/root.md", "ROOT LAYER\n")
+    _write(s / "public/layers/llm/this_repo/packages/example.md", "EXAMPLE LAYER\n")
+    _write(s / "this_repo/layers/llm/this_repo/packages.md", "PACKAGES DIR LAYER\n")
+    _write(s / "this_repo/layers/llm/this_repo/packages/foo.md", "FOO PACKAGE LAYER\n")
+    _write(
+        s / "public/compose/claude-md/root.yaml",
+        yaml.safe_dump(
+            {
+                "type": "claude-md",
+                "inputs": [".shared-llm/public/layers/llm/common/root.md"],
+                "output": "CLAUDE.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    _write(
+        s / "public/compose/claude-md/example-package.yaml",
+        yaml.safe_dump(
+            {
+                "type": "claude-md",
+                "inputs": [".shared-llm/public/layers/llm/this_repo/packages/example.md"],
+                "output": "samples/src/packages/example_package/CLAUDE.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    _write(
+        s / "this_repo/compose/claude-md/packages/foo.yaml",
+        yaml.safe_dump(
+            {
+                "type": "claude-md",
+                "inputs": [".shared-llm/this_repo/layers/llm/this_repo/packages/foo.md"],
+                "output": "src/packages/foo/CLAUDE.md",
+            },
+            sort_keys=False,
+        ),
+    )
+    _write(
+        s / "this_repo/compose/agents-md/packages.yaml",
+        yaml.safe_dump(
+            {
+                "type": "agents-md",
+                "inputs": [".shared-llm/this_repo/layers/llm/this_repo/packages.md"],
+                "output": "src/packages/AGENTS.md",
+            },
+            sort_keys=False,
+        ),
+    )
+
+    m.do_compose(_cfg(m, dest, ["cc", "pi"]), _quiet(m))
+
+    assert "ROOT LAYER" in (dest / "CLAUDE.md").read_text()
+    assert "FOO PACKAGE LAYER" in (dest / "src/packages/foo/CLAUDE.md").read_text()
+    assert "PACKAGES DIR LAYER" in (dest / "src/packages/AGENTS.md").read_text()
+    assert not (dest / "samples/src/packages/example_package/CLAUDE.md").exists()
+
+
 # --- link ------------------------------------------------------------------
 
 

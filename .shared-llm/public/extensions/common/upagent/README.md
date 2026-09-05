@@ -5,6 +5,11 @@ The Python **Recruiter** persists each request, launches and verifies the worker
 result, closes owned panes, publishes a receipt, and releases the lease. See
 [FUNDAMENTALS.md](FUNDAMENTALS.md) for the authority model and use-case tree.
 
+The hub is tested against **Herdr 0.7.1**. A newer binary breaks wait/subscription behavior.
+Pin it from the kit checkout with `just herdr-pin` (`tools/install-herdr.sh`). Do not run
+`herdr update` or the unpinned `https://herdr.dev/install.sh` installer. Machine setup:
+[UPINSTALL.md](../../../../../UPINSTALL.md).
+
 ## Per-command execution
 
 Every recipe invokes `client.py`. Before importing any UpAgent runtime module or classifying the
@@ -499,6 +504,12 @@ repo-owned overlay `.shared-llm/this_repo/extensions/common/upagent/specialists.
 against the approved offering roster. A destination that overrides one specialist keeps every other kit entry.
 The roster is loaded only for specialist requests and specialist listing: an invalid specialist
 overlay cannot block an ordinary worker request.
+
+Kit personas are generic (`clickhouse`, `kafka`, `backend`, …). A dest overlay is for **this
+repo's practice** the generic body does not cover (for example ClickHouse materialized views used
+as a transformation pipeline). Destination setup asks before adding those; the agent prompt is
+the kit root [SETUP-SPECIALISTS.md](../../../../../SETUP-SPECIALISTS.md). After `just update`,
+`just upagent-specialists` run from the destination lists kit names plus the overlay.
 
 ## Public offerings and legacy controller roster
 

@@ -745,7 +745,7 @@ def test_global_skill_documentation_lists_match_registered_conventions() -> None
     expected_readme = "`, `".join(module.GLOBAL_CONVENTION_SKILLS)
     assert f"`{expected_readme}`" in (REPO / "README.md").read_text()
     expected_onboarding = "`/`".join(module.GLOBAL_CONVENTION_SKILLS)
-    assert f"`{expected_onboarding}`" in (REPO / "docs/ONBOARDING.md").read_text()
+    assert f"`{expected_onboarding}`" in (REPO / "UPINSTALL.md").read_text()
 
 
 def test_upagent_roster_contains_new_specialists_with_required_offering_and_locations() -> (
@@ -793,8 +793,8 @@ def test_description_matching_checklist_shape_and_routing_words() -> None:
     assert "event" in boundary_cases["kafka_unrelated_event_system"]
 
 
-def test_install_prompt_contains_required_guardrails() -> None:
-    text = (REPO / "INSTALL-PROMPT.md").read_text()
+def test_upinstall_contains_required_guardrails() -> None:
+    text = (REPO / "UPINSTALL.md").read_text()
     required = [
         "just init -o <mac|ubuntu>",
         "just configure -g <harnesses>",
@@ -810,8 +810,90 @@ def test_install_prompt_contains_required_guardrails() -> None:
         "Ask before installing OS packages",
         "Never edit generated outputs",
         "passes twice",
+        "Do you want to set up a destination repository, or just install or update the kit?",
+        "npm install -g @earendil-works/pi-coding-agent",
+        "just pi-extensions",
+        "tools/install-pi-extensions.sh",
+        "third-party-extensions.txt",
+        "just herdr-pin",
+        "tools/install-herdr.sh",
+        "0.7.1",
+        "https://herdr.dev/install.sh",
+        "just misc",
+        "tools/install-misc.sh",
+        "kunchenguid/lavish-axi",
+        "unslop",
+        "impeccable",
+        "npx -y impeccable install",
     ]
     for needle in required:
-        assert needle in text
+        assert needle in text, needle
     assert "just configure -s <kit" not in text
     assert "just configure -s /path/to/llm-config-setup" not in text
+
+
+def test_install_misc_script_installs_third_party_skills() -> None:
+    text = (REPO / "tools/install-misc.sh").read_text()
+    for needle in [
+        "kunchenguid/lavish-axi",
+        "kunchenguid/quota-axi",
+        "impeccable install",
+        "--scope=global",
+        "plannotator.ai/install.sh",
+        "unslop is NOT listed here",
+    ]:
+        assert needle in text, needle
+
+
+def test_herdr_config_disables_version_nag() -> None:
+    text = (REPO / "herdr-config.toml").read_text()
+    assert "version_check = false" in text
+    assert "0.7.1" in text
+
+
+def test_setup_destination_contains_required_gates() -> None:
+    text = (REPO / "SETUP-DESTINATION.md").read_text()
+    required = [
+        "Do you have a structure in mind for where to deposit the LLM md files?",
+        "Do you want me to analyze how LLM-friendly this codebase is",
+        "non-disruptive",
+        "strong",
+        "mixed",
+        "weak",
+        "1–5",
+        "do not fix",
+        "Quick fix",
+        "Is this file map acceptable?",
+        "Do not write `~/.shared-llm.yaml` or the destination `.shared-llm/` until the user accepts the file map",
+        "just configure -d <repo> -l <harnesses>",
+        "just update",
+        "Never edit generated outputs",
+        "this_repo/compose/claude-md/",
+        "this_repo/compose/agents-md/",
+        "Do you want me to analyze that area more deeply and add a dest-contextual specialist",
+        "SETUP-SPECIALISTS.md",
+    ]
+    for needle in required:
+        assert needle in text, needle
+    assert "do not restructure" in text.lower() or "Do not move packages" in text
+
+
+def test_setup_specialists_contains_overlay_and_hub_gates() -> None:
+    text = (REPO / "SETUP-SPECIALISTS.md").read_text()
+    required = [
+        "this_repo/extensions/common/upagent/specialists.yaml",
+        "this_repo/compose/agents/",
+        "just upagent-specialists",
+        "materialized views",
+        "Do not refactor the dest",
+        "Never hand-edit `.claude/agents/<name>.md`",
+        "Reuse the kit entry when the generic persona is enough",
+        "_report-contract.md",
+        "offering: claude-sonnet-5",
+    ]
+    for needle in required:
+        assert needle in text, needle
+    readme = (
+        REPO / ".shared-llm/public/extensions/common/upagent/README.md"
+    ).read_text()
+    assert "SETUP-SPECIALISTS.md" in readme
