@@ -84,6 +84,7 @@ def test_plan_commands_own_grill_design_and_two_round_plan_adversary() -> None:
         assert "plan-candidate-vN.md" in text, name
         assert "final human approval" in text, name
         assert "Do not create `route.yaml`" in text, name
+        assert "/hil --plan <plan.md>" in text, name
 
 
 def test_convert_commands_share_herdr_core_and_design_required_contract() -> None:
@@ -112,19 +113,13 @@ def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:
         assert "Do not call `/cc-convert`" in text, name
 
 
-def test_full_commands_call_each_primitive_exactly_once() -> None:
-    expectations = {
-        "cc-full": ("/cc-plan", "/cc-implement", "/cc-convert --herdr"),
-        "do-full": ("/do-plan", "/do-implement", "/do-convert --herdr"),
-    }
+def test_full_commands_are_disabled_stops() -> None:
     for name, path in FULL_COMMANDS.items():
         text = path.read_text()
-        for token in expectations[name]:
-            assert text.count(token) == 1, f"{name} should mention {token} exactly once"
-        assert text.count("just run-start") == 1, name
-        assert "With neither flag, prompt the human once" in text, name
-        assert "Do not run a standalone check command" in text, name
-        assert "DESIGN_REQUIRED" in text, name
+        assert "disabled" in text, name
+        assert "/hil --plan <plan.md>" in text, name
+        assert "Do not call" in text, name
+        assert "Do not plan, convert, implement, or start a run." in text, name
 
 
 def test_aliases_are_warning_delegate_only() -> None:
@@ -178,7 +173,10 @@ def test_recipe_inventory_has_new_surface_and_retired_meta_wrapper_removed() -> 
         "do-plan-and-grill",
         "do-research",
     }
-    assert {"tui-control", "phase-leader"} <= recipes
+    assert {"tui-control", "phase-leader", "plan-implementer"} <= recipes
+    assert (RECIPES / "common/claude/hil.yaml").is_file()
+    assert (RECIPES / "common/claude/hil.yaml").parent.name == "claude"
+    assert (RECIPES / "common/common/plan-implementer.yaml").parent.name == "common"
     assert "herdr-run" not in recipes
     assert "meta-cc-plan-and-grill" not in recipes
     assert "meta-plan-check" not in recipes

@@ -10,6 +10,42 @@ Pin it from the kit checkout with `just herdr-pin` (`tools/install-herdr.sh`). D
 `herdr update` or the unpinned `https://herdr.dev/install.sh` installer. Machine setup:
 [UPINSTALL.md](../../../../../UPINSTALL.md).
 
+## Three execution flows
+
+The human talks to one **HIL agent** — a Claude Code pane they started themselves inside Herdr
+(`HERDR_ENV=1`). Automation never creates that pane. `just run-start` stays Flow 3 only.
+
+```text
+human  (Claude Code remote app)
+  └── HIL  (Claude Code, human-started, already in a Herdr pane)
+        │
+        ├── Flow 1   /hil → plan-implementer controller → Recruiter → workers
+        ├── Flow 2   /upagent-run and /upagent-pipeline (HIL hires workers itself)
+        └── Flow 3   /tui-control → phase-leader → Recruiter → workers
+                     (phased meta-run via just run-start; used least)
+```
+
+- **Flow 1** takes an approved `plan.md`. No `route.yaml`. `/hil` is a relay; the
+  plan-implementer is a gated controller like a phase leader. Default is delegate / review /
+  stop-and-ask. After `/cc-plan`, this is the default execution path.
+- **Flow 2** is a single UpAgent hire (or a named pipeline) from the HIL pane. Unchanged.
+- **Flow 3** is the checked `plan.md` + `route.yaml` path. `just run-start` launches
+  `/tui-control` (TUI agent / phased HIL); that controller creates one `/phase-leader` per
+  phase.
+
+```text
+human
+  └── HIL  (/hil)                    Claude Code · relay only
+        └── plan-implementer         pi/claude/codex/cursor · smart
+              └── Recruiter
+                    ├── slice workers
+                    ├── reviewers / adversaries
+                    └── specialists (consults)
+```
+
+The implementer lands in the `control` tab beside the already-running HIL pane; hired workers
+still move to `workers`.
+
 ## Per-command execution
 
 Every recipe invokes `client.py`. Before importing any UpAgent runtime module or classifying the
@@ -207,7 +243,25 @@ A request's manager, worker, and short-lived checkers start beside `order.cockpi
 atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
 its fenced lease owner.
 
-Phase startup has its own deterministic front door:
+Flow 1 implementer startup has its own deterministic front door. The HIL never splits a pane
+or types `/plan-implementer` itself:
+
+```text
+just upagent-implementer-start <plan.md> <offering> <effort> <run-root>
+just upagent-implementer-await <run-root>/control/implementer-start.json
+```
+
+`--offering` / `--effort` are required (fail loud; no silent default). The controller starts
+the implementer behind a gate, writes `implementer-start.json`, and health-checks it. It
+returns `IMPLEMENTER_STARTED` with `ready`. The HIL then blocks in `upagent-implementer-await`
+which returns one typed event per call (`completed`, `blocked`, `failed`, `needs-input`,
+`leader-missing`, `leader-stalled`, `inactivity-checkpoint`, `await-heartbeat`, …). On
+`needs-input`, quote the question to the human, then
+`just upagent-implementer-respond <receipt> <question-id> <answer-file>`. The implementer
+blocks in `just upagent-implementer-await-answer` rather than LLM-polling. Durable files are
+truth; pane text is display-only.
+
+Phase startup (Flow 3) has its own deterministic front door:
 
 ```text
 just upagent-phase-start <frozen-route.yaml> <run-tree> <phase-id> <pass-number>
@@ -577,6 +631,10 @@ The `phase_leaders:` map is deliberately separate from `harnesses:`. A phase lea
 once with a controller assignment and held behind the phase-start gate; a stage worker receives a
 lease-private result contract. `upagent-phase-start` fails before creating a pane when the selected
 harness has no phase-leader template.
+
+`plan_implementers:` is the same kind of map for Flow 1. `upagent-implementer-start` fails
+before creating a pane when the selected offering's harness has no plan-implementer template.
+ClaudeX has none — it is a worker offering, not a controller.
 
 ## Pipelines (`pipelines.yaml`) — what shape of work to run
 

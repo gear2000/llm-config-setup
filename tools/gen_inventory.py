@@ -61,7 +61,7 @@ CATEGORIES: list[tuple[str, Path, str]] = [
         "Slash-command skills",
         SHARED / "compose" / "slash-commands",
         "Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. "
-        "`cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's "
+        "`cc/do-plan`, `cc/do-implement`, `cc/do-convert --herdr`, and Claude-only `/hil` are the primary workflow surface; `/cc-full` and `/do-full` are disabled; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's "
         "`.claude/skills/<name>/SKILL.md`.",
     ),
 ]

@@ -202,6 +202,28 @@ phase_leaders:
     cursor-agent --force --trust --model {model}
     "Read {instructions_path} and follow that phase-leader assignment."
 
+# Plan-implementers are whole-plan controllers, not stage workers. The HIL starts one
+# through upagent-implementer-start. Same gated launch as a phase leader; the assignment
+# is /plan-implementer. Offering harness must match a template here — claudex has none.
+plan_implementers:
+  claude: >-
+    claude --dangerously-skip-permissions --model {model} --effort {effort}
+    "Read {instructions_path} and follow that plan-implementer assignment as the {agent} persona."
+
+  codex: >-
+    codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+    --model {model} -c model_reasoning_effort={effort}
+    "Read {instructions_path} and follow that plan-implementer assignment."
+
+  pi: >-
+    pi --approve --no-extensions -e "$HOME/.pi/agent/extensions/herdr-agent-state.ts"
+    --model {model} --thinking {effort}
+    "Read {instructions_path} and follow that plan-implementer assignment."
+
+  cursor: >-
+    cursor-agent --force --trust --model {model}
+    "Read {instructions_path} and follow that plan-implementer assignment."
+
 harnesses:
   claude: >-
     claude --dangerously-skip-permissions --agent {agent} --model {model} --effort {effort}

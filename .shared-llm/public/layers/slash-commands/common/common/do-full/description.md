@@ -1,1 +1,1 @@
-Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for direct work or `/do-convert --herdr` once plus `just run-start` once. Prompts for mode when no execution flag is supplied.
+Disabled composer. Warns and stops. Use `/do-plan`, then a Claude Code `/hil --plan <plan.md>` session for Flow 1 execution. Use when someone invokes `/do-full`.

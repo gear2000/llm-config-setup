@@ -1,0 +1,1 @@
+Whole-plan controller for Flow 1. Reads an approved plan.md, hires UpAgent workers for slices, and asks the HIL when stuck. Use when this pane was started by `just upagent-implementer-start` / `/plan-implementer`, or when running as the plan-implementer under HERDR_ENV=1.

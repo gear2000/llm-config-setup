@@ -145,6 +145,8 @@ TARGETS = {
     "recruiter": "recruiter.py",
     "phase-controller": "phase_controller.py",
     "phase-await": "phase_await.py",
+    "implementer-controller": "implementer_controller.py",
+    "implementer-await": "implementer_await.py",
     "direct-controller": "direct_controller.py",
     "pipelines": "pipelines.py",
 }
@@ -153,7 +155,7 @@ RUNNER_TARGETS = {
     "run-lifecycle": "run_lifecycle.py",
 }
 RECRUITER_TARGETS = frozenset(
-    ("public", "recruiter", "phase-controller", "direct-controller")
+    ("public", "recruiter", "phase-controller", "implementer-controller", "direct-controller")
 )
 READ_ONLY_PUBLIC = frozenset(("help", "status", "get", "lists"))
 READ_ONLY_RECRUITER = frozenset(("status", "specialists"))
@@ -189,6 +191,8 @@ def _is_mutating(target: str, argv: list[str]) -> bool:
         return _recruiter_command(argv) not in READ_ONLY_RECRUITER
     if target == "phase-await":
         return command != "wait"
+    if target == "implementer-await":
+        return command not in ("wait", "wait-answer")
     if target == "direct-controller":
         return command != "steps"
     if target == "pipelines":

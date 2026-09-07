@@ -57,4 +57,5 @@ Keep these under the resolved plan directory:
 - The adversary is the separate `plan-adversary` persona. Do not reuse the code-focused `adversarial-evaluator`.
 - The reviewer is read-only and writes typed findings only.
 - Do not create `route.yaml`, run `/cc-convert`, run `/do-convert`, start a managed run, start workers, or edit implementation code.
+- After human approval, default execution is `/hil --plan <plan.md> --offering <id> --effort <effort>` (Flow 1). Do not start `/cc-full`, `/do-full`, `/cc-implement`, `/do-implement`, or `just run-start` unless the human explicitly asks.
 - If a conditional design artifact is needed but cannot be resolved from available context and the human, stop with the unresolved fork and evidence rather than inventing architecture.

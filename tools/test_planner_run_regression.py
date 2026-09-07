@@ -23,6 +23,7 @@ CLAUDE_SKILLS = {
     "cc-plan": ".claude/skills/cc-plan/SKILL.md",
     "cc-plan-and-grill": ".claude/skills/cc-plan-and-grill/SKILL.md",
     "cc-planish": ".claude/skills/cc-planish/SKILL.md",
+    "hil": ".claude/skills/hil/SKILL.md",
 }
 PI_SKILLS = {
     "do-convert": ".pi-skills/do-convert/SKILL.md",
@@ -34,6 +35,7 @@ PI_SKILLS = {
 COMMON_REQUIRED_SKILLS = {
     "tui-control": ".claude/skills/tui-control",
     "phase-leader": ".claude/skills/phase-leader",
+    "plan-implementer": ".claude/skills/plan-implementer",
 }
 PI_REQUIRED_SKILLS = {
     **{name: path.rsplit("/SKILL.md", 1)[0] for name, path in PI_SKILLS.items()},
@@ -164,8 +166,12 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
 
     for name, relative in CLAUDE_SKILLS.items():
         text = (destination / relative).read_text()
-        if name not in {"cc-plan-and-grill", "cc-planish"}:
+        if name not in {"cc-plan-and-grill", "cc-planish", "cc-full"}:
             assert "plan.md" in text, name
+        if name == "cc-full":
+            assert "/hil --plan <plan.md>" in text, name
+        if name == "hil":
+            assert "just upagent-implementer-start" in text, name
         assert not (destination / ".pi-skills" / name).exists(), f"{name} leaked to Pi"
 
     for name, relative in PI_SKILLS.items():
@@ -175,10 +181,18 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
         assert not (destination / ".claude/skills" / name).exists(), f"{name} leaked to Claude"
 
     assert "Do not create `route.yaml`" in (destination / ".claude/skills/cc-plan/SKILL.md").read_text()
+    assert "/hil --plan <plan.md>" in (destination / ".claude/skills/cc-plan/SKILL.md").read_text()
     assert "Do not create `route.yaml`" in (destination / ".pi-skills/do-plan/SKILL.md").read_text()
+    assert "/hil --plan <plan.md>" in (destination / ".pi-skills/do-plan/SKILL.md").read_text()
     assert "DESIGN_REQUIRED" in (destination / ".claude/skills/cc-convert/SKILL.md").read_text()
     assert "DESIGN_REQUIRED" in (destination / ".pi-skills/do-convert/SKILL.md").read_text()
     assert "just run-start" in (destination / ".claude/skills/tui-control/SKILL.md").read_text()
+    assert "just upagent-request" in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
+    assert "implementer-result.json" in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
     assert not (destination / ".claude/skills/herdr-run").exists()
     assert not (destination / ".claude/skills/meta-cc-plan-and-grill").exists()
 
@@ -198,6 +212,8 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
         link = home / ".pi/agent/skills" / name
         assert link.is_symlink(), f"Pi does not expose {name}"
         assert link.resolve() == (destination / relative).resolve()
+
+    assert not (home / ".pi/agent/skills/hil").exists()
 
     root_justfile = (ROOT / "justfile").read_text()
     assert "worker-up:" not in root_justfile

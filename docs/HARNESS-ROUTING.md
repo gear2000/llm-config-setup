@@ -74,11 +74,13 @@ skills from `~/.pi/agent/skills/`, not `<repo>/.pi/skills/`.
 
 ## Planner-to-Herdr inventory
 
-- Claude Code primary workflow commands are `cc-plan`, `cc-implement`, `cc-convert`, and `cc-full`.
-- Pi primary workflow commands are `do-plan`, `do-implement`, `do-convert`, and `do-full`.
-- `do-*` remains Pi-only and `cc-*` remains Claude-only.
-- `just run-start` launches the checked pair into internal `/tui-control`; that controller
-  creates one internal `/phase-leader` leader per phase.
+- Claude Code primary workflow commands are `cc-plan`, `cc-implement`, `cc-convert`, and `hil`.
+- Pi primary workflow commands are `do-plan`, `do-implement`, and `do-convert`.
+- `/cc-full` and `/do-full` are disabled composers: they warn and stop.
+- `do-*` remains Pi-only and `cc-*` remains Claude-only. `/hil` is Claude-only (recipe under `claude/`).
+- After `/cc-plan`, default execution is `/hil` (Flow 1). `just run-start` launches the checked
+  pair into internal `/tui-control` (Flow 3); that controller creates one internal `/phase-leader`
+  leader per phase.
 - The redundant `meta-cc-plan-and-grill` wrapper and the one-release `meta-plan-convert` /
   `meta-plan-check` aliases are retired and pruned. `rphase-*`, `cc-loop`, and `do-loop` are not
   installed command surfaces.
