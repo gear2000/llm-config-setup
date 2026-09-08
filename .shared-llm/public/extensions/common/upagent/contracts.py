@@ -819,22 +819,39 @@ def parse_event(
     return event
 
 
-def validate_event_order(previous: dict | None, current: dict) -> dict:
-    if previous is None:
-        return current
-    if current["sequence"] <= previous["sequence"]:
-        raise ContractError(
-            f"event order: sequence {current['sequence']} must exceed {previous['sequence']}"
-        )
-    if previous.get("terminal"):
-        prev_gen = previous.get("generation", 1)
+def is_cleanup_advisory(event: dict) -> bool:
+    return event.get("kind") == "advisory" and isinstance(event.get("dedupe_key"), str) and event["dedupe_key"].startswith("flow1:cleanup-failed:")
+
+
+class _OrderedEvent(dict):
+    """Carry terminal ordering state without adding fields to serialized events."""
+
+    def __init__(self, event: dict, terminal: dict | None):
+        super().__init__(event)
+        self.terminal_event = terminal
+
+
+def validate_event_order(previous: dict | None, current: dict, *, terminal_event: dict | None = None) -> dict:
+    terminal = terminal_event
+    if previous is not None:
+        if current["sequence"] <= previous["sequence"]:
+            raise ContractError(
+                f"event order: sequence {current['sequence']} must exceed {previous['sequence']}"
+            )
+        terminal = terminal or (previous if previous.get("terminal") else getattr(previous, "terminal_event", None))
+    if terminal is not None:
+        prev_gen = terminal.get("generation", 1)
         cur_gen = current.get("generation", 1)
-        if cur_gen <= prev_gen:
+        if cur_gen <= prev_gen and not is_cleanup_advisory(current):
             raise ContractError(
                 "event order: terminal event "
-                f"{previous['event_id']!r} (generation {prev_gen}) cannot be followed by "
+                f"{terminal['event_id']!r} (generation {prev_gen}) cannot be followed by "
                 f"{current['event_id']!r} (generation {cur_gen})"
             )
+        if cur_gen > prev_gen:
+            terminal = None
+    if terminal is not None and is_cleanup_advisory(current):
+        return _OrderedEvent(current, terminal)
     return current
 
 

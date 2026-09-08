@@ -2,6 +2,8 @@
 # order is policy owned by this roster, while offerings.py validates every reference and renders
 # every command. The public YAML never carries executable commands.
 management:
+  # False disables status recovery only; Sentinel closeouts still use the shared ladder.
+  status_first: true
   mode: direct
   rescue_on_startup_failure: true
   startup_timeout_ms: 45000
@@ -37,3 +39,9 @@ management:
         effort: low
     agent: upagent-sentinel
     timeout_ms: 120000
+
+# Standalone Flow 1 sweeps; false is the rollback switch.
+run_watch:
+  enabled: true
+  interval_minutes: 5
+  drain_minutes: 5

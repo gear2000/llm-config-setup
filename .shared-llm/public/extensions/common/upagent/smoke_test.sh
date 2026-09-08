@@ -79,6 +79,8 @@ try:
         name = args[2]
         cwd = args[args.index("--cwd") + 1]
         command = args[args.index("--") + 1:]
+        if "fake_worker.py" not in command[-1]:
+            raise RuntimeError("smoke only permits its local fake worker command")
         process = subprocess.Popen(command, cwd=cwd, env=os.environ.copy(), start_new_session=True)
         pane_id = "pane-" + name[-16:]
         state["panes"][pane_id] = {
@@ -123,7 +125,8 @@ def value(label):
     match = re.search(rf"^- {label}: (.+)$", text, re.MULTILINE)
     if match is None:
         raise RuntimeError(f"missing {label} path")
-    return Path(match.group(1))
+    # The result label includes an explanatory REQUIRED annotation after two spaces.
+    return Path(match.group(1).partition("  (REQUIRED")[0])
 order = re.search(r'`order_id`: exactly "([^"]+)"', text).group(1)
 time.sleep(0.2)
 for path in (value("result.json"), value("compacted.md"), value("handoff.md")):
@@ -177,7 +180,8 @@ cat >"$WORK/order.json" <<EOF
   "instructions_path": "$WORK/instructions.md",
   "result_path": "$WORK/result.json",
   "cockpit_pane": "cockpit-pane",
-  "timeout_ms": 10000
+  "timeout_ms": 10000,
+  "sentinel": false
 }
 EOF
 

@@ -60,7 +60,7 @@ class AwaitError(RuntimeError):
 
 
 class ImplementerContext:
-    def __init__(self, receipt_path: Path):
+    def __init__(self, receipt_path: Path, *, allow_incomplete: bool = False):
         receipt_path = receipt_path.resolve()
         if not receipt_path.is_file():
             raise AwaitError(f"implementer-start receipt not found: {receipt_path}")
@@ -70,7 +70,7 @@ class ImplementerContext:
             raise AwaitError(f"implementer-start receipt unreadable: {error}") from error
         if not isinstance(receipt, dict):
             raise AwaitError("implementer-start receipt must be a JSON object")
-        if receipt.get("state") not in ("ready", "ready-degraded"):
+        if receipt.get("state") not in ("ready", "ready-degraded") and not allow_incomplete:
             raise AwaitError(
                 f"implementer-start receipt state must be ready/ready-degraded (got {receipt.get('state')!r})"
             )
@@ -78,7 +78,9 @@ class ImplementerContext:
         run_id = receipt.get("run_id")
         phase_id = receipt.get("phase_id") or "plan"
         if not isinstance(pane, str) or not pane:
-            raise AwaitError("implementer-start receipt has no implementer_pane")
+            if not allow_incomplete:
+                raise AwaitError("implementer-start receipt has no implementer_pane")
+            pane = ""
         if not isinstance(run_id, str) or not run_id:
             raise AwaitError("implementer-start receipt has no run_id")
         if not isinstance(phase_id, str) or not phase_id:
@@ -142,6 +144,7 @@ def read_journal(ctx: ImplementerContext) -> list[dict]:
         return []
     events: list[dict] = []
     previous = None
+    terminal_event = None
     for path in sorted(ctx.events_dir.glob("*.json")):
         try:
             event = contracts.parse_event(
@@ -151,7 +154,9 @@ def read_journal(ctx: ImplementerContext) -> list[dict]:
             )
         except (OSError, contracts.ContractError) as error:
             raise AwaitError(f"journal event {path.name} invalid: {error}") from error
-        previous = contracts.validate_event_order(previous, event)
+        previous = contracts.validate_event_order(previous, event, terminal_event=terminal_event)
+        if event.get("terminal"):
+            terminal_event = event
         events.append(event)
     return events
 
@@ -218,7 +223,7 @@ def publish_event(
             ctx, events
         ):
             return None
-        if any(e.get("terminal") for e in events):
+        if any(e.get("terminal") for e in events) and not contracts.is_cleanup_advisory({"kind": kind, "dedupe_key": dedupe_key}):
             return None
         sequence = events[-1]["sequence"] + 1 if events else 1
         event: dict[str, object] = {
@@ -420,7 +425,8 @@ def _probe_leader(pane_id: str, *, herdr_session: str | None = None) -> dict:
     return {"alive": True, "agent_status": pane.get("agent_status")}
 
 
-def _has_terminal_result(ctx: ImplementerContext) -> bool:
+def has_terminal_result(ctx: ImplementerContext) -> bool:
+    """Owner-validated terminal predicate for await and standalone run-watch."""
     try:
         contracts.parse_implementer_result(
             ctx.result_path.read_text(),
@@ -462,6 +468,13 @@ def await_event(
     notify: Callable[[str, str], object] | None = None,
 ) -> dict:
     ctx = ImplementerContext(Path(receipt_path))
+    reconciler = None
+    if ctx.receipt.get('supervise') is True:
+        spec = importlib.util.spec_from_file_location('upagent_await_flow1', HERE / 'flow1_supervision.py')
+        assert spec and spec.loader
+        flow1 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(flow1)
+        reconciler = flow1.Reconciler(ctx)
     session = ctx.herdr_session
     probe = probe or (
         lambda pane_id, bound_session=session: _probe_leader(
@@ -482,13 +495,13 @@ def await_event(
         now = time.monotonic()
         if now >= next_reconcile:
             next_reconcile = now + reconcile_ms / 1000
-            observed = probe(ctx.leader_pane)
+            observed = reconciler.tick() if reconciler else probe(ctx.leader_pane)
             alive = observed.get("alive")
             status = observed.get("agent_status")
             if status != last_status:
                 last_status = cast(str | None, status)
                 last_material_change = now
-            if alive is False and not _has_terminal_result(ctx):
+            if reconciler is None and alive is False and not has_terminal_result(ctx):
                 dead_sweeps += 1
                 if dead_sweeps >= STALL_CONFIRMATIONS:
                     publish_event(
@@ -502,9 +515,10 @@ def await_event(
             else:
                 dead_sweeps = 0
             if (
-                alive is True
+                reconciler is None
+                and alive is True
                 and status in ("idle", "done")
-                and not _has_terminal_result(ctx)
+                and not has_terminal_result(ctx)
             ):
                 stalled_sweeps += 1
                 if stalled_sweeps >= STALL_CONFIRMATIONS:

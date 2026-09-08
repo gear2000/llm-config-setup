@@ -90,6 +90,8 @@
 # advise retry vs stop, then relaunch at most once. If the broker itself cannot run, the
 # Recruiter retries once anyway. Applies in both modes.
 management:
+  # False disables status recovery only; Sentinel closeouts still use the shared ladder.
+  status_first: true
   mode: direct
   rescue_on_startup_failure: true
   startup_timeout_ms: 45000
@@ -245,3 +247,9 @@ harnesses:
     a JSON list of recognized stage ids from the brief — never a bare string, never prose.
     full_log: a pointer to your session transcript. Then remain in your session and go idle;
     do NOT exit or close your pane — the Recruiter validates your files and closes the pane."
+
+# Standalone Flow 1 sweeps; false is the rollback switch.
+run_watch:
+  enabled: true
+  interval_minutes: 5
+  drain_minutes: 5

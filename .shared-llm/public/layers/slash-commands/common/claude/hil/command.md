@@ -5,7 +5,7 @@ Relay between the human and a plan-implementer. This pane is the **HIL agent** â
 ## Invocation
 
 ```text
-/hil --plan <plan.md> --offering <id> --effort <effort>
+/hil --plan <plan.md> --offering <id> --effort <effort> [--no-supervise]
 ```
 
 `--plan`, `--offering`, and `--effort` are required. Fail loud rather than guessing. `--offering` / `--effort` select the **plan-implementer** from `just upagent lists --type plan-implementers --json`, not a silent default and not the general worker list.
@@ -40,9 +40,10 @@ raise SystemExit(0 if any(isinstance(pane, dict) and pane.get("pane_id") == expe
 fi
 ```
 
-3. Require a readable `--plan` file.
+3. Refuse before listing or starting unless `--offering` is literally present in the human's invocation. Stop with `ERROR: /hil requires an explicit --offering; supply an id from the plan-implementers list.` Never infer it from context, a previous run, or a default. Require a readable `--plan` file and an explicit `--effort`.
 4. Run `just upagent lists --type plan-implementers --json`. The `--offering` id must exist in that list and `--effort` must be in that offering's `efforts` list. Fail loud if not. Do not use a ClaudeX or other worker-only offering as the controller. If the command fails with `no checked-out main branch UpAgent source found` or `ambiguous checked-out main branch UpAgent sources`, set `CHECKOUT` to this checkout's absolute root. Prefix **every** later `just upagent*` invocation in this pane with `UPAGENT_CANONICAL_REPO="$CHECKOUT"` â€” Claude Code's Bash tool does not persist `export` across calls. Report that fix rather than the raw traceback. Do not skip the list.
-5. Resolve the run tree next to the plan (or under the plan directory `/cc-plan` already created):
+5. Echo `offering=<id> harness=<harness> effort=<effort> supervise=<bool>` using the literal invocation and validated listing. `supervise=false` only when `--no-supervise` was supplied.
+6. Resolve the run tree next to the plan (or under the plan directory `/cc-plan` already created):
 
    ```text
    <plan-dir>/implementer/<run-id>/
@@ -58,15 +59,56 @@ Do not call `herdr pane split`, `herdr agent start`, `herdr pane run`, or type `
 UPAGENT_CANONICAL_REPO="$CHECKOUT" just upagent-implementer-start "$PLAN" "$OFFERING" "$EFFORT" "$RUN_ROOT"
 ```
 
-Omit the `UPAGENT_CANONICAL_REPO="$CHECKOUT"` prefix when the list succeeded without it. When the prefix is required, use it on every later `just upagent-implementer-await`, `ack`, `respond`, and `finish` as well. Python copies that env into the implementer's `start.sh` so hired work can run `just upagent` on a feature-branch checkout.
+Omit the `UPAGENT_CANONICAL_REPO="$CHECKOUT"` prefix when the list succeeded without it. When the prefix is required, use it on every later `just upagent-implementer-await`, `inject`, `ack`, `respond`, and `finish` as well. Python copies that env into the implementer's `start.sh` so hired work can run `just upagent` on a feature-branch checkout.
 
-Continue only after `IMPLEMENTER_STARTED` with `state: ready` and a live `implementer_pane`. The receipt is `"$RUN_ROOT"/control/implementer-start.json`. Quote every path.
+Pass `--no-supervise` through to the start recipe when supplied. Call both start and finish with shell `timeout: 600000`; Python validates their 480-second budgets.
 
-Then loop. Claude Code's Bash tool defaults to 120 s and caps at 600 s. Pass `timeout: 600000` on the shell tool. Pass `timeout_ms` 590000 so Python returns before the tool kills the process:
+Continue only after `IMPLEMENTER_STARTED` with `state: ready` or `state: ready-degraded` and a live `implementer_pane`. For `ready-degraded`, print the receipt's `startup_advisory` verbatim, then enter the await loop. The receipt is `"$RUN_ROOT"/control/implementer-start.json`. Quote every path.
+
+Then loop with 60-second awaits. Pass `timeout: 600000` on the shell tool and `timeout_ms` 60000 so queued human input can be relayed after each return:
 
 ```bash
-just upagent-implementer-await "$RECEIPT" "$AFTER" 590000
+just upagent-implementer-await "$RECEIPT" "$AFTER" 60000
 ```
+
+After every await return, including a heartbeat or interrupted await, first persist each new unsolicited human message exactly once. Use a file-writing tool to put its verbatim text in a temporary `$HUMAN_MESSAGE_FILE`. Human text must stay in files; never interpolate it into shell commands or pane commands. An answer to a pending `needs-input` question still uses `respond` below.
+
+For each new message, run this file-only writer. `$RUN_ROOT` comes from the start receipt. The HIL is the sole sequence allocator. Keep acknowledged envelopes so sequence numbers never repeat after a restart. The human inbox is `<run-root>/inbox/`; `control/inbox/` is reserved for implementer events.
+
+```bash
+python3 - "$RUN_ROOT" "$HUMAN_MESSAGE_FILE" <<'PY'
+import json, os, sys, time, uuid
+from pathlib import Path
+
+inbox = Path(sys.argv[1]) / "inbox"
+inbox.mkdir(parents=True, exist_ok=True)
+seq = 1 + max((int(p.stem.removeprefix("msg-")) for p in inbox.glob("msg-*.json")), default=0)
+envelope = {"seq": seq, "text": Path(sys.argv[2]).read_text(), "at_ns": time.time_ns(), "acked": False}
+path = inbox / f"msg-{seq}.json"
+temporary = inbox / f".{path.name}.{uuid.uuid4().hex}.tmp"
+with temporary.open("x", encoding="utf-8") as stream:
+    os.chmod(temporary, 0o600)
+    json.dump(envelope, stream, ensure_ascii=False)
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, path)
+fd = os.open(inbox, os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+print(path)
+PY
+```
+
+Then invoke injection whenever any envelope remains unacknowledged, even if this return brought no new human text:
+
+```bash
+just upagent-implementer-inject "$RECEIPT"
+```
+
+The response contains `outcome`, `reason`, `episode`, and `envelope_seqs` listing all unacknowledged messages. `delivered` means the fixed `read your inbox` prompt was sent, not that the messages were acknowledged. Leave the files untouched and retry while any envelope is unacknowledged. `not-idle`, `backoff`, `aborted`, and `nothing-pending` do not acknowledge messages. A `finished` outcome sends nothing; report any remaining unacknowledged messages to the human. An inject error must be shown, never silently dropped. Never send human text with `herdr pane run` or any other pane command.
 
 Handle the JSON `kind`, then `just upagent-implementer-ack "$RECEIPT" "$EVENT_ID"`. Re-await with `after=<that event's sequence>` after every nonterminal event. Never derive a verdict from pane scrollback. An unrecognized `kind` is reported in full to the human, then stop fail-loud; do not guess. If the shell tool is killed, times out, or the await exits without event JSON, re-enter the same await with the same `after`. That is not a terminal verdict and not an unrecognized kind.
 
@@ -85,6 +127,8 @@ Handle the JSON `kind`, then `just upagent-implementer-ack "$RECEIPT" "$EVENT_ID
 | `startup-ready` / `startup-degraded` | no | Record; ack; re-await. |
 | `progress` / `advisory` / `worker-warning` / `worker-missing` | no | Show the full event to the human; ack; re-await. |
 | `decision-required` / `soft-timeout` | no | Quote the event to the human; wait for their instruction; ack; re-await. |
+
+After every finish recipe return, read `"$RUN_ROOT"/control/implementer-finish.json`. Print every `cleanup` entry verbatim. Read the event journal and print every post-terminal advisory with dedupe prefix `flow1:cleanup-failed:` verbatim before stopping.
 
 ## Hard rules
 

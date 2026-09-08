@@ -3,7 +3,8 @@
 A provider-overload halt leaves a worker idle with its conversation intact; a single
 literal "continue" resumes it. The Recruiter's wait loop calls into this module when a
 Sentinel STALLED closeout survives Python's re-probe: `decide` applies the backoff
-ladder and hard cap over durable state, `record_nudge`/`mark_delivered` keep the
+ladder and hard cap over durable state, `classify` supplies status-first verdicts,
+`record_verdict` tracks idle episodes, and `record_nudge`/`mark_delivered` keep the
 intent-before-delivery idempotency record, and `provider_of` derives the provider
 identity used by the cross-provider sentinel gate. Delivery, generation/lease fencing,
 and ledger events stay in recruiter.py — nothing here touches a pane.
@@ -14,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
+from enum import Enum
 from pathlib import Path
 
 # The one allowed payload (nudge-only vocabulary): never instructions or task content.
@@ -37,7 +40,79 @@ _MODEL_PREFIX_PROVIDERS = (
 
 
 class StallNudgeError(ValueError):
-    """A malformed durable state file or an idempotency violation."""
+    """An invalid pane status, malformed state, or idempotency violation."""
+
+
+class PaneProbeWarning(RuntimeWarning):
+    """The pane probe is uncertain; hold without declaring the pane gone."""
+
+
+class PaneState(Enum):
+    PRESENT = "present"
+    GONE = "gone"
+    UNKNOWN = "unknown"
+
+
+class Verdict(Enum):
+    FINISHED = "FINISHED"
+    WORKING = "WORKING"
+    NUDGE = "NUDGE"
+    HOLD = "HOLD"
+    GONE = "GONE"
+
+
+def classify(
+    status: str | None,
+    terminal_valid: bool,
+    pane_state: PaneState,
+    completion_style: str,
+) -> Verdict:
+    """Evaluate owner-validated terminal evidence before liveness and status.
+
+    Callers derive completion_style from the validated harness via offerings.py.
+    terminal_valid means validated terminal evidence, never file existence.
+    """
+    if terminal_valid:
+        return Verdict.FINISHED
+    if pane_state == PaneState.GONE:
+        return Verdict.GONE
+    if pane_state == PaneState.UNKNOWN:
+        warnings.warn(
+            "pane probe is uncertain; holding", PaneProbeWarning, stacklevel=2
+        )
+        return Verdict.HOLD
+    if pane_state != PaneState.PRESENT:
+        raise StallNudgeError(f"unknown pane state {pane_state!r}")
+    if completion_style != "interactive":
+        return Verdict.HOLD
+    if status == "working":
+        return Verdict.WORKING
+    if status == "blocked":
+        return Verdict.HOLD
+    if status in ("idle", "done"):
+        return Verdict.NUDGE
+    raise StallNudgeError(f"unknown interactive pane status {status!r}")
+
+
+def record_verdict(state: dict, verdict: Verdict) -> None:
+    """Apply an episode transition before decide; the caller persists the state.
+
+    Only confirmed NUDGE and WORKING verdicts change episodes. last_verdict
+    records the last of those verdicts, so HOLD cannot erase a recovery or reset
+    a spent cap. Closed episodes retain their records until the next idle probe.
+    """
+    if not isinstance(verdict, Verdict):
+        raise StallNudgeError(f"unknown nudge verdict {verdict!r}")
+    if verdict not in (Verdict.NUDGE, Verdict.WORKING):
+        return
+    if verdict == Verdict.NUDGE and state["last_verdict"] in (
+        None,
+        Verdict.WORKING.value,
+    ):
+        state["episode"] += 1
+        state["nudges"] = []
+        state["escalated"] = False
+    state["last_verdict"] = verdict.value
 
 
 def decide(state: dict, now: float) -> str:
@@ -51,11 +126,21 @@ def decide(state: dict, now: float) -> str:
 
 
 def load_state(path: Path) -> dict:
-    if not path.is_file():
-        return {"nudges": []}
     try:
-        state = json.loads(path.read_text())
-    except (OSError, ValueError) as error:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return {
+            "schema": 2,
+            "episode": 0,
+            "last_verdict": None,
+            "nudges": [],
+            "escalated": False,
+        }
+    except (OSError, UnicodeError) as error:
+        raise StallNudgeError(f"cannot read nudge state at {path}: {error}") from error
+    try:
+        state = json.loads(raw)
+    except ValueError as error:
         raise StallNudgeError(f"corrupt nudge state at {path}: {error}") from error
     if not isinstance(state, dict) or not isinstance(state.get("nudges"), list):
         raise StallNudgeError(f"malformed nudge state at {path}")
@@ -71,6 +156,22 @@ def load_state(path: Path) -> dict:
             raise StallNudgeError(f"malformed nudge record at {path}: {item!r}")
     if "escalated" in state and not isinstance(state["escalated"], bool):
         raise StallNudgeError(f"malformed escalated flag at {path}")
+    schema = state.get("schema", 1)
+    if type(schema) is not int or schema not in (1, 2):
+        raise StallNudgeError(f"unsupported nudge state schema at {path}: {schema!r}")
+    if schema == 1:
+        # Original files had no schema field. Their spent cap belongs to episode 1.
+        state.update(schema=2, episode=1, last_verdict=Verdict.NUDGE.value)
+        state.setdefault("escalated", False)
+    if (
+        type(state.get("episode")) is not int
+        or state["episode"] < 0
+        or "last_verdict" not in state
+        or state["last_verdict"]
+        not in (None, Verdict.NUDGE.value, Verdict.WORKING.value)
+        or not isinstance(state.get("escalated"), bool)
+    ):
+        raise StallNudgeError(f"malformed nudge episode at {path}")
     return state
 
 
@@ -81,6 +182,9 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def record_nudge(state: dict, *, at: float, digest: str, delivered: bool) -> None:
+    # Existing callers record a confirmed stall without an explicit classification.
+    if state.get("schema") == 2:
+        record_verdict(state, Verdict.NUDGE)
     if any(item["digest"] == digest for item in state["nudges"]):
         raise StallNudgeError(f"nudge intent {digest} already recorded")
     state["nudges"].append({"at": at, "digest": digest, "delivered": delivered})
@@ -94,9 +198,17 @@ def mark_delivered(state: dict, digest: str) -> None:
     raise StallNudgeError(f"no recorded nudge intent {digest}")
 
 
-def evidence_digest(*, generation: int, attempt: int, nudge_index: int) -> str:
+def evidence_digest(
+    *, generation: int, attempt: int, nudge_index: int, episode: int = 1
+) -> str:
+    """Identify an intent within an episode; legacy callers use episode 1."""
     payload = json.dumps(
-        {"generation": generation, "attempt": attempt, "nudge_index": nudge_index},
+        {
+            "generation": generation,
+            "attempt": attempt,
+            "nudge_index": nudge_index,
+            "episode": episode,
+        },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()

@@ -8,7 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -184,6 +184,7 @@ class OfferingRoster:
     management: dict[str, object]
     source: Path
     selected_sets: tuple[str, ...]
+    run_watch: dict[str, object] = field(default_factory=dict)
 
     def resolve(self, offering_id: str, effort: str | None) -> dict[str, object]:
         offering = self.offerings.get(offering_id)
@@ -269,7 +270,9 @@ def _selected_sets_for_ids(ids: set[str]) -> tuple[str, ...]:
 def _parse_roster(raw: object, source: Path) -> OfferingRoster:
     if not isinstance(raw, dict):
         raise OfferingError(f"offering roster {source} must be one YAML object")
-    _strict_keys(raw, {"schema_version", "offerings", "management"}, "offering roster")
+    _strict_keys(
+        raw, {"schema_version", "offerings", "management", "run_watch"}, "offering roster"
+    )
     if raw.get("schema_version") != 1:
         raise OfferingError("offering roster schema_version must equal 1")
     values = raw.get("offerings")
@@ -321,7 +324,10 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
     if not isinstance(management, dict):
         raise OfferingError("offering roster management must be an object")
     _validate_management(management, parsed)
-    return OfferingRoster(parsed, dict(management), source, selected_sets)
+    return OfferingRoster(
+        parsed, dict(management), source, selected_sets,
+        validate_run_watch(raw.get("run_watch", {})),
+    )
 
 
 def load_roster(path: str | Path) -> OfferingRoster:
@@ -508,7 +514,7 @@ def render_roster(
         ) from error
     if not isinstance(management_raw, dict):
         raise OfferingError("offering management policy must be one YAML object")
-    _strict_keys(management_raw, {"management"}, "offering management policy")
+    _strict_keys(management_raw, {"management", "run_watch"}, "offering management policy")
 
     # Standard is required by the fixed management candidates. Keeping its authored text as
     # the base preserves the pre-offering-set standard roster byte-for-byte.
@@ -543,12 +549,27 @@ def load_selected_roster(
     return _parse_roster(_load_yaml(rendered), Path("<approved-offering-sets>"))
 
 
+def validate_run_watch(raw: object) -> dict[str, object]:
+    """Strict shared public/legacy run-watch policy; omission uses defaults."""
+    if not isinstance(raw, dict):
+        raise OfferingError("run_watch must be an object")
+    _strict_keys(raw, {"enabled", "interval_minutes", "drain_minutes"}, "run_watch")
+    value = {"enabled": True, "interval_minutes": 5, "drain_minutes": 5, **raw}
+    if type(value["enabled"]) is not bool:
+        raise OfferingError("run_watch.enabled must be a boolean")
+    for key in ("interval_minutes", "drain_minutes"):
+        if type(value[key]) is not int or value[key] <= 0:
+            raise OfferingError(f"run_watch.{key} must be a positive integer")
+    return value
+
+
 def _validate_management(
     management: dict[str, Any], offerings: dict[str, Offering]
 ) -> None:
     allowed = {
         "mode",
         "rescue_on_startup_failure",
+        "status_first",
         "startup_timeout_ms",
         "inactivity_check_ms",
         "requester_grace_ms",
@@ -557,6 +578,8 @@ def _validate_management(
         "sentinel",
     }
     _strict_keys(management, allowed, "management")
+    if type(management.get("status_first", True)) is not bool:
+        raise OfferingError("management.status_first must be a boolean")
     for role_name in ("account_manager", "checker", "sentinel"):
         role = management.get(role_name)
         if not isinstance(role, dict):
@@ -787,6 +810,7 @@ def _materialize_candidate_role(
 def materialize_management(roster: OfferingRoster) -> dict[str, object]:
     """Translate validated offering references into code-owned lifecycle commands."""
     management = dict(roster.management)
+    management.setdefault("status_first", True)
     management["account_manager"] = _materialize_candidate_role(
         roster,
         cast(dict[str, object], management["account_manager"]),

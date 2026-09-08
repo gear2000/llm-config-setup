@@ -147,6 +147,7 @@ TARGETS = {
     "phase-await": "phase_await.py",
     "implementer-controller": "implementer_controller.py",
     "implementer-await": "implementer_await.py",
+    "run-watch": "run_watch.py",
     "direct-controller": "direct_controller.py",
     "pipelines": "pipelines.py",
 }
@@ -155,7 +156,8 @@ RUNNER_TARGETS = {
     "run-lifecycle": "run_lifecycle.py",
 }
 RECRUITER_TARGETS = frozenset(
-    ("public", "recruiter", "phase-controller", "implementer-controller", "direct-controller")
+    ("public", "recruiter", "phase-controller", "implementer-controller",
+     "direct-controller", "run-watch")
 )
 READ_ONLY_PUBLIC = frozenset(("help", "status", "get", "lists"))
 READ_ONLY_RECRUITER = frozenset(("status", "specialists"))
@@ -185,6 +187,8 @@ def _recruiter_command(argv: list[str]) -> str | None:
 def _is_mutating(target: str, argv: list[str]) -> bool:
     """Classify command entry points; unknown commands fail closed as mutations."""
     command = argv[0] if argv else None
+    if target == "run-watch":
+        return False
     if target == "public":
         return command not in READ_ONLY_PUBLIC
     if target == "recruiter":

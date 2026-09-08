@@ -174,7 +174,8 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
             assert "just upagent-implementer-start" in text, name
             assert "UPAGENT_CANONICAL_REPO" in text, name
             assert "does not persist" in text, name
-            assert "590000" in text, name
+            assert '"$AFTER" 60000' in text, name
+            assert "upagent-implementer-inject" in text, name
             assert "re-enter the same await" in text, name
         assert not (destination / ".pi-skills" / name).exists(), f"{name} leaked to Pi"
 

@@ -49,7 +49,25 @@ if [[ "$request_rc" -ne 0 ]]; then
 fi
 ```
 
-Redact `.state.requester_control_token` into `$run_dir/control-token` mode `0600` before any further use of `request.json`. Then:
+Redact `.state.requester_control_token` into `$run_dir/control-token` mode `0600`, then remove that field from `request.json` before any further use.
+
+After every accepted response, including attachment to an existing request, register it
+before awaiting. `$run_root` is the absolute `--run-root` supplied to this implementer,
+not `$run_dir` and never a directory inferred from cwd. Two runs can share one cwd.
+
+```bash
+just upagent-register-worker "$run_root" "$response"
+```
+
+This atomically writes `<run-root>/control/workers/<request-id>.json` with only
+`request_id` from `.request_id`, `payload_sha256` from `.payload_sha256`, `order_id`
+from `.state.order_id`, `generation` from `.state.generation`, and `placed_at_ns`.
+It stores no `cockpit_pane` or control token. An identical attachment preserves the
+record and its placement time. Identity or retry-generation mismatch fails loud;
+do not overwrite the previous generation or silently await it. Resolve that mismatch
+with the HIL. A registration failure stops this hire's await path.
+
+Then:
 
 ```bash
 just upagent await --request "$request_id" --json >"$run_dir/terminal.json"

@@ -103,6 +103,7 @@ class ManagementConfig:
     # health verification. The fast Python path stays the default; intelligence is hired
     # exactly at the failure point.
     rescue_on_startup_failure: bool = True
+    status_first: bool = True
 
 
 def _positive_int(value: object, field: str, default: int) -> int:
@@ -226,6 +227,9 @@ def load_management_config(roster: dict) -> ManagementConfig:
         raise ManagementConfigError(
             "management.rescue_on_startup_failure must be a boolean"
         )
+    status_first = raw.get("status_first", True)
+    if type(status_first) is not bool:
+        raise ManagementConfigError("management.status_first must be a boolean")
     account_manager = raw.get("account_manager")
     checker = raw.get("checker")
     sentinel = raw.get("sentinel")
@@ -265,6 +269,7 @@ def load_management_config(roster: dict) -> ManagementConfig:
         ),
         mode=mode,
         rescue_on_startup_failure=rescue,
+        status_first=status_first,
     )
 
 

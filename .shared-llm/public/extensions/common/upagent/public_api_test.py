@@ -1797,3 +1797,137 @@ def test_effortful_offering_rejects_omitted_effort(tmp_path: Path) -> None:
 
     with pytest.raises(public_api.PublicError, match="requires an explicit effort"):
         public_api.validate_request(_args(argv), tmp_path)
+
+
+@pytest.mark.parametrize("setting", [True, False, "omitted"])
+def test_public_status_first_policy_reaches_request_supervision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: object
+) -> None:
+    """Public CLI selection, generated policy, materialization, and both triggers."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    roster_path = tmp_path / public_api.offerings.ROSTER_RELATIVE_PATH
+    source = roster_path.read_text()
+    replacement = (
+        "" if setting == "omitted" else f"  status_first: {str(setting).lower()}\n"
+    )
+    roster_path.write_text(source.replace("  status_first: true\n", replacement))
+    monkeypatch.setattr(
+        public_api, "_public_lifecycle_roster_path", lambda: str(roster_path)
+    )
+    # An opposite legacy value must never replace public policy.
+    legacy = tmp_path / "upagent.yaml"
+    legacy.write_text(
+        f"harnesses:\n  pi: pi\nmanagement:\n  status_first: {str(setting is False).lower()}\n"
+    )
+    monkeypatch.setattr(recruiter, "default_roster_path", lambda: str(legacy))
+    delivered: list[str] = []
+
+    def request(order_path: str, selected_roster: str) -> int:
+        assert selected_roster == str(roster_path)
+        config = recruiter.llm_management.load_management_config(
+            recruiter.load_roster(selected_roster)
+        )
+        assert config.status_first is (setting is not False)
+        order = recruiter.load_order(order_path)
+        ledger = recruiter.JobLedger()
+        key, _ = ledger.submit(order)
+        token = ledger.claim(key, order["order_id"], 60_000, owner={"generation": 1})
+        assert token is not None
+        manifest = recruiter.completion.build_manifest(
+            order,
+            ledger.request_dir(key),
+            token,
+            recruiter.lifecycle.request_identity(order),
+        )
+        launch = ledger.begin_launch(
+            key,
+            token,
+            "worker",
+            "public-worker",
+            "test-session",
+            order["cwd"],
+            metadata={"attempt": 1, "generation": 1},
+        )
+        ledger.record_launch_created(
+            key, token, launch, "worker-pane", "workspace", "worker-address"
+        )
+        assert ledger.mark_launch_started(
+            key, token, launch, "worker-pane", "workspace", "worker-address"
+        )
+        watch = recruiter._SentinelWatch(
+            ledger,
+            key,
+            order,
+            manifest,
+            recruiter._sentinel_closeout_path(ledger, key, 1),
+            {},
+            herdr_session="test-session",
+        )
+        watch.status_first = config.status_first
+        watch.status_probe()
+        watch.status_probe()
+        assert delivered == (["continue"] if config.status_first else [])
+        # False rolls back only status delivery. A Sentinel request still delivers.
+        assert watch._attempt_stall_nudge("corroborated stall", trigger="sentinel")
+        assert delivered == ["continue"]
+        events = [event for event in ledger.events(key) if event["event"] == "nudge"]
+        assert any(event["trigger"] == "sentinel" for event in events)
+        assert (
+            any(event["trigger"] == "status" for event in events) is config.status_first
+        )
+        return 0
+
+    def herdr(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("pane", "get"):
+            return {
+                "result": {
+                    "pane": {
+                        "pane_id": "worker-pane",
+                        "workspace_id": "workspace",
+                        "agent_status": "idle",
+                    }
+                }
+            }
+        if args[:2] == ("agent", "get"):
+            return {
+                "result": {
+                    "agent": {
+                        "name": "public-worker",
+                        "pane_id": "worker-pane",
+                        "workspace_id": "workspace",
+                    }
+                }
+            }
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr)
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda _address, text, **_kwargs: delivered.append(text),
+    )
+    monkeypatch.setattr(recruiter, "cmd_request_strict", request)
+    assert public_api.execute(_args(_worker_argv(tmp_path)), tmp_path) == 0
+
+
+@pytest.mark.parametrize("invalid", ['"false"', "null", "0", "1", "[]", "{}"])
+def test_public_request_rejects_invalid_status_first_before_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    roster_path = tmp_path / public_api.offerings.ROSTER_RELATIVE_PATH
+    roster_path.write_text(
+        roster_path.read_text().replace(
+            "status_first: true", f"status_first: {invalid}"
+        )
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "cmd_request_strict",
+        lambda *_args: pytest.fail("invalid policy launched"),
+    )
+    with pytest.raises(
+        public_api.PublicError, match="management.status_first must be a boolean"
+    ):
+        public_api.execute(_args(_worker_argv(tmp_path)), tmp_path)

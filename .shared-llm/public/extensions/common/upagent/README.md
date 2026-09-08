@@ -304,6 +304,118 @@ compatibility fallback. Recovery is explicit: use `just run-session-snapshot <ru
 then `just run-session-reconcile <run-dir>`, and only then start with stale takeover when
 the reconciliation receipt proves the recorded owner is stale.
 
+### Flow 1 implementer lifecycle
+
+`just upagent-implementer-start <plan> <offering> <effort> <run-root> [--no-supervise]`
+verifies the implementer process, cwd, rendered model and effort, and agent identity.
+It closes the advisory Account Manager after output or timeout, starts a provider-disjoint
+Sentinel, then starts run-watch when enabled. A manager concern or unavailable supervision
+returns `ready-degraded` with a literal `startup_advisory`. The HIL prints it and awaits events.
+`--no-supervise` skips all three helpers and restores the previous await behavior.
+
+Supervised awaits share the nudge authority with run-watch. Two idle/done probes send
+`continue` and `SENTINEL_STALL_NUDGED`; only exhaustion publishes `leader-stalled`.
+Exec-style implementers never receive a status nudge. Sentinel launches, closeouts, wake
+messages and the cursor across awaits live under `control/sentinel/`.
+
+Start and finish validate a 480-second budget; the HIL gives both recipes a 600-second
+shell timeout. `just upagent-implementer-finish <receipt> [--force]` records progress under
+`.implementer-finish.lock` in `control/finishing.json`, fences further implementer nudges,
+closes owned helpers, drains run-watch, and closes the implementer. It verifies pane,
+agent, PID, process birth and argv before cleanup. A retry resumes the cursor. Forced
+finish without a valid result records `verdict: cancelled`. The HIL prints the final
+`control/implementer-finish.json` cleanup entries and any `flow1:cleanup-failed:*`
+advisories. Only those advisories may follow a terminal journal event.
+
+### HIL human inbox
+
+`/hil` requires a literal `--offering` and validates it against the
+plan-implementer listing. Before starting, it prints
+`offering=<id> harness=<harness> effort=<effort> supervise=<bool>`.
+It awaits events in 60-second windows. After every return, it atomically writes
+new unsolicited human messages to `<run-root>/inbox/msg-<seq>.json` with
+`{seq, text, at_ns, acked: false}`. This directory is separate from
+`control/inbox/`, which carries events for the HIL.
+
+While any envelope remains unacknowledged, the HIL calls:
+
+```bash
+just upagent-implementer-inject <receipt>
+```
+
+The JSON response contains the shared authority's `outcome`, `reason`, and
+`episode`, plus `envelope_seqs` listing all unacknowledged messages. A working
+pane returns `not-idle`; a later idle call sends the fixed `read your inbox`
+prompt once for the pending batch. Duplicate calls do not repeat a recorded
+delivery. Human text never enters a pane command. Inbox delivery shares the
+identity, terminal-result, finishing, and idle checks used by run-watch, and
+never spends the `continue` cap. Exec-style implementers receive no prompt.
+
+The implementer reads envelopes at slice boundaries and on that fixed prompt,
+acts on each message, and quotes it with its sequence and action in
+`implementer-status.md`. It then atomically sets `acked: true` and retains the
+file. Delivery is not acknowledgement. A crash after sending but before recording
+delivery can repeat the fixed prompt; consumers check acknowledgements and the
+recorded action before repeating work.
+
+To roll back Phase 2, revert the inbox relay additions in the HIL and
+plan-implementer command layers, then run `just update` from the main checkout.
+Keep the Phase 3 registry writer in `plan-implementer/hire.md` and the Phase 1
+degraded-start and finish handling. Local tests compose both layer variants and
+exercise injection through the real recipe with fake Herdr. Live phone delivery
+within two await cycles still requires acceptance on a supervised live run.
+
+### Standalone Flow 1 run-watch
+
+After each accepted public request, the implementer redacts its control token and runs:
+
+```bash
+just upagent-register-worker <run-root> <redacted-request.json>
+just upagent-run-watch <run-root> [--roster <roster.yaml>]
+```
+
+The first command atomically records the response's request id, payload hash, order id,
+generation, and placement time under `control/workers/`. Identical attachments are
+idempotent. A changed generation fails instead of replacing the record. The run root
+comes from the implementer's invocation; two runs sharing a cwd have separate registries.
+
+Run-watch reads only these requests from the canonical ledger. It checks their identities
+and generations against the current worker launch before each send. It also supervises
+the implementer identified by `control/implementer-start.json`. Validated terminal evidence
+wins over pane absence. Interactive idle/done panes use the shared nudge authority with
+trigger `run-watch`; working panes close idle episodes, and exec panes receive no prompt.
+Unknown probes hold. Gone and blocked panes produce hourly advisories in the HIL journal.
+Run-watch does not request a Sentinel recheck or write task verdicts.
+
+After the nudge cap, one provider-disjoint Checker reads one saved evidence snapshot.
+Only one Checker is active per run; other exhausted targets wait for a later sweep.
+A busy authority lock defers that target instead of blocking Checker lease cleanup.
+Its typed assessment becomes an advisory. Run-watch closes and verifies its pane as soon
+as output or process exit is observed, or after a four-minute wait with one minute reserved
+for cleanup. Two consecutive empty assessments also produce an hourly provider advisory.
+
+Both authored `offerings-management.yaml` and legacy `upagent.yaml` accept this root block:
+
+```yaml
+run_watch:
+  enabled: true
+  interval_minutes: 5
+  drain_minutes: 5
+```
+
+Omitting the block uses those defaults. Set `enabled: false` to roll back standalone
+supervision. Unknown keys, non-boolean `enabled`, and non-positive or non-integer minute
+values fail before a pane is touched. The process polls every five seconds and records its
+PID, process birth time, argv, Herdr session, effective policy, last sweep, advisories, and
+Checker ownership in `control/run-watch.json`. A process lock permits one owner per run.
+`--once` performs one poll/sweep, closes any assessment it started, and records `stopped`.
+
+SIGTERM or `control/implementer-finish.json` starts a drain. Registered live workers remain
+supervised until none remain or the drain deadline passes. The final state is `finished`
+or `drain-timeout`, with remaining request ids. A missing or failed start receipt records
+`orphaned`. Phase 1's lifecycle controller will own automatic startup and finish-budget
+validation; this command can already be started by hand.
+
 ## The order → result contract (`contracts.py`)
 
 Durable files are the source of truth; terminal text is display-only.
@@ -436,37 +548,40 @@ Durable files are the source of truth; terminal text is display-only.
   worker on the Sentinel's word: Python re-probes the worker pane once and, only on a
   POSITIVE pane answer (probe uncertainty is never treated as liveness), rejects the
   closeout back to the Sentinel for one re-check before a repeat claim
-  is accepted. A confirmed stall over a provably live worker does not end the wait
-  immediately either: the hub runs its own nudge ladder first — Python (never the
-  Sentinel) delivers the one literal payload `continue` through the worker's agent
-  address (the agent-idle prompt path, so a busy tool or foreground state refuses
-  delivery), with an intent-before-delivery record under an idempotency key
-  `(generation, attempt, nudge_index)`, a backoff ladder (immediate, then 5, then
-  15 minutes) and a hard cap of 3, all persisted beside the closeout in
-  `nudges.json` and in typed ledger events (`worker-nudge-intent` /
-  `worker-nudge-delivered` / `worker-nudge-failed` / `worker-nudge-held` /
-  `worker-nudge-rejected`). Completion always wins the race: a staged bundle that
-  already validates supersedes the stall (`worker-nudge-superseded`) instead of
-  resuming a finished worker. A STALLED closeout is provisional in the Sentinel's
-  own brief — it stays idle for the hub's disposition and resumes PULSE on
-  `SENTINEL_STALL_NUDGED` — so later rungs are actually reachable. Nudges are
-  refused outright in requester-facing,
-  release, cancelling, and terminal states (checked at classification AND re-checked
-  immediately before delivery, failing CLOSED on unreadable state; nudge delivery
-  uses a short ~10s idle wait — a stalled worker is already idle, a busy worker is
-  not stalled and fails the rung — so the gate-to-send window is seconds, an
-  accepted residual rather than a mutation-lock reservation), for a journal
-  whose attempt/generation is not this watch's own, for requests with no started
-  worker launch, and for a worker pane that is not POSITIVELY present; corrupt
-  nudge state is recorded (`worker-nudge-state-invalid`) and falls through to the
-  exact pre-ladder blocked path; retained
-  keep-open workers never get a Sentinel at all, so their designed idle checkpoint
-  is never classified as a stall. Exhausted nudges publish exactly one durable
-  `worker-stall-escalation` requester-mailbox event (idempotent via a durable
-  `escalated` flag in the nudge records, published-then-flagged so a crash risks a
-  rare duplicate, never a lost escalation) pointing at the Python-owned
-  nudge records and archived closeouts, and only then does the stall end the wait
-  exactly as before. Cross-provider supervision is mandatory on every hire,
+  is accepted. Python also probes interactive workers about every 20 seconds. Two
+  consecutive `idle` or `done` probes without a validated bundle trigger the literal
+  `continue`, even when no Sentinel closeout exists or the Sentinel could not start.
+  `working` closes the idle episode; `blocked` and uncertain probes hold. Exec-style,
+  retained keep-open, and watchdog workers receive no automatic continue.
+
+  Both status and Sentinel triggers use `nudge_authority.py`. One per-target lock
+  protects `<JobLedger.root>/nudge/<target-id>.json` and its intent-before-delivery
+  records. The target hashes the Herdr session, workspace, pane, exact agent name,
+  owner kind, and request identity. Each idle episode has a cap of three attempts,
+  with the first immediate, the second after five minutes, and the third after another
+  fifteen minutes. Failed or aborted sends spend a rung. Both triggers share that cap.
+  The authority rechecks identity, pane status, ledger permission, and validated
+  terminal evidence immediately before submitting through the existing agent prompt
+  path. Valid terminal evidence wins even when the pane has vanished. A recovered
+  `working` worker supersedes a stale STALLED closeout.
+
+  A `nudge` journal event records `trigger`, `episode`, and `outcome`; the existing
+  `worker-nudge-*` events still support the public summary. Delivery sends
+  `SENTINEL_STALL_NUDGED` to an available Sentinel so it resumes its finalization duty.
+  Exhaustion publishes `worker-stall-escalation` once per episode and marks that
+  episode escalated after publication. A crash before the flag may repeat the notice.
+  Invalid state fails loudly; requester decisions, cancellation, and finalization
+  forbid delivery. The target lock serializes nudges, while lifecycle mutations retain
+  their own lock and the bounded final probe-to-submit race.
+
+  `management.status_first` defaults to `true`. Set it to `false` in the authored
+  `offerings-management.yaml` and regenerate `offerings.yaml` to disable only status
+  delivery for public requests. Legacy orders read the same switch in `upagent.yaml`.
+  Omission means true; strings, numbers, null, and other non-booleans fail validation.
+  `management-start` journals the effective value. Sentinel-triggered recovery and
+  bundle finalization still run with the switch off.
+
+  Cross-provider supervision is mandatory on every hire,
   including retries. Public worker offerings pin code-owned provider metadata in
   their immutable snapshots; legacy orders fall back to known harness/model identity
   only when no snapshot provider exists. For the public roster, the Recruiter filters the

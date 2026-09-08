@@ -82,14 +82,19 @@ upagent-phase-publish receipt kind summary:
 # Start one Flow 1 plan-implementer. The controller remains behind a filesystem gate
 # until its durable receipt records the pane identity. The HIL is never auto-launched.
 [no-cd]
-upagent-implementer-start plan offering effort run_root:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-controller "{{plan}}" "{{offering}}" "{{effort}}" "{{run_root}}"
+upagent-implementer-start plan offering effort run_root *FLAGS:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-controller "{{plan}}" "{{offering}}" "{{effort}}" "{{run_root}}" {{FLAGS}}
 
 # Block until one typed implementer event is available for the HIL. Re-run with after=<last sequence>.
 # timeout_ms stays under Claude Code's 600 s Bash cap so the recipe can return before the tool kills it.
 [no-cd]
 upagent-implementer-await receipt after='0' timeout_ms='590000':
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-await wait --receipt "{{receipt}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
+
+# Notify an idle implementer of unacknowledged human inbox files using a fixed prompt.
+[no-cd]
+upagent-implementer-inject receipt:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-controller inject "{{receipt}}"
 
 # Acknowledge one delivered implementer event.
 [no-cd]
@@ -225,3 +230,13 @@ upagent-reconcile:
 [no-cd]
 leader-restamp phase_start pane:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter leader-restamp "{{phase_start}}" --pane "{{pane}}"
+
+# Standalone Flow 1 supervision; no ledger lifecycle mutation.
+[no-cd]
+upagent-run-watch run_root *FLAGS:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target run-watch "{{run_root}}" {{FLAGS}}
+
+# Persist one accepted, redacted public response in this run's registry.
+[no-cd]
+upagent-register-worker run_root response:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target run-watch register "{{run_root}}" "{{response}}"

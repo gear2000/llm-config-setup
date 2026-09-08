@@ -127,6 +127,12 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
         "_live_panes",
         lambda herdr_session=None: {"implementer-pane", "hil-pane"},
     )
+    def capture(self, pane, name):
+        return {"pane_id": pane, "agent_name": name, "workspace_id": "workspace-1", "herdr_session": "llm-lab-test", "pid": 123, "process_start_time": "start-123", "argv": ["claude"], "argv_marker": "claude"}
+
+    monkeypatch.setattr(implementer_controller.supervision.Panes, "capture", capture)
+    monkeypatch.setattr(implementer_controller.supervision.Panes, "verify_start", lambda self, receipt, script, launch: capture(self, receipt['implementer_pane'], receipt['agent_name']))
+    monkeypatch.setattr(implementer_controller.supervision.Panes, "close", lambda self, owner, target: {"target": target, "status": "closed", "pane_id": closed.append(owner['pane_id']) or owner['pane_id']} if owner else {"target": target, "status": "not-started"})
     return started, closed
 
 
@@ -145,6 +151,7 @@ def test_implementer_start_releases_verified_controller_without_a_watchdog(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
 
     assert receipt["state"] == "ready"
@@ -179,6 +186,7 @@ def test_start_script_exports_canonical_repo_when_set(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     script = (run_root / "control" / "start.sh").read_text()
     expected = f"export {implementer_controller.CANONICAL_REPO_ENV}={shlex.quote(str(checkout.resolve()))}"
@@ -201,6 +209,7 @@ def test_implementer_start_requires_herdr(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
 
@@ -219,6 +228,7 @@ def test_missing_plan_implementers_template_fails_loud(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
 
@@ -244,6 +254,7 @@ def test_startup_failure_closes_the_gated_implementer(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
     assert closed == ["implementer-pane"]
@@ -273,6 +284,7 @@ def test_gate_release_sees_implementer_identity(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     assert seen[0]["state"] == "implementer-gated"
     assert seen[0]["implementer_pane"] == "implementer-pane"
@@ -292,6 +304,7 @@ def test_ready_receipt_reattach_requires_live_matching_launch(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     again = implementer_controller.start_implementer(
         plan_path=plan,
@@ -301,6 +314,7 @@ def test_ready_receipt_reattach_requires_live_matching_launch(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     assert again["implementer_pane"] == first["implementer_pane"]
     assert first["plan_sha256"] == hashlib.sha256(plan.read_bytes()).hexdigest()
@@ -315,6 +329,7 @@ def test_ready_receipt_reattach_requires_live_matching_launch(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
 
@@ -331,6 +346,7 @@ def test_ready_receipt_rejects_offering_mismatch(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     with pytest.raises(ImplementerStartError, match="offering"):
         implementer_controller.start_implementer(
@@ -341,6 +357,7 @@ def test_ready_receipt_rejects_offering_mismatch(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
 
@@ -369,6 +386,7 @@ def test_failed_receipt_requires_a_new_run_root(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
 
@@ -385,6 +403,7 @@ def test_finish_closes_only_the_recorded_implementer_pane(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     (run_root / "implementer-result.json").write_text(
         json.dumps(
@@ -418,6 +437,7 @@ def test_finish_force_closes_without_a_result(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     receipt_path = run_root / "control" / "implementer-start.json"
     with pytest.raises(ImplementerStartError, match="implementer-result"):
@@ -451,6 +471,8 @@ def test_start_gated_closes_a_mismatched_workspace_pane(
         "_close_worker_pane",
         lambda pane, **kwargs: closed.append(pane),
     )
+    monkeypatch.setattr(implementer_controller.supervision.Panes, "capture", lambda self, pane, name: {"pane_id": pane, "agent_name": name})
+    monkeypatch.setattr(implementer_controller.supervision.Panes, "close", lambda self, owner, target: {"target": target, "status": "closed", "pane_id": closed.append(owner['pane_id']) or owner['pane_id']})
     with pytest.raises(ImplementerStartError, match="workspace"):
         implementer_controller._start_gated(
             "name", "hil-pane", tmp_path, tmp_path / "start.sh", "llm-lab-test"
@@ -505,6 +527,7 @@ def test_start_places_the_implementer_in_the_control_tab(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     assert placed == [("implementer-pane", "workspace-1", "control")]
 
@@ -534,6 +557,7 @@ def test_start_rejects_a_leftover_result_without_a_ready_receipt(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
 
 
@@ -550,6 +574,7 @@ def test_ready_receipt_rejects_a_changed_source_plan_without_rewriting_frozen_pl
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     frozen = (run_root / "plan.md").read_text()
     other = tmp_path / "other-plan.md"
@@ -563,6 +588,7 @@ def test_ready_receipt_rejects_a_changed_source_plan_without_rewriting_frozen_pl
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
     assert (run_root / "plan.md").read_text() == frozen
     assert frozen != other.read_text()
@@ -581,6 +607,7 @@ def test_ready_receipt_rejects_a_tampered_frozen_plan_without_reattaching(
         hil_pane="hil-pane",
         cwd=tmp_path,
         roster_path=str(roster),
+        supervise=False,
     )
     frozen = run_root / "plan.md"
     original = frozen.read_text()
@@ -594,6 +621,7 @@ def test_ready_receipt_rejects_a_tampered_frozen_plan_without_reattaching(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
     assert frozen.read_text() == "# TAMPERED FROZEN PLAN\n"
     assert original == plan.read_text()
@@ -619,6 +647,7 @@ def test_start_rejects_leftover_control_events_without_a_ready_receipt(
             hil_pane="hil-pane",
             cwd=tmp_path,
             roster_path=str(roster),
+        supervise=False,
         )
     assert not (run_root / "plan.md").exists()
 

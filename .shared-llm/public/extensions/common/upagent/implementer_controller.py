@@ -24,6 +24,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
@@ -48,6 +49,11 @@ if _spec is None or _spec.loader is None:
     raise RuntimeError("could not load UpAgent contracts")
 contracts = cast(Any, importlib.util.module_from_spec(_spec))
 _spec.loader.exec_module(contracts)
+
+_flow_spec = importlib.util.spec_from_file_location("upagent_controller_flow1", HERE / "flow1_supervision.py")
+assert _flow_spec and _flow_spec.loader
+supervision = importlib.util.module_from_spec(_flow_spec)
+_flow_spec.loader.exec_module(supervision)
 
 recruiter: Any = None
 
@@ -142,14 +148,19 @@ def _release_gate(path: Path, request_id: str) -> None:
 def _exclusive(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(supervision.allocation(0.05))
         try:
             yield
         finally:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def _resolve_offering(offering_id: str, effort: str, cwd: Path) -> dict[str, str]:
+def _resolve_offering(offering_id: str, effort: str, cwd: Path) -> dict[str, Any]:
     catalog = recruiter.offering_catalog
     roster = catalog.load_roster(catalog.resolve_roster_path(cwd))
     snapshot = roster.resolve(offering_id, effort)
@@ -169,6 +180,7 @@ def _resolve_offering(offering_id: str, effort: str, cwd: Path) -> dict[str, str
         "harness": harness,
         "id": offering_id,
         "model": model,
+        "snapshot": snapshot,
     }
 
 
@@ -260,9 +272,14 @@ def _start_gated(
         and returned_workspace != workspace_id
     ):
         try:
-            recruiter._close_worker_pane(pane_id, herdr_session=herdr_session)
+            panes = supervision.Panes(recruiter, {"herdr_session": herdr_session, "workspace_id": returned_workspace, "hil_pane": hil_pane})
+            owner = panes.capture(pane_id, name)
+            cleanup = panes.close(owner, "implementer")
+            if cleanup['status'] == 'cleanup-failed':
+                raise supervision.SupervisionError(str(cleanup))
         except (
             recruiter.RecruiterError,
+            supervision.SupervisionError,
             OSError,
             subprocess.SubprocessError,
         ) as close_error:
@@ -378,6 +395,7 @@ def _canonical_repo_export() -> str | None:
     return str(path.resolve())
 
 
+@supervision.bounded
 def start_implementer(
     *,
     plan_path: Path,
@@ -387,6 +405,7 @@ def start_implementer(
     hil_pane: str,
     cwd: Path,
     roster_path: str,
+    supervise: bool = True,
 ) -> dict[str, object]:
     if command_runtime.getenv("HERDR_ENV") != "1":
         raise ImplementerStartError(
@@ -408,6 +427,11 @@ def start_implementer(
         raise ImplementerStartError("effort is required")
     if not cwd.is_absolute() or not cwd.is_dir():
         raise ImplementerStartError(f"cwd must be an existing absolute directory: {cwd}")
+    roster = recruiter.load_roster(roster_path)
+    try:
+        budget = supervision.start_budget(roster, supervise)
+    except supervision.SupervisionError as error:
+        raise ImplementerStartError(str(error)) from error
     run_root.mkdir(parents=True, exist_ok=True)
     if not run_root.is_absolute() or not run_root.is_dir():
         raise ImplementerStartError(
@@ -461,6 +485,8 @@ def start_implementer(
                     raise ImplementerStartError(
                         "implementer-start receipt effort does not match this launch"
                     )
+                if existing.get("supervise", False) != supervise:
+                    raise ImplementerStartError("implementer-start receipt supervision mode mismatch")
                 recorded_digest = existing.get("plan_sha256")
                 if recorded_digest != _plan_digest(plan_path):
                     raise ImplementerStartError(
@@ -552,6 +578,8 @@ def start_implementer(
         )
         implementer_pane: str | None = None
         ready = False
+        cleanup_owner = None
+        receipt = {}
         watchdog = {
             "reason": "Flow 1: implementer-await owns delivery; no standing watchdog",
             "state": "not-configured",
@@ -561,6 +589,11 @@ def start_implementer(
             _write_json_atomic(
                 receipt_path,
                 {
+                    "agent_name": _safe_name(slug),
+                    "cwd": str(cwd),
+                    "supervise": supervise,
+                    "run_watch": budget['run_watch'],
+                    "roster_path": str(Path(roster_path).resolve()),
                     "at_ns": time.time_ns(),
                     "effort": profile["effort"],
                     "harness": profile["harness"],
@@ -581,17 +614,26 @@ def start_implementer(
             implementer_pane, workspace_id = _start_gated(
                 _safe_name(slug), hil_pane, cwd, script_path, herdr_session
             )
+            pane_receipt = {"herdr_session": herdr_session, "workspace_id": workspace_id, "hil_pane": hil_pane}
+            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug))
             _verify_gated(implementer_pane, script_path, herdr_session)
             implementer_pane = _place_in_control_tab(
                 implementer_pane, workspace_id, herdr_session
             )
+            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug))
             ownership = {
+                "implementer": cleanup_owner,
                 "leader": {"pane_id": implementer_pane, "state": "created"},
                 "pane": {"pane_id": implementer_pane, "state": "created"},
             }
             _write_json_atomic(
                 receipt_path,
                 {
+                    "agent_name": _safe_name(slug),
+                    "cwd": str(cwd),
+                    "supervise": supervise,
+                    "run_watch": budget['run_watch'],
+                    "roster_path": str(Path(roster_path).resolve()),
                     "at_ns": time.time_ns(),
                     "effort": profile["effort"],
                     "harness": profile["harness"],
@@ -615,7 +657,16 @@ def start_implementer(
             )
             _release_gate(gate_path, release_token)
             health = _health(implementer_pane, cwd, profile, roster, herdr_session)
+            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug))
+            ownership['implementer'] = cleanup_owner
             receipt = {
+                "cwd": str(cwd),
+                "supervise": supervise,
+                "run_watch": budget['run_watch'],
+                "startup_budget": budget,
+                "roster_path": str(Path(roster_path).resolve()),
+                **({"offering_snapshot": profile['snapshot']} if 'snapshot' in profile else {}),
+                "agent_name": _safe_name(slug),
                 "at_ns": time.time_ns(),
                 "effort": profile["effort"],
                 "harness": profile["harness"],
@@ -637,16 +688,21 @@ def start_implementer(
                 **canonical_fields,
                 **({"workspace_id": workspace_id} if workspace_id else {}),
             }
+            ownership['implementer'] = supervision.Panes(recruiter, receipt).verify_start(receipt, script_path, launch)
             _write_json_atomic(receipt_path, receipt)
+            if supervise:
+                receipt = supervision.start(receipt_path, receipt, roster, str(Path(roster_path).resolve()), recruiter, budget)
             ready = True
             return receipt
         except (
             ImplementerStartError,
+            supervision.SupervisionError,
             recruiter.RecruiterError,
             recruiter.OfferingError,
             OSError,
             subprocess.SubprocessError,
         ) as error:
+            failed_receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
             _write_json_atomic(
                 receipt_path,
                 {
@@ -661,6 +717,8 @@ def start_implementer(
                     "phase_id": IMPLEMENTER_PHASE_ID,
                     "plan_path": str(frozen_plan),
                     "plan_sha256": plan_sha256,
+                    "ownership": {**failed_receipt.get("ownership", {}), "implementer": cleanup_owner},
+                    "supervise": supervise,
                     "reason": str(error),
                     "run_id": slug,
                     "state": "failed",
@@ -671,22 +729,21 @@ def start_implementer(
         finally:
             if not ready:
                 gate_path.unlink(missing_ok=True)
-                if implementer_pane is not None:
+                if cleanup_owner is not None:
+                    panes = supervision.Panes(recruiter, pane_receipt)
                     try:
-                        recruiter._close_worker_pane(
-                            implementer_pane, herdr_session=herdr_session
-                        )
-                    except (
-                        recruiter.RecruiterError,
-                        OSError,
-                        subprocess.SubprocessError,
-                    ) as close_error:
-                        command_runtime.write_stderr(
-                            "implementer-start cleanup: could not close gated "
-                            f"implementer {implementer_pane}: {close_error}\n"
-                        )
+                        cleanup_owner = panes.refresh_launch(cleanup_owner)
+                    except (supervision.SupervisionError, recruiter.RecruiterError) as refresh_error:
+                        command_runtime.write_stderr(f"implementer-start ownership refresh: {refresh_error}\n")
+                    entry = panes.close(cleanup_owner, 'implementer')
+                    failed = json.loads(receipt_path.read_text())
+                    failed['cleanup'] = [entry]
+                    _write_json_atomic(receipt_path, failed)
+                    if entry['status'] == 'cleanup-failed':
+                        command_runtime.write_stderr(f"implementer-start cleanup: {entry}\n")
 
 
+@supervision.bounded
 def finish_implementer(receipt_path: Path, *, force: bool = False) -> dict[str, object]:
     receipt_path = receipt_path.resolve()
     if not receipt_path.is_file():
@@ -700,45 +757,78 @@ def finish_implementer(receipt_path: Path, *, force: bool = False) -> dict[str, 
     if not isinstance(receipt, dict) or receipt.get("state") not in (
         "ready",
         "ready-degraded",
+        "failed",
+        "implementer-gated",
+        "preparing",
     ):
         raise ImplementerStartError(
-            "finish requires a ready implementer-start receipt"
+            "finish requires an owned implementer-start receipt"
         )
     pane = receipt.get("implementer_pane") or receipt.get("leader_pane")
     hil_pane = receipt.get("hil_pane")
     run_id = receipt.get("run_id")
-    if not isinstance(pane, str) or not pane:
+    if (not isinstance(pane, str) or not pane) and receipt.get("state") in ("ready", "ready-degraded"):
         raise ImplementerStartError("implementer-start receipt has no implementer_pane")
     if pane == hil_pane:
         raise ImplementerStartError("refusing to close the HIL pane")
     if not isinstance(run_id, str) or not run_id:
         raise ImplementerStartError("implementer-start receipt has no run_id")
-    run_root = receipt_path.parent.parent
-    result_path = run_root / "implementer-result.json"
-    result: dict[str, object] | None
     try:
-        result = contracts.parse_implementer_result(
-            result_path.read_text(),
-            expected_run_root=run_root,
-            expected_run_id=run_id,
-        )
-    except (OSError, contracts.ContractError) as error:
-        if not force:
-            raise ImplementerStartError(
-                f"finish requires a valid implementer-result.json: {error}"
-            ) from error
-        result = None
-    session = receipt.get("herdr_session")
-    recruiter._close_worker_pane(
-        pane, herdr_session=session if isinstance(session, str) else None
+        return supervision.finish(receipt_path, receipt, force, recruiter, contracts, _exclusive)
+    except supervision.SupervisionError as error:
+        raise ImplementerStartError(str(error)) from error
+
+
+def inject_implementer(receipt_path: Path) -> dict[str, object]:
+    """Notify an idle implementer of unacknowledged human envelopes.
+
+    Return the authority outcome and all currently unacknowledged envelope_seqs.
+    Delivery never acknowledges files or sends their text through Herdr.
+    """
+    rw = supervision._load("run_watch")
+    ctx = rw.awaiter.ImplementerContext(receipt_path)
+    seqs: list[int] = []
+    for path in (ctx.run_root / "inbox").glob("msg-*.json"):
+        envelope = rw.read_json(path)
+        if (
+            set(envelope) != {"seq", "text", "at_ns", "acked"}
+            or type(envelope.get("seq")) is not int
+            or envelope["seq"] < 1
+            or path.name != f"msg-{envelope['seq']}.json"
+            or not isinstance(envelope.get("text"), str)
+            or type(envelope.get("at_ns")) is not int
+            or envelope["at_ns"] < 0
+            or type(envelope.get("acked")) is not bool
+        ):
+            raise ImplementerStartError(f"invalid human inbox envelope: {path}")
+        if not envelope["acked"]:
+            seqs.append(envelope["seq"])
+    seqs.sort()
+    if not seqs:
+        return asdict(rw.authority.NudgeOutcome(
+            "nothing-pending", "no unacknowledged envelopes", 0
+        ))
+    runtime = rw.Runtime(ctx, {})
+    target = runtime.implementer()
+    outcome = runtime.nudges.request_nudge(
+        target.identity,
+        payload="inbox",
+        trigger="hil",
+        probe=lambda: runtime.probe(target),
+        deliver=lambda text: runtime.deliver(target, text),
+        envelope_seqs=seqs,
+        wait_for_lock=False,
     )
-    return {
-        "closed_pane": pane,
-        "force": force,
-        "hil_pane": hil_pane,
-        "result": result,
-        "run_id": run_id,
-    }
+    return {**asdict(outcome), "envelope_seqs": seqs}
+
+
+def _cmd_inject(argv: list[str]) -> int:
+    parser = command_runtime.ArgumentParser(prog="upagent-implementer-inject")
+    parser.add_argument("receipt", type=Path)
+    args = parser.parse_args(argv)
+    result = inject_implementer(args.receipt.expanduser().resolve())
+    print(json.dumps(result, sort_keys=True), flush=True)
+    return 0
 
 
 def _cmd_finish(argv: list[str]) -> int:
@@ -757,6 +847,21 @@ def _cmd_finish(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "inject":
+        rw = supervision._load("run_watch")
+        try:
+            return _cmd_inject(argv[1:])
+        except (
+            OSError,
+            ImplementerStartError,
+            rw.awaiter.AwaitError,
+            rw.RunWatchError,
+            rw.authority.NudgeAuthorityError,
+            rw.authority.stall_nudge.StallNudgeError,
+            rw.offerings.OfferingError,
+            rw.recruiter.RecruiterError,
+        ) as error:
+            sys.exit(f"upagent-implementer-inject: {error}")
     if argv and argv[0] == "finish":
         try:
             return _cmd_finish(argv[1:])
@@ -768,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
         ) as error:
             sys.exit(f"upagent-implementer-finish: {error}")
     parser = command_runtime.ArgumentParser(prog="upagent-implementer-start")
+    parser.add_argument("--no-supervise", action="store_true", help="skip manager, Sentinel and run-watch")
     parser.add_argument("plan", type=Path, help="approved plan.md")
     parser.add_argument("offering", help="offering id from just upagent lists")
     parser.add_argument("effort", help="effort the offering permits")
@@ -798,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
             hil_pane=args.hil_pane,
             cwd=args.cwd.expanduser().resolve(),
             roster_path=args.roster,
+            supervise=not args.no_supervise,
         )
     except (
         OSError,

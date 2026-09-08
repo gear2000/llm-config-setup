@@ -407,9 +407,15 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
         offerings.load_roster(path)
 
 
-def test_standard_render_is_the_pre_set_roster_byte_for_byte() -> None:
+def test_standard_render_preserves_the_roster_except_supervision_policy() -> None:
     rendered = offerings.render_roster(["standard"])
 
+    rendered = rendered.replace(
+        "  # False disables status recovery only; Sentinel closeouts still use the shared ladder.\n"
+        "  status_first: true\n",
+        "",
+    )
+    rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
         "9d6ace4a27c22bbb5aaeac21304c41e153b9815d5b70b8702e8f3ee80913e411"
     )
@@ -678,3 +684,40 @@ def test_claudex_preflight_failure_never_substitutes_native_claude(
     ):
         offerings.preflight_snapshot(snapshot)
     assert offerings.render_argv(snapshot, "backend", "/lease.md")[0] == "claudex"
+
+
+@pytest.mark.parametrize("setting", ["true", "false", "omitted"])
+def test_authored_status_first_round_trips_through_generation_and_materialization(
+    tmp_path: Path, setting: str
+) -> None:
+    import shutil
+
+    shutil.copytree(HERE / "offerings.d", tmp_path / "offerings.d")
+    source = (HERE / "offerings-management.yaml").read_text()
+    replacement = "" if setting == "omitted" else f"  status_first: {setting}\n"
+    (tmp_path / "offerings-management.yaml").write_text(
+        source.replace("  status_first: true\n", replacement)
+    )
+    generated = tmp_path / "offerings.yaml"
+    generated.write_text(offerings.render_roster(["standard"], tmp_path))
+    roster = offerings.load_roster(generated)
+    assert offerings.materialize_management(roster)["status_first"] is (
+        setting != "false"
+    )
+
+
+@pytest.mark.parametrize("invalid", ['"false"', "null", "1", "[]"])
+def test_authored_status_first_invalid_value_stops_generation(
+    tmp_path: Path, invalid: str
+) -> None:
+    import shutil
+
+    shutil.copytree(HERE / "offerings.d", tmp_path / "offerings.d")
+    source = (HERE / "offerings-management.yaml").read_text()
+    (tmp_path / "offerings-management.yaml").write_text(
+        source.replace("status_first: true", f"status_first: {invalid}")
+    )
+    with pytest.raises(
+        offerings.OfferingError, match="management.status_first must be a boolean"
+    ):
+        offerings.render_roster(["standard"], tmp_path)

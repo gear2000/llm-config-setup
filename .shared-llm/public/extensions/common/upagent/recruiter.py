@@ -137,6 +137,16 @@ sys.modules[_stall_nudge_spec.name] = stall_nudge
 _stall_nudge_spec.loader.exec_module(stall_nudge)
 StallNudgeError = stall_nudge.StallNudgeError
 
+_nudge_authority_spec = importlib.util.spec_from_file_location(
+    "upagent_nudge_authority", HERE / "nudge_authority.py"
+)
+if _nudge_authority_spec is None or _nudge_authority_spec.loader is None:
+    raise RuntimeError("could not load UpAgent nudge authority")
+nudge_authority = cast(Any, importlib.util.module_from_spec(_nudge_authority_spec))
+sys.modules[_nudge_authority_spec.name] = nudge_authority
+_nudge_authority_spec.loader.exec_module(nudge_authority)
+
+
 _offerings_spec = importlib.util.spec_from_file_location(
     "upagent_offerings", HERE / "offerings.py"
 )
@@ -2670,6 +2680,7 @@ def load_roster(path: str | Path) -> dict:
         # Surface an unreadable file or invalid YAML as a RecruiterError so cmd_recruit's
         # fallback catches it (a blocked result + DONE) instead of it escaping past main().
         raise RecruiterError(f"roster {p} is unreadable or invalid YAML: {e}") from e
+    data["run_watch"] = offering_catalog.validate_run_watch(data.get("run_watch", {}))
     is_public_roster = "offerings" in data
     if not is_public_roster:
         raw_management = data.get("management", {})
@@ -4821,6 +4832,8 @@ def _wait_for_interactive_completion(
                 and sentinel_watch.staging_activity()
             ):
                 sentinel_watch.touch_wake("partial-staging")
+            if sentinel_watch is not None:
+                sentinel_watch.status_probe()
             if _worker_pane_confirmed_gone(
                 worker_pane, herdr_session=herdr_session, confirmations=2
             ) or _worker_process_confirmed_gone(
@@ -5965,6 +5978,10 @@ def _closeout_published_reason(
     return "; ".join(parts)
 
 
+class _NudgeDeliveryError(RecruiterError):
+    """A reserved nudge could not be submitted; its rung remains spent."""
+
+
 class _SentinelWatch:
     """Poll one closeout file from inside the Recruiter's completion wait.
 
@@ -5999,6 +6016,13 @@ class _SentinelWatch:
         self._confirmed_dead = False
         self._wakes_touched: set[str] = set()
         self._landing_window_deadline: float | None = None
+        self.status_first = True
+        self.generation = cast(int, sentinel_state.get("generation", 1))
+        self.attempt = cast(int, sentinel_state.get("attempt", 1))
+        self._idle_probes = 0
+        self._nudge_target: Any | None = None
+        self._nudge_address: str | None = None
+        self._authority = nudge_authority.NudgeAuthority(ledger.root)
 
     @property
     def supervising(self) -> bool:
@@ -6163,44 +6187,71 @@ class _SentinelWatch:
         }
     )
 
-    def _attempt_stall_nudge(self, reason: str) -> bool:
-        """The hub-owned nudge ladder for a confirmed STALLED closeout.
+    def _nudge_harness(self) -> str:
+        snapshot = self.order.get("offering_snapshot")
+        if snapshot is not None:
+            try:
+                selected = offering_catalog.validate_snapshot(snapshot)
+            except OfferingError as error:
+                raise RecruiterError(
+                    f"invalid nudge offering snapshot: {error}"
+                ) from error
+            harness = cast(str, selected["harness"])
+        else:
+            harness = cast(str, self.order["harness"])
+        # Legacy orders have no snapshot. Both paths use the same strict harness map.
+        try:
+            offering_catalog.completion_style(harness)
+        except OfferingError as error:
+            raise RecruiterError(f"invalid nudge harness: {error}") from error
+        return harness
 
-        Returns True when the wait should continue (a nudge was delivered or is
-        backing off) and False when the stall must end the wait as before —
-        exhausted nudges additionally publish one durable requester escalation.
-        Every load-bearing step is Python's: the literal payload, the state gate,
-        the intent-before-delivery record, backoff, and the cap. The Sentinel only
-        proposed the stall; a request with no started worker launch has nothing to
-        nudge and keeps its exact pre-ladder behavior."""
+    def _nudge_eligible(self) -> bool:
+        return (
+            offering_catalog.completion_style(self._nudge_harness()) == "interactive"
+            and self.order.get("agent") not in WATCHDOG_AGENTS
+            and self.order.get("completion_policy") != "requester_release"
+        )
+
+    def _target_from_journal(self, journal: dict) -> Any:
+        return nudge_authority.TargetIdentity(
+            herdr_session=journal.get("herdr_session"),
+            workspace_id=journal.get("workspace_id"),
+            pane_id=journal.get("pane"),
+            agent_name=journal.get("agent_name"),
+            owner_kind="request",
+            owner_id=lifecycle.request_identity(self.order),
+        )
+
+    def _bind_nudge_target(self) -> bool:
+        if self._nudge_target is not None:
+            return True
         try:
             journal = _live_worker_journal(self.ledger, self.key)
-        except RecruiterError:
+        except RecruiterError as error:
+            self.ledger._event(self.key, "worker-nudge-unavailable", reason=str(error))
             return False
-        worker_address = journal.get("address")
-        if not isinstance(worker_address, str):
-            return False
-        generation = cast(int, self.sentinel_state.get("generation", 1))
-        attempt = cast(int, self.sentinel_state.get("attempt", 1))
-        # The cheap fence: the started journal must be THIS watch's worker — a
-        # replacement attempt or a bumped generation keeps the pre-ladder behavior.
-        if journal.get("attempt") != attempt or journal.get("generation") != generation:
-            return False
-        # Only a POSITIVELY present worker pane may be nudged: a gone pane — or probe
-        # uncertainty — keeps the exact pre-ladder behavior (the stall ends the wait).
-        worker_pane = self.sentinel_state.get("worker_pane")
-        if not (
-            isinstance(worker_pane, str)
-            and _worker_pane_confirmed_present(
-                worker_pane, herdr_session=self.herdr_session
-            )
+        if (
+            journal.get("attempt") != self.attempt
+            or journal.get("generation") != self.generation
         ):
+            self.ledger._event(
+                self.key, "worker-nudge-rejected", reason="worker attempt changed"
+            )
             return False
-        if not self._nudge_state_allows(at="classification"):
-            return False
-        # Completion wins the race outright: a staged bundle that already validates
-        # means the worker finished — resuming it could repeat a side effect, so the
-        # closeout is archived and the ordinary completion path ends the wait.
+        try:
+            self._nudge_target = self._target_from_journal(journal)
+        except nudge_authority.NudgeAuthorityError as error:
+            raise RecruiterError(f"invalid nudge target: {error}") from error
+        address = journal.get("address")
+        if not isinstance(address, str) or not address:
+            raise RecruiterError("started worker journal has no nudge address")
+        self._nudge_address = address
+        return True
+
+    def _terminal_valid(self) -> bool:
+        if self.ledger.completed_result(self.key, self.order) is not None:
+            return True
         try:
             completion.validate_bundle(
                 self.manifest,
@@ -6208,36 +6259,215 @@ class _SentinelWatch:
                 load_answer=contracts_consult.load_answer,
             )
         except CompletionError:
-            pass
-        else:
-            archived = self.closeout_path.with_name("closeout.stalled-superseded.json")
-            os.replace(self.closeout_path, archived)
+            return False
+        return True
+
+    def _nudge_probe(self) -> Any:
+        """Fresh owner evidence and exact Herdr identity, also used under the send lock."""
+        target = self._nudge_target
+        assert target is not None
+        harness = self._nudge_harness()
+        Probe = nudge_authority.Probe
+        PaneState = nudge_authority.PaneState
+        if self._terminal_valid():
+            return Probe(target, None, True, PaneState.UNKNOWN, harness)
+        if not self._nudge_state_allows(at="probe"):
+            return Probe(target, "blocked", False, PaneState.PRESENT, harness)
+        try:
+            journal = _live_worker_journal(self.ledger, self.key)
+        except RecruiterError as error:
+            self.ledger._event(self.key, "worker-nudge-unavailable", reason=str(error))
+            return Probe(None, None, False, PaneState.UNKNOWN, harness)
+        current = self._target_from_journal(journal)
+        if (
+            current != target
+            or journal.get("attempt") != self.attempt
+            or journal.get("generation") != self.generation
+            or journal.get("address") != self._nudge_address
+        ):
+            return Probe(None, "blocked", False, PaneState.PRESENT, harness)
+        try:
+            reply = _herdr_json(
+                "pane",
+                "get",
+                target.pane_id,
+                timeout_seconds=10,
+                herdr_session=target.herdr_session,
+            )
+        except RecruiterError as error:
+            pane_state = (
+                PaneState.GONE if "pane_not_found" in str(error) else PaneState.UNKNOWN
+            )
             self.ledger._event(
                 self.key,
-                "worker-nudge-superseded",
-                archived=str(archived),
-                reason="staged bundle already validates; completion path wins",
+                "worker-nudge-probe",
+                reason=str(error),
+                pane_state=pane_state.value,
             )
-            return True
-        state_path = self.closeout_path.with_name("nudges.json")
+            return Probe(target, None, False, pane_state, harness)
+        pane = reply.get("result", {}).get("pane")
+        if not isinstance(pane, dict):
+            raise RecruiterError("nudge probe returned no pane object")
         try:
-            state = stall_nudge.load_state(state_path)
-        except StallNudgeError as error:
-            # Corrupt durable nudge state must not escape the normal fail-loud
-            # terminal path: record it and let the stall end the wait as before.
+            reply = _herdr_json(
+                "agent",
+                "get",
+                target.agent_name,
+                timeout_seconds=10,
+                herdr_session=target.herdr_session,
+            )
+        except RecruiterError as error:
+            self.ledger._event(
+                self.key, "worker-nudge-probe", reason=str(error), pane_state="unknown"
+            )
+            return Probe(None, None, False, PaneState.UNKNOWN, harness)
+        agent = reply.get("result", {}).get("agent")
+        if not isinstance(agent, dict):
+            raise RecruiterError("nudge probe returned no agent object")
+        identity_matches = (
+            pane.get("pane_id") == target.pane_id
+            and pane.get("workspace_id") == target.workspace_id
+            and agent.get("name") == target.agent_name
+            and agent.get("pane_id") == target.pane_id
+            and agent.get("workspace_id") == target.workspace_id
+        )
+        terminal_valid = self._terminal_valid()
+        status = pane.get("agent_status")
+        if not terminal_valid and not self._nudge_state_allows(at="delivery"):
+            status = "blocked"
+        return Probe(
+            target if identity_matches else None,
+            status,
+            terminal_valid,
+            PaneState.PRESENT,
+            harness,
+        )
+
+    def status_probe(self) -> Any:
+        """Two consecutive idle/done probes trigger recovery, even without a Sentinel."""
+        harness = self._nudge_harness()
+        if (
+            self.order.get("agent") in WATCHDOG_AGENTS
+            or self.order.get("completion_policy") == "requester_release"
+        ):
+            self._idle_probes = 0
+            return nudge_authority.Verdict.HOLD
+        if self._terminal_valid():
+            self._idle_probes = 0
+            return nudge_authority.Probe(
+                None, None, True, nudge_authority.PaneState.UNKNOWN, harness
+            ).classify()
+        if (
+            offering_catalog.completion_style(harness) != "interactive"
+            or not self._bind_nudge_target()
+        ):
+            self._idle_probes = 0
+            return nudge_authority.Verdict.HOLD
+        try:
+            observed = self._authority.observe(self._nudge_target, self._nudge_probe)
+        except (
+            nudge_authority.NudgeAuthorityError,
+            nudge_authority.stall_nudge.StallNudgeError,
+        ) as error:
             self.ledger._event(
                 self.key, "worker-nudge-state-invalid", reason=str(error)
             )
+            raise RecruiterError(f"invalid nudge authority: {error}") from error
+        verdict = (
+            nudge_authority.Verdict(observed.reason)
+            if observed.outcome != "aborted"
+            else nudge_authority.Verdict.HOLD
+        )
+        self._idle_probes = (
+            self._idle_probes + 1 if verdict == nudge_authority.Verdict.NUDGE else 0
+        )
+        if self.status_first and self._idle_probes >= 2:
+            self._attempt_stall_nudge(
+                "two consecutive idle worker probes", trigger="status"
+            )
+        return verdict
+
+    def _attempt_stall_nudge(self, reason: str, *, trigger: str = "sentinel") -> bool:
+        """Both triggers spend one ledger-root episode through the shared authority."""
+        if not self._nudge_eligible() or not self._bind_nudge_target():
             return False
-        ordinal = len(state["nudges"]) + 1
-        decision = stall_nudge.decide(state, now=time.time())
-        if decision == "exhausted":
-            if not state.get("escalated"):
-                # Publish-then-flag: a crash between the two risks one duplicate
-                # escalation, never a lost one — the right direction here.
+        target = self._nudge_target
+        state_path = self._authority.state_path(target)
+
+        def deliver(payload: str) -> None:
+            # The authority has persisted intent and re-probed under its target lock.
+            state = json.loads(state_path.read_text())["continue"]
+            intent = state["nudges"][-1]
+            self.ledger._event(
+                self.key,
+                "worker-nudge-intent",
+                trigger=trigger,
+                episode=state["episode"],
+                digest=intent["digest"],
+                nudge_index=len(state["nudges"]),
+                generation=self.generation,
+                attempt=self.attempt,
+                worker_address=self._nudge_address,
+            )
+            try:
+                _submit_agent_prompt(
+                    self._nudge_address,
+                    payload,
+                    idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
+                    paste_settle_seconds=(
+                        CURSOR_PROMPT_PASTE_SETTLE_SECONDS
+                        if self.order.get("harness") == "cursor"
+                        else 0.0
+                    ),
+                    herdr_session=target.herdr_session,
+                )
+            except (RecruiterError, OSError) as error:
+                raise _NudgeDeliveryError(str(error)) from error
+
+        try:
+            outcome = self._authority.request_nudge(
+                target,
+                payload="continue",
+                trigger=trigger,
+                probe=self._nudge_probe,
+                deliver=deliver,
+            )
+        except (
+            nudge_authority.NudgeAuthorityError,
+            nudge_authority.stall_nudge.StallNudgeError,
+        ) as error:
+            self.ledger._event(
+                self.key, "worker-nudge-state-invalid", reason=str(error)
+            )
+            raise RecruiterError(f"invalid nudge authority: {error}") from error
+        except _NudgeDeliveryError as error:
+            # A refused send leaves its reserved intent spent. Report the fault and
+            # allow the next probe to use the ladder's backoff, as before.
+            state = json.loads(state_path.read_text())["continue"]
+            self.ledger._event(self.key, "worker-nudge-failed", reason=str(error))
+            outcome = nudge_authority.NudgeOutcome(
+                "aborted", str(error), state["episode"]
+            )
+        if outcome.outcome in ("aborted", "not-idle", "finished"):
+            # A fresh authority probe interrupted the idle streak. The next status
+            # observation must earn two confirmations again, including after recovery.
+            self._idle_probes = 0
+        self.ledger._event(
+            self.key,
+            "nudge",
+            trigger=trigger,
+            episode=outcome.episode,
+            outcome=outcome.outcome,
+            reason=outcome.reason,
+        )
+        if outcome.outcome == "cap-exhausted":
+            episode = json.loads(state_path.read_text())["continue"]
+            if episode["episode"] == outcome.episode and not episode["escalated"]:
                 evidence = {
-                    "nudges": len(state["nudges"]),
+                    "nudges": stall_nudge.NUDGE_CAP,
                     "nudge_records": str(state_path),
+                    "episode": outcome.episode,
+                    "target_id": target.target_id,
                     "stalled_closeouts": str(self.closeout_path.parent),
                 }
                 self.ledger._event(self.key, "worker-stall-escalation", **evidence)
@@ -6245,90 +6475,67 @@ class _SentinelWatch:
                     self.ledger,
                     self.key,
                     self.order,
-                    generation,
+                    self.generation,
                     "worker-stall-escalation",
-                    "The worker stalled and every hub nudge is spent. The Python-owned "
-                    f"nudge records and archived closeouts are attached: {reason}",
+                    f"The worker stalled and every hub nudge is spent: {reason}",
                     evidence,
                 )
-                state["escalated"] = True
-                stall_nudge.save_state(state_path, state)
+                self._authority.mark_escalated(target, outcome.episode)
             return False
-        if decision == "hold":
+        if outcome.outcome == "not-idle":
+            if trigger == "sentinel" and outcome.reason == "WORKING":
+                # A recovered worker cannot be stopped by an older STALLED claim.
+                if self.closeout_path.exists():
+                    archived = self.closeout_path.with_name(
+                        f"closeout.stalled-working-{time.time_ns()}.json"
+                    )
+                    os.replace(self.closeout_path, archived)
+                self._prompt_sentinel_after_nudge("working")
+                return True
+            return False
+        state = (
+            json.loads(state_path.read_text())["continue"]
+            if state_path.exists()
+            else {"nudges": []}
+        )
+        ordinal = len(state["nudges"])
+        label = {
+            "delivered": "nudged",
+            "backoff": "held",
+            "finished": "superseded",
+            "aborted": "aborted",
+        }[outcome.outcome]
+        archived = None
+        if trigger == "sentinel" and self.closeout_path.exists():
+            suffix = (
+                f"-{ordinal + 1}-{time.time_ns()}" if label == "held" else f"-{ordinal}"
+            )
+            if label == "superseded":
+                suffix = ""
             archived = self.closeout_path.with_name(
-                f"closeout.stalled-held-{ordinal}-{time.time_ns()}.json"
+                f"closeout.stalled-{label}{suffix}.json"
             )
             os.replace(self.closeout_path, archived)
-            self.ledger._event(
-                self.key,
-                "worker-nudge-held",
-                archived=str(archived),
-                nudges=len(state["nudges"]),
-            )
-            self._prompt_sentinel_after_nudge("held")
-            return True
-        digest = stall_nudge.evidence_digest(
-            generation=generation, attempt=attempt, nudge_index=ordinal
-        )
-        # Intent before delivery: a crash between these two writes leaves a spent,
-        # undelivered intent — the safe direction (at most one delivery per intent).
-        stall_nudge.record_nudge(state, at=time.time(), digest=digest, delivered=False)
-        stall_nudge.save_state(state_path, state)
+        event_name = {
+            "delivered": "delivered",
+            "backoff": "held",
+            "finished": "superseded",
+            "aborted": "aborted",
+        }[outcome.outcome]
         self.ledger._event(
             self.key,
-            "worker-nudge-intent",
-            nudge_index=ordinal,
-            generation=generation,
-            attempt=attempt,
-            digest=digest,
-            worker_address=worker_address,
+            f"worker-nudge-{event_name}",
+            episode=outcome.episode,
+            archived=str(archived) if archived else None,
         )
-        outcome = "delivered"
-        # The short NUDGE_PROMPT_IDLE_TIMEOUT_MS keeps the window between this gate
-        # and the pane send to seconds: a genuinely stalled worker is already idle,
-        # and a busy worker — not stalled — fails the rung instead of waiting out
-        # the full prompt-idle window. The residual seconds-scale race is accepted;
-        # a mutation-lock reservation was judged disproportionate for this feature.
-        if not self._nudge_state_allows(at="delivery"):
-            # The state flipped between classification and send (cancellation, a
-            # requester decision): the rung is spent, nothing is delivered.
-            outcome = "failed"
-            self.ledger._event(
-                self.key,
-                "worker-nudge-failed",
-                digest=digest,
-                reason="ledger state changed between classification and delivery",
+        if outcome.outcome == "delivered" or (
+            trigger == "sentinel" and outcome.outcome in ("backoff", "aborted")
+        ):
+            self._prompt_sentinel_after_nudge(
+                {"delivered": "delivered", "backoff": "held", "aborted": "failed"}[
+                    outcome.outcome
+                ]
             )
-        else:
-            try:
-                _submit_agent_prompt(
-                    worker_address,
-                    stall_nudge.NUDGE_PAYLOAD,
-                    idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
-                    paste_settle_seconds=(
-                        CURSOR_PROMPT_PASTE_SETTLE_SECONDS
-                        if self.order.get("harness") == "cursor"
-                        else 0.0
-                    ),
-                    herdr_session=self.herdr_session,
-                )
-            except (RecruiterError, OSError) as error:
-                # A refused delivery (agent never idle, pane vanished) still spends
-                # the intent: the mechanical presence/idle gate said no, and
-                # re-firing the same rung against the same evidence would spin.
-                outcome = "failed"
-                self.ledger._event(
-                    self.key, "worker-nudge-failed", digest=digest, reason=str(error)
-                )
-        if outcome == "delivered":
-            stall_nudge.mark_delivered(state, digest)
-            stall_nudge.save_state(state_path, state)
-            self.ledger._event(self.key, "worker-nudge-delivered", digest=digest)
-        archived = self.closeout_path.with_name(
-            f"closeout.stalled-nudged-{ordinal}.json"
-        )
-        os.replace(self.closeout_path, archived)
-        self._prompt_sentinel_after_nudge(outcome)
         return True
 
     def _nudge_state_allows(self, *, at: str) -> bool:
@@ -6362,6 +6569,7 @@ class _SentinelWatch:
         if not isinstance(address, str):
             return
         detail = {
+            "working": "the worker is working; no continue was sent",
             "held": "the stall is inside the hub's nudge backoff window",
             "delivered": "the hub sent a 'continue' nudge to the worker",
             "failed": "the hub's 'continue' nudge delivery failed and this rung "
@@ -6370,7 +6578,7 @@ class _SentinelWatch:
         try:
             _submit_agent_prompt(
                 address,
-                f"SENTINEL_STALL_NUDGED: your STALLED closeout was accepted and {detail}. "
+                f"SENTINEL_STALL_NUDGED: {detail}. "
                 "Resume PULSE; if the worker stalls again, write a fresh STALLED "
                 f"closeout with real citations to {self.closeout_path}.",
                 idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
@@ -12528,6 +12736,8 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     token = ledger.claim(key, order["order_id"], lease_window_ms, owner=owner)
     if token is None:
         return 0
+    ledger._event(key, "management-start", status_first=management_config.status_first,
+                  run_watch=roster["run_watch"])
     artifact_manifest = completion.build_manifest(
         order, ledger.request_dir(key), token, request_id
     )
@@ -13044,7 +13254,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         never_started_abort = threading.Event()
         attempt_state["number"] = attempt
         sentinel_watch: _SentinelWatch | None = None
-        if sentinel_supervised:
+        if abort_eligible:
             # Each attempt watches its own closeout file, so a retry's fresh Sentinel can
             # never race the previous attempt's terminal claim.
             closeout_path = _sentinel_closeout_path(ledger, key, attempt)
@@ -13058,6 +13268,10 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 sentinel_state,
                 herdr_session=herdr_session,
             )
+        if sentinel_watch is not None:
+            sentinel_watch.status_first = management_config.status_first
+            sentinel_watch.generation = generation
+            sentinel_watch.attempt = attempt
         before = len(worker_launches)
         try:
             outcome = _run_order(

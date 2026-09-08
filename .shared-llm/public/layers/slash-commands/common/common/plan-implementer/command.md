@@ -27,6 +27,14 @@ Hire independent reviewers the same way when a slice needs a check. Consult spec
 
 You may write code yourself only when a hire is the wrong tool. Record that choice in `implementer-status.md`.
 
+## Human inbox
+
+At every slice boundary, before placing the next hire and after reading its result, read `<run-root>/inbox/msg-<seq>.json` in numeric `seq` order. Also read it immediately on the fixed nudge `read your inbox`, and once more before writing the final result. The run root is the invocation's `--run-root`, never cwd. `control/inbox/` carries events for the HIL and is a separate directory.
+
+Each envelope has `{seq, text, at_ns, acked}`. Act on every message with `acked: false` as human steering of the approved plan. Quote its entire `text` verbatim, with its `seq` and the action taken, in `<run-root>/implementer-status.md`. Resolve a blocker through the HIL's question/answer path below. After acting and recording the quote, atomically set `acked: true`: write the complete envelope to a unique temporary sibling, flush and fsync it, then rename it over the original. Preserve `seq`, `text`, and `at_ns`. Never delete envelopes or acknowledge one just because a nudge arrived.
+
+Skip envelopes already acknowledged. A duplicate nudge is only a request to read the files again. If a restart finds a quoted but unacknowledged sequence, inspect the recorded action before repeating it, then finish its acknowledgement. Human text stays in files and never becomes a pane command.
+
 ## Stop and ask — never guess
 
 On a real blocker, do not assume, do not keep coding, do not talk to the human except through the HIL. Quote every path. Pass shell-tool timeout 600000 (Claude Code's maximum) and re-invoke until the answer file exists. A wait timeout or a killed shell is not a blocked plan; re-enter the wait. Never write `implementer-result.json` because a wait returned an error.
