@@ -11,30 +11,30 @@ management:
   requester_grace_ms: 300000
   account_manager:
     candidates:
-      - offering: pi-glm-5-3-flash
-        effort: low
       - offering: cursor-composer-2-5
         effort: default
+      - offering: pi-glm-5-3-flash
+        effort: low
       - offering: pi-gpt-5-4-mini
         effort: low
     agent: upagent-account-manager
     timeout_ms: 120000
   checker:
     candidates:
-      - offering: pi-glm-5-3-flash
-        effort: low
       - offering: cursor-composer-2-5
         effort: default
+      - offering: pi-glm-5-3-flash
+        effort: low
       - offering: pi-gpt-5-4-mini
         effort: low
     agent: upagent-checker
     timeout_ms: 120000
   sentinel:
     candidates:
-      - offering: pi-glm-5-3-flash
-        effort: low
       - offering: cursor-composer-2-5
         effort: default
+      - offering: pi-glm-5-3-flash
+        effort: low
       - offering: pi-gpt-5-4-mini
         effort: low
     agent: upagent-sentinel
