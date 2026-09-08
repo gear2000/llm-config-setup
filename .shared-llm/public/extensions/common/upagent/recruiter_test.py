@@ -1731,6 +1731,19 @@ def test_legacy_roster_cannot_define_claudex_phase_leader(tmp_path: Path) -> Non
         recruiter.load_roster(roster_path)
 
 
+def test_legacy_roster_cannot_define_claudex_plan_implementer(tmp_path: Path) -> None:
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        "harnesses:\n"
+        "  claude: claude {model}\n"
+        "plan_implementers:\n"
+        "  claudex: claudex {model} --effort {effort}\n"
+    )
+
+    with pytest.raises(RecruiterError, match="plan_implementers `claudex`"):
+        recruiter.load_roster(roster_path)
+
+
 def test_configuration_inspection_finds_missing_agent_before_launch(
     tmp_path: Path, monkeypatch
 ) -> None:

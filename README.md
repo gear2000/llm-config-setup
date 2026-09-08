@@ -281,7 +281,7 @@ A destination composes the **consumer-relevant** recipe groups: public root `CLA
 
 `just update` (or `just global` on its own) materializes the machine-wide UpAgent offering policy, using `[standard]` unless `upagent:` overrides it. When `~/.shared-llm.yaml` also has a `global:` list, it installs the pieces that live in `$HOME` and apply across every project. Each is foreign-safe: it never clobbers a divergent or foreign file, leaving it untouched with a warning.
 
-1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`, `herdr`, `clickhouse`, `kafka`, `lucidchart`, `drawio`, `create-html`) and the routed slash-command skills, syncs each into the durable per-machine generated tree (`~/.shared-llm/generated/skills/`), and **symlinks** it into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). `readlink` on any home skill answers "generated or handwritten"; a byte-identical pre-existing copy from the old copy mechanism is upgraded to a link in place. The workflow-suite commands are `/do-plan`, `/do-implement`, `/do-convert`, and `/do-full` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and `/cc-full` commands on Claude Code. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
+1. **General home skills** — composes the `global/` recipes (`python`, `nextjs`, `backend`, `golang`, `herdr`, `clickhouse`, `kafka`, `lucidchart`, `drawio`, `create-html`) and the routed slash-command skills, syncs each into the durable per-machine generated tree (`~/.shared-llm/generated/skills/`), and **symlinks** it into the home skill dir every wanted harness reads: `~/.claude/skills/`, `~/.pi/agent/skills/`, `~/.agents/skills` (Codex). `readlink` on any home skill answers "generated or handwritten"; a byte-identical pre-existing copy from the old copy mechanism is upgraded to a link in place. The workflow-suite commands are `/do-plan`, `/do-implement`, and `/do-convert` on Pi, with matching `/cc-plan`, `/cc-implement`, `/cc-convert`, and Claude-only `/hil` on Claude Code. `/cc-full` and `/do-full` are disabled. Legacy planish / plan-and-grill / meta names are one-release warning aliases.
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section), syncs each persona into `~/.shared-llm/generated/agents/`, and symlinks it into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — copies the bundled Pi extensions + agent personas into `~/.shared-llm/generated/` and symlinks them from there into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks and the statusline into the generated tree and links them into `~/.claude/hooks/` and `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent — settings stays a **real file** on purpose: Claude Code mutates it at runtime, and a rename-style save would silently replace a symlink.
@@ -368,15 +368,15 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-rescuer` | Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished… |
 | `upagent-sentinel` | Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout;… |
 
-### Slash-command skills (33)
+### Slash-command skills (35)
 
-Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, and `cc/do-convert --herdr` are the primary workflow surface; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
+Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, `cc/do-convert --herdr`, and Claude-only `/hil` are the primary workflow surface; `/cc-full` and `/do-full` are disabled; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
 | Name | Description |
 | --- | --- |
 | `blast-radius` | Find what a change could break somewhere else before it ships, beyond the diff, and prove the one… |
 | `cc-convert` | Claude Code converter: `/cc-convert --herdr <plan.md>` idempotently decomposes an approved big plan… |
-| `cc-full` | Phone-friendly Claude Code composer: run `/cc-plan` exactly once, then either `/cc-implement` once… |
+| `cc-full` | Disabled composer. Warns and stops. Use `/cc-plan` then `/hil --plan <plan.md>` for Flow 1… |
 | `cc-implement` | Claude Code direct implementation: implement an approved `plan.md` in one fresh interactive TUI… |
 | `cc-plan` | Claude Code planning front door: research, conditionally resolve design, grill with Planish, run… |
 | `cc-plan-and-grill` | Deprecated alias for `/cc-plan`. Warns, then delegates to the new Claude Code planning front door;… |
@@ -384,15 +384,17 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `cc-research` | Claude Code research only: produce research.md, with no plan or implementation. Use fresh Explore… |
 | `codex-delegate` | Delegate a routine coding, refactor, investigation, or review slice to Codex CLI as a peer… |
 | `do-convert` | Pi converter: `/do-convert --herdr <plan.md>` idempotently decomposes an approved big plan into… |
-| `do-full` | Phone-friendly Pi composer: run `/do-plan` exactly once, then either `/do-implement` once for… |
+| `do-full` | Disabled composer. Warns and stops. Use `/do-plan`, then a Claude Code `/hil --plan <plan.md>`… |
 | `do-implement` | Pi direct implementation: implement an approved `plan.md` in one fresh interactive TUI path. It… |
 | `do-plan` | Pi planning front door: research, conditionally resolve design, grill with Planish, run exactly two… |
 | `do-plan-and-grill` | Deprecated alias for `/do-plan`. Warns, then delegates to the new Pi planning front door; it no… |
 | `do-research` | Pi research only: produce research.md, with no plan or implementation. Use fresh Explore agents by… |
 | `fail-loud` | Cross-language rule against silent failure. Apply when writing or reviewing any error handling —… |
 | `grill-me` | Interview the user about a plan or design until shared understanding is reached. Use frontier… |
+| `hil` | Human-in-the-loop Claude Code proxy for Flow 1 under HERDR_ENV=1. Relays between the human… |
 | `phase-leader` | Run one canonical plan phase in a cockpit pane under HERDR_ENV=1. Validates route safety, places… |
 | `plain-speech` | How to talk to the user: repo ubiquitous language from CONTEXT.md, Simplified Technical English… |
+| `plan-implementer` | Whole-plan controller for Flow 1. Reads an approved plan.md, hires UpAgent workers for slices, and… |
 | `playwright-cli` | Automates browser interactions for testing, forms, screenshots, and extraction. Static HTML… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |

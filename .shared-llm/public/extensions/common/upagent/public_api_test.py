@@ -1754,6 +1754,32 @@ def test_cursor_omitted_and_explicit_default_are_canonical(tmp_path: Path) -> No
     assert omitted.payload["offering_snapshot"]["selected_effort"] == "default"
 
 
+def test_plan_implementer_listing_keeps_only_controller_harnesses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "default_roster_path",
+        lambda: "/tmp/upagent.yaml",
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "load_roster",
+        lambda path: {"plan_implementers": {"claude": "claude --model {model}"}},
+    )
+
+    class _Roster:
+        def listing(self) -> list[dict[str, object]]:
+            return [
+                {"id": "claude-sonnet-5", "harness": "claude", "efforts": ["medium"]},
+                {"id": "claudex-gpt-5-6-sol", "harness": "claudex", "efforts": ["high"]},
+            ]
+
+    monkeypatch.setattr(public_api, "_offering_roster", lambda cwd=None: _Roster())
+    rows = public_api._plan_implementer_listing(tmp_path)
+    assert [row["id"] for row in rows] == ["claude-sonnet-5"]
+
+
 def test_cursor_rejects_every_global_effort(tmp_path: Path) -> None:
     _persona(tmp_path)
 

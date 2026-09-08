@@ -102,6 +102,15 @@ RESULT_REQUIRED = (
     "full_log",  # pointer to the harness transcript (absolute path or session id)
 )
 
+# Required keys on Flow 1 implementer-result.json. run_root and run_id bind the file to this
+# launch so a truncated stub or a leftover from another run cannot count as success.
+IMPLEMENTER_RESULT_REQUIRED = (
+    "verdict",
+    "summary",
+    "run_root",
+    "run_id",
+)
+
 # Required keys on each entry of a result's optional `consults` list — the worker's record of
 # the specialists it asked. `request_id` is the load-bearing one: it is an ordinary UpAgent
 # request id, which is what lets the Recruiter resolve the claim against its own ledger instead
@@ -577,6 +586,52 @@ def parse_result(
     return result
 
 
+def parse_implementer_result(
+    text: str,
+    *,
+    expected_run_root: str | Path,
+    expected_run_id: str,
+) -> dict:
+    """Validate Flow 1 implementer-result.json. Fail-loud on stubs, relative paths, or the wrong run."""
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ContractError(
+            f"implementer-result.json is not valid JSON: {error}"
+        ) from error
+    if not isinstance(result, dict):
+        raise ContractError("implementer-result.json must be a JSON object")
+    for key in IMPLEMENTER_RESULT_REQUIRED:
+        _require_str(result, key, "implementer-result.json")
+    if not result["summary"].strip():
+        raise ContractError(
+            "implementer-result.json: `summary` must be a non-empty string "
+            f"(got {result['summary']!r})"
+        )
+    if result["verdict"] not in VERDICTS:
+        raise ContractError(
+            "implementer-result.json: verdict "
+            f"{result['verdict']!r} must be one of {', '.join(VERDICTS)}"
+        )
+    run_root = Path(result["run_root"])
+    if not run_root.is_absolute():
+        raise ContractError(
+            "implementer-result.json: `run_root` must be an absolute path"
+        )
+    expected_root = Path(expected_run_root)
+    if run_root.resolve() != expected_root.resolve():
+        raise ContractError(
+            "implementer-result.json: run_root "
+            f"{result['run_root']!r} does not match this run {str(expected_root)!r}"
+        )
+    if result["run_id"] != expected_run_id:
+        raise ContractError(
+            "implementer-result.json: run_id "
+            f"{result['run_id']!r} does not match this run {expected_run_id!r}"
+        )
+    return result
+
+
 def load_order(path: str | Path) -> dict:
     """Read + validate an order.json file. Fail-loud if missing or malformed."""
     p = Path(path)
@@ -668,6 +723,7 @@ EVENT_KINDS: dict[str, bool] = {
     "failed": True,
     "cancelled": True,
     "await-heartbeat": False,
+    "invalid-result": False,
 }
 EVENT_SEVERITIES = ("info", "attention", "urgent")
 COMMAND_ACTIONS = (

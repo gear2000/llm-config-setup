@@ -684,3 +684,68 @@ def test_receipt_synthesis_provenance_must_be_recognized() -> None:
         contracts.validate_receipt_synthesis("salvaged-somehow", "confirmed")
     with pytest.raises(ContractError, match="confirmation"):
         contracts.validate_receipt_synthesis("clean", "probably")
+
+
+def _valid_implementer_result(**over: object) -> dict:
+    base: dict[str, object] = {
+        "verdict": "passed",
+        "summary": "all slices landed",
+        "run_root": "/abs/sample-run",
+        "run_id": "sample-run",
+    }
+    base.update(over)
+    return base
+
+
+def test_implementer_result_requires_identity_and_summary() -> None:
+    parsed = contracts.parse_implementer_result(
+        json.dumps(_valid_implementer_result()),
+        expected_run_root="/abs/sample-run",
+        expected_run_id="sample-run",
+    )
+    assert parsed["verdict"] == "passed"
+
+    with pytest.raises(ContractError, match="summary"):
+        contracts.parse_implementer_result(
+            json.dumps(_valid_implementer_result(summary="")),
+            expected_run_root="/abs/sample-run",
+            expected_run_id="sample-run",
+        )
+    with pytest.raises(ContractError, match="summary"):
+        contracts.parse_implementer_result(
+            json.dumps(_valid_implementer_result(summary="   \n")),
+            expected_run_root="/abs/sample-run",
+            expected_run_id="sample-run",
+        )
+    with pytest.raises(ContractError, match="run_root"):
+        contracts.parse_implementer_result(
+            json.dumps(_valid_implementer_result(run_root="sample-run")),
+            expected_run_root="/abs/sample-run",
+            expected_run_id="sample-run",
+        )
+    with pytest.raises(ContractError, match="run_root"):
+        contracts.parse_implementer_result(
+            json.dumps(_valid_implementer_result()),
+            expected_run_root="/abs/other-run",
+            expected_run_id="sample-run",
+        )
+    with pytest.raises(ContractError, match="run_id"):
+        contracts.parse_implementer_result(
+            json.dumps(_valid_implementer_result(run_id="other")),
+            expected_run_root="/abs/sample-run",
+            expected_run_id="sample-run",
+        )
+    with pytest.raises(ContractError, match="summary"):
+        contracts.parse_implementer_result(
+            json.dumps({"verdict": "passed"}),
+            expected_run_root="/abs/sample-run",
+            expected_run_id="sample-run",
+        )
+
+
+def test_invalid_result_event_is_nonterminal() -> None:
+    assert contracts.EVENT_KINDS["invalid-result"] is False
+    event = contracts.parse_event(
+        json.dumps(_valid_event(kind="invalid-result", terminal=False))
+    )
+    assert event["kind"] == "invalid-result"

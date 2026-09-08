@@ -85,6 +85,23 @@ def _offering_roster(cwd: Path | None = None) -> Any:
         raise PublicError(str(error)) from error
 
 
+def _plan_implementer_listing(cwd: Path | None = None) -> list[dict[str, object]]:
+    roster = recruiter.load_roster(recruiter.default_roster_path())
+    templates = roster.get("plan_implementers")
+    if not isinstance(templates, dict) or not templates:
+        raise PublicError("roster needs plan_implementers launch templates")
+    harnesses = {
+        name
+        for name, template in templates.items()
+        if isinstance(template, str) and template.strip()
+    }
+    return [
+        row
+        for row in _offering_roster(cwd).listing()
+        if row.get("harness") in harnesses
+    ]
+
+
 class PublicError(RuntimeError):
     """A closed-schema request or public operation is invalid."""
 
@@ -1868,6 +1885,12 @@ def execute(args: Any, cwd: Path) -> int:
     if args.command == "lists":
         if args.type == "offerings":
             rows = _offering_roster(cwd).listing()
+            human = "\n".join(
+                f"{row['id']}  {row['rendered_identity']}  {','.join(cast(list[str], row['efforts']))}"
+                for row in rows
+            )
+        elif args.type == "plan-implementers":
+            rows = _plan_implementer_listing(cwd)
             human = "\n".join(
                 f"{row['id']}  {row['rendered_identity']}  {','.join(cast(list[str], row['efforts']))}"
                 for row in rows

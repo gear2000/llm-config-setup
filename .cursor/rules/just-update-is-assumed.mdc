@@ -1,0 +1,8 @@
+---
+description: Home-skill lag is never a finding; just update is assumed.
+alwaysApply: true
+---
+
+# `just update` is assumed
+
+Never report that `~/.claude` skills, home agents, or `~/.shared-llm/generated` lag this checkout. The operator runs `just update` whenever this kit is used. That drift is not a defect, gap, or review item.

@@ -2730,6 +2730,20 @@ def load_roster(path: str | Path) -> dict:
             raise RecruiterError(
                 f"{p} phase_leaders `{name}` must map to a non-empty template string"
             )
+    plan_implementers = data.get("plan_implementers", {})
+    if plan_implementers is None:
+        plan_implementers = {}
+    if not isinstance(plan_implementers, dict):
+        raise RecruiterError(f"{p} `plan_implementers:` must be an object when present")
+    for name, tmpl in plan_implementers.items():
+        if name not in LEGACY_CONTROLLER_HARNESSES:
+            raise RecruiterError(
+                f"{p} plan_implementers `{name}` is unsupported; expected one of {', '.join(LEGACY_CONTROLLER_HARNESSES)}"
+            )
+        if not isinstance(tmpl, str) or not tmpl.strip():
+            raise RecruiterError(
+                f"{p} plan_implementers `{name}` must map to a non-empty template string"
+            )
     health = data.get("health", {})
     if not isinstance(health, dict):
         raise RecruiterError(f"{p} `health:` must be an object when present")

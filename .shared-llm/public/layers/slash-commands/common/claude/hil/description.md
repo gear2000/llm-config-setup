@@ -1,0 +1,1 @@
+Human-in-the-loop Claude Code proxy for Flow 1 under HERDR_ENV=1. Relays between the human (including Claude Code remote app) and a plan-implementer that hires UpAgent workers from an approved plan.md. Use when executing after `/cc-plan`, or when the user says `/hil`, HIL, or plan-implementer.

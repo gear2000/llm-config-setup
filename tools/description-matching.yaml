@@ -194,6 +194,13 @@ items:
       - "Use frontier rounds and record settled decisions with --docs."
     should_not_match: "Implement the design without further questions."
     routing_words: [Interview, plan, frontier, docs]
+  - name: hil
+    source: .shared-llm/public/layers/slash-commands/common/claude/hil/description.md
+    should_match:
+      - "Execute this approved plan.md after /cc-plan."
+      - "Start the HIL relay to a plan-implementer."
+    should_not_match: "Control a checked plan.md and route.yaml under a five-stage route."
+    routing_words: [HIL, plan.md, HERDR_ENV, plan-implementer]
   - name: phase-leader
     source: .shared-llm/public/layers/slash-commands/common/common/phase-leader/description.md
     should_match:
@@ -201,6 +208,13 @@ items:
       - "Place durable UpAgent stage orders and write phase-result.json."
     should_not_match: "Draft a new plan from scratch."
     routing_words: [phase, HERDR_ENV, UpAgent, phase-result.json]
+  - name: plan-implementer
+    source: .shared-llm/public/layers/slash-commands/common/common/plan-implementer/description.md
+    should_match:
+      - "Run the approved plan.md as the plan-implementer."
+      - "Hire UpAgent workers for plan slices and ask HIL when blocked."
+    should_not_match: "Run one canonical plan phase from route.yaml."
+    routing_words: [plan.md, UpAgent, HIL, HERDR_ENV]
   - name: playwright-cli-command
     source: .shared-llm/public/layers/slash-commands/common/common/playwright-cli/description.md
     should_match:

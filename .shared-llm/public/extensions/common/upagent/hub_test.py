@@ -60,6 +60,10 @@ def test_mutation_classifier_keeps_reads_lock_free() -> None:
     assert client._is_mutating("recruiter", ["status"]) is False
     assert client._is_mutating("phase-await", ["wait"]) is False
     assert client._is_mutating("phase-await", ["publish"]) is True
+    assert client._is_mutating("implementer-await", ["wait"]) is False
+    assert client._is_mutating("implementer-await", ["wait-answer"]) is False
+    assert client._is_mutating("implementer-await", ["publish"]) is True
+    assert client._is_mutating("implementer-await", ["respond"]) is True
     assert client._is_mutating("pipelines", ["list"]) is False
     assert client._is_mutating("pipelines", ["list", "--json"]) is False
     assert client._is_mutating("pipelines", ["launch", "rpi"]) is True

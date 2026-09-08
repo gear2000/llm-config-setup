@@ -79,7 +79,46 @@ upagent-phase-ack receipt event_id state='acknowledged':
 upagent-phase-publish receipt kind summary:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target phase-await publish --receipt "{{receipt}}" --kind "{{kind}}" --summary "{{summary}}"
 
-# Direct plans have no phase leader; the caller sequences ready steps and human approval.
+# Start one Flow 1 plan-implementer. The controller remains behind a filesystem gate
+# until its durable receipt records the pane identity. The HIL is never auto-launched.
+[no-cd]
+upagent-implementer-start plan offering effort run_root:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-controller "{{plan}}" "{{offering}}" "{{effort}}" "{{run_root}}"
+
+# Block until one typed implementer event is available for the HIL. Re-run with after=<last sequence>.
+# timeout_ms stays under Claude Code's 600 s Bash cap so the recipe can return before the tool kills it.
+[no-cd]
+upagent-implementer-await receipt after='0' timeout_ms='590000':
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-await wait --receipt "{{receipt}}" --after "{{after}}" --timeout-ms "{{timeout_ms}}"
+
+# Acknowledge one delivered implementer event.
+[no-cd]
+upagent-implementer-ack receipt event_id state='acknowledged':
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-await ack --receipt "{{receipt}}" --event-id "{{event_id}}" --state "{{state}}"
+
+# Publish a typed implementer event into the HIL journal. Extra flags: --question-id, --evidence, --requested-action.
+[no-cd]
+upagent-implementer-publish receipt kind summary *FLAGS:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-await publish --receipt "{{receipt}}" --kind "{{kind}}" --summary "{{summary}}" {{FLAGS}}
+
+# HIL writes one human answer for a needs-input question the implementer is blocked on.
+[no-cd]
+upagent-implementer-respond receipt question_id answer_file:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-await respond --receipt "{{receipt}}" --question-id "{{question_id}}" --answer-file "{{answer_file}}"
+
+# Implementer blocks until the HIL answer for question_id exists. timeout_ms=0 waits
+# until that file appears; a positive bound is only for tests. A timeout is not a
+# blocked plan result — re-enter the wait.
+[no-cd]
+upagent-implementer-await-answer receipt question_id timeout_ms='0':
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-await wait-answer --receipt "{{receipt}}" --question-id "{{question_id}}" --timeout-ms "{{timeout_ms}}"
+
+# After a valid implementer-result.json, close only the recorded implementer pane.
+# Pass --force to close that pane when cancelled/hard-timeout left no result file.
+[no-cd]
+upagent-implementer-finish receipt *FLAGS:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target implementer-controller finish "{{receipt}}" {{FLAGS}}
+
 [no-cd]
 upagent-direct-steps route:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller steps --route "{{route}}"

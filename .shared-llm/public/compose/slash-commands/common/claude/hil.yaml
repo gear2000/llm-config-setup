@@ -1,0 +1,8 @@
+type: skill
+name: hil
+description: .shared-llm/public/layers/slash-commands/common/claude/hil/description.md
+frontmatter:
+  argument-hint: "--plan <plan.md> --offering <id> --effort <effort>"
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/claude/hil/command.md
+output: .claude/skills/hil/SKILL.md
