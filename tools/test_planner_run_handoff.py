@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -271,6 +272,27 @@ def test_public_route_guidance_uses_the_phase_leader_not_the_evaluator() -> None
     assert "optional, independent **phase evaluator**" in evaluator
     assert "You do not move phase files, start another worker, or fix implementation." in evaluator
     assert "The phase leader alone makes the durable `phase-result.json` decision" in evaluator
+
+
+def test_hil_action_table_covers_every_event_kind() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "hil_event_kinds_contracts",
+        ROOT / ".shared-llm/public/extensions/common/upagent/contracts.py",
+    )
+    assert spec and spec.loader
+    contracts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contracts)
+    text = (LAYERS / "common/claude/hil/command.md").read_text()
+    kinds: set[str] = set()
+    for line in text.splitlines():
+        if line.startswith("| `kind` |") or not line.startswith("| `"):
+            continue
+        cell = line.split("|", 2)[1]
+        kinds.update(re.findall(r"`([a-z0-9-]+)`", cell))
+    assert kinds == set(contracts.EVENT_KINDS)
+    assert "unrecognized `kind`" in text
 
 
 def test_public_planning_layers_have_no_retired_execution_reference() -> None:

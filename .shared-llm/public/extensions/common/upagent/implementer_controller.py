@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -40,11 +41,22 @@ else:
     sys.modules[_runtime_name] = command_runtime
     _runtime_spec.loader.exec_module(command_runtime)
 
+_spec = importlib.util.spec_from_file_location(
+    "upagent_implementer_contracts", HERE / "contracts.py"
+)
+if _spec is None or _spec.loader is None:
+    raise RuntimeError("could not load UpAgent contracts")
+contracts = cast(Any, importlib.util.module_from_spec(_spec))
+_spec.loader.exec_module(contracts)
+
 recruiter: Any = None
 
 IMPLEMENTER_START_RECEIPT_ENV = "UPAGENT_IMPLEMENTER_START_RECEIPT"
+CANONICAL_REPO_ENV = "UPAGENT_CANONICAL_REPO"
 IMPLEMENTER_PHASE_ID = "plan"
 STARTUP_TIMEOUT_MS = 45_000
+GATE_RELEASE_WAIT_S = 2.0
+GATE_RELEASE_SLEEP_S = 0.05
 IMPLEMENTER_TEMPLATE_FIELDS = (
     "agent",
     "cwd",
@@ -107,14 +119,19 @@ def _create_gate(path: Path) -> None:
 
 
 def _release_gate(path: Path, request_id: str) -> None:
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-    except OSError as error:
-        if error.errno == errno.ENXIO:
-            raise ImplementerStartError(
-                f"plan-implementer stopped waiting on gate {path}"
-            ) from error
-        raise
+    deadline = time.monotonic() + GATE_RELEASE_WAIT_S
+    while True:
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError as error:
+            if error.errno != errno.ENXIO or time.monotonic() >= deadline:
+                if error.errno == errno.ENXIO:
+                    raise ImplementerStartError(
+                        f"plan-implementer stopped waiting on gate {path}"
+                    ) from error
+                raise
+            time.sleep(GATE_RELEASE_SLEEP_S)
     try:
         os.write(descriptor, f"{request_id}\n".encode())
     finally:
@@ -242,10 +259,50 @@ def _start_gated(
         and isinstance(returned_workspace, str)
         and returned_workspace != workspace_id
     ):
+        try:
+            recruiter._close_worker_pane(pane_id, herdr_session=herdr_session)
+        except (
+            recruiter.RecruiterError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as close_error:
+            command_runtime.write_stderr(
+                "implementer-start cleanup: could not close mismatched "
+                f"implementer {pane_id}: {close_error}\n"
+            )
         raise ImplementerStartError(
             f"plan-implementer started in workspace {returned_workspace}, expected {workspace_id}"
         )
     return pane_id, returned_workspace if isinstance(returned_workspace, str) else ""
+
+
+def _live_panes(herdr_session: str | None = None) -> set[str]:
+    response = recruiter._herdr_json("pane", "list", herdr_session=herdr_session)
+    panes = response.get("result", {}).get("panes", [])
+    return {
+        pane["pane_id"]
+        for pane in panes
+        if isinstance(pane, dict) and isinstance(pane.get("pane_id"), str)
+    }
+
+
+def _place_in_control_tab(
+    pane_id: str, workspace_id: str, herdr_session: str
+) -> str:
+    if not workspace_id:
+        raise ImplementerStartError(
+            "plan-implementer start returned no workspace_id; cannot place it in the control tab"
+        )
+    return cast(
+        str,
+        recruiter._place_started_agent_in_role_tab(
+            pane_id,
+            workspace_id,
+            "control",
+            split_direction="down",
+            herdr_session=herdr_session,
+        ),
+    )
 
 
 def _verify_gated(pane_id: str, script_path: Path, herdr_session: str) -> None:
@@ -305,6 +362,22 @@ def _safe_name(slug: str) -> str:
     )[:80]
 
 
+def _plan_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _canonical_repo_export() -> str | None:
+    value = command_runtime.getenv(CANONICAL_REPO_ENV)
+    if value is None or not value.strip():
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute() or not path.is_dir():
+        raise ImplementerStartError(
+            f"{CANONICAL_REPO_ENV} must be an existing absolute directory: {value}"
+        )
+    return str(path.resolve())
+
+
 def start_implementer(
     *,
     plan_path: Path,
@@ -341,16 +414,13 @@ def start_implementer(
             f"run_root must be an existing absolute directory: {run_root}"
         )
 
-    frozen_plan = run_root / "plan.md"
-    if frozen_plan.resolve() != plan_path.resolve():
-        shutil.copy2(plan_path, frozen_plan)
-
     try:
         profile = _resolve_offering(offering_id, effort, cwd)
     except recruiter.OfferingError as error:
         raise ImplementerStartError(str(error)) from error
     roster = recruiter.load_roster(roster_path)
     slug = run_root.name
+    frozen_plan = run_root / "plan.md"
     control_dir = run_root / "control"
     receipt_path = control_dir / "implementer-start.json"
     gate_path = control_dir / "implementer-ready.fifo"
@@ -367,6 +437,10 @@ def start_implementer(
                 raise ImplementerStartError(
                     f"implementer-start receipt {receipt_path} is unreadable: {error}"
                 ) from error
+            if isinstance(existing, dict) and existing.get("state") == "failed":
+                raise ImplementerStartError(
+                    f"implementer start already failed at {receipt_path}; use a new run-root"
+                )
             if isinstance(existing, dict) and existing.get("state") in (
                 "ready",
                 "ready-degraded",
@@ -375,17 +449,79 @@ def start_implementer(
                     raise ImplementerStartError(
                         "implementer-start receipt belongs to a different Herdr session"
                     )
+                if existing.get("hil_pane") != hil_pane:
+                    raise ImplementerStartError(
+                        "implementer-start receipt belongs to a different HIL pane"
+                    )
+                if existing.get("offering") != offering_id:
+                    raise ImplementerStartError(
+                        "implementer-start receipt offering does not match this launch"
+                    )
+                if existing.get("effort") != profile["effort"]:
+                    raise ImplementerStartError(
+                        "implementer-start receipt effort does not match this launch"
+                    )
+                recorded_digest = existing.get("plan_sha256")
+                if recorded_digest != _plan_digest(plan_path):
+                    raise ImplementerStartError(
+                        "implementer-start receipt plan does not match this launch"
+                    )
+                try:
+                    frozen_digest = _plan_digest(frozen_plan)
+                except OSError as error:
+                    raise ImplementerStartError(
+                        f"implementer-start frozen plan is missing or unreadable: {error}"
+                    ) from error
+                if recorded_digest != frozen_digest:
+                    raise ImplementerStartError(
+                        "implementer-start frozen plan does not match the recorded digest"
+                    )
+                existing_plan = existing.get("plan_path")
+                if (
+                    not isinstance(existing_plan, str)
+                    or Path(existing_plan).resolve() != frozen_plan.resolve()
+                ):
+                    raise ImplementerStartError(
+                        "implementer-start receipt plan_path does not match this launch"
+                    )
                 existing_pane = existing.get("implementer_pane") or existing.get(
                     "leader_pane"
                 )
                 if isinstance(existing_pane, str) and existing_pane:
+                    if existing_pane not in _live_panes(herdr_session):
+                        raise ImplementerStartError(
+                            "implementer-start receipt says ready but its implementer is no longer live"
+                        )
                     return cast(dict[str, object], existing)
             raise ImplementerStartError(
                 f"implementer start already has non-ready state at {receipt_path}"
             )
+        leftover_result = run_root / "implementer-result.json"
+        if leftover_result.is_file():
+            raise ImplementerStartError(
+                f"run root already has {leftover_result}; use a new run-root"
+            )
+        if control_dir.exists() and any(control_dir.iterdir()):
+            raise ImplementerStartError(
+                f"run root already has control artifacts under {control_dir}; use a new run-root"
+            )
         if gate_path.exists():
             raise ImplementerStartError(
                 f"implementer-start artifacts already exist under {control_dir}"
+            )
+        if frozen_plan.resolve() != plan_path.resolve():
+            shutil.copy2(plan_path, frozen_plan)
+        plan_sha256 = _plan_digest(frozen_plan)
+        canonical_repo = _canonical_repo_export()
+        canonical_fields = (
+            {"canonical_repo": canonical_repo} if canonical_repo is not None else {}
+        )
+        env_exports = (
+            f"export {IMPLEMENTER_START_RECEIPT_ENV}={shlex.quote(str(receipt_path))}\n"
+        )
+        if canonical_repo is not None:
+            env_exports += (
+                f"export {CANONICAL_REPO_ENV}={shlex.quote(canonical_repo)}\n"
             )
 
         assignment = (
@@ -397,8 +533,9 @@ def start_implementer(
             instructions,
             "# Plan-implementer startup\n\n"
             f"Configured agent/persona: `{IMPLEMENTER_AGENT}`.\n\n"
-            "Run exactly this controller command and own the plan until it writes "
-            "implementer-result.json:\n\n"
+            "Wait until $UPAGENT_IMPLEMENTER_START_RECEIPT has `state: ready` (or "
+            "`ready-degraded`) before hiring. Run exactly this controller command and "
+            "own the plan until it writes implementer-result.json:\n\n"
             f"```text\n{assignment}\n```\n",
         )
         launch = _resolve_launch(roster, profile, cwd, instructions)
@@ -409,12 +546,16 @@ def start_implementer(
             f"IFS= read -r implementer_release_token < {shlex.quote(str(gate_path))}\n"
             f"rm -f {shlex.quote(str(gate_path))}\n"
             f'[[ "$implementer_release_token" == {shlex.quote(release_token)} ]]\n'
-            f"export {IMPLEMENTER_START_RECEIPT_ENV}={shlex.quote(str(receipt_path))}\n"
+            f"{env_exports}"
             f"exec bash -lc {shlex.quote(launch_in_cwd)}\n",
             executable=True,
         )
         implementer_pane: str | None = None
         ready = False
+        watchdog = {
+            "reason": "Flow 1: implementer-await owns delivery; no standing watchdog",
+            "state": "not-configured",
+        }
         try:
             _create_gate(gate_path)
             _write_json_atomic(
@@ -424,23 +565,54 @@ def start_implementer(
                     "effort": profile["effort"],
                     "harness": profile["harness"],
                     "herdr_session": herdr_session,
+                    "hil_pane": hil_pane,
                     "model": profile["model"],
                     "offering": offering_id,
                     "pass": 1,
                     "phase_id": IMPLEMENTER_PHASE_ID,
                     "plan_path": str(frozen_plan),
+                    "plan_sha256": plan_sha256,
                     "run_id": slug,
-                    "state": "starting",
-                    "watchdog": {
-                        "reason": "Flow 1: implementer-await owns delivery; no standing watchdog",
-                        "state": "not-configured",
-                    },
+                    "state": "preparing",
+                    "watchdog": watchdog,
+                    **canonical_fields,
                 },
             )
             implementer_pane, workspace_id = _start_gated(
                 _safe_name(slug), hil_pane, cwd, script_path, herdr_session
             )
             _verify_gated(implementer_pane, script_path, herdr_session)
+            implementer_pane = _place_in_control_tab(
+                implementer_pane, workspace_id, herdr_session
+            )
+            ownership = {
+                "leader": {"pane_id": implementer_pane, "state": "created"},
+                "pane": {"pane_id": implementer_pane, "state": "created"},
+            }
+            _write_json_atomic(
+                receipt_path,
+                {
+                    "at_ns": time.time_ns(),
+                    "effort": profile["effort"],
+                    "harness": profile["harness"],
+                    "herdr_session": herdr_session,
+                    "hil_pane": hil_pane,
+                    "implementer_pane": implementer_pane,
+                    "leader_pane": implementer_pane,
+                    "model": profile["model"],
+                    "offering": offering_id,
+                    "ownership": ownership,
+                    "pass": 1,
+                    "phase_id": IMPLEMENTER_PHASE_ID,
+                    "plan_path": str(frozen_plan),
+                    "plan_sha256": plan_sha256,
+                    "run_id": slug,
+                    "state": "implementer-gated",
+                    "watchdog": watchdog,
+                    **canonical_fields,
+                    **({"workspace_id": workspace_id} if workspace_id else {}),
+                },
+            )
             _release_gate(gate_path, release_token)
             health = _health(implementer_pane, cwd, profile, roster, herdr_session)
             receipt = {
@@ -449,24 +621,53 @@ def start_implementer(
                 "harness": profile["harness"],
                 "health": health,
                 "herdr_session": herdr_session,
+                "hil_pane": hil_pane,
                 "implementer_pane": implementer_pane,
                 "leader_pane": implementer_pane,
                 "model": profile["model"],
                 "offering": offering_id,
+                "ownership": ownership,
                 "pass": 1,
                 "phase_id": IMPLEMENTER_PHASE_ID,
                 "plan_path": str(frozen_plan),
+                "plan_sha256": plan_sha256,
                 "run_id": slug,
                 "state": "ready",
-                "watchdog": {
-                    "reason": "Flow 1: implementer-await owns delivery; no standing watchdog",
-                    "state": "not-configured",
-                },
+                "watchdog": watchdog,
+                **canonical_fields,
                 **({"workspace_id": workspace_id} if workspace_id else {}),
             }
             _write_json_atomic(receipt_path, receipt)
             ready = True
             return receipt
+        except (
+            ImplementerStartError,
+            recruiter.RecruiterError,
+            recruiter.OfferingError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as error:
+            _write_json_atomic(
+                receipt_path,
+                {
+                    "at_ns": time.time_ns(),
+                    "effort": profile["effort"],
+                    "harness": profile["harness"],
+                    "herdr_session": herdr_session,
+                    "hil_pane": hil_pane,
+                    "implementer_pane": implementer_pane,
+                    "offering": offering_id,
+                    "pass": 1,
+                    "phase_id": IMPLEMENTER_PHASE_ID,
+                    "plan_path": str(frozen_plan),
+                    "plan_sha256": plan_sha256,
+                    "reason": str(error),
+                    "run_id": slug,
+                    "state": "failed",
+                    **canonical_fields,
+                },
+            )
+            raise
         finally:
             if not ready:
                 gate_path.unlink(missing_ok=True)
@@ -486,7 +687,86 @@ def start_implementer(
                         )
 
 
+def finish_implementer(receipt_path: Path, *, force: bool = False) -> dict[str, object]:
+    receipt_path = receipt_path.resolve()
+    if not receipt_path.is_file():
+        raise ImplementerStartError(f"implementer-start receipt not found: {receipt_path}")
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ImplementerStartError(
+            f"implementer-start receipt unreadable: {error}"
+        ) from error
+    if not isinstance(receipt, dict) or receipt.get("state") not in (
+        "ready",
+        "ready-degraded",
+    ):
+        raise ImplementerStartError(
+            "finish requires a ready implementer-start receipt"
+        )
+    pane = receipt.get("implementer_pane") or receipt.get("leader_pane")
+    hil_pane = receipt.get("hil_pane")
+    run_id = receipt.get("run_id")
+    if not isinstance(pane, str) or not pane:
+        raise ImplementerStartError("implementer-start receipt has no implementer_pane")
+    if pane == hil_pane:
+        raise ImplementerStartError("refusing to close the HIL pane")
+    if not isinstance(run_id, str) or not run_id:
+        raise ImplementerStartError("implementer-start receipt has no run_id")
+    run_root = receipt_path.parent.parent
+    result_path = run_root / "implementer-result.json"
+    result: dict[str, object] | None
+    try:
+        result = contracts.parse_implementer_result(
+            result_path.read_text(),
+            expected_run_root=run_root,
+            expected_run_id=run_id,
+        )
+    except (OSError, contracts.ContractError) as error:
+        if not force:
+            raise ImplementerStartError(
+                f"finish requires a valid implementer-result.json: {error}"
+            ) from error
+        result = None
+    session = receipt.get("herdr_session")
+    recruiter._close_worker_pane(
+        pane, herdr_session=session if isinstance(session, str) else None
+    )
+    return {
+        "closed_pane": pane,
+        "force": force,
+        "hil_pane": hil_pane,
+        "result": result,
+        "run_id": run_id,
+    }
+
+
+def _cmd_finish(argv: list[str]) -> int:
+    parser = command_runtime.ArgumentParser(prog="upagent-implementer-finish")
+    parser.add_argument("receipt", type=Path)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="close the recorded implementer pane even when implementer-result.json is missing",
+    )
+    args = parser.parse_args(argv)
+    result = finish_implementer(args.receipt.expanduser().resolve(), force=args.force)
+    print(f"IMPLEMENTER_FINISHED {json.dumps(result, sort_keys=True)}", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "finish":
+        try:
+            return _cmd_finish(argv[1:])
+        except (
+            OSError,
+            ImplementerStartError,
+            recruiter.RecruiterError,
+            recruiter.OfferingError,
+        ) as error:
+            sys.exit(f"upagent-implementer-finish: {error}")
     parser = command_runtime.ArgumentParser(prog="upagent-implementer-start")
     parser.add_argument("plan", type=Path, help="approved plan.md")
     parser.add_argument("offering", help="offering id from just upagent lists")

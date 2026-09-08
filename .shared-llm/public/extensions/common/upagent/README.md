@@ -118,7 +118,7 @@ just upagent --help
 just upagent up
 just upagent status [--request ID] [--json]
 just upagent get --request ID [--json]
-just upagent lists --type offerings|specialists|workers [--status active|terminal|all] [--json]
+just upagent lists --type offerings|plan-implementers|specialists|workers [--status active|terminal|all] [--json]
 just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
   --prompt-file /absolute/brief.md [--cwd /absolute/worktree] \
   [--duration-minutes 1..120] [--keep-open] [--no-sentinel] [--cockpit-pane LIVE_PANE] \
@@ -253,13 +253,26 @@ just upagent-implementer-await <run-root>/control/implementer-start.json
 
 `--offering` / `--effort` are required (fail loud; no silent default). The controller starts
 the implementer behind a gate, writes `implementer-start.json`, and health-checks it. It
-returns `IMPLEMENTER_STARTED` with `ready`. The HIL then blocks in `upagent-implementer-await`
+returns `IMPLEMENTER_STARTED` with `ready`. The receipt records the implementer pane
+before the gate releases, then Python health-checks and writes `ready`. A failed start
+writes `state: failed`; retry uses a new run-root. The implementer is placed in the
+`control` tab. The HIL then blocks in `upagent-implementer-await`
 which returns one typed event per call (`completed`, `blocked`, `failed`, `needs-input`,
-`leader-missing`, `leader-stalled`, `inactivity-checkpoint`, `await-heartbeat`, …). On
+`invalid-result`, `leader-missing`, `leader-stalled`, `inactivity-checkpoint`,
+`await-heartbeat`, …). On
 `needs-input`, quote the question to the human, then
 `just upagent-implementer-respond <receipt> <question-id> <answer-file>`. The implementer
-blocks in `just upagent-implementer-await-answer` rather than LLM-polling. Durable files are
+blocks in `just upagent-implementer-await-answer` until that answer file exists
+(`timeout_ms=0`). After a valid `implementer-result.json`,
+`just upagent-implementer-finish <receipt>` closes only the recorded implementer pane.
+On `cancelled` / `hard-timeout` without a result file, pass `--force`. Claude Code's
+HIL await uses `timeout_ms=590000` under a 600 s shell-tool cap and re-enters the
+same wait if the tool is killed. Feature-branch checkouts prefix every `just upagent*`
+call with `$UPAGENT_CANONICAL_REPO`; `start.sh` copies that env into the implementer pane. Durable files are
 truth; pane text is display-only.
+
+The plan-implementer hires workers with `just upagent request` (public façade), not
+Recruiter `order.json`.
 
 Phase startup (Flow 3) has its own deterministic front door:
 

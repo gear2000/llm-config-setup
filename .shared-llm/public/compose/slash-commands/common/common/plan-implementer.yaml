@@ -5,4 +5,5 @@ frontmatter:
   argument-hint: "--plan <plan.md> --run-root <dir> --offering <id> --effort <effort>"
 inputs:
   - .shared-llm/public/layers/slash-commands/common/common/plan-implementer/command.md
+  - .shared-llm/public/layers/slash-commands/common/common/plan-implementer/hire.md
 output: .claude/skills/plan-implementer/SKILL.md

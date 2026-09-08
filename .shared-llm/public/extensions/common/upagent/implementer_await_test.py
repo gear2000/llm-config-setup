@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,11 +86,69 @@ def test_needs_input_is_delivered_until_acknowledged(tmp_path: Path) -> None:
 
 def test_result_file_promotes_completed(tmp_path: Path) -> None:
     path = _receipt(tmp_path)
+    run_root = tmp_path / "sample-run"
+    (run_root / "implementer-result.json").write_text(
+        json.dumps(
+            {
+                "verdict": "passed",
+                "summary": "all slices landed",
+                "run_root": str(run_root),
+                "run_id": "sample-run",
+            }
+        )
+    )
+    event = _await(path)
+    assert event["kind"] == "completed"
+
+
+def test_stub_result_publishes_invalid_result_not_completed(tmp_path: Path) -> None:
+    path = _receipt(tmp_path)
     (tmp_path / "sample-run" / "implementer-result.json").write_text(
         json.dumps({"verdict": "passed"})
     )
     event = _await(path)
-    assert event["kind"] == "completed"
+    assert event["kind"] == "invalid-result"
+
+
+def test_wrong_run_result_is_invalid(tmp_path: Path) -> None:
+    path = _receipt(tmp_path)
+    run_root = tmp_path / "sample-run"
+    (run_root / "implementer-result.json").write_text(
+        json.dumps(
+            {
+                "verdict": "passed",
+                "summary": "leftover",
+                "run_root": str(run_root),
+                "run_id": "other-run",
+            }
+        )
+    )
+    event = _await(path)
+    assert event["kind"] == "invalid-result"
+
+
+def test_unreadable_result_publishes_invalid_result(tmp_path: Path) -> None:
+    path = _receipt(tmp_path)
+    (tmp_path / "sample-run" / "implementer-result.json").write_text("{not-json")
+    event = _await(path)
+    assert event["kind"] == "invalid-result"
+
+
+def test_await_answer_times_out_without_writing_a_plan_result(tmp_path: Path) -> None:
+    path = _receipt(tmp_path)
+    ctx = implementer_await.ImplementerContext(path)
+    with pytest.raises(implementer_await.AwaitError, match="timed out"):
+        implementer_await.await_answer(path, "q-db", timeout_ms=40, poll_ms=10)
+    assert not ctx.result_path.exists()
+
+
+def test_await_answer_zero_timeout_waits_until_the_file_exists(tmp_path: Path) -> None:
+    path = _receipt(tmp_path)
+    answer = tmp_path / "human.md"
+    answer.write_text("use postgres\n")
+    implementer_await.write_answer(path, "q-db", answer)
+    got = implementer_await.await_answer(path, "q-db", timeout_ms=0, poll_ms=10)
+    assert "use postgres" in got["answer"]
 
 
 def test_respond_and_wait_answer(tmp_path: Path) -> None:
@@ -143,3 +202,21 @@ def test_publish_question_id_becomes_needs_input_dedupe_key(tmp_path: Path) -> N
     event = _await(path)
     assert event["kind"] == "needs-input"
     assert event["dedupe_key"] == "q-db"
+
+
+def test_probe_leader_passes_the_receipt_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        seen.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"result": {"pane": {"agent_status": "working"}}}),
+        )
+
+    monkeypatch.setattr(implementer_await.subprocess, "run", run)
+    observed = implementer_await._probe_leader("pane-1", herdr_session="sess-9")
+    assert observed == {"alive": True, "agent_status": "working"}
+    assert seen == [["herdr", "--session", "sess-9", "pane", "get", "pane-1"]]

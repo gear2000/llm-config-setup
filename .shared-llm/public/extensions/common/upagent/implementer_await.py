@@ -40,7 +40,7 @@ if _spec is None or _spec.loader is None:
 contracts = cast(Any, importlib.util.module_from_spec(_spec))
 _spec.loader.exec_module(contracts)
 
-DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
+DEFAULT_TIMEOUT_MS = 590_000
 DEFAULT_POLL_MS = 750
 DEFAULT_RECONCILE_MS = 20_000
 DEFAULT_INACTIVITY_MS = 15 * 60 * 1000
@@ -90,6 +90,8 @@ class ImplementerContext:
         self.phase_id = phase_id
         self.pass_number = 1
         self.leader_pane = pane
+        session = receipt.get("herdr_session")
+        self.herdr_session = session if isinstance(session, str) and session else None
         self.events_dir = self.control_dir / "events"
         self.inbox_dir = self.control_dir / "inbox"
         self.acks_dir = self.control_dir / "acknowledgements"
@@ -297,15 +299,25 @@ def check_implementer_result(ctx: ImplementerContext) -> None:
     if not ctx.result_path.is_file():
         return
     try:
-        result = json.loads(ctx.result_path.read_text())
-    except (OSError, json.JSONDecodeError):
+        result = contracts.parse_implementer_result(
+            ctx.result_path.read_text(),
+            expected_run_root=ctx.run_root,
+            expected_run_id=ctx.run_id,
+        )
+    except (OSError, contracts.ContractError) as error:
+        publish_event(
+            ctx,
+            "invalid-result",
+            f"implementer-result.json is not a valid terminal result: {error}",
+            severity="attention",
+            ack_required=True,
+            dedupe_key="implementer-result:invalid",
+            evidence=[{"kind": "durable-file", "path": str(ctx.result_path)}],
+            requested_action="inspect-and-decide",
+        )
         return
-    if not isinstance(result, dict):
-        return
-    verdict = result.get("verdict")
-    kind = _RESULT_VERDICT_KINDS.get(cast(str, verdict))
-    if kind is None:
-        return
+    verdict = result["verdict"]
+    kind = _RESULT_VERDICT_KINDS[cast(str, verdict)]
     summary = f"Plan-implementer result: verdict={verdict}"
     publish_event(
         ctx,
@@ -383,10 +395,14 @@ def _escalate_unacked_urgent(
             _write_json_atomic(marker, {"event_id": event["event_id"], "at_ns": now_ns})
 
 
-def _probe_leader(pane_id: str) -> dict:
+def _probe_leader(pane_id: str, *, herdr_session: str | None = None) -> dict:
+    argv = ["herdr"]
+    if herdr_session:
+        argv.extend(["--session", herdr_session])
+    argv.extend(["pane", "get", pane_id])
     try:
         proc = subprocess.run(
-            ["herdr", "pane", "get", pane_id],
+            argv,
             capture_output=True,
             text=True,
             timeout=15,
@@ -406,10 +422,14 @@ def _probe_leader(pane_id: str) -> dict:
 
 def _has_terminal_result(ctx: ImplementerContext) -> bool:
     try:
-        result = json.loads(ctx.result_path.read_text())
-    except (OSError, json.JSONDecodeError):
+        contracts.parse_implementer_result(
+            ctx.result_path.read_text(),
+            expected_run_root=ctx.run_root,
+            expected_run_id=ctx.run_id,
+        )
+    except (OSError, contracts.ContractError):
         return False
-    return isinstance(result, dict) and result.get("verdict") in _RESULT_VERDICT_KINDS
+    return True
 
 
 def _deliverable(ctx: ImplementerContext, events: list[dict], after: int) -> dict | None:
@@ -442,7 +462,12 @@ def await_event(
     notify: Callable[[str, str], object] | None = None,
 ) -> dict:
     ctx = ImplementerContext(Path(receipt_path))
-    probe = probe or _probe_leader
+    session = ctx.herdr_session
+    probe = probe or (
+        lambda pane_id, bound_session=session: _probe_leader(
+            pane_id, herdr_session=bound_session
+        )
+    )
     notify = notify or _notify_human
     deadline = time.monotonic() + timeout_ms / 1000
     next_reconcile = 0.0
@@ -546,13 +571,15 @@ def await_answer(
     receipt_path: str | Path,
     question_id: str,
     *,
-    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    timeout_ms: int = 0,
     poll_ms: int = DEFAULT_POLL_MS,
 ) -> dict:
+    if timeout_ms < 0:
+        raise AwaitError("timeout-ms must be >= 0 (0 waits until the answer exists)")
     ctx = ImplementerContext(Path(receipt_path))
     qid = _question_id(question_id)
     path = ctx.answers_dir / f"{qid}.json"
-    deadline = time.monotonic() + timeout_ms / 1000
+    deadline = None if timeout_ms == 0 else time.monotonic() + timeout_ms / 1000
     while True:
         if path.is_file():
             try:
@@ -565,7 +592,7 @@ def await_answer(
             if not isinstance(answer, str) or not answer.strip():
                 raise AwaitError(f"answer {path} has no answer text")
             return payload
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             raise AwaitError(f"timed out waiting for HIL answer {qid}")
         time.sleep(poll_ms / 1000)
 
@@ -703,7 +730,7 @@ def main(argv: list[str] | None = None) -> int:
     wait_answer = sub.add_parser("wait-answer")
     wait_answer.add_argument("--receipt", required=True)
     wait_answer.add_argument("--question-id", required=True)
-    wait_answer.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
+    wait_answer.add_argument("--timeout-ms", type=int, default=0)
     wait_answer.add_argument("--poll-ms", type=int, default=DEFAULT_POLL_MS)
     wait_answer.set_defaults(handler=_cmd_wait_answer)
     args = parser.parse_args(argv)

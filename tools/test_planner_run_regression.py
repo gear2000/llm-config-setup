@@ -172,6 +172,10 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
             assert "/hil --plan <plan.md>" in text, name
         if name == "hil":
             assert "just upagent-implementer-start" in text, name
+            assert "UPAGENT_CANONICAL_REPO" in text, name
+            assert "does not persist" in text, name
+            assert "590000" in text, name
+            assert "re-enter the same await" in text, name
         assert not (destination / ".pi-skills" / name).exists(), f"{name} leaked to Pi"
 
     for name, relative in PI_SKILLS.items():
@@ -187,7 +191,22 @@ def test_generated_planner_handoff_and_pi_link_policy(tmp_path: Path) -> None:
     assert "DESIGN_REQUIRED" in (destination / ".claude/skills/cc-convert/SKILL.md").read_text()
     assert "DESIGN_REQUIRED" in (destination / ".pi-skills/do-convert/SKILL.md").read_text()
     assert "just run-start" in (destination / ".claude/skills/tui-control/SKILL.md").read_text()
-    assert "just upagent-request" in (
+    assert "just upagent request" in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
+    assert "just upagent-request" not in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
+    assert "request_rc" in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
+    assert "timeout 600000" in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
+    assert "UPAGENT_CANONICAL_REPO" in (
+        destination / ".claude/skills/plan-implementer/SKILL.md"
+    ).read_text()
+    assert "unbounded" not in (
         destination / ".claude/skills/plan-implementer/SKILL.md"
     ).read_text()
     assert "implementer-result.json" in (

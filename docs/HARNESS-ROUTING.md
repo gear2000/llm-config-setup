@@ -78,7 +78,8 @@ skills from `~/.pi/agent/skills/`, not `<repo>/.pi/skills/`.
 - Pi primary workflow commands are `do-plan`, `do-implement`, and `do-convert`.
 - `/cc-full` and `/do-full` are disabled composers: they warn and stop.
 - `do-*` remains Pi-only and `cc-*` remains Claude-only. `/hil` is Claude-only (recipe under `claude/`).
-- After `/cc-plan`, default execution is `/hil` (Flow 1). `just run-start` launches the checked
+- After `/cc-plan`, default execution is `/hil` (Flow 1). `/do-plan` hands the approved plan
+  to a human-started Claude Code `/hil` pane; Pi does not install `/hil`. `just run-start` launches the checked
   pair into internal `/tui-control` (Flow 3); that controller creates one internal `/phase-leader`
   leader per phase.
 - The redundant `meta-cc-plan-and-grill` wrapper and the one-release `meta-plan-convert` /

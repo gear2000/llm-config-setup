@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   just upagent lists --type offerings
+  just upagent lists --type plan-implementers
   just upagent request --type worker --offering pi-gpt-5-6-sol --effort high \\
     --agent backend --prompt-file /abs/brief.md
   just upagent request --file /abs/request.json --cockpit-pane LIVE_PANE --wait --json
@@ -69,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     lists = sub.add_parser("lists", help="list offerings, specialists, or workers")
     lists.add_argument(
-        "--type", required=True, choices=("offerings", "specialists", "workers")
+        "--type", required=True, choices=("offerings", "plan-implementers", "specialists", "workers")
     )
     lists.add_argument(
         "--status", choices=("active", "terminal", "all"), default="active"
