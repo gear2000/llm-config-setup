@@ -27,7 +27,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 17
+    assert len(roster.listing()) == 16
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
     assert "codex:::gpt-5.5" in rendered_identities
@@ -36,9 +36,8 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert "cursor:::composer-2.5" in rendered_identities
     assert "cursor:::cursor-grok-4.6-high" in rendered_identities
     assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
-    assert "pi:::openrouter/z-ai/glm-5.3-flash" in rendered_identities
+    assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
     expected_candidates = [
-        {"offering": "pi-glm-5-3-flash", "effort": "low"},
         {"offering": "cursor-composer-2-5", "effort": "default"},
         {"offering": "pi-gpt-5-4-mini", "effort": "low"},
     ]
@@ -46,7 +45,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert roster.management["checker"]["candidates"] == expected_candidates
     assert roster.management["sentinel"]["candidates"] == expected_candidates
     assert all(
-        roster.management[role]["candidates"][0]["offering"] == "pi-glm-5-3-flash"
+        roster.management[role]["candidates"][0]["offering"] == "cursor-composer-2-5"
         for role in ("account_manager", "checker", "sentinel")
     )
 
@@ -103,23 +102,6 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "Read /lease/instructions.md and do exactly that work.",
             ],
         ),
-        (
-            "pi-glm-5-3-flash",
-            "max",
-            "backend",
-            [
-                "pi",
-                "--approve",
-                "--no-extensions",
-                "-e",
-                str(Path.home() / ".pi/agent/extensions/herdr-agent-state.ts"),
-                "--model",
-                "openrouter/z-ai/glm-5.3-flash",
-                "--thinking",
-                "max",
-                "Read /lease/instructions.md and do exactly that work.",
-            ],
-        ),
     ],
 )
 def test_code_owned_renderer_emits_exact_tokens(
@@ -152,22 +134,22 @@ def test_every_approved_offering_and_effort_renders_without_yaml_commands() -> N
                 assert argv[argv.index("--thinking") + 1] == effort
 
 
-def test_glm_offering_has_only_the_pi_catalog_supported_efforts(
+def test_restricted_offering_has_only_the_pi_catalog_supported_efforts(
     tmp_path: Path,
 ) -> None:
     roster = offerings.load_selected_roster()
-    glm = roster.offerings["pi-glm-5-3-flash"]
+    mini = roster.offerings["pi-gpt-5-4-mini"]
 
-    assert glm.efforts == ("low", "high", "max")
-    for effort in ("medium", "xhigh"):
-        with pytest.raises(offerings.OfferingError, match="does not allow effort"):
-            roster.resolve(glm.offering_id, effort)
+    assert mini.efforts == ("low", "medium", "high", "xhigh")
+    with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+        roster.resolve(mini.offering_id, "max")
 
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["offerings"][glm.offering_id]["efforts"] = [
+    source["offerings"][mini.offering_id]["efforts"] = [
         "low",
         "medium",
         "high",
+        "xhigh",
         "max",
     ]
     path = tmp_path / "offerings.yaml"
@@ -214,7 +196,7 @@ def test_effortful_offering_still_requires_effort() -> None:
         "claude-sonnet-5",
         "codex-gpt-5-6-sol",
         "pi-gpt-5-6-sol",
-        "pi-glm-5-3-flash",
+        "pi-gpt-5-4-mini",
     ):
         with pytest.raises(
             offerings.OfferingError, match="requires an explicit effort"
@@ -323,7 +305,6 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "pi-gpt-6-astra": "openai",
         "pi-gpt-5-5": "openai",
         "pi-gpt-5-4-mini": "openai",
-        "pi-glm-5-3-flash": "openrouter",
     }
 
     assert {key: item.provider for key, item in roster.offerings.items()} == expected
@@ -355,28 +336,22 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     candidates = role["candidates"]
 
     assert [candidate["offering_id"] for candidate in candidates] == [
-        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]
     assert [candidate["provider"] for candidate in candidates] == [
-        "openrouter",
         "cursor",
         "openai",
     ]
-    assert candidates[0]["expected_agent"] == "pi"
-    assert candidates[0]["expected_process"] == "pi"
-    assert "openrouter/z-ai/glm-5.3-flash" in candidates[0]["command"]
-    assert "--thinking low" in candidates[0]["command"]
-    assert candidates[1]["expected_agent"] == "cursor"
-    assert candidates[1]["expected_process"] == "cursor-agent"
-    assert candidates[1]["command"].startswith(
+    assert candidates[0]["expected_agent"] == "cursor"
+    assert candidates[0]["expected_process"] == "cursor-agent"
+    assert candidates[0]["command"].startswith(
         "cursor-agent --force --trust --model composer-2.5"
     )
-    assert candidates[2]["expected_agent"] == "pi"
-    assert candidates[2]["expected_process"] == "pi"
-    assert "openai-codex/gpt-5.4-mini" in candidates[2]["command"]
-    assert "--thinking low" in candidates[2]["command"]
+    assert candidates[1]["expected_agent"] == "pi"
+    assert candidates[1]["expected_process"] == "pi"
+    assert "openai-codex/gpt-5.4-mini" in candidates[1]["command"]
+    assert "--thinking low" in candidates[1]["command"]
     assert role["command"] == candidates[0]["command"]
 
 
@@ -417,7 +392,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "9d6ace4a27c22bbb5aaeac21304c41e153b9815d5b70b8702e8f3ee80913e411"
+        "10689f175366e9abefcfa0c27da89ec020a4f250bc548e5cf0f3729fb3fd3b85"
     )
 
 

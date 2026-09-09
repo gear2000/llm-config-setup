@@ -438,8 +438,8 @@ Durable files are the source of truth; terminal text is display-only.
   facts are given to the manager. A bad request is explained to the requester and terminalized
   without ever creating a worker, even if the LLM mistakenly recommends approval.
 - Public requests use one dedicated advisory Account Manager selected from the ordered approved
-  candidates in `offerings.yaml`: `pi-glm-5-3-flash` at `low`, then `cursor-composer-2-5` at
-  `default`, then `pi-gpt-5-4-mini` at `low`, all with the `upagent-account-manager` brief. The Recruiter removes
+  candidates in `offerings.yaml`: `cursor-composer-2-5` at `default`, then `pi-gpt-5-4-mini` at
+  `low`, all with the `upagent-account-manager` brief. The Recruiter removes
   same-provider candidates, tries the first eligible candidate, and records each startup failure
   before trying the next. Exhaustion degrades supervision only: it cannot veto Python-valid
   startup, mutate a lease, publish artifacts, invent success, or terminalize the request.
@@ -585,8 +585,8 @@ Durable files are the source of truth; terminal text is display-only.
   including retries. Public worker offerings pin code-owned provider metadata in
   their immutable snapshots; legacy orders fall back to known harness/model identity
   only when no snapshot provider exists. For the public roster, the Recruiter filters the
-  YAML-ordered Sentinel candidates (`pi-glm-5-3-flash`/low, then `cursor-composer-2-5`/default,
-  then `pi-gpt-5-4-mini`/low) by provider and tries every eligible startup in order. Each failure is
+  YAML-ordered Sentinel candidates (`cursor-composer-2-5`/default, then `pi-gpt-5-4-mini`/low)
+  by provider and tries every eligible startup in order. Each failure is
   recorded; only exhaustion degrades to mechanical supervision through the existing
   `sentinel-degraded` path with a typed `reason_type`. An explicit legacy
   `management.sentinel` command remains an override: its command
@@ -698,8 +698,8 @@ the kit root [SETUP-SPECIALISTS.md](../../../../../SETUP-SPECIALISTS.md). After 
 Public workers and management candidates never read a YAML launch command. `offerings.yaml`
 selects approved harness/model identities and effort allowlists, plus the candidate order;
 `offerings.py` validates every reference and renders the exact child argv. Public Account Manager,
-Checker, and Sentinel candidates are `pi-glm-5-3-flash`/low first, then
-`cursor-composer-2-5`/default, then `pi-gpt-5-4-mini`/low. The Recruiter filters the worker's
+Checker, and Sentinel candidates are `cursor-composer-2-5`/default first, then
+`pi-gpt-5-4-mini`/low. The Recruiter filters the worker's
 provider and falls back on startup
 failure. A legacy `upagent.yaml` remains only for explicitly route-driven controller compatibility,
 where existing phase routes still provide raw harness/model profiles and may configure singular

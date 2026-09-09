@@ -76,7 +76,3 @@ offerings:
     harness: pi
     model: openai-codex/gpt-5.4-mini
     efforts: [low, medium, high, xhigh]
-  pi-glm-5-3-flash:
-    harness: pi
-    model: openrouter/z-ai/glm-5.3-flash
-    efforts: [low, high, max]

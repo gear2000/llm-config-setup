@@ -4182,16 +4182,13 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
     )
 
     assert [candidate.offering_id for candidate in anthropic] == [
-        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "pi-glm-5-3-flash",
         "pi-gpt-5-4-mini",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
     ]
 
@@ -4211,16 +4208,13 @@ def test_public_checker_candidates_filter_same_provider_and_preserve_order() -> 
     )
 
     assert [candidate.offering_id for candidate in anthropic] == [
-        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "pi-glm-5-3-flash",
         "pi-gpt-5-4-mini",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
     ]
 
@@ -4269,7 +4263,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
 
     def health(pane: str, **kwargs: object) -> dict[str, object]:
         if pane == "checker-pane-1":
-            raise recruiter.RecruiterError("glm startup failed")
+            raise recruiter.RecruiterError("cursor startup failed")
         return {"healthy": True}
 
     assessment = SimpleNamespace(
@@ -4292,15 +4286,15 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
     )
 
     assert result is assessment
-    assert "--model openrouter/z-ai/glm-5.3-flash --thinking low" in attempted[0]
-    assert attempted[1].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert "--model openai-codex/gpt-5.4-mini --thinking low" in attempted[1]
     failures = [
         event
         for event in ledger.events(key)
         if event["event"] == "checker-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("pi-glm-5-3-flash", "glm startup failed")
+        ("cursor-composer-2-5", "cursor startup failed")
     ]
 
 
@@ -4399,7 +4393,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
 
     def health(pane: str, **kwargs: object) -> dict[str, object]:
         if pane == "manager-pane-1":
-            raise recruiter.RecruiterError("glm startup failed")
+            raise recruiter.RecruiterError("cursor startup failed")
         return {"healthy": True}
 
     decision = recruiter.lifecycle.ManagerDecision(
@@ -4420,16 +4414,16 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
     )
 
     assert len(attempted) == 2
-    assert "--model openrouter/z-ai/glm-5.3-flash --thinking low" in attempted[0]
-    assert attempted[1].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert manager["management_offering_id"] == "cursor-composer-2-5"
+    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert "--model openai-codex/gpt-5.4-mini --thinking low" in attempted[1]
+    assert manager["management_offering_id"] == "pi-gpt-5-4-mini"
     failures = [
         event
         for event in ledger.events(key)
         if event["event"] == "account-manager-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("pi-glm-5-3-flash", "glm startup failed")
+        ("cursor-composer-2-5", "cursor startup failed")
     ]
 
     def reject_every_candidate(*args: object, **kwargs: object) -> dict[str, object]:
@@ -4446,9 +4440,8 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         event
         for event in ledger.events(key)
         if event["event"] == "account-manager-candidate-failed"
-    ][-3:]
+    ][-2:]
     assert [event["offering_id"] for event in exhausted] == [
-        "pi-glm-5-3-flash",
         "cursor-composer-2-5",
         "pi-gpt-5-4-mini",
     ]

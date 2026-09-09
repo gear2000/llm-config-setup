@@ -456,7 +456,8 @@ def test_provider_of_maps_the_approved_harnesses() -> None:
     assert stall_nudge.provider_of("pi", "claude-opus-5") == "anthropic"
     assert stall_nudge.provider_of("pi", "gpt-5.6-sol") == "openai"
     assert (
-        stall_nudge.provider_of("pi", "openrouter/z-ai/glm-5.3-flash") == "openrouter"
+        stall_nudge.provider_of("pi", "openrouter/some-vendor/some-model")
+        == "openrouter"
     )
     assert stall_nudge.provider_of("cursor", "mystery") == "unknown"
     assert stall_nudge.provider_of("pi", "mystery") == "unknown"

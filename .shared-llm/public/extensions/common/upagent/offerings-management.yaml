@@ -13,8 +13,6 @@ management:
     candidates:
       - offering: cursor-composer-2-5
         effort: default
-      - offering: pi-glm-5-3-flash
-        effort: low
       - offering: pi-gpt-5-4-mini
         effort: low
     agent: upagent-account-manager
@@ -23,8 +21,6 @@ management:
     candidates:
       - offering: cursor-composer-2-5
         effort: default
-      - offering: pi-glm-5-3-flash
-        effort: low
       - offering: pi-gpt-5-4-mini
         effort: low
     agent: upagent-checker
@@ -33,8 +29,6 @@ management:
     candidates:
       - offering: cursor-composer-2-5
         effort: default
-      - offering: pi-glm-5-3-flash
-        effort: low
       - offering: pi-gpt-5-4-mini
         effort: low
     agent: upagent-sentinel
