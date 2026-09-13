@@ -1194,6 +1194,145 @@ def has_configured_update_work(cfg: dict[str, Any]) -> bool:
     return bool(cfg["destinations"] or cfg["global"] or "upagent" in cfg)
 
 
+def destination_ignored(destination: dict) -> bool:
+    """True when this dest stays in ~/.shared-llm.yaml but must not be touched.
+
+    Distinct from top-level `exclude:`, which skips compose *recipes*, not dests.
+    """
+    if "ignore" not in destination:
+        return False
+    value = destination["ignore"]
+    if value is True:
+        return True
+    if value is False:
+        return False
+    sys.exit(
+        f"error: destination {destination.get('path')!r} ignore: must be a boolean"
+    )
+
+
+def active_destinations(cfg: dict) -> list[dict]:
+    """Destinations this run should copy/compose/link/check.
+
+    Drops `ignore: true` entries and any one-off CLI skip set stashed on `cfg`
+    by `apply_destination_cli_filters`. Config-ignored dests remain in
+    `cfg["destinations"]` so configure and the skip notice can still see them.
+    """
+    skip_ids = cfg.get("_skip_destination_ids", set())
+    only_ids = cfg.get("_only_destination_ids")
+    selected: list[dict] = []
+    for destination in cfg["destinations"]:
+        if destination_ignored(destination) or id(destination) in skip_ids:
+            continue
+        if only_ids is not None and id(destination) not in only_ids:
+            continue
+        selected.append(destination)
+    return selected
+
+
+def report_ignored_destinations(cfg: dict, log: RunLog) -> None:
+    """Print one skip line per config-ignored dest, once per run."""
+    if cfg.get("_ignored_reported"):
+        return
+    cfg["_ignored_reported"] = True
+    for destination in cfg["destinations"]:
+        if destination_ignored(destination):
+            log.always(f"  ⏭ ignoring {destination['path']} (ignore: true)")
+
+
+def destination_selector_keys(destination: dict) -> set[str]:
+    raw = str(destination["path"])
+    expanded = str(Path(raw).expanduser())
+    return {raw, expanded, Path(raw).name, Path(expanded).name}
+
+
+def destination_matches(destination: dict, selector: str) -> bool:
+    keys = destination_selector_keys(destination)
+    token = str(selector)
+    return token in keys or str(Path(token).expanduser()) in keys
+
+
+def resolve_destination_selector(cfg: dict, selector: str, flag: str) -> dict:
+    matches = [d for d in cfg["destinations"] if destination_matches(d, selector)]
+    if not matches:
+        paths = [str(d.get("path", "")) for d in cfg["destinations"]]
+        print(
+            f"error: {flag} {selector!r} matches no configured destination "
+            f"(configured: {', '.join(paths) or '(none)'})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if len(matches) > 1:
+        print(
+            f"error: {flag} {selector!r} matches multiple destinations "
+            f"({', '.join(str(d['path']) for d in matches)})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return matches[0]
+
+
+def apply_destination_cli_filters(
+    cfg: dict,
+    ignore_selectors: list[str] | None,
+    only_selectors: list[str] | None,
+) -> None:
+    """Stash one-off --ignore / --only on cfg for `active_destinations`."""
+    ignore_selectors = [s for s in (ignore_selectors or []) if s]
+    only_selectors = [s for s in (only_selectors or []) if s]
+    if ignore_selectors:
+        cfg["_skip_destination_ids"] = {
+            id(resolve_destination_selector(cfg, selector, "--ignore"))
+            for selector in ignore_selectors
+        }
+    if only_selectors:
+        cfg["_only_destination_ids"] = {
+            id(resolve_destination_selector(cfg, selector, "--only"))
+            for selector in only_selectors
+        }
+
+
+def preserved_inactive_repo_links(
+    cfg: dict, prior: dict[Path, str]
+) -> dict[Path, Path]:
+    """Home skill links owned by dests this run is skipping — still wanted.
+
+    Ignoring a dest (config or CLI) must not retire its existing home links.
+    """
+    active_ids = {id(d) for d in active_destinations(cfg)}
+    roots = [
+        Path(d["path"]).expanduser()
+        for d in cfg["destinations"]
+        if id(d) not in active_ids
+    ]
+    if not roots:
+        return {}
+    kept: dict[Path, Path] = {}
+    for home, source in prior.items():
+        src = Path(source)
+        src_s = str(src)
+        for root in roots:
+            try:
+                src.resolve().relative_to(root.resolve())
+            except ValueError:
+                if src_s == str(root) or src_s.startswith(str(root) + "/"):
+                    kept[home] = src
+                    break
+                continue
+            kept[home] = src
+            break
+    return kept
+
+
+def destination_home_links_for_manifest(
+    cfg: dict, manifest: HomeManifest | None
+) -> dict[Path, Path]:
+    links = destination_home_links(cfg)
+    if manifest is not None:
+        links.update(preserved_inactive_repo_links(cfg, manifest.prior_repo_links()))
+    return links
+
+
 def _write_if_changed(path: Path, content: str) -> bool:
     # A leaf symlink is not a managed generated file even when its target has
     # equal bytes. Replace the link itself instead of adopting its external target.
@@ -1435,6 +1574,7 @@ def load_config() -> dict:
         sys.exit("error: config destinations must be a list of mappings")
     selected_offering_sets(cfg)
     for index, destination in enumerate(cfg["destinations"], start=1):
+        destination_ignored(destination)
         if "upagent" in destination:
             _validated_upagent_block(destination["upagent"], f"destinations[{index}]")
     return cfg
@@ -1489,14 +1629,22 @@ def _print_config(cfg: dict) -> None:
             if "upagent" in d
             else ""
         )
+        ignored = "  (ignored)" if destination_ignored(d) else ""
         print(
-            f"  dest: {d['path']}  [{', '.join(d.get('harnesses', []))}]{replacement}"
+            f"  dest: {d['path']}  [{', '.join(d.get('harnesses', []))}]{replacement}{ignored}"
         )
 
 
 def cmd_configure(args: argparse.Namespace) -> None:
     existed = CONFIG_PATH.exists()
     cfg = load_config()
+    want_ignore = bool(getattr(args, "ignore", False))
+    want_unignore = bool(getattr(args, "unignore", False))
+    if want_ignore and want_unignore:
+        sys.exit("error: --ignore and --unignore cannot be combined")
+    if (want_ignore or want_unignore) and not args.dest:
+        flag = "--ignore" if want_ignore else "--unignore"
+        sys.exit(f"error: {flag} requires -d / --dest to name the destination")
     if args.source:
         cfg["source"] = str(Path(args.source).expanduser())
     if args.global_list is not None:
@@ -1527,12 +1675,18 @@ def cmd_configure(args: argparse.Namespace) -> None:
                     d["harnesses"] = requested_harnesses
                 if parsed_offering_sets is not None:
                     d["upagent"] = {"offering_sets": parsed_offering_sets}
+                if want_ignore:
+                    d["ignore"] = True
+                if want_unignore:
+                    d.pop("ignore", None)
                 break
         else:
             harnesses = requested_harnesses or ["cc", "pi"]
             destination: dict[str, Any] = {"path": path, "harnesses": harnesses}
             if parsed_offering_sets is not None:
                 destination["upagent"] = {"offering_sets": parsed_offering_sets}
+            if want_ignore:
+                destination["ignore"] = True
             cfg["destinations"].append(destination)
     elif parsed_offering_sets is not None:
         cfg["upagent"] = {"offering_sets": parsed_offering_sets}
@@ -1892,7 +2046,8 @@ def do_copy(cfg: dict, log: RunLog) -> None:
         f"  hub: {c['new']} new, {c['changed']} changed, {c['same']} unchanged, "
         f"{pruned_hub_commands} retired slash-command layers pruned"
     )
-    for d in cfg["destinations"]:
+    report_ignored_destinations(cfg, log)
+    for d in active_destinations(cfg):
         dest = Path(d["path"]).expanduser()
         dest_shared = dest / ".shared-llm"
         name = Path(d["path"]).name
@@ -2104,7 +2259,8 @@ def _compose_destination(
 
 
 def do_compose(cfg: dict, log: RunLog) -> None:
-    for d in cfg["destinations"]:
+    report_ignored_destinations(cfg, log)
+    for d in active_destinations(cfg):
         _compose_destination(
             Path(d["path"]).expanduser(), log, placeholders=d.get("placeholders") or {}
         )
@@ -2280,17 +2436,19 @@ def _cleanup_repo_scoped_pi(dests: list[Path], log: RunLog) -> int:
 def destination_home_skills(
     cfg: dict,
 ) -> tuple[dict[str, Path], dict[str, Path], list[str]]:
-    """The home skill links every configured DESTINATION wants: (pi, codex,
-    collisions), each keyed by skill name.
+    """The home skill links every *active* DESTINATION wants: (pi, codex,
+    collisions), each keyed by skill name. Destinations with `ignore: true`
+    (or skipped by `--ignore` / omitted from `--only`) contribute nothing.
 
     One function, two consumers: the link step deploys these, and the global flow
     records them in the manifest so they can be retired later. Computing the set
     twice from two copies of the rules is how a link ends up deployed but never
-    recorded, or recorded but never deployed."""
+    recorded, or recorded but never deployed. Skipped dests' existing home links
+    are preserved separately via `destination_home_links_for_manifest`."""
     pi_desired: dict[str, Path] = {}
     codex_desired: dict[str, Path] = {}
     collisions: list[str] = []
-    for d in cfg["destinations"]:
+    for d in active_destinations(cfg):
         dest = Path(d["path"]).expanduser()
         harnesses = d.get("harnesses", [])
         if "pi" in harnesses:
@@ -2321,10 +2479,10 @@ def do_link(cfg: dict, log: RunLog, manifest: HomeManifest | None = None) -> Non
     evidence available when a destination's path changes underneath a link — see
     `_reconcile_global`. Callers that mutate home paths build it before this step
     and finalize it after, so both halves share one transaction."""
-    dests = [Path(d["path"]).expanduser() for d in cfg["destinations"]]
+    dests = [Path(d["path"]).expanduser() for d in active_destinations(cfg)]
     prior_owned = manifest.prior_repo_links() if manifest is not None else None
     pi_desired, codex_desired, collisions = destination_home_skills(cfg)
-    for d in cfg["destinations"]:
+    for d in active_destinations(cfg):
         if "cc" in d.get("harnesses", []):
             dest = Path(d["path"]).expanduser()
             log(f"  [{dest.name}] cc: no link needed (reads .claude/ directly)")
@@ -2781,7 +2939,7 @@ class HomeManifest:
             for key, meta in self.previous.items()
             if meta.get("kind") != "repo-link"
         }
-        for dest, source in destination_home_links(cfg).items():
+        for dest, source in destination_home_links_for_manifest(cfg, self).items():
             self.record_repo_link(dest, source, log)
         for key, meta in self.previous.items():
             if meta.get("kind") != "repo-link" or key in self.entries:
@@ -3666,7 +3824,10 @@ def build_description_corpus(
         items.extend(got)
         errors.extend(bad)
 
+    active_ids = {id(d) for d in active_destinations(cfg)}
     for destination_index, dest_cfg in enumerate(cfg.get("destinations", []), start=1):
+        if id(dest_cfg) not in active_ids:
+            continue
         dest = Path(dest_cfg.get("path", "")).expanduser()
         placeholders = dest_cfg.get("placeholders") or {}
         if not isinstance(placeholders, dict):
@@ -3816,7 +3977,9 @@ def do_global(cfg: dict, log: RunLog, manifest: HomeManifest | None = None) -> N
     installed = uptodate = skipped = pruned = 0
     # Names a previous run linked to a destination that no longer wants them:
     # this run may take them back for the generated skill of the same name.
-    reclaimable = manifest.retiring_repo_links(destination_home_links(cfg))
+    reclaimable = manifest.retiring_repo_links(
+        destination_home_links_for_manifest(cfg, manifest)
+    )
 
     gen_skills = generated_root() / "skills"
 
@@ -4224,7 +4387,7 @@ def do_global_flow(
         # Destination-provided home links are deployed by the link step but
         # recorded here, because this is the only step that always runs — an
         # emptied config has no link step left to speak for them.
-        for dest, source in destination_home_links(cfg).items():
+        for dest, source in destination_home_links_for_manifest(cfg, m).items():
             m.record_repo_link(dest, source, log)
         m.finalize(log)
         m.commit_generated(log)
@@ -4247,15 +4410,26 @@ def _log_path() -> Path:
 
 
 def cmd_copy(args: argparse.Namespace) -> None:
-    do_copy(load_config(), RunLog(verbose=True))
+    cfg = load_config()
+    apply_destination_cli_filters(
+        cfg, getattr(args, "ignore", None), getattr(args, "only", None)
+    )
+    do_copy(cfg, RunLog(verbose=True))
 
 
 def cmd_compose_cfg(args: argparse.Namespace) -> None:
-    do_compose(load_config(), RunLog(verbose=True))
+    cfg = load_config()
+    apply_destination_cli_filters(
+        cfg, getattr(args, "ignore", None), getattr(args, "only", None)
+    )
+    do_compose(cfg, RunLog(verbose=True))
 
 
 def cmd_link(args: argparse.Namespace) -> None:
     cfg = load_config()
+    apply_destination_cli_filters(
+        cfg, getattr(args, "ignore", None), getattr(args, "only", None)
+    )
     log = RunLog(verbose=True)
     with home_lock(log):
         manifest = HomeManifest()
@@ -4298,10 +4472,10 @@ def do_check(cfg: dict, log: RunLog) -> bool:
         return [p.name for p in d.iterdir() if pred(p)] if d.is_dir() else []
 
     uses_pi = any(
-        "pi" in d.get("harnesses", []) for d in cfg["destinations"]
+        "pi" in d.get("harnesses", []) for d in active_destinations(cfg)
     ) or "pi" in cfg.get("global", [])
     uses_codex = any(
-        wants_codex_surface(d.get("harnesses", [])) for d in cfg["destinations"]
+        wants_codex_surface(d.get("harnesses", [])) for d in active_destinations(cfg)
     ) or wants_codex_surface(cfg.get("global", []))
 
     if uses_pi:
@@ -4316,7 +4490,7 @@ def do_check(cfg: dict, log: RunLog) -> bool:
         report(f"Codex {cx} has NO do-*", names(cx, lambda p: p.name.startswith("do-")))
         report(f"Codex {cx} has NO cc-*", names(cx, lambda p: p.name.startswith("cc-")))
 
-    for d in cfg["destinations"]:
+    for d in active_destinations(cfg):
         dest = Path(d["path"]).expanduser()
         cs = dest / ".claude/skills"
         ps = dest / PI_ONLY_SKILLS_DIR
@@ -4348,9 +4522,13 @@ def cmd_update(args: argparse.Namespace) -> None:
         sys.exit(
             "error: nothing configured. Run `just configure -d <repo> -l cc,pi` first."
         )
+    apply_destination_cli_filters(
+        cfg, getattr(args, "ignore", None), getattr(args, "only", None)
+    )
     log_path = _log_path()
     log = RunLog(verbose=args.verbose, path=log_path)
     log.always(f"update: log -> {log_path}")
+    report_ignored_destinations(cfg, log)
     enforce_destinations = os.environ.get("SHARED_LLM_ENFORCE_DEST_DESCRIPTIONS") == "1"
     enforce_description_preflight(cfg, enforce_destinations=enforce_destinations)
     if cfg["destinations"]:
@@ -4392,7 +4570,7 @@ def do_reset(cfg: dict, log: RunLog) -> None:
         if target.exists():
             log.always(f"reset: rm hub {target}")
             shutil.rmtree(target) if target.is_dir() else target.unlink()
-    for d in cfg["destinations"]:
+    for d in active_destinations(cfg):
         pub = Path(d["path"]).expanduser() / ".shared-llm" / PUBLIC_DIR
         # The kit's own public/ tree is the SOURCE, not a build product — if the
         # kit itself is registered as a destination, deleting it destroys the kit.
@@ -4414,6 +4592,30 @@ def cmd_reset(args: argparse.Namespace) -> None:
     do_reset(cfg, log)
     log.always("reset: kit-owned state removed — rebuilding via update")
     cmd_update(argparse.Namespace(verbose=args.verbose))
+
+
+def _add_destination_filter_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ignore",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Skip this destination for this run (repeatable). Match the configured "
+            "path, its expanded form, or its basename. Distinct from --exclude "
+            "(recipe paths) and from configure --ignore (persistent ignore: true)."
+        ),
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Run only these destinations (repeatable). Same matching as --ignore. "
+            "Config ignore: true still skips a listed dest."
+        ),
+    )
 
 
 def main() -> None:
@@ -4481,22 +4683,36 @@ def main() -> None:
             "destination's sets (comma-separated: standard,claudex)."
         ),
     )
+    pcfg.add_argument(
+        "--ignore",
+        action="store_true",
+        help="Set ignore: true on -d. The dest stays in the config but update/copy/"
+        "compose/link skip it. Distinct from --exclude (recipe paths, not dests).",
+    )
+    pcfg.add_argument(
+        "--unignore",
+        action="store_true",
+        help="Clear ignore: on -d so the destination is updated again.",
+    )
     pcfg.set_defaults(func=cmd_configure)
 
     pcp = sub.add_parser(
         "copy", help="Kit -> hub -> each destination's .shared-llm/ (common only)."
     )
+    _add_destination_filter_flags(pcp)
     pcp.set_defaults(func=cmd_copy)
 
     pcd = sub.add_parser(
         "compose-dests",
         help="Compose every configured destination from its own .shared-llm/.",
     )
+    _add_destination_filter_flags(pcd)
     pcd.set_defaults(func=cmd_compose_cfg)
 
     pl = sub.add_parser(
         "link", help="Reconcile repo-scoped pi/codex skill links per destination."
     )
+    _add_destination_filter_flags(pl)
     pl.set_defaults(func=cmd_link)
 
     pg = sub.add_parser(
@@ -4542,6 +4758,7 @@ def main() -> None:
         action="store_true",
         help="Print per-file detail (always written to the log).",
     )
+    _add_destination_filter_flags(pup)
     pup.set_defaults(func=cmd_update)
 
     prs = sub.add_parser(
