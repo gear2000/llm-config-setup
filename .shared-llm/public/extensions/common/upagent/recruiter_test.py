@@ -2376,6 +2376,116 @@ def test_lapsed_awaiting_requester_deadline_writes_failed_result(
     assert result["order_id"] == order["order_id"]
 
 
+def test_unchanged_progress_fingerprint_marks_stalled_and_issues_nudge(
+    tmp_path: Path,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **lease)
+    fingerprint = recruiter.worker_progress_fingerprint(
+        token_count=12, pane_output="looping the same script\n" * 5
+    )
+    nudges: list[str] = []
+
+    first = recruiter.apply_inactivity_progress(
+        ledger, key, fingerprint, nudge=lambda: nudges.append("nudge")
+    )
+    assert first is False
+    assert ledger.state(key)["state"] == "running"
+    assert nudges == []
+
+    stalled = recruiter.apply_inactivity_progress(
+        ledger, key, fingerprint, nudge=lambda: nudges.append("nudge")
+    )
+    assert stalled is True
+    assert ledger.state(key)["state"] == "stalled"
+    assert nudges == ["nudge"]
+    assert ledger.state(key)["progress_fingerprint"] == fingerprint
+
+
+def test_changed_progress_fingerprint_does_not_stall(tmp_path: Path) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **lease)
+
+    recruiter.apply_inactivity_progress(
+        ledger,
+        key,
+        recruiter.worker_progress_fingerprint(token_count=1, pane_output="first"),
+    )
+    stalled = recruiter.apply_inactivity_progress(
+        ledger,
+        key,
+        recruiter.worker_progress_fingerprint(token_count=2, pane_output="second"),
+    )
+    assert stalled is False
+    assert ledger.state(key)["state"] == "running"
+
+
+def test_soft_timeout_extension_is_refused_when_fingerprint_is_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
+    assert token
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **lease)
+    fingerprint = recruiter.worker_progress_fingerprint(
+        token_count=9, pane_output="frozen"
+    )
+    recruiter.apply_inactivity_progress(ledger, key, fingerprint)
+    recruiter.apply_inactivity_progress(ledger, key, fingerprint)
+    assert ledger.state(key)["state"] == "stalled"
+    manager = {
+        "address": None,
+        "config": SimpleNamespace(
+            account_manager=SimpleNamespace(timeout_ms=100), requester_grace_ms=1_000
+        ),
+        "generation": 1,
+    }
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", lambda *args, **kwargs: None)
+    monkeypatch.setattr(recruiter, "_notify_requester", lambda *args, **kwargs: None)
+    outcomes: list[int | None] = []
+    runner = threading.Thread(
+        target=lambda: outcomes.append(
+            recruiter._await_requester_timeout_decision(
+                ledger, key, token, order, manager, "worker-pane", 1, threading.Event()
+            )
+        )
+    )
+    runner.start()
+    deadline = time.monotonic() + 1
+    state = ledger.state(key)
+    while state.get("state") != "awaiting-requester" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        state = ledger.state(key)
+    assert state["state"] == "awaiting-requester"
+    decision = recruiter.lifecycle.RequesterDecision(
+        recruiter.lifecycle.request_identity(order),
+        1,
+        "extend",
+        60_000,
+        "Keep going.",
+    )
+    ledger.record_requester_decision(key, token, state["decision_nonce"], decision)
+    runner.join(timeout=1)
+
+    assert not runner.is_alive()
+    assert outcomes == [None]
+    stored = ledger.state(key)
+    assert "fingerprint" in str(stored.get("extension_refused_reason", "")).lower()
+
+
 
 def test_worker_instructions_have_no_result_only_fallback(tmp_path: Path) -> None:
     original = tmp_path / "instructions.md"

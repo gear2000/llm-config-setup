@@ -2077,7 +2077,7 @@ class JobLedger:
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
                 raise RecruiterError("request lease changed before timeout warning")
-            if self.state(key).get("state") != "running":
+            if self.state(key).get("state") not in ("running", "stalled"):
                 return None
             detail = {"decision_nonce": nonce, "timeout_number": timeout_number}
             self._event(key, "timeout-warning", **detail)
@@ -3623,6 +3623,141 @@ def _worker_inactivity_check_ms(order: dict, configured_ms: int) -> int:
     if order.get("harness") != "cursor":
         return configured_ms
     return min(configured_ms, CURSOR_INACTIVITY_CHECK_MS)
+
+
+PROGRESS_OUTPUT_LINES = 80
+
+
+def worker_progress_fingerprint(
+    *,
+    token_count: int | None,
+    pane_output: str,
+    lines: int = PROGRESS_OUTPUT_LINES,
+) -> dict[str, object]:
+    """Mechanical progress fingerprint: token count plus a hash of recent pane output."""
+    tail = "\n".join(pane_output.splitlines()[-lines:])
+    return {
+        "output_sha256": hashlib.sha256(tail.encode("utf-8")).hexdigest(),
+        "token_count": token_count,
+    }
+
+
+def progress_fingerprint_frozen(previous: object, current: object) -> bool:
+    return isinstance(previous, dict) and isinstance(current, dict) and previous == current
+
+
+def _progress_state_path(ledger: JobLedger, key: str) -> Path:
+    return ledger.request_dir(key) / "state" / "progress.json"
+
+
+def _load_progress_state(ledger: JobLedger, key: str) -> dict[str, object]:
+    path = _progress_state_path(ledger, key)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(f"progress state {path} is unreadable: {error}") from error
+    if not isinstance(payload, dict):
+        raise RecruiterError(f"progress state {path} must be a JSON object")
+    return payload
+
+
+def record_progress_fingerprint(ledger: JobLedger, key: str, fingerprint: dict) -> bool:
+    """Persist a checkpoint fingerprint. True when it was unchanged across the window."""
+    previous_payload = _load_progress_state(ledger, key)
+    previous = previous_payload.get("fingerprint")
+    frozen = progress_fingerprint_frozen(previous, fingerprint)
+    payload: dict[str, object] = {
+        "at_ns": time.time_ns(),
+        "fingerprint": fingerprint,
+        "frozen": frozen,
+        "previous_fingerprint": previous,
+    }
+    JobLedger._write_json(_progress_state_path(ledger, key), payload)
+    current = ledger.state(key)
+    detail = {
+        name: value
+        for name, value in current.items()
+        if name
+        not in ("state", "at_ns", "progress_fingerprint", "progress_stall_reason")
+    }
+    if frozen:
+        ledger._snapshot(
+            key,
+            "stalled",
+            **detail,
+            progress_fingerprint=fingerprint,
+            progress_stall_reason="progress fingerprint unchanged across inactivity window",
+        )
+    else:
+        restore = current.get("state")
+        if restore == "stalled":
+            restore = "running"
+        ledger._snapshot(
+            key,
+            restore if isinstance(restore, str) else "running",
+            **detail,
+            progress_fingerprint=fingerprint,
+        )
+    return frozen
+
+
+def apply_inactivity_progress(
+    ledger: JobLedger,
+    key: str,
+    fingerprint: dict,
+    nudge: Callable[[], None] | None = None,
+) -> bool:
+    """Record one inactivity fingerprint and route a freeze into the stall-nudge ladder."""
+    stalled = record_progress_fingerprint(ledger, key, fingerprint)
+    if stalled and nudge is not None:
+        nudge()
+    return stalled
+
+
+def _token_count_from_status(payload: object) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    for field in ("token_count", "tokens", "total_tokens"):
+        value = payload.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    for field in ("usage", "pane", "agent", "result"):
+        found = _token_count_from_status(payload.get(field))
+        if found is not None:
+            return found
+    return None
+
+
+def capture_worker_progress_fingerprint(
+    pane: str, *, herdr_session: str | None = None
+) -> dict[str, object]:
+    status = _herdr_json("pane", "get", pane, herdr_session=herdr_session)
+    output = _pane_recent_output(
+        pane, lines=PROGRESS_OUTPUT_LINES, herdr_session=herdr_session
+    )
+    return worker_progress_fingerprint(
+        token_count=_token_count_from_status(status),
+        pane_output=output,
+    )
+
+
+def _progress_fingerprint_is_frozen(ledger: JobLedger, key: str) -> bool:
+    return _load_progress_state(ledger, key).get("frozen") is True
+
+
+def _refuse_frozen_extension(ledger: JobLedger, key: str) -> str:
+    reason = "progress fingerprint unchanged across inactivity window"
+    payload = {**_load_progress_state(ledger, key), "extension_refused_reason": reason}
+    JobLedger._write_json(_progress_state_path(ledger, key), payload)
+    current = ledger.state(key)
+    JobLedger._write_json(
+        ledger.request_dir(key) / "state" / "latest.json",
+        {**current, "extension_refused_reason": reason},
+    )
+    ledger._event(key, "extension-refused", reason=reason)
+    return reason
 
 
 def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
@@ -6333,6 +6468,8 @@ class _SentinelWatch:
         )
         terminal_valid = self._terminal_valid()
         status = pane.get("agent_status")
+        if self.ledger.state(self.key).get("state") == "stalled":
+            status = "idle"
         if not terminal_valid and not self._nudge_state_allows(at="delivery"):
             status = "blocked"
         return Probe(
@@ -8243,6 +8380,9 @@ def _await_requester_timeout_decision(
                 ) from error
             if decision.action == "extend":
                 assert decision.extension_ms is not None
+                if _progress_fingerprint_is_frozen(ledger, key):
+                    _refuse_frozen_extension(ledger, key)
+                    return None
                 ledger.extend_lease(key, token, decision.extension_ms)
                 _notify_requester(
                     ledger,
@@ -12965,6 +13105,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     sentinel_state: dict[str, object] = {}
     sentinel_context: dict[str, object] = {}
     sentinel_cleanups: list[dict[str, object]] = []
+    watch_holder: dict[str, Any] = {}
     # One requester notification per distinct degrade reason per invocation: the ledger
     # records every attempt's degrade (typed, with the attempt number), but a persona
     # missing on attempt 1 is still missing on attempt 2 and must not spam the requester.
@@ -13047,6 +13188,21 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             assert manager is not None
             with inactivity_lock:
                 try:
+                    fingerprint = capture_worker_progress_fingerprint(
+                        worker_pane, herdr_session=herdr_session
+                    )
+                    watch = watch_holder.get("watch")
+
+                    def issue_nudge() -> None:
+                        if watch is not None:
+                            watch._attempt_stall_nudge(
+                                "progress fingerprint unchanged across inactivity window",
+                                trigger="progress",
+                            )
+
+                    apply_inactivity_progress(
+                        ledger, key, fingerprint, nudge=issue_nudge
+                    )
                     _run_one_shot_checker(
                         ledger,
                         key,
@@ -13350,6 +13506,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             sentinel_watch.status_first = management_config.status_first
             sentinel_watch.generation = generation
             sentinel_watch.attempt = attempt
+        watch_holder["watch"] = sentinel_watch
         before = len(worker_launches)
         try:
             outcome = _run_order(
