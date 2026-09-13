@@ -13,7 +13,7 @@ management:
     candidates:
       - offering: cursor-composer-2-5
         effort: default
-      - offering: pi-gpt-5-4-mini
+      - offering: pi-gpt-5-6-terra
         effort: low
     agent: upagent-account-manager
     timeout_ms: 120000
@@ -21,7 +21,7 @@ management:
     candidates:
       - offering: cursor-composer-2-5
         effort: default
-      - offering: pi-gpt-5-4-mini
+      - offering: pi-gpt-5-6-terra
         effort: low
     agent: upagent-checker
     timeout_ms: 120000
@@ -29,7 +29,7 @@ management:
     candidates:
       - offering: cursor-composer-2-5
         effort: default
-      - offering: pi-gpt-5-4-mini
+      - offering: pi-gpt-5-6-terra
         effort: low
     agent: upagent-sentinel
     timeout_ms: 120000
