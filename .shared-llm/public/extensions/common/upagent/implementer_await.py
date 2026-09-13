@@ -257,14 +257,17 @@ def _unregistered_pane_race_hire(
     for request_dir in sorted(requests.iterdir()):
         if not request_dir.is_dir() or request_dir.name.startswith("."):
             continue
+        if not (request_dir / "request.json").is_file():
+            # Pruned (tombstone-only) or half-written directory: never a live hire.
+            continue
+        lease = _active_lease_for_request(ledger_root, request_dir)
+        if not lease:
+            continue
         order = _load_hire_order(request_dir)
         request_id = _hire_request_id(order)
         if request_id is None or request_id in registered_ids or request_id in owned_ids:
             continue
         if order.get("cockpit_pane") != ctx.leader_pane:
-            continue
-        lease = _active_lease_for_request(ledger_root, request_dir)
-        if not lease:
             continue
         session = lease.get("herdr_session")
         if ctx.herdr_session and session != ctx.herdr_session:

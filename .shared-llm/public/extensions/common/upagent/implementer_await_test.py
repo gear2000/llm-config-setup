@@ -520,3 +520,23 @@ def test_awaiting_requester_lease_expiry_does_not_emit_worker_missing_early(
         for p in sorted((tmp_path / "sample-run" / "control" / "events").glob("*.json"))
     ]
     assert "worker-missing" not in kinds
+
+
+def test_pruned_tombstone_only_request_dir_does_not_crash_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UPAGENT_HUB_DIR", raising=False)
+    _open_hire(tmp_path, register=True)
+    pruned = tmp_path / "ledger" / "requests" / "pruned-request"
+    pruned.mkdir(parents=True)
+    (pruned / "tombstone.json").write_text(json.dumps({"pruned": True}))
+    path = _receipt(tmp_path)
+    event = _await(
+        path,
+        timeout_ms=400,
+        poll_ms=10,
+        reconcile_ms=30,
+        probe=_idle,
+    )
+    assert event["kind"] != "leader-stalled"
+    assert "pruned-request" not in json.dumps(event)
