@@ -220,3 +220,86 @@ def test_probe_leader_passes_the_receipt_session(
     observed = implementer_await._probe_leader("pane-1", herdr_session="sess-9")
     assert observed == {"alive": True, "agent_status": "working"}
     assert seen == [["herdr", "--session", "sess-9", "pane", "get", "pane-1"]]
+
+
+def _idle(pane: str) -> dict:
+    return {"alive": True, "agent_status": "done"}
+
+
+def _open_hire(tmp_path: Path, pane: str = "implementer-pane") -> str:
+    request_id = "hired-worker-1"
+    ledger_root = tmp_path / "ledger"
+    request_dir = ledger_root / "requests" / ("a" * 64)
+    request_dir.mkdir(parents=True)
+    (request_dir / "request.json").write_text(
+        json.dumps(
+            {
+                "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
+                "cockpit_pane": pane,
+                "request_id": request_id,
+                "result_path": str(tmp_path / "missing-worker-result.json"),
+            }
+        )
+    )
+    return request_id
+
+
+def test_idle_implementer_with_no_open_hire_publishes_leader_stalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    path = _receipt(tmp_path)
+    event = _await(
+        path,
+        timeout_ms=400,
+        poll_ms=10,
+        reconcile_ms=30,
+        probe=_idle,
+    )
+    assert event["kind"] == "leader-stalled"
+
+
+def test_idle_implementer_waiting_on_open_hire_does_not_publish_leader_stalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    request_id = _open_hire(tmp_path)
+    path = _receipt(tmp_path)
+    event = _await(
+        path,
+        timeout_ms=400,
+        poll_ms=10,
+        reconcile_ms=30,
+        probe=_idle,
+    )
+    assert event["kind"] != "leader-stalled"
+    assert event["kind"] == "await-heartbeat"
+    kinds = [
+        json.loads(p.read_text())["kind"]
+        for p in sorted((tmp_path / "sample-run" / "control" / "events").glob("*.json"))
+    ]
+    assert "leader-stalled" not in kinds
+    waiting = implementer_await.open_hire_request_ids(
+        implementer_await.ImplementerContext(path)
+    )
+    assert request_id in waiting
+
+
+def test_idle_implementer_stalls_once_the_hire_has_result_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    _open_hire(tmp_path)
+    (tmp_path / "missing-worker-result.json").write_text('{"verdict": "passed"}\n')
+    path = _receipt(tmp_path)
+    event = _await(
+        path,
+        timeout_ms=400,
+        poll_ms=10,
+        reconcile_ms=30,
+        probe=_idle,
+    )
+    assert event["kind"] == "leader-stalled"
+    assert implementer_await.open_hire_request_ids(
+        implementer_await.ImplementerContext(path)
+    ) == []

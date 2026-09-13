@@ -101,6 +101,93 @@ class ImplementerContext:
         self.result_path = self.run_root / "implementer-result.json"
 
 
+def _load_sibling(name: str) -> Any:
+    key = f"upagent_implementer_await_{name}"
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, HERE / f"{name}.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load UpAgent {name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _ledger_root() -> Path:
+    return _load_sibling("hub_transport").ledger_path()
+
+
+def _hire_request_id(order: dict) -> str | None:
+    request_id = order.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    public = order.get("public_request")
+    if isinstance(public, dict):
+        public_id = public.get("request_id")
+        if isinstance(public_id, str) and public_id:
+            return public_id
+    order_id = order.get("order_id")
+    return order_id if isinstance(order_id, str) and order_id else None
+
+
+def _hire_has_result(order: dict, request_dir: Path) -> bool:
+    result_path = order.get("result_path")
+    if isinstance(result_path, str) and result_path and Path(result_path).is_file():
+        return True
+    return (request_dir / "published-result.json").is_file()
+
+
+def _registered_hire_ids(ctx: ImplementerContext) -> set[str]:
+    directory = ctx.run_root / "control" / "workers"
+    if not directory.is_dir():
+        return set()
+    ids: set[str] = set()
+    for path in directory.glob("*.json"):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise AwaitError(f"worker registry {path} is unreadable: {error}") from error
+        if not isinstance(record, dict):
+            raise AwaitError(f"worker registry {path} must be a JSON object")
+        request_id = record.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            ids.add(request_id)
+    return ids
+
+
+def open_hire_request_ids(ctx: ImplementerContext) -> list[str]:
+    """Request ids of ledger orders this implementer owns that still lack result.json."""
+    ledger_root = _ledger_root()
+    requests = ledger_root / "requests"
+    if not requests.is_dir():
+        return []
+    registered = _registered_hire_ids(ctx)
+    open_ids: list[str] = []
+    for request_dir in sorted(requests.iterdir()):
+        if not request_dir.is_dir() or request_dir.name.startswith("."):
+            continue
+        order_path = request_dir / "request.json"
+        if not order_path.is_file():
+            continue
+        try:
+            order = json.loads(order_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise AwaitError(
+                f"ledger request {order_path} is unreadable: {error}"
+            ) from error
+        if not isinstance(order, dict):
+            raise AwaitError(f"ledger request {order_path} must be a JSON object")
+        request_id = _hire_request_id(order)
+        if request_id is None:
+            continue
+        owned = order.get("cockpit_pane") == ctx.leader_pane or request_id in registered
+        if not owned or _hire_has_result(order, request_dir):
+            continue
+        open_ids.append(request_id)
+    return open_ids
+
+
 def _now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -520,16 +607,20 @@ def await_event(
                 and status in ("idle", "done")
                 and not has_terminal_result(ctx)
             ):
-                stalled_sweeps += 1
-                if stalled_sweeps >= STALL_CONFIRMATIONS:
-                    publish_event(
-                        ctx,
-                        "leader-stalled",
-                        f"Implementer pane {ctx.leader_pane} reports agent status {status!r} but no implementer-result.json exists.",
-                        severity="urgent",
-                        dedupe_key="implementer-stalled",
-                        requested_action="inspect-and-decide",
-                    )
+                waiting = open_hire_request_ids(ctx)
+                if waiting:
+                    stalled_sweeps = 0
+                else:
+                    stalled_sweeps += 1
+                    if stalled_sweeps >= STALL_CONFIRMATIONS:
+                        publish_event(
+                            ctx,
+                            "leader-stalled",
+                            f"Implementer pane {ctx.leader_pane} reports agent status {status!r} but no implementer-result.json exists.",
+                            severity="urgent",
+                            dedupe_key="implementer-stalled",
+                            requested_action="inspect-and-decide",
+                        )
             else:
                 stalled_sweeps = 0
         events = read_journal(ctx)
