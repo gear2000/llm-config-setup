@@ -4338,8 +4338,35 @@ def cmd_check(args: argparse.Namespace) -> None:
     log.always("check: all placement invariants hold ✓")
 
 
+def _excluded_destinations(cfg: dict, exclude_csv: str | None) -> set[str]:
+    """Resolve `--exclude a,b` to the configured destination paths it names.
+    A name that matches no configured destination is an error: a typo must not
+    silently rebuild the repo the user meant to protect."""
+    if not exclude_csv:
+        return set()
+    configured = {
+        str(Path(d["path"]).expanduser().resolve()): d["path"]
+        for d in cfg["destinations"]
+    }
+    excluded: set[str] = set()
+    for raw in exclude_csv.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        key = str(Path(raw).expanduser().resolve())
+        if key not in configured:
+            sys.exit(
+                f"error: --exclude {raw!r} is not a configured destination "
+                f"(see `just configure` / ~/.shared-llm.yaml)"
+            )
+        excluded.add(configured[key])
+    return excluded
+
+
 def cmd_update(args: argparse.Namespace) -> None:
     cfg = load_config()
+    # Validate --exclude before any work: a typo must fail here, not after copy.
+    excluded = _excluded_destinations(cfg, getattr(args, "exclude", None))
     # An emptied config is not "nothing to do" — it is a RETIREMENT. If a
     # manifest exists, a previous run deployed something and update must still
     # take the lock and prune it, exactly as the docs promise. The informational
@@ -4353,11 +4380,21 @@ def cmd_update(args: argparse.Namespace) -> None:
     log.always(f"update: log -> {log_path}")
     enforce_destinations = os.environ.get("SHARED_LLM_ENFORCE_DEST_DESCRIPTIONS") == "1"
     enforce_description_preflight(cfg, enforce_destinations=enforce_destinations)
-    if cfg["destinations"]:
+    # --exclude keeps the engine OUT of the named repos: no copy into their
+    # .shared-llm/public/ and no recompose of their outputs. Their home links
+    # are still reconciled from whatever they already have on disk, so nothing
+    # they provide to ~/.pi or ~/.agents is pruned just because they sat out.
+    for path in sorted(excluded):
+        log.always(f"update: exclude {path} (copy and compose skipped, links kept)")
+    write_cfg = {
+        **cfg,
+        "destinations": [d for d in cfg["destinations"] if d["path"] not in excluded],
+    }
+    if write_cfg["destinations"]:
         log.always("=== copy ===")
-        do_copy(cfg, log)
+        do_copy(write_cfg, log)
         log.always("=== compose ===")
-        do_compose(cfg, log)
+        do_compose(write_cfg, log)
     # One lock spans BOTH home-link steps. The destination link step and the
     # global flow reconcile the same home skill dirs and hand ownership of a name
     # back and forth, so splitting them across two locks would let a concurrent
@@ -4413,7 +4450,7 @@ def cmd_reset(args: argparse.Namespace) -> None:
     log = RunLog(verbose=True)
     do_reset(cfg, log)
     log.always("reset: kit-owned state removed — rebuilding via update")
-    cmd_update(argparse.Namespace(verbose=args.verbose))
+    cmd_update(argparse.Namespace(verbose=args.verbose, exclude=None))
 
 
 def main() -> None:
@@ -4541,6 +4578,16 @@ def main() -> None:
         "--verbose",
         action="store_true",
         help="Print per-file detail (always written to the log).",
+    )
+    pup.add_argument(
+        "-x",
+        "--exclude",
+        metavar="CSV",
+        help=(
+            "Comma-separated destination repo paths to leave untouched this run "
+            "(no copy, no compose; their existing home links are kept). Each must "
+            "be a configured destination."
+        ),
     )
     pup.set_defaults(func=cmd_update)
 

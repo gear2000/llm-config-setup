@@ -35,6 +35,7 @@ just configure --offering-sets standard,claudex  # optional machine UpAgent rost
 just descriptions                # audit owned discovery descriptions without writing files
 just update                      # the headline command: copy → compose → link (+ global), every destination
 just update -v                   # same, with per-file detail printed
+just update -x /path/to/busy-repo   # same, but leave that destination untouched (no copy, no compose); comma-separate for more
 just reset                       # heavy hammer: delete all kit-owned state, then rebuild via update
 ```
 

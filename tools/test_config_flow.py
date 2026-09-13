@@ -777,6 +777,63 @@ def test_update_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     assert c["create"] == 0 and c["repoint"] == 0 and c["prune"] == 0
 
 
+def test_update_exclude_skips_copy_and_compose_but_keeps_links(
+    tmp_path: Path,
+) -> None:
+    """`update --exclude <path>`: the named destination gets no copy and no
+    recompose, while its already-deployed home links survive the reconcile."""
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    kit = tmp_path / "kit"
+    _write(
+        kit / ".shared-llm/public/layers/skills/common/demo/description.md",
+        "A demo skill.\n",
+    )
+    _write(
+        kit / ".shared-llm/public/layers/skills/common/demo/practices.md",
+        "COMMON practices body.\n",
+    )
+    m.__dict__["project_root"] = lambda: kit
+    busy = tmp_path / "busy"
+    other = tmp_path / "other"
+    _scaffold_dest(busy)
+    _scaffold_dest(other)
+    cfg = _cfg(m, busy, ["cc", "pi", "codex"])
+    cfg["destinations"].append({"path": str(other), "harnesses": ["cc", "pi"]})
+    m.save_config(cfg)
+
+    # Full run first: both composed, busy's links deployed.
+    m.cmd_update(argparse.Namespace(verbose=False, exclude=None))
+    assert (busy / ".claude/skills/demo/SKILL.md").exists()
+    assert (home / ".agents/skills/demo").is_symlink()
+
+    # Local edit in busy's this_repo layer, plus a hub change that copy would push.
+    _write(busy / ".shared-llm/this_repo/layers/skills/this_repo/demo.md", "EDITED.\n")
+    _write(other / ".shared-llm/this_repo/layers/skills/this_repo/demo.md", "EDITED.\n")
+    _write(m.DEFAULT_SOURCE / "layers/llm/common/new.md", "hub new.\n")
+
+    m.cmd_update(argparse.Namespace(verbose=False, exclude=str(busy)))
+
+    # busy: no copy, no recompose; other: both.
+    assert not (busy / ".shared-llm/public/layers/llm/common/new.md").exists()
+    assert "EDITED" not in (busy / ".claude/skills/demo/SKILL.md").read_text()
+    assert (other / ".shared-llm/public/layers/llm/common/new.md").exists()
+    assert "EDITED" in (other / ".claude/skills/demo/SKILL.md").read_text()
+    # busy's codex link (only busy has the codex harness) was not pruned.
+    assert (home / ".agents/skills/demo").is_symlink()
+
+
+def test_update_exclude_rejects_unconfigured_path(tmp_path: Path) -> None:
+    m = _load()
+    _patch_home(m, tmp_path / "home")
+    dest = tmp_path / "dest"
+    _scaffold_dest(dest)
+    m.save_config(_cfg(m, dest, ["cc"]))
+    with pytest.raises(SystemExit, match="not a configured destination"):
+        m.cmd_update(argparse.Namespace(verbose=False, exclude=str(tmp_path / "nope")))
+
+
 def test_update_materializes_home_roster_for_upagent_only_config(
     tmp_path: Path,
 ) -> None:
