@@ -1182,9 +1182,23 @@ def _public_status(
     }
 
 
+def _result_reason(status: dict[str, object]) -> str | None:
+    for source_name in ("result", "receipt"):
+        source = status.get(source_name)
+        if not isinstance(source, dict):
+            continue
+        reason = source.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason
+    return None
+
+
 def _human_request_status(request_id: str, status: dict[str, object]) -> str:
     state = cast(dict[str, object], status["state"])
     rendered = f"request {request_id}: {state.get('state')}"
+    reason = _result_reason(status)
+    if reason is not None:
+        rendered = f"{rendered}: {reason}"
     summary = status.get("nudge_summary")
     if not isinstance(summary, dict):
         return rendered
@@ -1854,12 +1868,14 @@ def _request(args: Any, cwd: Path) -> int:
         include_requester_control_token=registered.created and submitted_now,
     )
     status["attached"] = not registered.created or not submitted_now
-    _emit(
-        status,
-        args.json,
-        f"request {registered.request_id}: {cast(dict[str, object], status['state']).get('state')}"
-        + (" (attached)" if not registered.created else ""),
-    )
+    state_name = cast(dict[str, object], status["state"]).get("state")
+    human = f"request {registered.request_id}: {state_name}"
+    if not registered.created:
+        human += " (attached)"
+    reason = _result_reason(status)
+    if reason is not None:
+        human = f"{human}: {reason}"
+    _emit(status, args.json, human)
     return code
 
 

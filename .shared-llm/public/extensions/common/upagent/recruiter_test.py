@@ -1762,6 +1762,104 @@ def test_configuration_inspection_finds_missing_agent_before_launch(
 
     assert evidence["valid"] is False
     assert any("not-installed-here" in error for error in evidence["errors"])
+    cwd_agent = str(tmp_path / ".claude/agents/not-installed-here.md")
+    home_agent = str(Path.home() / ".claude/agents/not-installed-here.md")
+    assert any(cwd_agent in error and home_agent in error for error in evidence["errors"])
+
+
+def test_configuration_inspection_finds_missing_agent_on_public_claude_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Do work.\n")
+    monkeypatch.setattr(recruiter.shutil, "which", lambda binary: f"/bin/{binary}")
+    snapshot = recruiter.offering_catalog.load_selected_roster(["standard"]).resolve(
+        "claude-sonnet-5", "high"
+    )
+    agent = "missing-agent-not-installed"
+    order = _order(
+        cwd=str(tmp_path),
+        instructions_path=str(instructions),
+        result_path=str(tmp_path / "result.json"),
+        harness="claude",
+        model="claude-sonnet-5",
+        effort="high",
+        agent=agent,
+        offering_snapshot=snapshot,
+    )
+    roster_path = tmp_path / "offerings.yaml"
+    roster_path.write_text(recruiter.offering_catalog.render_roster(["standard"]))
+    roster = recruiter.load_roster(roster_path)
+
+    evidence = recruiter.inspect_worker_configuration(order, roster)
+
+    cwd_agent = str(tmp_path / ".claude/agents" / f"{agent}.md")
+    home_agent = str(Path.home() / ".claude/agents" / f"{agent}.md")
+    assert evidence["valid"] is False
+    assert any(cwd_agent in error and home_agent in error for error in evidence["errors"])
+
+
+def test_unresolvable_agent_blocks_with_both_search_paths_in_result_and_request_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    instructions = worktree / "instructions.md"
+    instructions.write_text("Do the bounded task.\n")
+    result_path = worktree / "public" / "result.json"
+    agent = "missing-agent-not-installed"
+    cwd_agent = str(worktree / ".claude/agents" / f"{agent}.md")
+    home_agent = str(Path.home() / ".claude/agents" / f"{agent}.md")
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter.shutil, "which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr(recruiter, "_notify_requester", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        recruiter,
+        "_direct_manager",
+        lambda *args, **kwargs: {
+            "address": None,
+            "config": args[0],
+            "generation": 1,
+            "health": None,
+            "herdr_session": "llm-lab-test",
+            "pane": None,
+            "workspace_id": None,
+        },
+    )
+    order = _order(
+        cwd=str(worktree),
+        instructions_path=str(instructions),
+        result_path=str(result_path),
+        agent=agent,
+    )
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        "harnesses:\n"
+        '  claude: "claude --agent {agent} --model {model}'
+        ' read:{instructions_path} write:{result_path}"\n'
+    )
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+
+    result = json.loads(result_path.read_text())
+    assert result["verdict"] == "blocked"
+    assert cwd_agent in result["reason"]
+    assert home_agent in result["reason"]
+    receipt = ledger.completed_receipt(key, order)
+    assert receipt["verdict"] == "blocked"
+    assert cwd_agent in str(receipt.get("reason", ""))
+    assert home_agent in str(receipt.get("reason", ""))
+
+    capsys.readouterr()
+    assert recruiter._request_order(order, str(roster_path)) == 1
+    printed = capsys.readouterr().out
+    assert printed.startswith("REQUEST_TERMINAL ")
+    response = json.loads(printed.split("REQUEST_TERMINAL ", 1)[1])
+    assert response["verdict"] == "blocked"
+    assert cwd_agent in response["reason"]
+    assert home_agent in response["reason"]
 
 
 def test_configuration_inspection_accepts_existing_agent_and_binary(

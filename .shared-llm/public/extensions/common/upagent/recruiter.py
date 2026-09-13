@@ -2558,6 +2558,11 @@ class JobLedger:
                 "cleanup": cleanup,
                 "generation": lease.get("generation", 1),
                 "order_id": order["order_id"],
+                **(
+                    {"reason": parsed["reason"]}
+                    if isinstance(parsed.get("reason"), str) and parsed["reason"]
+                    else {}
+                ),
                 "published_result_path": str(published),
                 "request_id": lease.get(
                     "request_id", lifecycle.request_identity(order)
@@ -3365,7 +3370,7 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
         except OfferingError as error:
             errors.append(str(error))
     agent_candidates: list[str] = []
-    if order["harness"] == "claude" and "--agent {agent}" in template:
+    if order["harness"] in ("claude", "claudex"):
         agent_file = f"{order['agent']}.md"
         roots = [cwd / ".claude/agents", Path.home() / ".claude/agents"]
         agent_candidates = [str(root / agent_file) for root in roots]
