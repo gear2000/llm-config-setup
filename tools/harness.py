@@ -1329,7 +1329,10 @@ def destination_home_links_for_manifest(
 ) -> dict[Path, Path]:
     links = destination_home_links(cfg)
     if manifest is not None:
-        links.update(preserved_inactive_repo_links(cfg, manifest.prior_repo_links()))
+        for home, source in preserved_inactive_repo_links(
+            cfg, manifest.prior_repo_links()
+        ).items():
+            links.setdefault(home, source)
     return links
 
 

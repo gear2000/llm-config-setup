@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -99,6 +100,13 @@ class ImplementerContext:
         self.acks_dir = self.control_dir / "acknowledgements"
         self.answers_dir = self.control_dir / "answers"
         self.result_path = self.run_root / "implementer-result.json"
+        self._ledger_root: Path | None = None
+
+    @property
+    def ledger_root(self) -> Path:
+        if self._ledger_root is None:
+            self._ledger_root = _ledger_root_from_receipt(self.receipt)
+        return self._ledger_root
 
 
 def _load_sibling(name: str) -> Any:
@@ -114,8 +122,20 @@ def _load_sibling(name: str) -> Any:
     return module
 
 
-def _ledger_root() -> Path:
-    return _load_sibling("hub_transport").ledger_path()
+def _ledger_root_from_receipt(receipt: dict) -> Path:
+    stamped = receipt.get("ledger_path")
+    if isinstance(stamped, str) and stamped:
+        return Path(stamped).expanduser().resolve()
+    cwd = receipt.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        try:
+            return _load_sibling("hub_transport").ledger_path(cwd)
+        except RuntimeError:
+            repo_id = hashlib.sha256(str(Path(cwd).resolve()).encode()).hexdigest()[:20]
+            return Path.home() / ".local/state/herdr/upagent" / repo_id / "ledger"
+    raise AwaitError(
+        "implementer-start receipt has no ledger_path or cwd for UpAgent ledger binding"
+    )
 
 
 def _hire_request_id(order: dict) -> str | None:
@@ -138,11 +158,11 @@ def _hire_has_result(order: dict, request_dir: Path) -> bool:
     return (request_dir / "published-result.json").is_file()
 
 
-def _registered_hire_ids(ctx: ImplementerContext) -> set[str]:
+def _registered_hire_records(ctx: ImplementerContext) -> dict[str, dict]:
     directory = ctx.run_root / "control" / "workers"
     if not directory.is_dir():
-        return set()
-    ids: set[str] = set()
+        return {}
+    records: dict[str, dict] = {}
     for path in directory.glob("*.json"):
         try:
             record = json.loads(path.read_text())
@@ -152,38 +172,111 @@ def _registered_hire_ids(ctx: ImplementerContext) -> set[str]:
             raise AwaitError(f"worker registry {path} must be a JSON object")
         request_id = record.get("request_id")
         if isinstance(request_id, str) and request_id:
-            ids.add(request_id)
-    return ids
+            records[request_id] = record
+    return records
+
+
+def _request_dir_for_id(ledger_root: Path, request_id: str) -> Path:
+    key = _load_sibling("recruiter").JobLedger.key(request_id)
+    return ledger_root / "requests" / key
+
+
+def _load_hire_order(request_dir: Path) -> dict:
+    order_path = request_dir / "request.json"
+    try:
+        order = json.loads(order_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AwaitError(f"ledger request {order_path} is unreadable: {error}") from error
+    if not isinstance(order, dict):
+        raise AwaitError(f"ledger request {order_path} must be a JSON object")
+    return order
+
+
+def _hire_matches_registry(
+    order: dict, request_dir: Path, record: dict, ledger_root: Path
+) -> bool:
+    request_id = _hire_request_id(order)
+    if request_id is None or request_id != record.get("request_id"):
+        return False
+    if order.get("order_id") != record.get("order_id"):
+        return False
+    state = _hire_state(request_dir, ledger_root)
+    generation = state.get("generation")
+    if generation is not None and generation != record.get("generation"):
+        return False
+    if state.get("request_id") not in (None, request_id):
+        return False
+    if state.get("order_id") not in (None, record.get("order_id")):
+        return False
+    return True
+
+
+def _active_lease_for_request(ledger_root: Path, request_dir: Path) -> dict:
+    lease_path = ledger_root / "active" / "requests" / request_dir.name / "lease.json"
+    if not lease_path.is_file():
+        return {}
+    try:
+        lease = json.loads(lease_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AwaitError(f"lease {lease_path} is unreadable: {error}") from error
+    if not isinstance(lease, dict):
+        raise AwaitError(f"lease {lease_path} must be a JSON object")
+    return lease
+
+
+def _unregistered_pane_race_hire(
+    ctx: ImplementerContext,
+    ledger_root: Path,
+    registered_ids: set[str],
+    owned_ids: set[str],
+) -> list[tuple[str, dict, Path]]:
+    """Cover the short window before run-watch registers a just-accepted hire."""
+    requests = ledger_root / "requests"
+    if not requests.is_dir():
+        return []
+    raced: list[tuple[str, dict, Path]] = []
+    now = int(time.time())
+    for request_dir in sorted(requests.iterdir()):
+        if not request_dir.is_dir() or request_dir.name.startswith("."):
+            continue
+        order = _load_hire_order(request_dir)
+        request_id = _hire_request_id(order)
+        if request_id is None or request_id in registered_ids or request_id in owned_ids:
+            continue
+        if order.get("cockpit_pane") != ctx.leader_pane:
+            continue
+        lease = _active_lease_for_request(ledger_root, request_dir)
+        if not lease:
+            continue
+        session = lease.get("herdr_session")
+        if ctx.herdr_session and session != ctx.herdr_session:
+            continue
+        expires_at = lease.get("expires_at")
+        if isinstance(expires_at, int) and expires_at <= now:
+            continue
+        raced.append((request_id, order, request_dir))
+    return raced
 
 
 def _iter_owned_hires(
     ctx: ImplementerContext,
 ) -> list[tuple[str, dict, Path]]:
-    ledger_root = _ledger_root()
-    requests = ledger_root / "requests"
-    if not requests.is_dir():
-        return []
-    registered = _registered_hire_ids(ctx)
+    ledger_root = ctx.ledger_root
+    registered = _registered_hire_records(ctx)
     owned: list[tuple[str, dict, Path]] = []
-    for request_dir in sorted(requests.iterdir()):
-        if not request_dir.is_dir() or request_dir.name.startswith("."):
+    owned_ids: set[str] = set()
+    for request_id, record in sorted(registered.items()):
+        request_dir = _request_dir_for_id(ledger_root, request_id)
+        if not request_dir.is_dir():
             continue
-        order_path = request_dir / "request.json"
-        if not order_path.is_file():
+        order = _load_hire_order(request_dir)
+        if not _hire_matches_registry(order, request_dir, record, ledger_root):
             continue
-        try:
-            order = json.loads(order_path.read_text())
-        except (OSError, json.JSONDecodeError) as error:
-            raise AwaitError(
-                f"ledger request {order_path} is unreadable: {error}"
-            ) from error
-        if not isinstance(order, dict):
-            raise AwaitError(f"ledger request {order_path} must be a JSON object")
-        request_id = _hire_request_id(order)
-        if request_id is None:
-            continue
-        if order.get("cockpit_pane") == ctx.leader_pane or request_id in registered:
-            owned.append((request_id, order, request_dir))
+        owned.append((request_id, order, request_dir))
+        owned_ids.add(request_id)
+    owned.extend(
+        _unregistered_pane_race_hire(ctx, ledger_root, set(registered), owned_ids)
+    )
     return owned
 
 
@@ -196,10 +289,8 @@ def open_hire_request_ids(ctx: ImplementerContext) -> list[str]:
     ]
 
 
-def _hire_lease(request_dir: Path) -> dict:
-    lease_path = (
-        _ledger_root() / "active" / "requests" / request_dir.name / "lease.json"
-    )
+def _hire_lease(request_dir: Path, ledger_root: Path) -> dict:
+    lease_path = ledger_root / "active" / "requests" / request_dir.name / "lease.json"
     if not lease_path.is_file():
         return {}
     try:
@@ -211,7 +302,7 @@ def _hire_lease(request_dir: Path) -> dict:
     return lease
 
 
-def _hire_state(request_dir: Path) -> dict:
+def _hire_state(request_dir: Path, ledger_root: Path) -> dict:
     path = request_dir / "state" / "latest.json"
     if not path.is_file():
         return {}
@@ -224,16 +315,16 @@ def _hire_state(request_dir: Path) -> dict:
     return state
 
 
-def _worker_missing_condition(order: dict, request_dir: Path) -> str | None:
+def _worker_missing_condition(
+    order: dict, request_dir: Path, ledger_root: Path
+) -> str | None:
     if _hire_has_result(order, request_dir):
         return None
-    lease = _hire_lease(request_dir)
-    state = _hire_state(request_dir)
-    expires_at = state.get("expires_at")
-    if not isinstance(expires_at, int):
-        expires_at = lease.get("expires_at")
-    if state.get("state") == "awaiting-requester" and isinstance(expires_at, int):
-        if expires_at <= int(time.time()):
+    lease = _hire_lease(request_dir, ledger_root)
+    state = _hire_state(request_dir, ledger_root)
+    if state.get("state") == "awaiting-requester":
+        deadline = state.get("requester_decision_deadline")
+        if isinstance(deadline, int) and deadline <= int(time.time()):
             return "awaiting-requester-expired"
     pid = lease.get("runner_pid")
     start = lease.get("runner_start_time")
@@ -244,9 +335,9 @@ def _worker_missing_condition(order: dict, request_dir: Path) -> str | None:
     return None
 
 
-def _hire_worker_pane(order: dict, request_dir: Path) -> str:
-    lease = _hire_lease(request_dir)
-    state = _hire_state(request_dir)
+def _hire_worker_pane(order: dict, request_dir: Path, ledger_root: Path) -> str:
+    lease = _hire_lease(request_dir, ledger_root)
+    state = _hire_state(request_dir, ledger_root)
     for value in (lease.get("worker_pane"), state.get("worker_pane")):
         if isinstance(value, str) and value:
             return value
@@ -255,10 +346,10 @@ def _hire_worker_pane(order: dict, request_dir: Path) -> str:
 
 def publish_missing_workers(ctx: ImplementerContext) -> None:
     for request_id, order, request_dir in _iter_owned_hires(ctx):
-        condition = _worker_missing_condition(order, request_dir)
+        condition = _worker_missing_condition(order, request_dir, ctx.ledger_root)
         if condition is None:
             continue
-        pane = _hire_worker_pane(order, request_dir)
+        pane = _hire_worker_pane(order, request_dir, ctx.ledger_root)
         publish_event(
             ctx,
             "worker-missing",

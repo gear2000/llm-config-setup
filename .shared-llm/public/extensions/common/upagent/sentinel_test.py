@@ -2179,12 +2179,14 @@ def test_drill_dead_sentinel_falls_to_the_hard_timeout_backstop(
         tmp_path, monkeypatch, timeout_ms=400, grace_ms=50
     )
 
-    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
     receipt = ledger.completed_receipt(key, order)
-    assert receipt["verdict"] == "blocked"
+    assert receipt["verdict"] == "failed"
     published = json.loads(Path(order["result_path"]).read_text())
-    assert "exceeded its cap" in published["reason"]
+    assert published["verdict"] == "failed"
+    assert published.get("hub_terminal") == "missing-worker"
+    assert "awaiting-requester" in published["reason"]
     assert "sentinel-closeout" not in _events(ledger, key)
     assert drill.closed == ["worker-pane", "sentinel-pane"]
     assert receipt["cleanup"]["verified_absent"] is True

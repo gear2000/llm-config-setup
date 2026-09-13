@@ -2205,7 +2205,9 @@ def test_requester_decision_is_fenced_to_current_lease_and_extends_it(
     assert token
     active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
     ledger._snapshot(key, "running", **active_lease)
-    lease = ledger.mark_awaiting_requester(key, token, "nonce-1", 1)
+    lease = ledger.mark_awaiting_requester(
+        key, token, "nonce-1", 1, requester_grace_ms=300_000
+    )
     assert lease is not None
     decision = recruiter.lifecycle.parse_requester_decision(
         json.dumps(
@@ -2659,15 +2661,173 @@ def test_unreleased_retained_result_is_never_preserved_after_wait_fault() -> Non
     )
 
 
-def test_wait_fault_never_preserves_a_recruiter_authored_missing_worker_result() -> None:
+def test_wait_fault_never_preserves_a_generic_recruiter_blocked_fallback() -> None:
     order = _order()
     result = {
-        **_result(order["order_id"], verdict="failed"),
-        "reason": "recruiter: awaiting-requester deadline lapsed without a requester decision",
+        **_result(order["order_id"], verdict="blocked"),
+        "reason": "recruiter: worker cleanup failed: pane gone",
     }
     assert not recruiter._may_preserve_worker_result(
         order, result, startup_validated=True
     )
+
+
+def test_wait_fault_preserves_hub_authored_missing_worker_failure() -> None:
+    order = _order()
+    result = {
+        **_result(order["order_id"], verdict="failed"),
+        "hub_terminal": "missing-worker",
+        "reason": "recruiter: awaiting-requester deadline lapsed without a requester decision",
+    }
+    assert recruiter._may_preserve_worker_result(order, result, startup_validated=True)
+
+
+def test_run_order_keeps_failed_bundle_after_requester_grace_hard_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_result = tmp_path / "private-result.json"
+    public_result = tmp_path / "public-result.json"
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("Do the stage.\n")
+    order = _order(
+        timeout_ms=10,
+        result_path=str(public_result),
+        instructions_path=str(instructions),
+    )
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    manifest = recruiter.completion.build_manifest(
+        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_start_herdr_agent",
+        lambda name, execution_order, launch, **kwargs: (
+            "worker-pane",
+            "cockpit",
+            name,
+        ),
+    )
+    monkeypatch.setattr(
+        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
+    )
+    monkeypatch.setattr(
+        recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
+    )
+    monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
+
+    def wait_then_timeout(
+        _pane: str, timeout_ms: int, _finalized: object, **_: object
+    ) -> bool:
+        raise recruiter.AgentWaitTimeout("cap reached")
+
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", wait_then_timeout)
+    manager = {
+        "address": None,
+        "config": SimpleNamespace(
+            account_manager=SimpleNamespace(timeout_ms=100), requester_grace_ms=50
+        ),
+        "generation": 1,
+        "herdr_session": "llm-lab-test",
+    }
+
+    def on_timeout(number: int, finalized: threading.Event | None) -> int | None:
+        return recruiter._await_requester_timeout_decision(
+            ledger, key, token, order, manager, "worker-pane", number, finalized
+        )
+
+    code, result, worker_cleanup = recruiter._run_order(
+        str(order_path),
+        str(roster_path),
+        private_result,
+        on_timeout=on_timeout,
+        herdr_session="llm-lab-test",
+        artifact_manifest=manifest,
+    )
+
+    assert code == 0
+    assert result["verdict"] == "failed"
+    assert result.get("hub_terminal") == "missing-worker"
+    staged = json.loads(manifest.artifact("result").staging_path.read_text())
+    assert staged["verdict"] == "failed"
+    assert json.loads(public_result.read_text())["verdict"] == "failed"
+    assert worker_cleanup["verified_absent"] is True
+
+
+def test_capture_worker_progress_fingerprint_herdr_calls_are_timed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float | None] = []
+
+    def fake_run(argv, **kwargs: object) -> SimpleNamespace:
+        timeouts.append(kwargs.get("timeout"))
+        return SimpleNamespace(returncode=0, stdout='{"result": {}}')
+
+    monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
+    recruiter.capture_worker_progress_fingerprint("worker-pane", herdr_session="sess-1")
+    assert timeouts == [
+        recruiter.FINGERPRINT_HERDR_TIMEOUT_SECONDS,
+        recruiter.FINGERPRINT_HERDR_TIMEOUT_SECONDS,
+    ]
+
+
+def test_worker_progress_fingerprint_bounds_captured_output_bytes() -> None:
+    huge = "x" * (recruiter.PROGRESS_OUTPUT_MAX_BYTES + 10_000)
+    unbounded = recruiter.worker_progress_fingerprint(
+        token_count=1,
+        pane_output=huge,
+        max_bytes=len(huge.encode()),
+    )
+    bounded = recruiter.worker_progress_fingerprint(
+        token_count=1,
+        pane_output=huge,
+        max_bytes=recruiter.PROGRESS_OUTPUT_MAX_BYTES,
+    )
+    assert unbounded != bounded
+    assert bounded["token_count"] == 1
+
+
+def test_inactivity_callback_survives_fingerprint_timeout_without_stall_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **lease)
+    lock = threading.Lock()
+
+    def fail_capture(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RecruiterError("pane get timed out after 5 seconds")
+
+    monkeypatch.setattr(recruiter, "capture_worker_progress_fingerprint", fail_capture)
+    monkeypatch.setattr(recruiter, "apply_inactivity_progress", lambda *a, **k: False)
+    monkeypatch.setattr(recruiter, "_run_one_shot_checker", lambda *a, **k: None)
+
+    def probe(_number: int) -> None:
+        with lock:
+            try:
+                recruiter.capture_worker_progress_fingerprint("worker-pane")
+            except RecruiterError as error:
+                ledger._event(key, "worker-check-failed", reason=str(error))
+
+    probe(1)
+    assert ledger.state(key)["state"] == "running"
+    progress_path = ledger.request_dir(key) / "state" / "progress.json"
+    assert not progress_path.is_file()
 
 
 def test_finalize_rejects_unreleased_retained_success(
@@ -2860,7 +3020,11 @@ def test_internal_retained_review_commands_continue_and_release_same_worker(
         cancellation_races.append(str(error.value))
         timeout_races.append(
             ledger.mark_awaiting_requester(
-                key, token, f"nonce-{len(prompts)}", len(prompts)
+                key,
+                token,
+                f"nonce-{len(prompts)}",
+                len(prompts),
+                requester_grace_ms=300_000,
             )
         )
 

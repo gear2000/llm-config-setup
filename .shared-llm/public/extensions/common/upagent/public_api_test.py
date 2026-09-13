@@ -456,7 +456,7 @@ def test_review_status_preserves_requester_timeout_decision(
         key, token, "worker-pane", "workspace", "worker-address"
     )
     assert ledger.mark_worker_healthy(key, token, {"healthy": True})
-    ledger.mark_awaiting_requester(key, token, "nonce-1", 1)
+    ledger.mark_awaiting_requester(key, token, "nonce-1", 1, requester_grace_ms=300_000)
 
     status = public_api._public_status(store, registered)
     assert status["state"]["state"] == "awaiting-requester"

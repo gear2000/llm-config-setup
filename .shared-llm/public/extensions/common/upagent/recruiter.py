@@ -2067,7 +2067,13 @@ class JobLedger:
             return True
 
     def mark_awaiting_requester(
-        self, key: str, token: str, nonce: str, timeout_number: int
+        self,
+        key: str,
+        token: str,
+        nonce: str,
+        timeout_number: int,
+        *,
+        requester_grace_ms: int,
     ) -> dict | None:
         """Publish a timeout decision only while running; a review transition wins races."""
         claim_dir = self.active / "requests" / key
@@ -2079,7 +2085,14 @@ class JobLedger:
                 raise RecruiterError("request lease changed before timeout warning")
             if self.state(key).get("state") not in ("running", "stalled"):
                 return None
-            detail = {"decision_nonce": nonce, "timeout_number": timeout_number}
+            decision_deadline = int(time.time()) + max(
+                1, int(requester_grace_ms / 1000)
+            )
+            detail = {
+                "decision_nonce": nonce,
+                "timeout_number": timeout_number,
+                "requester_decision_deadline": decision_deadline,
+            }
             self._event(key, "timeout-warning", **detail)
             self._snapshot(key, "awaiting-requester", **lease, **detail)
             return lease
@@ -3585,7 +3598,11 @@ def _herdr(*args: str, herdr_session: str | None = None) -> None:
 
 
 def _pane_recent_output(
-    pane: str, lines: int = 80, *, herdr_session: str | None = None
+    pane: str,
+    lines: int = 80,
+    *,
+    herdr_session: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     _herdr_available()
     session, argv = _herdr_argv(
@@ -3600,11 +3617,17 @@ def _pane_recent_output(
         ),
         herdr_session,
     )
-    process = subprocess.run(
-        argv,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        process = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, ('pane', 'read', pane))} timed out after {timeout_seconds} seconds"
+        ) from error
     if process.returncode != 0:
         raise RecruiterError(
             f"{_herdr_command_display(session, ('pane', 'read', pane))} failed: {process.stderr.strip()}"
@@ -3631,6 +3654,8 @@ def _worker_inactivity_check_ms(order: dict, configured_ms: int) -> int:
 
 
 PROGRESS_OUTPUT_LINES = 80
+PROGRESS_OUTPUT_MAX_BYTES = 65_536
+FINGERPRINT_HERDR_TIMEOUT_SECONDS = 5.0
 
 
 def worker_progress_fingerprint(
@@ -3638,11 +3663,15 @@ def worker_progress_fingerprint(
     token_count: int | None,
     pane_output: str,
     lines: int = PROGRESS_OUTPUT_LINES,
+    max_bytes: int = PROGRESS_OUTPUT_MAX_BYTES,
 ) -> dict[str, object]:
     """Mechanical progress fingerprint: token count plus a hash of recent pane output."""
     tail = "\n".join(pane_output.splitlines()[-lines:])
+    encoded = tail.encode("utf-8")
+    if len(encoded) > max_bytes:
+        encoded = encoded[-max_bytes:]
     return {
-        "output_sha256": hashlib.sha256(tail.encode("utf-8")).hexdigest(),
+        "output_sha256": hashlib.sha256(encoded).hexdigest(),
         "token_count": token_count,
     }
 
@@ -3738,9 +3767,18 @@ def _token_count_from_status(payload: object) -> int | None:
 def capture_worker_progress_fingerprint(
     pane: str, *, herdr_session: str | None = None
 ) -> dict[str, object]:
-    status = _herdr_json("pane", "get", pane, herdr_session=herdr_session)
+    status = _herdr_json(
+        "pane",
+        "get",
+        pane,
+        timeout_seconds=FINGERPRINT_HERDR_TIMEOUT_SECONDS,
+        herdr_session=herdr_session,
+    )
     output = _pane_recent_output(
-        pane, lines=PROGRESS_OUTPUT_LINES, herdr_session=herdr_session
+        pane,
+        lines=PROGRESS_OUTPUT_LINES,
+        herdr_session=herdr_session,
+        timeout_seconds=FINGERPRINT_HERDR_TIMEOUT_SECONDS,
     )
     return worker_progress_fingerprint(
         token_count=_token_count_from_status(status),
@@ -7179,6 +7217,8 @@ def _may_preserve_worker_result(
     """A wait fault may preserve only a semantically terminal worker result."""
     if not startup_validated or order.get("completion_policy") == "requester_release":
         return False
+    if result.get("hub_terminal") == "missing-worker" and result.get("verdict") == "failed":
+        return True
     reason = result.get("reason")
     if isinstance(reason, str) and reason.startswith("recruiter:"):
         return False
@@ -8327,14 +8367,16 @@ def _await_requester_timeout_decision(
     """Ask the recorded owner before a hard stop; return an authorized extension in ms."""
     generation = cast(int, manager["generation"])
     request_id = lifecycle.request_identity(order)
+    config = cast(Any, manager["config"])
     nonce = uuid.uuid4().hex
-    lease = ledger.mark_awaiting_requester(key, token, nonce, timeout_number)
+    lease = ledger.mark_awaiting_requester(
+        key, token, nonce, timeout_number, requester_grace_ms=config.requester_grace_ms
+    )
     if lease is None:
         # Release or feedback delivery won the state race. Permit one bounded finalization
         # grace; a second timeout hard-stops instead of extending forever.
         return ledger.consume_review_transition_grace(key, token)
     control_token = cast(str, lease["requester_control_token"])
-    config = cast(Any, manager["config"])
     response_path = ledger.request_dir(key) / "responses" / f"{nonce}.json"
     command = (
         f"just upagent-respond {shlex.quote(str(ledger.request_dir(key) / 'request.json'))} "
@@ -8763,15 +8805,19 @@ def _run_order(
         else:
             # A filesystem failure writing the fallback propagates.  Without a valid result,
             # the caller must not publish terminal state or DONE.
-            try:
-                # The order's own result contract applies here too: preserving a review result
-                # that lacks its validated verdict_document would republish exactly the
-                # unusable "passed" this contract exists to prevent.
-                existing_result = contracts.result_loader(order)(
-                    worker_result_path, expected_order_id=order_id
+            loader = contracts.result_loader(order)
+            candidate_paths = [worker_result_path]
+            if artifact_manifest is not None:
+                candidate_paths.append(
+                    artifact_manifest.artifact("result").staging_path
                 )
-            except ContractError:
-                existing_result = None
+            existing_result = None
+            for candidate in candidate_paths:
+                try:
+                    existing_result = loader(candidate, expected_order_id=order_id)
+                    break
+                except ContractError:
+                    continue
             preserve_existing = (
                 existing_result is not None
                 and _may_preserve_worker_result(
@@ -8842,9 +8888,22 @@ def _run_order(
     # rejected the worker's own bytes. A worker cannot smuggle the verdict through — its
     # result is measured strictly by `validate()` before this line is ever reached, and any
     # value that reaches `finalize` without a salvage record is re-checked strictly there.
-    result = load_result(
-        worker_result_path, expected_order_id=order_id, allow_synthesized=True
-    )
+    return_paths = [worker_result_path]
+    if artifact_manifest is not None:
+        return_paths.append(artifact_manifest.artifact("result").staging_path)
+    result: dict | None = None
+    for return_path in return_paths:
+        try:
+            result = load_result(
+                return_path, expected_order_id=order_id, allow_synthesized=True
+            )
+            break
+        except ContractError:
+            continue
+    if result is None:
+        raise ContractError(
+            f"no valid worker result at {worker_result_path} or staged artifact path"
+        )
     final_label = "blocked" if fell_back else "done"
     _report_state(
         my_pane,
@@ -10704,6 +10763,7 @@ def _write_failed_result(
     result_path: str | Path | None = None,
     *,
     epilogue: dict | None = None,
+    hub_terminal: str | None = None,
 ) -> dict:
     """Author a valid failed result so a result.json watch can fire."""
     path = Path(result_path or order["result_path"])
@@ -10719,12 +10779,15 @@ def _write_failed_result(
         "reason": f"recruiter: {reason}",
         "full_log": "(none — worker did not run to completion)",
         **({"epilogue": epilogue} if epilogue is not None else {}),
+        **({"hub_terminal": hub_terminal} if hub_terminal is not None else {}),
     }
     JobLedger._write_json(path, result)
     return load_result(path, expected_order_id=order["order_id"])
 
 
-def _write_required_failed_bundle(order: dict, manifest: Any, reason: str) -> dict:
+def _write_required_failed_bundle(
+    order: dict, manifest: Any, reason: str, *, hub_terminal: str | None = None
+) -> dict:
     epilogue = _epilogue_evidence(order, manifest)
     result = cast(
         dict,
@@ -10732,7 +10795,7 @@ def _write_required_failed_bundle(order: dict, manifest: Any, reason: str) -> di
             manifest,
             reason,
             write_result=lambda path, why: _write_failed_result(
-                order, why, path, epilogue=epilogue
+                order, why, path, epilogue=epilogue, hub_terminal=hub_terminal
             ),
             failure_answer=contracts_consult.failure_answer,
         ),
@@ -10755,7 +10818,9 @@ def _terminalize_missing_worker(
         completion.parse_manifest(manifest_path.read_text(), manifest)
     except (OSError, CompletionError):
         completion.write_manifest(manifest_path, manifest)
-    result = _write_required_failed_bundle(order, manifest, reason)
+    result = _write_required_failed_bundle(
+        order, manifest, reason, hub_terminal="missing-worker"
+    )
     ledger._event(key, "worker-missing-failed", reason=reason)
     return result
 

@@ -281,6 +281,45 @@ def test_ignored_destination_keeps_existing_home_skill_links(tmp_path: Path) -> 
     assert link.resolve() == (skipped / ".claude/skills/skipped-only").resolve()
 
 
+def test_manifest_skill_collision_prefers_active_destination_over_ignored_prior(
+    tmp_path: Path,
+) -> None:
+    m = _load()
+    home, kept, skipped = _two_dests(tmp_path, m)
+    _minimal_kit(m, tmp_path)
+    _add_common_skill(kept, "collision-skill")
+    _add_common_skill(skipped, "collision-skill")
+    kept_src = (kept / ".claude/skills/collision-skill").resolve()
+    skipped_src = (skipped / ".claude/skills/collision-skill").resolve()
+    home_link = m._pi_global_skills() / "collision-skill"
+    cfg = {
+        "source": str(m.DEFAULT_SOURCE),
+        "global": [],
+        "destinations": [
+            {"path": str(kept), "harnesses": ["pi"]},
+            {"path": str(skipped), "harnesses": ["pi"], "ignore": True},
+        ],
+    }
+    m.do_compose(
+        {
+            "source": str(m.DEFAULT_SOURCE),
+            "global": [],
+            "destinations": [
+                {"path": str(kept), "harnesses": ["pi"]},
+                {"path": str(skipped), "harnesses": ["pi"]},
+            ],
+        },
+        _quiet(m),
+    )
+    class _PriorManifest:
+        def prior_repo_links(self) -> dict[Path, str]:
+            return {home_link: str(skipped_src)}
+
+    links = m.destination_home_links_for_manifest(cfg, _PriorManifest())
+    assert links[home_link] == kept_src
+    assert links[home_link] != skipped_src
+
+
 def test_global_still_runs_when_every_destination_is_ignored(tmp_path: Path) -> None:
     m = _load()
     home, kept, skipped = _two_dests(tmp_path, m)
