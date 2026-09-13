@@ -31,7 +31,10 @@ Same direction. Layer 4 sits on 3, on 2, on 1, on 0.
 
 A deep module hides internals behind a narrow seam: the public interface. Test that module. Test how other code talks to it through that seam. Do not test the whole tree as one blob. Do not add a wrapper that only re-exports another library.
 
-Before you create a package or a service, stop and ask.
+Before you create a package or a service, stop and ask:
+- Universal, High-context, or Service-contextual?
+- One service, or more than one?
+- Shared package, or stay inside the one service?
 
 Place logic at the lowest cohesive layer. Ask only if two or more services would share it.
 
