@@ -4602,10 +4602,10 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
 
     assert [candidate.offering_id for candidate in anthropic] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-terra",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-terra",
     ]
     assert [candidate.offering_id for candidate in openai] == [
         "cursor-composer-2-5",
@@ -4628,10 +4628,10 @@ def test_public_checker_candidates_filter_same_provider_and_preserve_order() -> 
 
     assert [candidate.offering_id for candidate in anthropic] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-terra",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-terra",
     ]
     assert [candidate.offering_id for candidate in openai] == [
         "cursor-composer-2-5",
@@ -4706,7 +4706,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
 
     assert result is assessment
     assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.4-mini --thinking low" in attempted[1]
+    assert "--model openai-codex/gpt-5.6-terra --thinking low" in attempted[1]
     failures = [
         event
         for event in ledger.events(key)
@@ -4834,8 +4834,8 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
 
     assert len(attempted) == 2
     assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.4-mini --thinking low" in attempted[1]
-    assert manager["management_offering_id"] == "pi-gpt-5-4-mini"
+    assert "--model openai-codex/gpt-5.6-terra --thinking low" in attempted[1]
+    assert manager["management_offering_id"] == "pi-gpt-5-6-terra"
     failures = [
         event
         for event in ledger.events(key)
@@ -4862,7 +4862,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
     ][-2:]
     assert [event["offering_id"] for event in exhausted] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-terra",
     ]
     assert all(
         event["reason"] == "management startup unavailable" for event in exhausted

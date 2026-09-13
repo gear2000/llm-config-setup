@@ -238,7 +238,7 @@ def test_verifier_request_ignores_unrelated_invalid_specialist_roster(
                 "--request",
                 REQUEST_ID,
                 "--offering",
-                "pi-gpt-5-4-mini",
+                "pi-gpt-5-6-terra",
                 "--effort",
                 "low",
                 "--agent",
@@ -887,7 +887,7 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
     commands = [candidate["command"] for candidate in manager["candidates"]]
     assert all("legacy-manager" not in command for command in commands)
     assert commands[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.4-mini --thinking low" in commands[1]
+    assert "--model openai-codex/gpt-5.6-terra --thinking low" in commands[1]
 
 
 def test_same_id_same_hash_attaches_without_second_launch_and_changed_prompt_conflicts(
