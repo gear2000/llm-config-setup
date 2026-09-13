@@ -265,6 +265,8 @@ def _open_hire(
     worker_pane: str = "worker-pane-9",
     register: bool = True,
     request_id: str = "hired-worker-1",
+    active_lease: bool = False,
+    lease_mtime: int | None = None,
 ) -> str:
     order_id = "phase-0.stage-1-implementation.pass-1.try-1"
     key = hashlib.sha256(request_id.encode()).hexdigest()
@@ -292,10 +294,13 @@ def _open_hire(
     if runner_pid is not None:
         lease["runner_pid"] = runner_pid
         lease["runner_start_time"] = runner_start_time or "recorded-start"
-    if runner_pid is not None or state is not None:
+    if runner_pid is not None or state is not None or active_lease:
         lease_dir = ledger_root / "active" / "requests" / key
         lease_dir.mkdir(parents=True)
-        (lease_dir / "lease.json").write_text(json.dumps(lease))
+        lease_path = lease_dir / "lease.json"
+        lease_path.write_text(json.dumps(lease))
+        if lease_mtime is not None:
+            os.utime(lease_path, (lease_mtime, lease_mtime))
     if state is not None:
         (request_dir / "state").mkdir(parents=True, exist_ok=True)
         payload: dict[str, object] = {
@@ -476,6 +481,9 @@ def test_stale_pane_match_without_registry_does_not_suppress_leader_stall(
         tmp_path,
         request_id="stale-unregistered",
         register=False,
+        active_lease=True,
+        state="running",
+        lease_mtime=int(time.time()) - implementer_await.UNREGISTERED_PANE_RACE_SECONDS - 5,
     )
     path = _receipt(tmp_path)
     event = _await(

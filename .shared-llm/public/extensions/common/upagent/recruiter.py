@@ -49,6 +49,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import shutil
 import stat
@@ -2085,17 +2086,45 @@ class JobLedger:
                 raise RecruiterError("request lease changed before timeout warning")
             if self.state(key).get("state") not in ("running", "stalled"):
                 return None
-            decision_deadline = int(time.time()) + max(
-                1, int(requester_grace_ms / 1000)
-            )
             detail = {
                 "decision_nonce": nonce,
                 "timeout_number": timeout_number,
-                "requester_decision_deadline": decision_deadline,
             }
             self._event(key, "timeout-warning", **detail)
             self._snapshot(key, "awaiting-requester", **lease, **detail)
             return lease
+
+    def stamp_requester_decision_deadline(
+        self, key: str, token: str, deadline_epoch: float
+    ) -> None:
+        """Persist the requester grace wall clock at the instant the grace loop starts."""
+        claim_dir = self.active / "requests" / key
+        with self._claim_lock(key):
+            if not claim_dir.is_dir():
+                raise RecruiterError(
+                    "request lease disappeared before requester grace began"
+                )
+            lease = self._lease(claim_dir / "lease.json")
+            if lease["token"] != token:
+                raise RecruiterError(
+                    "request lease changed before requester grace began"
+                )
+            current = self.state(key)
+            if current.get("state") != "awaiting-requester":
+                raise RecruiterError(
+                    "request is no longer awaiting a requester decision"
+                )
+            preserved = {
+                key: value
+                for key, value in current.items()
+                if key not in ("state", "at_ns")
+            }
+            self._snapshot(
+                key,
+                "awaiting-requester",
+                **preserved,
+                requester_decision_deadline=deadline_epoch,
+            )
 
     def extend_lease(self, key: str, token: str, extension_ms: int) -> int:
         """Extend only the current generation and add a new expiry index entry."""
@@ -3597,12 +3626,106 @@ def _herdr(*args: str, herdr_session: str | None = None) -> None:
         )
 
 
+PROGRESS_OUTPUT_LINES = 80
+PROGRESS_OUTPUT_MAX_BYTES = 65_536
+FINGERPRINT_HERDR_TIMEOUT_SECONDS = 5.0
+
+
+def _terminate_subprocess(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            with suppress(Exception):
+                stream.close()
+    process.kill()
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=1)
+
+
+def _run_herdr_text_capped(
+    argv: list[str],
+    *,
+    session: str,
+    display_args: Sequence[str],
+    timeout_seconds: float | None,
+    max_bytes: int,
+) -> str:
+    """Run herdr and return stdout without buffering more than max_bytes in memory."""
+    _herdr_available()
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, display_args)} could not run: {error}"
+        ) from error
+    assert process.stdout is not None
+    assert process.stderr is not None
+    deadline = (
+        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    )
+    stdout = bytearray()
+    capped = False
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            _terminate_subprocess(process)
+            raise RecruiterError(
+                f"{_herdr_command_display(session, display_args)} timed out after {timeout_seconds} seconds"
+            )
+        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+        if ready:
+            chunk = process.stdout.read(8192)
+            if not chunk:
+                break
+            stdout.extend(chunk)
+            if len(stdout) > max_bytes:
+                stdout = stdout[:max_bytes]
+                capped = True
+                _terminate_subprocess(process)
+                break
+        elif process.poll() is not None:
+            remainder = process.stdout.read()
+            if remainder:
+                stdout.extend(remainder)
+                if len(stdout) > max_bytes:
+                    stdout = stdout[:max_bytes]
+                    capped = True
+            break
+    if not capped and process.poll() is None:
+        try:
+            remainder, _stderr = process.communicate(timeout=0)
+        except subprocess.TimeoutExpired as error:
+            _terminate_subprocess(process)
+            raise RecruiterError(
+                f"{_herdr_command_display(session, display_args)} timed out after {timeout_seconds} seconds"
+            ) from error
+        if remainder:
+            stdout.extend(remainder)
+            if len(stdout) > max_bytes:
+                stdout = stdout[:max_bytes]
+    if process.poll() is None:
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=0)
+    stderr = b""
+    if process.stderr is not None:
+        with suppress(Exception):
+            stderr = process.stderr.read() or b""
+    if process.returncode not in (0, None) and process.returncode != 0 and not capped:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, display_args)} failed: {stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    return stdout.decode("utf-8", errors="replace")
+
+
 def _pane_recent_output(
     pane: str,
     lines: int = 80,
     *,
     herdr_session: str | None = None,
     timeout_seconds: float | None = None,
+    max_bytes: int = PROGRESS_OUTPUT_MAX_BYTES,
 ) -> str:
     _herdr_available()
     session, argv = _herdr_argv(
@@ -3617,22 +3740,13 @@ def _pane_recent_output(
         ),
         herdr_session,
     )
-    try:
-        process = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise RecruiterError(
-            f"{_herdr_command_display(session, ('pane', 'read', pane))} timed out after {timeout_seconds} seconds"
-        ) from error
-    if process.returncode != 0:
-        raise RecruiterError(
-            f"{_herdr_command_display(session, ('pane', 'read', pane))} failed: {process.stderr.strip()}"
-        )
-    return process.stdout
+    return _run_herdr_text_capped(
+        argv,
+        session=session,
+        display_args=("pane", "read", pane),
+        timeout_seconds=timeout_seconds,
+        max_bytes=max_bytes,
+    )
 
 
 def _cursor_startup_failure_message(output: str) -> str | None:
@@ -3651,11 +3765,6 @@ def _worker_inactivity_check_ms(order: dict, configured_ms: int) -> int:
     if order.get("harness") != "cursor":
         return configured_ms
     return min(configured_ms, CURSOR_INACTIVITY_CHECK_MS)
-
-
-PROGRESS_OUTPUT_LINES = 80
-PROGRESS_OUTPUT_MAX_BYTES = 65_536
-FINGERPRINT_HERDR_TIMEOUT_SECONDS = 5.0
 
 
 def worker_progress_fingerprint(
@@ -8410,7 +8519,10 @@ def _await_requester_timeout_decision(
             "worker_pane": worker_pane,
         },
     )
-    deadline = time.monotonic() + config.requester_grace_ms / 1000
+    grace_seconds = config.requester_grace_ms / 1000
+    deadline_epoch = time.time() + grace_seconds
+    ledger.stamp_requester_decision_deadline(key, token, deadline_epoch)
+    deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
         if monitor_finalized is not None and monitor_finalized.is_set():
             ledger._event(

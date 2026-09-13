@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -2768,18 +2768,134 @@ def test_run_order_keeps_failed_bundle_after_requester_grace_hard_timeout(
 def test_capture_worker_progress_fingerprint_herdr_calls_are_timed_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    timeouts: list[float | None] = []
+    run_timeouts: list[float | None] = []
+    pane_timeouts: list[float | None] = []
 
     def fake_run(argv, **kwargs: object) -> SimpleNamespace:
-        timeouts.append(kwargs.get("timeout"))
+        run_timeouts.append(kwargs.get("timeout"))
         return SimpleNamespace(returncode=0, stdout='{"result": {}}')
 
+    def fake_pane_recent_output(
+        *args: object, timeout_seconds: float | None = None, **kwargs: object
+    ) -> str:
+        pane_timeouts.append(timeout_seconds)
+        return ""
+
     monkeypatch.setattr(recruiter.subprocess, "run", fake_run)
+    monkeypatch.setattr(recruiter, "_pane_recent_output", fake_pane_recent_output)
     recruiter.capture_worker_progress_fingerprint("worker-pane", herdr_session="sess-1")
-    assert timeouts == [
-        recruiter.FINGERPRINT_HERDR_TIMEOUT_SECONDS,
-        recruiter.FINGERPRINT_HERDR_TIMEOUT_SECONDS,
-    ]
+    assert run_timeouts == [recruiter.FINGERPRINT_HERDR_TIMEOUT_SECONDS]
+    assert pane_timeouts == [recruiter.FINGERPRINT_HERDR_TIMEOUT_SECONDS]
+
+
+def test_requester_decision_deadline_matches_grace_after_slow_manager_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    manager = {
+        "address": "manager-name",
+        "config": SimpleNamespace(
+            account_manager=SimpleNamespace(timeout_ms=100), requester_grace_ms=900
+        ),
+        "generation": 1,
+    }
+    prompt_delay = 0.35
+
+    def slow_prompt(*_args: object, **_kwargs: object) -> None:
+        time.sleep(prompt_delay)
+
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", slow_prompt)
+    monkeypatch.setattr(recruiter, "_notify_requester", lambda *args, **kwargs: None)
+    grace_started = threading.Event()
+    observed: list[float] = []
+
+    def await_decision() -> None:
+        extension = recruiter._await_requester_timeout_decision(
+            ledger, key, token, order, manager, "worker-pane", 1, threading.Event()
+        )
+        observed.append(cast(float, extension or 0.0))
+
+    runner = threading.Thread(target=await_decision)
+    runner.start()
+    deadline = time.monotonic() + 2
+    while not grace_started.is_set() and time.monotonic() < deadline:
+        state = ledger.state(key)
+        persisted = state.get("requester_decision_deadline")
+        if isinstance(persisted, (int, float)) and not isinstance(persisted, bool):
+            grace_started.set()
+            assert abs(persisted - time.time()) <= 1.0
+            assert persisted > time.time()
+    runner.join(timeout=3)
+    assert grace_started.is_set()
+
+
+def test_pane_recent_output_caps_herdr_stdout_and_survives_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"x" * (1024 * 1024)
+    read_fd, write_fd = os.pipe()
+
+    def _fill_pipe() -> None:
+        os.write(write_fd, payload)
+        os.close(write_fd)
+
+    threading.Thread(target=_fill_pipe, daemon=True).start()
+
+    class FakeProcess:
+        def __init__(self, stdout: object) -> None:
+            self.stdout = stdout
+            self.stderr = open(os.devnull, "rb")
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = 0
+            return 0
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            self.returncode = 0
+            return b"", b""
+
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(
+        recruiter.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakeProcess(os.fdopen(read_fd, "rb")),
+    )
+
+    output = recruiter._pane_recent_output(
+        "worker-pane",
+        lines=recruiter.PROGRESS_OUTPUT_LINES,
+        herdr_session="llm-lab-test",
+        timeout_seconds=2.0,
+    )
+    assert len(output.encode("utf-8")) <= recruiter.PROGRESS_OUTPUT_MAX_BYTES
+
+    hang_read, hang_write = os.pipe()
+
+    def fake_hanging_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        return FakeProcess(os.fdopen(hang_read, "rb"))
+
+    monkeypatch.setattr(recruiter.subprocess, "Popen", fake_hanging_popen)
+    with pytest.raises(recruiter.RecruiterError, match="timed out"):
+        recruiter._pane_recent_output(
+            "worker-pane", herdr_session="llm-lab-test", timeout_seconds=0.05
+        )
+    os.close(hang_write)
 
 
 def test_worker_progress_fingerprint_bounds_captured_output_bytes() -> None:
@@ -4602,10 +4718,10 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
 
     assert [candidate.offering_id for candidate in anthropic] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-6-terra",
+        "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "pi-gpt-5-6-terra",
+        "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in openai] == [
         "cursor-composer-2-5",
@@ -4628,10 +4744,10 @@ def test_public_checker_candidates_filter_same_provider_and_preserve_order() -> 
 
     assert [candidate.offering_id for candidate in anthropic] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-6-terra",
+        "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "pi-gpt-5-6-terra",
+        "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in openai] == [
         "cursor-composer-2-5",
@@ -4706,7 +4822,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
 
     assert result is assessment
     assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.6-terra --thinking low" in attempted[1]
+    assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
     failures = [
         event
         for event in ledger.events(key)
@@ -4834,8 +4950,8 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
 
     assert len(attempted) == 2
     assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.6-terra --thinking low" in attempted[1]
-    assert manager["management_offering_id"] == "pi-gpt-5-6-terra"
+    assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
+    assert manager["management_offering_id"] == "pi-gpt-5-6-luna"
     failures = [
         event
         for event in ledger.events(key)
@@ -4862,7 +4978,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
     ][-2:]
     assert [event["offering_id"] for event in exhausted] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-6-terra",
+        "pi-gpt-5-6-luna",
     ]
     assert all(
         event["reason"] == "management startup unavailable" for event in exhausted

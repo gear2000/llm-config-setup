@@ -47,6 +47,7 @@ DEFAULT_RECONCILE_MS = 20_000
 DEFAULT_INACTIVITY_MS = 15 * 60 * 1000
 DEFAULT_ESCALATE_MS = 10 * 60 * 1000
 STALL_CONFIRMATIONS = 2
+UNREGISTERED_PANE_RACE_SECONDS = 60
 QUESTION_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _RESULT_VERDICT_KINDS = {
     "passed": "completed",
@@ -211,6 +212,23 @@ def _hire_matches_registry(
     return True
 
 
+def _receipt_request_generation(receipt: dict) -> int | None:
+    generation = receipt.get("generation")
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        return generation
+    return None
+
+
+def _lease_claimed_at_epoch(ledger_root: Path, request_dir: Path) -> int | None:
+    lease_path = ledger_root / "active" / "requests" / request_dir.name / "lease.json"
+    if not lease_path.is_file():
+        return None
+    try:
+        return int(lease_path.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def _active_lease_for_request(ledger_root: Path, request_dir: Path) -> dict:
     lease_path = ledger_root / "active" / "requests" / request_dir.name / "lease.json"
     if not lease_path.is_file():
@@ -253,6 +271,21 @@ def _unregistered_pane_race_hire(
             continue
         expires_at = lease.get("expires_at")
         if isinstance(expires_at, int) and expires_at <= now:
+            continue
+        claimed_at = _lease_claimed_at_epoch(ledger_root, request_dir)
+        if (
+            claimed_at is None
+            or now - claimed_at > UNREGISTERED_PANE_RACE_SECONDS
+        ):
+            continue
+        receipt_generation = _receipt_request_generation(ctx.receipt)
+        lease_generation = lease.get("generation")
+        state = _hire_state(request_dir, ledger_root)
+        state_generation = state.get("generation")
+        expected_generation = receipt_generation
+        if expected_generation is None and isinstance(state_generation, int):
+            expected_generation = state_generation
+        if isinstance(expected_generation, int) and lease_generation != expected_generation:
             continue
         raced.append((request_id, order, request_dir))
     return raced
@@ -324,7 +357,9 @@ def _worker_missing_condition(
     state = _hire_state(request_dir, ledger_root)
     if state.get("state") == "awaiting-requester":
         deadline = state.get("requester_decision_deadline")
-        if isinstance(deadline, int) and deadline <= int(time.time()):
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            deadline = None
+        if deadline is not None and deadline <= time.time():
             return "awaiting-requester-expired"
     pid = lease.get("runner_pid")
     start = lease.get("runner_start_time")
