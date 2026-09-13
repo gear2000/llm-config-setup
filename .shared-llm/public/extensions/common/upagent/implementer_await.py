@@ -156,14 +156,15 @@ def _registered_hire_ids(ctx: ImplementerContext) -> set[str]:
     return ids
 
 
-def open_hire_request_ids(ctx: ImplementerContext) -> list[str]:
-    """Request ids of ledger orders this implementer owns that still lack result.json."""
+def _iter_owned_hires(
+    ctx: ImplementerContext,
+) -> list[tuple[str, dict, Path]]:
     ledger_root = _ledger_root()
     requests = ledger_root / "requests"
     if not requests.is_dir():
         return []
     registered = _registered_hire_ids(ctx)
-    open_ids: list[str] = []
+    owned: list[tuple[str, dict, Path]] = []
     for request_dir in sorted(requests.iterdir()):
         if not request_dir.is_dir() or request_dir.name.startswith("."):
             continue
@@ -181,11 +182,93 @@ def open_hire_request_ids(ctx: ImplementerContext) -> list[str]:
         request_id = _hire_request_id(order)
         if request_id is None:
             continue
-        owned = order.get("cockpit_pane") == ctx.leader_pane or request_id in registered
-        if not owned or _hire_has_result(order, request_dir):
+        if order.get("cockpit_pane") == ctx.leader_pane or request_id in registered:
+            owned.append((request_id, order, request_dir))
+    return owned
+
+
+def open_hire_request_ids(ctx: ImplementerContext) -> list[str]:
+    """Request ids of ledger orders this implementer owns that still lack result.json."""
+    return [
+        request_id
+        for request_id, order, request_dir in _iter_owned_hires(ctx)
+        if not _hire_has_result(order, request_dir)
+    ]
+
+
+def _hire_lease(request_dir: Path) -> dict:
+    lease_path = (
+        _ledger_root() / "active" / "requests" / request_dir.name / "lease.json"
+    )
+    if not lease_path.is_file():
+        return {}
+    try:
+        lease = json.loads(lease_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AwaitError(f"lease {lease_path} is unreadable: {error}") from error
+    if not isinstance(lease, dict):
+        raise AwaitError(f"lease {lease_path} must be a JSON object")
+    return lease
+
+
+def _hire_state(request_dir: Path) -> dict:
+    path = request_dir / "state" / "latest.json"
+    if not path.is_file():
+        return {}
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AwaitError(f"hire state {path} is unreadable: {error}") from error
+    if not isinstance(state, dict):
+        raise AwaitError(f"hire state {path} must be a JSON object")
+    return state
+
+
+def _worker_missing_condition(order: dict, request_dir: Path) -> str | None:
+    if _hire_has_result(order, request_dir):
+        return None
+    lease = _hire_lease(request_dir)
+    state = _hire_state(request_dir)
+    expires_at = state.get("expires_at")
+    if not isinstance(expires_at, int):
+        expires_at = lease.get("expires_at")
+    if state.get("state") == "awaiting-requester" and isinstance(expires_at, int):
+        if expires_at <= int(time.time()):
+            return "awaiting-requester-expired"
+    pid = lease.get("runner_pid")
+    start = lease.get("runner_start_time")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 1:
+        current = _load_sibling("recruiter")._process_start_time(pid)
+        if current != start:
+            return "runner-pid-dead"
+    return None
+
+
+def _hire_worker_pane(order: dict, request_dir: Path) -> str:
+    lease = _hire_lease(request_dir)
+    state = _hire_state(request_dir)
+    for value in (lease.get("worker_pane"), state.get("worker_pane")):
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def publish_missing_workers(ctx: ImplementerContext) -> None:
+    for request_id, order, request_dir in _iter_owned_hires(ctx):
+        condition = _worker_missing_condition(order, request_dir)
+        if condition is None:
             continue
-        open_ids.append(request_id)
-    return open_ids
+        pane = _hire_worker_pane(order, request_dir)
+        publish_event(
+            ctx,
+            "worker-missing",
+            f"Worker {request_id} pane {pane} is missing: {condition}.",
+            severity="urgent",
+            dedupe_key=f"worker-missing:{request_id}",
+            requested_action="inspect-and-decide",
+            request_id=request_id,
+            evidence=[{"request_id": request_id, "pane": pane, "condition": condition}],
+        )
 
 
 def _now_iso() -> str:
@@ -585,6 +668,7 @@ def await_event(
             observed = reconciler.tick() if reconciler else probe(ctx.leader_pane)
             alive = observed.get("alive")
             status = observed.get("agent_status")
+            publish_missing_workers(ctx)
             if status != last_status:
                 last_status = cast(str | None, status)
                 last_material_change = now

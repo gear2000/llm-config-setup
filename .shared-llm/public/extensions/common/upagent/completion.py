@@ -627,6 +627,27 @@ def write_blocked_bundle(
     )
 
 
+def write_failed_bundle(
+    manifest: Manifest,
+    reason: str,
+    *,
+    write_result: Callable[[Path, str], dict[str, Any]],
+    failure_answer: Callable[[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    return _write_terminal_bundle(
+        manifest,
+        reason,
+        write_result=write_result,
+        failure_answer=failure_answer,
+        heading="Failed completion",
+        handoff_body=(
+            "Python failed this request because its worker vanished or the "
+            "awaiting-requester deadline lapsed with no owner decision."
+        ),
+        answer_prefix="upagent completion failed",
+    )
+
+
 def write_salvaged_bundle(
     manifest: Manifest,
     reason: str,

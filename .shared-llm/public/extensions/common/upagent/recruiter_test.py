@@ -2341,6 +2341,42 @@ def test_timeout_waits_for_authenticated_requester_extension(
     assert ledger.state(key)["state"] == "running"
 
 
+def test_lapsed_awaiting_requester_deadline_writes_failed_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(
+        result_path=str(tmp_path / "result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    Path(order["instructions_path"]).write_text("Do the stage.\n")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    manager = {
+        "address": None,
+        "config": SimpleNamespace(
+            account_manager=SimpleNamespace(timeout_ms=100), requester_grace_ms=50
+        ),
+        "generation": 1,
+    }
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", lambda *args, **kwargs: None)
+    monkeypatch.setattr(recruiter, "_notify_requester", lambda *args, **kwargs: None)
+
+    extension = recruiter._await_requester_timeout_decision(
+        ledger, key, token, order, manager, "worker-pane", 1, threading.Event()
+    )
+
+    assert extension is None
+    result = json.loads(Path(order["result_path"]).read_text())
+    assert result["verdict"] == "failed"
+    assert "awaiting-requester" in result["reason"]
+    assert result["order_id"] == order["order_id"]
+
+
+
 def test_worker_instructions_have_no_result_only_fallback(tmp_path: Path) -> None:
     original = tmp_path / "instructions.md"
     original.write_text("Do the stage. An older brief mentioned /public/result.json.\n")

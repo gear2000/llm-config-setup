@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -226,10 +227,20 @@ def _idle(pane: str) -> dict:
     return {"alive": True, "agent_status": "done"}
 
 
-def _open_hire(tmp_path: Path, pane: str = "implementer-pane") -> str:
+def _open_hire(
+    tmp_path: Path,
+    pane: str = "implementer-pane",
+    *,
+    runner_pid: int | None = None,
+    runner_start_time: str | None = None,
+    state: str | None = None,
+    expires_at: int | None = None,
+    worker_pane: str = "worker-pane-9",
+) -> str:
     request_id = "hired-worker-1"
+    key = "a" * 64
     ledger_root = tmp_path / "ledger"
-    request_dir = ledger_root / "requests" / ("a" * 64)
+    request_dir = ledger_root / "requests" / key
     request_dir.mkdir(parents=True)
     (request_dir / "request.json").write_text(
         json.dumps(
@@ -241,6 +252,29 @@ def _open_hire(tmp_path: Path, pane: str = "implementer-pane") -> str:
             }
         )
     )
+    lease: dict[str, object] = {
+        "token": "tok",
+        "expires_at": expires_at if expires_at is not None else int(time.time()) + 300,
+        "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
+        "worker_pane": worker_pane,
+    }
+    if runner_pid is not None:
+        lease["runner_pid"] = runner_pid
+        lease["runner_start_time"] = runner_start_time or "recorded-start"
+    if runner_pid is not None or state is not None:
+        lease_dir = ledger_root / "active" / "requests" / key
+        lease_dir.mkdir(parents=True)
+        (lease_dir / "lease.json").write_text(json.dumps(lease))
+    if state is not None:
+        (request_dir / "state").mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {
+            "state": state,
+            "at_ns": 1,
+            "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
+            "worker_pane": worker_pane,
+            **lease,
+        }
+        (request_dir / "state" / "latest.json").write_text(json.dumps(payload))
     return request_id
 
 
@@ -303,3 +337,55 @@ def test_idle_implementer_stalls_once_the_hire_has_result_json(
     assert implementer_await.open_hire_request_ids(
         implementer_await.ImplementerContext(path)
     ) == []
+
+
+def test_await_emits_worker_missing_when_hire_runner_pid_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    _open_hire(
+        tmp_path,
+        runner_pid=999_999,
+        runner_start_time="dead-start",
+        state="running",
+    )
+    path = _receipt(tmp_path)
+    event = _await(
+        path,
+        timeout_ms=400,
+        poll_ms=10,
+        reconcile_ms=30,
+        probe=_alive,
+    )
+    assert event["kind"] == "worker-missing"
+    assert event["request_id"] == "hired-worker-1"
+    assert event["severity"] == "urgent"
+    assert event["requested_action"] == "inspect-and-decide"
+    assert "hired-worker-1" in event["summary"]
+    assert "worker-pane-9" in event["summary"]
+    assert "runner-pid-dead" in event["summary"]
+    assert event["dedupe_key"] == "worker-missing:hired-worker-1"
+
+
+def test_await_emits_worker_missing_when_awaiting_requester_deadline_lapsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    _open_hire(
+        tmp_path,
+        state="awaiting-requester",
+        expires_at=int(time.time()) - 30,
+    )
+    path = _receipt(tmp_path)
+    event = _await(
+        path,
+        timeout_ms=400,
+        poll_ms=10,
+        reconcile_ms=30,
+        probe=_alive,
+    )
+    assert event["kind"] == "worker-missing"
+    assert event["request_id"] == "hired-worker-1"
+    assert "awaiting-requester-expired" in event["summary"]
+    assert "worker-pane-9" in event["summary"]
+    assert event["dedupe_key"] == "worker-missing:hired-worker-1"

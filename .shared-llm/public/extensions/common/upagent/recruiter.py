@@ -8268,6 +8268,13 @@ def _await_requester_timeout_decision(
             )
             return None
         time.sleep(HEALTH_PROBE_SECONDS)
+    _terminalize_missing_worker(
+        ledger,
+        key,
+        token,
+        order,
+        "awaiting-requester deadline lapsed without a requester decision",
+    )
     _notify_requester(
         ledger,
         key,
@@ -10543,6 +10550,68 @@ def _write_required_blocked_bundle(
     )
 
 
+def _write_failed_result(
+    order: dict,
+    reason: str,
+    result_path: str | Path | None = None,
+    *,
+    epilogue: dict | None = None,
+) -> dict:
+    """Author a valid failed result so a result.json watch can fire."""
+    path = Path(result_path or order["result_path"])
+    stage = order.get("stage_id")
+    if stage not in RECOGNIZED_STAGE_IDS:
+        raise RecruiterError(
+            f"failed result requires a recognized stage_id, got {stage!r}"
+        )
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "failed",
+        "revisit": [stage],
+        "reason": f"recruiter: {reason}",
+        "full_log": "(none — worker did not run to completion)",
+        **({"epilogue": epilogue} if epilogue is not None else {}),
+    }
+    JobLedger._write_json(path, result)
+    return load_result(path, expected_order_id=order["order_id"])
+
+
+def _write_required_failed_bundle(order: dict, manifest: Any, reason: str) -> dict:
+    epilogue = _epilogue_evidence(order, manifest)
+    result = cast(
+        dict,
+        completion.write_failed_bundle(
+            manifest,
+            reason,
+            write_result=lambda path, why: _write_failed_result(
+                order, why, path, epilogue=epilogue
+            ),
+            failure_answer=contracts_consult.failure_answer,
+        ),
+    )
+    public_path = Path(order["result_path"])
+    if public_path.resolve() != manifest.artifact("result").staging_path.resolve():
+        JobLedger._write_json(public_path, result)
+    return result
+
+
+def _terminalize_missing_worker(
+    ledger: JobLedger, key: str, token: str, order: dict, reason: str
+) -> dict:
+    """Write a failed bundle when the runner died or requester grace lapsed."""
+    manifest = completion.build_manifest(
+        order, ledger.request_dir(key), token, lifecycle.request_identity(order)
+    )
+    manifest_path = ledger.request_dir(key) / "artifact-manifest.json"
+    try:
+        completion.parse_manifest(manifest_path.read_text(), manifest)
+    except (OSError, CompletionError):
+        completion.write_manifest(manifest_path, manifest)
+    result = _write_required_failed_bundle(order, manifest, reason)
+    ledger._event(key, "worker-missing-failed", reason=reason)
+    return result
+
+
 def error_chain(error: BaseException) -> list[str]:
     """The ordered root-cause chain behind one failure, terminal message first.
 
@@ -11171,12 +11240,21 @@ def _reconcile_claim(
                 ledger, key, order, manifest, f"runner reconciliation: {error}"
             )
             result = salvage["result"]
+            if result.get("verdict") == "blocked" and not runner_alive:
+                salvage = None
+                result = _write_required_failed_bundle(
+                    order,
+                    manifest,
+                    f"runner pid died; runner reconciliation: {error}",
+                )
     else:
-        result = _write_required_blocked_bundle(
-            order,
-            manifest,
-            f"runner reconciliation could not close worker pane {worker_pane}",
-        )
+        reason = f"runner reconciliation could not close worker pane {worker_pane}"
+        if not runner_alive:
+            result = _write_required_failed_bundle(
+                order, manifest, f"runner pid died; {reason}"
+            )
+        else:
+            result = _write_required_blocked_bundle(order, manifest, reason)
     if salvage is not None:
         result = salvage["result"]
     finalized = ledger.finalize(
