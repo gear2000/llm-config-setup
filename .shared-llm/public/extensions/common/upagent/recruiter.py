@@ -3628,6 +3628,7 @@ def _herdr(*args: str, herdr_session: str | None = None) -> None:
 
 PROGRESS_OUTPUT_LINES = 80
 PROGRESS_OUTPUT_MAX_BYTES = 65_536
+PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS = 30.0
 FINGERPRINT_HERDR_TIMEOUT_SECONDS = 5.0
 
 
@@ -3649,8 +3650,16 @@ def _run_herdr_text_capped(
     timeout_seconds: float | None,
     max_bytes: int,
 ) -> str:
-    """Run herdr and return stdout without buffering more than max_bytes in memory."""
+    """Run herdr and return stdout without buffering more than max_bytes in memory.
+
+    Both pipes are drained with nonblocking fd reads so a child that writes one byte and
+    then stalls, or floods stderr past the pipe capacity, can never block past the
+    deadline. A missing timeout falls back to PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS so no
+    caller can bypass its outer deadline. Every timeout or cap path kills and reaps the child.
+    """
     _herdr_available()
+    if timeout_seconds is None:
+        timeout_seconds = PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS
     try:
         process = subprocess.Popen(
             argv,
@@ -3663,60 +3672,60 @@ def _run_herdr_text_capped(
         ) from error
     assert process.stdout is not None
     assert process.stderr is not None
-    deadline = (
-        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-    )
+    out_fd = process.stdout.fileno()
+    err_fd = process.stderr.fileno()
+    for fd in (out_fd, err_fd):
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    deadline = time.monotonic() + timeout_seconds
     stdout = bytearray()
+    stderr = bytearray()
+    open_fds = {out_fd, err_fd}
     capped = False
-    while True:
-        if deadline is not None and time.monotonic() >= deadline:
+    while open_fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             _terminate_subprocess(process)
             raise RecruiterError(
                 f"{_herdr_command_display(session, display_args)} timed out after {timeout_seconds} seconds"
             )
-        ready, _, _ = select.select([process.stdout], [], [], 0.1)
-        if ready:
-            chunk = process.stdout.read(8192)
+        ready, _, _ = select.select(sorted(open_fds), [], [], min(remaining, 0.1))
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 65_536)
+            except BlockingIOError:
+                continue
             if not chunk:
-                break
-            stdout.extend(chunk)
-            if len(stdout) > max_bytes:
-                stdout = stdout[:max_bytes]
-                capped = True
-                _terminate_subprocess(process)
-                break
-        elif process.poll() is not None:
-            remainder = process.stdout.read()
-            if remainder:
-                stdout.extend(remainder)
+                open_fds.discard(fd)
+                continue
+            if fd == out_fd:
+                stdout.extend(chunk)
                 if len(stdout) > max_bytes:
-                    stdout = stdout[:max_bytes]
+                    del stdout[max_bytes:]
                     capped = True
-            break
-    if not capped and process.poll() is None:
+                    _terminate_subprocess(process)
+                    open_fds.clear()
+                    break
+            else:
+                stderr.extend(chunk)
+                if len(stderr) > max_bytes:
+                    del stderr[:-max_bytes]
+    if not capped:
         try:
-            remainder, _stderr = process.communicate(timeout=0)
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as error:
             _terminate_subprocess(process)
             raise RecruiterError(
                 f"{_herdr_command_display(session, display_args)} timed out after {timeout_seconds} seconds"
             ) from error
-        if remainder:
-            stdout.extend(remainder)
-            if len(stdout) > max_bytes:
-                stdout = stdout[:max_bytes]
-    if process.poll() is None:
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=0)
-    stderr = b""
-    if process.stderr is not None:
+    for stream in (process.stdout, process.stderr):
         with suppress(Exception):
-            stderr = process.stderr.read() or b""
-    if process.returncode not in (0, None) and process.returncode != 0 and not capped:
+            stream.close()
+    if not capped and process.returncode not in (0, None):
         raise RecruiterError(
-            f"{_herdr_command_display(session, display_args)} failed: {stderr.decode('utf-8', errors='replace').strip()}"
+            f"{_herdr_command_display(session, display_args)} failed: {bytes(stderr).decode('utf-8', errors='replace').strip()}"
         )
-    return stdout.decode("utf-8", errors="replace")
+    return bytes(stdout).decode("utf-8", errors="replace")
 
 
 def _pane_recent_output(

@@ -18,6 +18,7 @@ import multiprocessing
 import os
 import stat
 import threading
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -10507,3 +10508,51 @@ def test_corrupt_claude_json_fails_loud_instead_of_hanging_launch(
 
     with pytest.raises(RecruiterError, match="pre-trust"):
         recruiter._ensure_claude_folder_trust(str(tmp_path))
+
+
+def _real_herdr_child(monkeypatch: pytest.MonkeyPatch, script: str) -> None:
+    """Route the capped reader at a real python child instead of herdr."""
+    monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_argv",
+        lambda args, session: ("llm-lab-test", [sys.executable, "-c", script]),
+    )
+
+
+def test_pane_reader_partial_byte_then_hang_raises_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _real_herdr_child(
+        monkeypatch,
+        "import sys,time; sys.stdout.write('x'); sys.stdout.flush(); time.sleep(30)",
+    )
+    started = time.monotonic()
+    with pytest.raises(recruiter.RecruiterError, match="timed out"):
+        recruiter._pane_recent_output(
+            "worker-pane", herdr_session="llm-lab-test", timeout_seconds=0.2
+        )
+    assert time.monotonic() - started < 0.2 + 0.3
+
+
+def test_pane_reader_survives_stderr_flood_and_reaps_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _real_herdr_child(
+        monkeypatch,
+        "import sys; sys.stderr.write('e'*(1<<20)); sys.stderr.flush(); "
+        "sys.stdout.write('ok'); sys.stdout.flush()",
+    )
+    output = recruiter._pane_recent_output(
+        "worker-pane", herdr_session="llm-lab-test", timeout_seconds=5.0
+    )
+    assert output == "ok"
+
+
+def test_pane_reader_default_timeout_bounds_callers_without_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(recruiter, "PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS", 0.2)
+    _real_herdr_child(monkeypatch, "import time; time.sleep(30)")
+    with pytest.raises(recruiter.RecruiterError, match="timed out after 0.2"):
+        recruiter._pane_recent_output("worker-pane", herdr_session="llm-lab-test")
