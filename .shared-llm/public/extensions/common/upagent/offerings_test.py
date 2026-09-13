@@ -39,7 +39,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
     expected_candidates = [
         {"offering": "cursor-composer-2-5", "effort": "default"},
-        {"offering": "pi-gpt-5-6-terra", "effort": "low"},
+        {"offering": "pi-gpt-5-6-luna", "effort": "high"},
     ]
     assert roster.management["account_manager"]["candidates"] == expected_candidates
     assert roster.management["checker"]["candidates"] == expected_candidates
@@ -337,7 +337,7 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
 
     assert [candidate["offering_id"] for candidate in candidates] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-6-terra",
+        "pi-gpt-5-6-luna",
     ]
     assert [candidate["provider"] for candidate in candidates] == [
         "cursor",
@@ -350,8 +350,8 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     )
     assert candidates[1]["expected_agent"] == "pi"
     assert candidates[1]["expected_process"] == "pi"
-    assert "openai-codex/gpt-5.6-terra" in candidates[1]["command"]
-    assert "--thinking low" in candidates[1]["command"]
+    assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
+    assert "--thinking high" in candidates[1]["command"]
     assert role["command"] == candidates[0]["command"]
 
 
@@ -392,7 +392,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "91bc75925a6b4934171733b315a8a3d69aab8cf427f493028573169bf3e6afcd"
+        "1f9202191034f6d38a7601bdc3f0411e21edbb791949e38ee8391d740222a79a"
     )
 
 
