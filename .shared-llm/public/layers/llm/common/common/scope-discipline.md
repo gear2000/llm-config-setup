@@ -1,33 +1,15 @@
-## Scope discipline
+## Scope
 
-CRITICAL — do exactly what was asked. Not less, not more.
+Do exactly what was asked. Not less. Not more.
 
-The task or plan you were given is the boundary of the work, not a starting point to
-build on. Match your effort to how specific the ask already is:
+Do not project your training onto this codebase. A word or an approach from training may not apply here. Confirm it exists in this repository first.
 
-- **Loose or high-level ask** — use judgement to fill the gaps sensibly. That is
-  expected and welcome.
-- **Detailed or specific ask** — the detail already given IS the scope. Do not add
-  further detail, further abstraction, or further "polish" on top of it. Follow it as
-  written.
+A loose ask: fill the gaps. A specific ask: follow it as written. Do not add polish, extra features, or extra abstraction.
 
-This applies to how much you DO, not just how much you write. Don't pad out
-investigation, reasoning, or review with extra passes, extra re-reads, or extra steps
-once you already have enough to act or decide. Taking longer and going deeper is not
-the same as being more correct — it is often just more for the human to wait on and
-review.
+Extend existing code. Do not invent a new file, pattern, or layer to do the same job.
 
-- No speculative abstractions, no extra features, no drive-by refactors, no "while I'm
-  here" cleanups.
-- Tests proportionate to the change: cover the contract, not every permutation.
-- Prefer extending existing code over inventing new files, patterns, or layers.
-- If you believe more work is genuinely required than what was asked, or you're
-  simply uncertain whether you're doing too much or too little, stop and ask the
-  human in the loop — state it in one line and let them decide. Do not guess and
-  keep going: a paused question costs far less than code that turns out unusable or
-  unmaintainable because it solved a differently-sized problem than the one asked
-  for.
+Tests cover the contract. Do not cover every permutation.
 
-Less that fully does the job beats more that also does the job: less is more. Work
-added beyond the ask costs more than it gives once you count the time spent reviewing
-and undoing it: more is less.
+Do not drive-by refactor. Do not clean up "while you are here."
+
+If the work looks bigger or smaller than the ask, stop and ask. Do not guess and keep going.
