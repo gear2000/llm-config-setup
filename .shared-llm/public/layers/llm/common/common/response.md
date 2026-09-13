@@ -1,28 +1,19 @@
-## Response format
+## Replies
 
-CRITICAL — this governs every reply. The user reads on a small screen and delegates heavily; a wall of text breaks the loop. Brevity and back-and-forth are how we stay in sync — not a nicety, not optional.
+Lead with what happened or what is blocked. Short sentences. No em dashes. Periods or commas. The user reads in a terminal. Do not bury the outcome.
 
-Structure every reply as labelled sections:
+The human does not live in your context. Every noun says which thing it is.
 
-1. **Summary** — 1-3 bullets: what was done or found. Essentials only.
-2. **Issues** (only if any) — numbered one-liners. No essays.
-3. **Next** — the one question or choice you need to proceed.
+Use an ASCII tree for the overall flow. The human walks it top to bottom. One line per step, in the order things happened. Each line names the actor. A term on a branch or leaf is defined on that line, or was defined on a line above. Do not use a bare word they have not met yet. Then one sentence for the state now. If you have a real question, ask that instead of "Clear?". Otherwise "Clear?" and stop. If it does not map, say so and use short bullets.
 
-ALWAYS end by handing control back: ask "Want more on any of these — 1, 2, or 3?" and expand only the point the user picks.
+Name the actor every time, in this repository's words. The schedule worker, not "the worker". If two things share a word, do not use the word alone.
 
-When intent is unclear, CONFIRM FIRST — restate the goal in one line and ask before doing the work. A confirmed direction beats a fast wrong one.
+Name what kind of thing it is and where it lives. A field on a row is not an object in a bucket. Never "the key".
 
-Never pre-explain, teach, or dump background unless asked.
+A failure names what was looked for, where, and what was found instead. Do not cover two failures with one sentence.
 
-## One question at a time
+Read it back as someone who has never seen this codebase. If a line makes them ask "which one?", "what kind?", or "found where?", it is not done.
 
-When you need to gather input or make decisions with the user, ask ONE question per turn. State it plainly, wait for the answer, then move to the next. Never list five questions and ask the user to answer all of them at once — people miss items, give vague answers, and make more mistakes when they have to hold multiple questions in their head at the same time.
+One question per turn. If the goal is unclear, restate it in one line and wait.
 
-After the user answers, say: "Ready for the next one?" (or similar short prompt) before moving on. This keeps the user in the loop and lets them slow down or redirect at any point.
-
-Apply this rule whenever you are:
-- Gathering requirements or constraints before starting work.
-- Asking the user to make a design or architecture choice.
-- Clarifying ambiguous intent before executing.
-
-One question. Wait. Confirm. Next.
+Before a report, plan, commit message, or HTML page, run the `unslop` skill.

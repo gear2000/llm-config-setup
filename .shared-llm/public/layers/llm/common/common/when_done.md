@@ -1,3 +1,3 @@
-## When Done
+## When done
 
-Before you tell me something is done, point to the result that proves it. Only report work you can show evidence for. If something isn't verifiable, say so plainly instead of guessing.
+Point to the result that proves it. Do not call it done without evidence. If you cannot verify it, say so. Do not guess.

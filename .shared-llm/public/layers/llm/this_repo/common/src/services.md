@@ -2,54 +2,91 @@
 
 # src/services/
 
-Deployable services. Every directory here ships somewhere — cloud functions, containers, or binaries.
+Deployable services. Every directory here ships: cloud functions, containers, or binaries.
 
-## Python conventions
+## Package architecture
 
-- Python 3.14, modern syntax, type-annotate all function signatures.
-- Pydantic for data models. No ORM — psycopg3 for Postgres, boto3 for AWS.
-- pytest for all tests. Run `ruff check` before delivering code.
-- Services use `pyproject.toml`, not `setup.py`.
-- Services declare `__all__ = []` in `__init__.py` with a comment stating invocation type (e.g. Lambda handler / FastAPI mount / CLI).
-- Services are NOT published to the package registry. They ship as Docker images or built binaries.
-- Tests run through Docker: `Dockerfile.test` for unit tests, `Dockerfile.e2e` for end-to-end.
+Maintainable code is a hierarchy. Imports flow down only. Do not import upward.
 
-## Error handling
+Repo:
 
-- Default: do NOT catch errors.
-- No broad catches (`except Exception`, bare `except:`).
-- Never wrap large blocks in try/except.
-- No anticipatory catches — let failures surface immediately.
+```
+higher services
+└── services
+    └── higher-level packages
+        └── lower-level packages
+```
+
+Packages sit at the bottom. A higher-level package is built on lower-level packages. A service is built on packages. A higher service is built on services and packages.
+
+Inside one package:
+
+```
+Layer 4  entry points   main or lambda. Wire only.
+Layer 3  application    orchestrates 0-2
+Layer 2  domain         rules and models. No I/O.
+Layer 1  adapters       one module per external system
+Layer 0  primitives     types, constants, utilities. No external deps.
+```
+
+Same direction. Layer 4 sits on 3, on 2, on 1, on 0.
+
+- Universal (0-1): stateless primitives. Do not import from a higher layer.
+- High-context (2-3): environment-specific. Do not know user-facing product workflows.
+- Service-contextual: one service only. Go `internal/`. Python `_internal/`. Do not publish it.
+
+A deep module hides internals behind a narrow seam: the public interface. Test that module. Test how other code talks to it through that seam. Do not test the whole tree as one blob. Do not add a wrapper that only re-exports another library.
+
+Before you create a package or a service, stop and ask:
+- Universal, High-context, or Service-contextual?
+- One service, or more than one?
+- Shared package, or stay inside the one service?
+
+Place logic at the lowest cohesive layer. Ask only if two or more services would share it.
+
+If helpers pile up in an entry point, ask whether to add an internal module.
+
+## Python
+
+- Python 3.14. Type-annotate every function signature.
+- Pydantic for data models. No ORM. psycopg3 for Postgres. boto3 for AWS.
+- pytest. Run `ruff check` before you deliver.
+- `pyproject.toml`, not `setup.py`.
+- `__all__ = []` in `__init__.py`, with a comment for the invocation type (Lambda handler / FastAPI mount / CLI).
+- Services are not published to the package registry. They ship as images or binaries.
+- Tests through Docker: `Dockerfile.test`, `Dockerfile.e2e`.
+
+## Errors
+
+Do not catch by default. Fail loud. Do not use `except Exception` or bare `except:`. Wrap only the expression that can fail.
 
 ## PyPI
 
-Internal packages installed from your registry:
+Internal packages from your registry:
 
-| Context | PyPI URL |
-|---------|----------|
+| Context | URL |
+|---------|-----|
 | In-cluster / CI | `{{PYPI_INDEX_URL}}` |
 | Authenticated | `{{PYPI_INDEX_URL_AUTH}}` |
 
-<!-- TODO(project): Replace {{PYPI_INDEX_URL}} and {{PYPI_INDEX_URL_AUTH}} with your registry URLs (same values as in src/packages.md). -->
+<!-- TODO(project): Same values as src/packages.md. -->
 
 ## CI/CD
 
-- **{{CI_BUILD_TOOL}}** — build, unit tests, linting. Triggered on every push.
-- **{{CI_DEPLOY_TOOL}}** — deploy, integration tests, E2E tests (prefer headed over headless).
-- Tests run through Docker: `Dockerfile.test` for unit + integration tests, `Dockerfile.e2e` for end-to-end.
-- No bare runtime in CI — never `python`/`pytest`/`npm` directly in CI steps. Always through Dockerfile.
+- **{{CI_BUILD_TOOL}}** — build, unit tests, lint. On every push.
+- **{{CI_DEPLOY_TOOL}}** — deploy, integration, E2E.
+- Tests through Docker. Do not run `python` / `pytest` / `npm` bare in CI.
 
 ## Service catalog
 
-<!-- TODO(project): List all services here. Group by type (frontend, cloud functions, CLI tools, etc.). For each service, give the directory path and a one-line description.
+<!-- TODO(project): List every service. Path and one line each.
 
-Example shape:
 ### Frontend
-- **`frontend/`** — Next.js app, auth + database. Runs on dev:3001.
+- **`frontend/`** — Next.js app.
 
-### Cloud Functions (Python, FastAPI)
-- **`aws/{{PACKAGE_PREFIX}}-api/`** — Entry point for <action>.
-- **`aws/{{PACKAGE_PREFIX}}-worker/`** — Background processing Lambda.
+### Cloud functions
+- **`aws/{{PACKAGE_PREFIX}}-api/`** — Entry point.
+- **`aws/{{PACKAGE_PREFIX}}-worker/`** — Background processing.
 
 ### CLI
 - **`cli/{{PACKAGE_PREFIX}}-admin/`** — Admin tasks.
@@ -57,18 +94,16 @@ Example shape:
 
 ## Deploy gate
 
-<!-- TODO(project): Describe how deploys are triggered. Example:
+<!-- TODO(project): How deploys are triggered. Example:
 
-{{CI_BUILD_TOOL}} runs unit tests on push. **It does not deploy to cloud.** Deploys are triggered via:
+{{CI_BUILD_TOOL}} runs unit tests on push. It does not deploy.
 
 ```
-{{DEPLOY_SCRIPT}} <name>     # build + push + update one service
-{{DEPLOY_SCRIPT}} check      # compare source_rev tag vs git HEAD; deploy drifted ones
+{{DEPLOY_SCRIPT}} <name>
+{{DEPLOY_SCRIPT}} check
 ```
-
-Replace {{DEPLOY_SCRIPT}} with your deploy helper script path (e.g. tools/deploy.sh).
 -->
 
 ## Gotchas
 
-<!-- TODO(project): Document project-specific service gotchas — naming differences between directory and cloud function name, services that shell out to external tools, interop docs for cross-service flows, etc. -->
+<!-- TODO(project): Directory vs cloud name, env vars, deploy order. -->

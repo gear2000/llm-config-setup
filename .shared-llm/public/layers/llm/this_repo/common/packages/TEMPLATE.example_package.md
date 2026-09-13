@@ -2,18 +2,18 @@
 
 # {{PACKAGE_NAME}}
 
-<!-- TODO(project): Replace {{PACKAGE_NAME}} with the actual package name (e.g. myapp_auth). Add a one-line description of what this package does and whether it is a Library or Service. -->
+<!-- TODO(project): Replace {{PACKAGE_NAME}}. One line: what it does, Library or Service. -->
 
-**Type:** Library  <!-- or: Service — invoked as Lambda handler / FastAPI mount / CLI -->
+**Type:** Library  <!-- or: Service, invoked as Lambda handler / FastAPI mount / CLI -->
 
 ## Notable modules
 
-<!-- TODO(project): List the key modules inside this package and what each one does. Example:
+<!-- TODO(project):
 - `models.py` — Pydantic models (public contract)
-- `client.py` — Public API: one class, three methods
-- `_internal/` — private implementation details
+- `client.py` — Public API
+- `_internal/` — private implementation
 -->
 
 ## Gotchas
 
-<!-- TODO(project): Document any non-obvious behaviour, historical naming quirks, or things that look like bugs but are intentional. -->
+<!-- TODO(project): Non-obvious behaviour, historical names, things that look like bugs but are intentional. -->

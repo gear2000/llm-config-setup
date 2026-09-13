@@ -135,7 +135,7 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
   public/                         — the kit's ENTIRE source tree (public-only; a destination adds this_repo/ alongside)
     layers/                       — SOURCE prose, split into reusable layers
       llm/                        — layers for CLAUDE.md / AGENTS.md
-        common/common/response.md — portable response-format rules (ready as-is)
+        common/common/response.md — replies: this repo's names, short, one question, unslop pointer
         this_repo/                — project-specific layers, shipped as TEMPLATE.* stubs
           common/TEMPLATE.general.md            — project identity, conventions, CI, credentials
           common/TEMPLATE.authoring.md          — example: CLAUDE.md for a special subdirectory
@@ -572,7 +572,7 @@ just tf-reviewer-down        # stop the reviewer
 
 ## Output-style caveat
 
-An active `explanatory` or `learning` Claude Code output style (set via `/config`) competes with the brevity rule in `.shared-llm/public/layers/llm/common/common/response.md` and can override it. For terse, structured replies use the default or `concise` output style.
+An active `explanatory` or `learning` Claude Code output style (set via `/config`) competes with `.shared-llm/public/layers/llm/common/common/response.md` and can override it. Use the default or `concise` output style.
 
 ## What is intentionally out of scope
 

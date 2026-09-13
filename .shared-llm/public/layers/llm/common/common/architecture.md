@@ -1,70 +1,41 @@
-# Package Architecture
+## Package architecture
 
-## Hierarchical layered architecture
+Maintainable code is a hierarchy. Imports flow down only. Do not import upward.
 
-All code follows a strict layered hierarchy. Packages sit below services. Imports flow downward
-only — a lower package must never import from a package or service above it.
+Repo:
 
 ```
-Layer 0 — primitives:   shared types, constants, utilities with no external deps
-Layer 1 — adapters:     one module per external system (queue, DB, HTTP client, cache)
-Layer 2 — domain:       domain logic with no I/O (models, rules, computation)
-Layer 3 — application:  orchestrate layers 0-2 (handlers, use cases, roles)
-Layer 4 — entry points: main / lambda root — wire everything, minimal public surface
+higher services
+└── services
+    └── higher-level packages
+        └── lower-level packages
 ```
 
-Three package classifications:
+Packages sit at the bottom. A higher-level package is built on lower-level packages. A service is built on packages. A higher service is built on services and packages.
 
-- **Universal** (layers 0-1): stateless technical primitives. Cannot import from a higher layer.
-- **High-context** (layers 2-3): opinionated about the technical environment; may contain domain
-  logic but must not know about user-facing product workflows.
-- **Service-contextual**: shapes generic packages into service-specific concepts for one service
-  only. In Go, this is `internal/` (compiler-enforced). In Python, a local `_internal/` module.
-  Never published globally.
+Inside one package:
 
-## Deep module contract
+```
+Layer 4  entry points   main or lambda. Wire only.
+Layer 3  application    orchestrates 0-2
+Layer 2  domain         rules and models. No I/O.
+Layer 1  adapters       one module per external system
+Layer 0  primitives     types, constants, utilities. No external deps.
+```
 
-A deep module has a narrow public interface and a rich hidden implementation.
+Same direction. Layer 4 sits on 3, on 2, on 1, on 0.
 
-Ask: would a caller need to understand the internals to use this correctly? If yes, the interface
-is too shallow — push complexity inward.
+- Universal (0-1): stateless primitives. Do not import from a higher layer.
+- High-context (2-3): environment-specific. Do not know user-facing product workflows.
+- Service-contextual: one service only. Go `internal/`. Python `_internal/`. Do not publish it.
 
-Supporting smell: ~10+ exported symbols (types + functions + methods combined) is a prompt to
-review whether the interface is too wide, not an automatic reject.
+A deep module hides internals behind a narrow seam: the public interface. Test that module. Test how other code talks to it through that seam. Do not test the whole tree as one blob. Do not add a wrapper that only re-exports another library.
 
-No pass-through packages. A module that only re-exports another library without adding value,
-transforming data, or altering configuration adds cost (an interface) without adding depth.
+Before you create a package or a service, stop and ask:
+- Universal, High-context, or Service-contextual?
+- One service, or more than one?
+- Shared package, or stay inside the one service?
 
-## LLM placement decisions
+Place logic at the lowest cohesive layer. Ask only if two or more services would share it.
 
-Identify the target layer, design the minimum public interface, verify imports flow downward only.
-
----
-**DECISION POINT: new_package_or_service**
-
-Trigger: you are about to create a new package or a new service.
-
-Always stop and ask the user before creating:
-- "What layer does this belong to — Universal, High-context, or Service-contextual?"
-- "Which services will use this? One, or more than one?"
-- "Should this be a new shared package, or stay internal to the one service that needs it?"
-
----
-**DECISION POINT: business_logic_placement**
-
-Trigger: you are placing domain or business logic and the right layer is not obvious.
-
-- Default: lowest cohesive layer. Do not ask.
-- Ask only when two or more services would share the same logic.
-- Question: "Services A and B both need this — should I create a shared package, or duplicate it?"
-
-Repo-level overrides may permit business logic in lower-level packages by default.
-Check `layers/skills/this_repo/<language>.md` if present.
-
----
-**DECISION POINT: service_contextual_package**
-
-Trigger: a service is growing large and helper logic is piling up in entry-point files.
-
-Ask: "This service is getting large. Should I create an internal module to organise helpers
-(`internal/` in Go, `_internal/` in Python), or keep it flat?"
+If helpers pile up in an entry point, ask whether to add an internal module.

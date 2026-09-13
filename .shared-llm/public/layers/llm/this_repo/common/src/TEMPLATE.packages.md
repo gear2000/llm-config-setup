@@ -2,11 +2,53 @@
 
 # src/packages/
 
-Python packages for the {{PROJECT_NAME}} platform. One package per directory.
+Python packages for {{PROJECT_NAME}}. One package per directory.
+
+## Package architecture
+
+Maintainable code is a hierarchy. Imports flow down only. Do not import upward.
+
+Repo:
+
+```
+higher services
+└── services
+    └── higher-level packages
+        └── lower-level packages
+```
+
+Packages sit at the bottom. A higher-level package is built on lower-level packages. A service is built on packages. A higher service is built on services and packages.
+
+Inside one package:
+
+```
+Layer 4  entry points   main or lambda. Wire only.
+Layer 3  application    orchestrates 0-2
+Layer 2  domain         rules and models. No I/O.
+Layer 1  adapters       one module per external system
+Layer 0  primitives     types, constants, utilities. No external deps.
+```
+
+Same direction. Layer 4 sits on 3, on 2, on 1, on 0.
+
+- Universal (0-1): stateless primitives. Do not import from a higher layer.
+- High-context (2-3): environment-specific. Do not know user-facing product workflows.
+- Service-contextual: one service only. Go `internal/`. Python `_internal/`. Do not publish it.
+
+A deep module hides internals behind a narrow seam: the public interface. Test that module. Test how other code talks to it through that seam. Do not test the whole tree as one blob. Do not add a wrapper that only re-exports another library.
+
+Before you create a package or a service, stop and ask:
+- Universal, High-context, or Service-contextual?
+- One service, or more than one?
+- Shared package, or stay inside the one service?
+
+Place logic at the lowest cohesive layer. Ask only if two or more services would share it.
+
+If helpers pile up in an entry point, ask whether to add an internal module.
 
 ## Package hierarchy
 
-<!-- TODO(project): Document your package tier ladder here. Example shape:
+<!-- TODO(project): Document your package tier ladder. Example:
 
 ```
 Tier 0 (base):        {{PACKAGE_PREFIX}}_commons
@@ -14,53 +56,47 @@ Tier 1 (foundation):  {{PACKAGE_PREFIX}}_auth, {{PACKAGE_PREFIX}}_db
 Tier 2 (platform):    {{PACKAGE_PREFIX}}_api
 ```
 
-Replace {{PACKAGE_PREFIX}} with your project's naming prefix (e.g. myapp). List all packages, grouped by dependency tier (Tier 0 = no internal deps; higher tiers build on lower ones).
+Replace {{PACKAGE_PREFIX}}. List all packages by dependency tier. Tier 0 has no internal deps.
 -->
 
-## This directory specifically
+## This directory
 
-- One repo per package in your registry. Directory name maps to the registry repo: `{{PACKAGE_PREFIX}}_<name>` → `{{PACKAGE_PREFIX}}-<name>`. Sync via your sync script.
-- `Dockerfile.test` is the test entry point for every package. Tests always run through Docker, never bare pytest.
+- Directory name maps to the registry repo: `{{PACKAGE_PREFIX}}_<name>` → `{{PACKAGE_PREFIX}}-<name>`.
+- Tests run through `Dockerfile.test`. Do not run bare pytest.
 - `__init__.py` is the contract. Libraries: explicit `__all__`. Services: `__all__ = []`.
-- All new packages are `{{PACKAGE_PREFIX}}_*` prefixed. All packages have `pyproject.toml`.
+- New packages are `{{PACKAGE_PREFIX}}_*`. Every package has `pyproject.toml`.
 - {{CI_BUILD_TOOL}} runs unit tests on every registry push.
 
-<!-- TODO(project): Replace {{PACKAGE_PREFIX}} with your package naming prefix (e.g. myapp). Replace {{CI_BUILD_TOOL}} with your CI system. -->
+<!-- TODO(project): Replace {{PACKAGE_PREFIX}} and {{CI_BUILD_TOOL}}. -->
 
-## Python conventions
+## Python
 
-- Python 3.14. Use modern syntax: `list[str]`, `str | None`, `match`.
-- Type-annotate all function signatures.
-- Pydantic for data models. No ORM — psycopg3 for Postgres, boto3 for AWS.
-- pytest for all tests (unit in `tests/unit/`, integration in `tests/integration/`).
-- Run `ruff check` before delivering code.
-- Deep modules: keep the public interface small; hide implementation detail.
+- Python 3.14. `list[str]`, `str | None`, `match`.
+- Type-annotate every function signature.
+- Pydantic for data models. No ORM. psycopg3 for Postgres. boto3 for AWS.
+- pytest: `tests/unit/`, `tests/integration/`.
+- Run `ruff check` before you deliver.
 
-## Error handling
+## Errors
 
-- Default: do NOT catch errors. Let them break loud.
-- No broad catches: `except Exception` and bare `except:` are forbidden.
-- Never wrap large blocks in try/except — wrap the smallest expression that can actually fail.
-- No anticipatory catches — add try/except only after encountering a real failure.
+Do not catch by default. Fail loud. Do not use `except Exception` or bare `except:`. Wrap only the expression that can fail. Add a catch only after a real failure.
 
 ## PyPI
 
-**Published to your internal registry** (all packages):
-
-| Context | PyPI URL |
-|---------|----------|
+| Context | URL |
+|---------|-----|
 | In-cluster / CI | `{{PYPI_INDEX_URL}}` |
 | Authenticated | `{{PYPI_INDEX_URL_AUTH}}` |
 
-<!-- TODO(project): Replace {{PYPI_INDEX_URL}} with your unauthenticated in-cluster PyPI URL and {{PYPI_INDEX_URL_AUTH}} with the authenticated form. Replace {{PYPI_HOST}} with the registry hostname (used in --trusted-host). -->
+<!-- TODO(project): Replace {{PYPI_INDEX_URL}} and {{PYPI_INDEX_URL_AUTH}}. -->
 
 ## CI/CD
 
-- **{{CI_BUILD_TOOL}}** — build, unit tests, linting. Triggered on every push.
-- **{{CI_DEPLOY_TOOL}}** — deploy, integration tests, E2E tests (prefer headed over headless).
-- Tests run through Docker: `Dockerfile.test` for unit + integration tests, `Dockerfile.e2e` for end-to-end (services only).
-- No bare runtime in CI — never `python`/`pytest`/`npm` directly in CI steps. Always through Dockerfile.
+- **{{CI_BUILD_TOOL}}** — build, unit tests, lint. On every push.
+- **{{CI_DEPLOY_TOOL}}** — deploy, integration, E2E.
+- Tests through Docker: `Dockerfile.test`, `Dockerfile.e2e` (services only).
+- Do not run `python` / `pytest` / `npm` bare in CI.
 
 ## Gotchas
 
-<!-- TODO(project): Document project-specific gotchas here — naming exceptions, legacy spellings that must be preserved, packages that bypass normal conventions for historical reasons, etc. -->
+<!-- TODO(project): Naming exceptions, legacy spellings, packages that bypass conventions. -->

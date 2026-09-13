@@ -5,9 +5,8 @@ inputs:
   - .shared-llm/public/layers/llm/common/common/architecture.md
   - .shared-llm/public/layers/llm/common/common/response.md
   - .shared-llm/public/layers/llm/common/common/general.md
-  - .shared-llm/public/layers/llm/common/common/plain-english.md
+  - .shared-llm/public/layers/llm/common/common/scope-discipline.md
   - .shared-llm/public/layers/llm/common/common/found-issues.md
   - .shared-llm/public/layers/llm/common/common/when_done.md
   - .shared-llm/public/layers/llm/common/common/subagents.md
-  - .shared-llm/public/layers/llm/common/common/ascii-communication.md
 output: CLAUDE.md
