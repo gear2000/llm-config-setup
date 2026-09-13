@@ -2179,12 +2179,14 @@ def test_drill_dead_sentinel_falls_to_the_hard_timeout_backstop(
         tmp_path, monkeypatch, timeout_ms=400, grace_ms=50
     )
 
-    assert recruiter.cmd_run_job(key, str(roster_path)) == 1
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
     receipt = ledger.completed_receipt(key, order)
-    assert receipt["verdict"] == "blocked"
+    assert receipt["verdict"] == "failed"
     published = json.loads(Path(order["result_path"]).read_text())
-    assert "exceeded its cap" in published["reason"]
+    assert published["verdict"] == "failed"
+    assert published.get("hub_terminal") == "missing-worker"
+    assert "awaiting-requester" in published["reason"]
     assert "sentinel-closeout" not in _events(ledger, key)
     assert drill.closed == ["worker-pane", "sentinel-pane"]
     assert receipt["cleanup"]["verified_absent"] is True
@@ -2482,17 +2484,17 @@ def test_public_sentinel_candidates_preserve_order_and_filter_the_worker_provide
 
     assert [item.offering_id for item in anthropic] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-luna",
     ]
     assert [item.offering_id for item in cursor] == [
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-luna",
     ]
     assert [item.offering_id for item in openai] == [
         "cursor-composer-2-5",
     ]
     assert [item.offering_id for item in openrouter] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-luna",
     ]
 
 
@@ -2530,7 +2532,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
 
     assert attempted == ["cursor-agent", "pi"]
     assert started == {"pane": "sentinel-pi"}
-    assert selected.offering_id == "pi-gpt-5-4-mini"
+    assert selected.offering_id == "pi-gpt-5-6-luna"
     failures = [
         item
         for item in ledger.events(key)
@@ -2582,7 +2584,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
     ]
     assert [item["offering_id"] for item in failures] == [
         "cursor-composer-2-5",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-6-luna",
     ]
     assert all(item["attempt"] == 2 for item in failures)
 

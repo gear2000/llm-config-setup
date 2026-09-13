@@ -132,7 +132,7 @@ Done when the accepted specialist names are a concrete list (possibly empty).
 
 Ask permission once more if dest files will change, then:
 
-1. From the kit checkout: `just configure -d <repo> -l <harnesses>` (add `--offering-sets` or a `placeholders:` map only when collected). This writes `~/.shared-llm.yaml`.
+1. From the kit checkout: `just configure -d <repo> -l <harnesses>` (add `--offering-sets` or a `placeholders:` map only when collected). This writes `~/.shared-llm.yaml`. To park a dest without removing it: `just configure -d <repo> --ignore` (clear with `--unignore`). `ignore: true` is not `exclude:` — `exclude:` skips compose recipes, not dests.
 2. Deposit `<repo>/.shared-llm/this_repo/`. Do not create `public/`; `just update` copies it.
    - Copy needed kit `TEMPLATE.*` stubs from `.shared-llm/public/layers/` (and recipes from `.shared-llm/public/compose/`) into the dest `this_repo/` tree, mirroring `layers/*/this_repo/` and `compose/`. Seed only stubs the accepted map needs. Delete unused stubs (`authoring.md`, `aws-execution-engine.md`, Python package leaves) when they do not apply.
    - Fill stubs from the tree and the user. Appendix groups A–J. Delete the `<!-- TEMPLATE -->` banner and drop the `TEMPLATE.` prefix.
@@ -274,9 +274,11 @@ Use the **accepted file map** from the workflow, not a hardcoded `src/packages` 
 
     ```bash
     just update        # (re)builds every registered destination; add -v for per-file detail
+    just update --ignore <path-or-name>   # one-off skip (repeatable)
+    just update --only <path-or-name>     # one-off: just these dests
     ```
 
-    (Once registered with `just configure -d`, your repo is rebuilt on every `just update`.)
+    (Once registered with `just configure -d`, your repo is rebuilt on every `just update` unless that dest has `ignore: true` or this run's `--ignore` / `--only` skips it. Match the configured path, its expanded form, or the basename; an unmatched argument exits 2.)
 
 3. **Where the outputs land.** Recipe `output:` paths are **root-relative** and resolve against the destination's root:
 

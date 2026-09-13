@@ -30,10 +30,14 @@ You drive it with `just` against a single config file, `~/.shared-llm.yaml`, tha
 just init -o mac|ubuntu          # one-time OS prereq check (python3 + just)
 just configure -s ~/.shared-llm  # set the source hub (default; run once)
 just configure -d /path/to/repo -l cc,pi   # register a destination repo + its harness list
+just configure -d /path/to/repo --ignore   # keep the dest in the config but skip it on update
+just configure -d /path/to/repo --unignore # start updating it again
 just configure -g cc,pi          # set the GLOBAL (home / all-projects) harness list
 just configure --offering-sets standard,claudex  # optional machine UpAgent roster
 just descriptions                # audit owned discovery descriptions without writing files
 just update                      # the headline command: copy → compose → link (+ global), every destination
+just update --ignore <path>      # one-off skip (repeatable; path, expanded path, or basename)
+just update --only <path>        # one-off: run just these dests (repeatable; same matching)
 just update -v                   # same, with per-file detail printed
 just reset                       # heavy hammer: delete all kit-owned state, then rebuild via update
 ```
@@ -65,11 +69,19 @@ destinations:
       PROJECT_NAME: Foo
   - path: ~/project/repo/bar
     harnesses: [cc, pi, codex]
+    ignore: true                 # optional: stay registered, skip copy/compose/link until unignored
     upagent:
       offering_sets: [standard]  # optional replacement, not a merge with machine policy
 ```
 
 `just update` reads this file and runs every operation centrally against the paths it lists. Because the engine is never copied into a destination, it can never drift out of sync with a per-repo copy of itself.
+
+**Skipping a destination.** `exclude:` skips compose *recipes* by source path; it is not a destination filter. To leave a dest registered (placeholders and harness list stay) without touching it:
+
+- Persistent: `ignore: true` on that dest, or `just configure -d /path/to/repo --ignore` (clear with `--unignore`). Every destination loop skips it and prints `  ⏭ ignoring <path> (ignore: true)`.
+- One-off: `just update --ignore <path-or-name>` (repeatable) or `just update --only <path-or-name>` (repeatable). Match the configured path, its expanded form, or its basename. An argument that matches nothing fails loud (exit 2) and names the unmatched value plus the configured paths.
+
+Copy, compose, link, check, reset, and descriptions honour the same skip. The global step (home skills, Pi runtime, herdr config) still runs; ignored dests contribute nothing to skill aggregation, and their existing home skill links are left in place. `just update` with no flags and no `ignore:` keys is unchanged.
 
 ### Optional UpAgent offering sets
 

@@ -88,6 +88,24 @@ def _request_cwd() -> Path:
     return command_runtime.current_cwd()
 
 
+def _ledger_path_for_cwd(cwd: Path) -> str:
+    spec = importlib.util.spec_from_file_location(
+        "upagent_implementer_hub_transport", HERE / "hub_transport.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load UpAgent hub transport")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    override = os.environ.get("UPAGENT_HUB_DIR")
+    if override:
+        return str(Path(override).expanduser().resolve())
+    try:
+        return str(module.ledger_path(cwd))
+    except RuntimeError:
+        repo_id = hashlib.sha256(str(cwd.resolve()).encode()).hexdigest()[:20]
+        return str(Path.home() / ".local/state/herdr/upagent" / repo_id / "ledger")
+
+
 def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -661,6 +679,7 @@ def start_implementer(
             ownership['implementer'] = cleanup_owner
             receipt = {
                 "cwd": str(cwd),
+                "ledger_path": _ledger_path_for_cwd(cwd),
                 "supervise": supervise,
                 "run_watch": budget['run_watch'],
                 "startup_budget": budget,

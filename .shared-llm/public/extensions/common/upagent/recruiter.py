@@ -49,6 +49,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import shutil
 import stat
@@ -2067,7 +2068,13 @@ class JobLedger:
             return True
 
     def mark_awaiting_requester(
-        self, key: str, token: str, nonce: str, timeout_number: int
+        self,
+        key: str,
+        token: str,
+        nonce: str,
+        timeout_number: int,
+        *,
+        requester_grace_ms: int,
     ) -> dict | None:
         """Publish a timeout decision only while running; a review transition wins races."""
         claim_dir = self.active / "requests" / key
@@ -2077,12 +2084,47 @@ class JobLedger:
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
                 raise RecruiterError("request lease changed before timeout warning")
-            if self.state(key).get("state") != "running":
+            if self.state(key).get("state") not in ("running", "stalled"):
                 return None
-            detail = {"decision_nonce": nonce, "timeout_number": timeout_number}
+            detail = {
+                "decision_nonce": nonce,
+                "timeout_number": timeout_number,
+            }
             self._event(key, "timeout-warning", **detail)
             self._snapshot(key, "awaiting-requester", **lease, **detail)
             return lease
+
+    def stamp_requester_decision_deadline(
+        self, key: str, token: str, deadline_epoch: float
+    ) -> None:
+        """Persist the requester grace wall clock at the instant the grace loop starts."""
+        claim_dir = self.active / "requests" / key
+        with self._claim_lock(key):
+            if not claim_dir.is_dir():
+                raise RecruiterError(
+                    "request lease disappeared before requester grace began"
+                )
+            lease = self._lease(claim_dir / "lease.json")
+            if lease["token"] != token:
+                raise RecruiterError(
+                    "request lease changed before requester grace began"
+                )
+            current = self.state(key)
+            if current.get("state") != "awaiting-requester":
+                raise RecruiterError(
+                    "request is no longer awaiting a requester decision"
+                )
+            preserved = {
+                key: value
+                for key, value in current.items()
+                if key not in ("state", "at_ns")
+            }
+            self._snapshot(
+                key,
+                "awaiting-requester",
+                **preserved,
+                requester_decision_deadline=deadline_epoch,
+            )
 
     def extend_lease(self, key: str, token: str, extension_ms: int) -> int:
         """Extend only the current generation and add a new expiry index entry."""
@@ -2558,6 +2600,11 @@ class JobLedger:
                 "cleanup": cleanup,
                 "generation": lease.get("generation", 1),
                 "order_id": order["order_id"],
+                **(
+                    {"reason": parsed["reason"]}
+                    if isinstance(parsed.get("reason"), str) and parsed["reason"]
+                    else {}
+                ),
                 "published_result_path": str(published),
                 "request_id": lease.get(
                     "request_id", lifecycle.request_identity(order)
@@ -3365,7 +3412,7 @@ def inspect_worker_configuration(order: dict, roster: dict) -> dict[str, object]
         except OfferingError as error:
             errors.append(str(error))
     agent_candidates: list[str] = []
-    if order["harness"] == "claude" and "--agent {agent}" in template:
+    if order["harness"] in ("claude", "claudex"):
         agent_file = f"{order['agent']}.md"
         roots = [cwd / ".claude/agents", Path.home() / ".claude/agents"]
         agent_candidates = [str(root / agent_file) for root in roots]
@@ -3579,8 +3626,115 @@ def _herdr(*args: str, herdr_session: str | None = None) -> None:
         )
 
 
+PROGRESS_OUTPUT_LINES = 80
+PROGRESS_OUTPUT_MAX_BYTES = 65_536
+PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS = 30.0
+FINGERPRINT_HERDR_TIMEOUT_SECONDS = 5.0
+
+
+def _terminate_subprocess(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            with suppress(Exception):
+                stream.close()
+    process.kill()
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=1)
+
+
+def _run_herdr_text_capped(
+    argv: list[str],
+    *,
+    session: str,
+    display_args: Sequence[str],
+    timeout_seconds: float | None,
+    max_bytes: int,
+) -> str:
+    """Run herdr and return stdout without buffering more than max_bytes in memory.
+
+    Both pipes are drained with nonblocking fd reads so a child that writes one byte and
+    then stalls, or floods stderr past the pipe capacity, can never block past the
+    deadline. A missing timeout falls back to PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS so no
+    caller can bypass its outer deadline. Every timeout or cap path kills and reaps the child.
+    """
+    _herdr_available()
+    if timeout_seconds is None:
+        timeout_seconds = PROGRESS_READ_DEFAULT_TIMEOUT_SECONDS
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, display_args)} could not run: {error}"
+        ) from error
+    assert process.stdout is not None
+    assert process.stderr is not None
+    out_fd = process.stdout.fileno()
+    err_fd = process.stderr.fileno()
+    for fd in (out_fd, err_fd):
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    deadline = time.monotonic() + timeout_seconds
+    stdout = bytearray()
+    stderr = bytearray()
+    open_fds = {out_fd, err_fd}
+    capped = False
+    while open_fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_subprocess(process)
+            raise RecruiterError(
+                f"{_herdr_command_display(session, display_args)} timed out after {timeout_seconds} seconds"
+            )
+        ready, _, _ = select.select(sorted(open_fds), [], [], min(remaining, 0.1))
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 65_536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                open_fds.discard(fd)
+                continue
+            if fd == out_fd:
+                stdout.extend(chunk)
+                if len(stdout) > max_bytes:
+                    del stdout[max_bytes:]
+                    capped = True
+                    _terminate_subprocess(process)
+                    open_fds.clear()
+                    break
+            else:
+                stderr.extend(chunk)
+                if len(stderr) > max_bytes:
+                    del stderr[:-max_bytes]
+    if not capped:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as error:
+            _terminate_subprocess(process)
+            raise RecruiterError(
+                f"{_herdr_command_display(session, display_args)} timed out after {timeout_seconds} seconds"
+            ) from error
+    for stream in (process.stdout, process.stderr):
+        with suppress(Exception):
+            stream.close()
+    if not capped and process.returncode not in (0, None):
+        raise RecruiterError(
+            f"{_herdr_command_display(session, display_args)} failed: {bytes(stderr).decode('utf-8', errors='replace').strip()}"
+        )
+    return bytes(stdout).decode("utf-8", errors="replace")
+
+
 def _pane_recent_output(
-    pane: str, lines: int = 80, *, herdr_session: str | None = None
+    pane: str,
+    lines: int = 80,
+    *,
+    herdr_session: str | None = None,
+    timeout_seconds: float | None = None,
+    max_bytes: int = PROGRESS_OUTPUT_MAX_BYTES,
 ) -> str:
     _herdr_available()
     session, argv = _herdr_argv(
@@ -3595,16 +3749,13 @@ def _pane_recent_output(
         ),
         herdr_session,
     )
-    process = subprocess.run(
+    return _run_herdr_text_capped(
         argv,
-        capture_output=True,
-        text=True,
+        session=session,
+        display_args=("pane", "read", pane),
+        timeout_seconds=timeout_seconds,
+        max_bytes=max_bytes,
     )
-    if process.returncode != 0:
-        raise RecruiterError(
-            f"{_herdr_command_display(session, ('pane', 'read', pane))} failed: {process.stderr.strip()}"
-        )
-    return process.stdout
 
 
 def _cursor_startup_failure_message(output: str) -> str | None:
@@ -3623,6 +3774,151 @@ def _worker_inactivity_check_ms(order: dict, configured_ms: int) -> int:
     if order.get("harness") != "cursor":
         return configured_ms
     return min(configured_ms, CURSOR_INACTIVITY_CHECK_MS)
+
+
+def worker_progress_fingerprint(
+    *,
+    token_count: int | None,
+    pane_output: str,
+    lines: int = PROGRESS_OUTPUT_LINES,
+    max_bytes: int = PROGRESS_OUTPUT_MAX_BYTES,
+) -> dict[str, object]:
+    """Mechanical progress fingerprint: token count plus a hash of recent pane output."""
+    tail = "\n".join(pane_output.splitlines()[-lines:])
+    encoded = tail.encode("utf-8")
+    if len(encoded) > max_bytes:
+        encoded = encoded[-max_bytes:]
+    return {
+        "output_sha256": hashlib.sha256(encoded).hexdigest(),
+        "token_count": token_count,
+    }
+
+
+def progress_fingerprint_frozen(previous: object, current: object) -> bool:
+    return isinstance(previous, dict) and isinstance(current, dict) and previous == current
+
+
+def _progress_state_path(ledger: JobLedger, key: str) -> Path:
+    return ledger.request_dir(key) / "state" / "progress.json"
+
+
+def _load_progress_state(ledger: JobLedger, key: str) -> dict[str, object]:
+    path = _progress_state_path(ledger, key)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RecruiterError(f"progress state {path} is unreadable: {error}") from error
+    if not isinstance(payload, dict):
+        raise RecruiterError(f"progress state {path} must be a JSON object")
+    return payload
+
+
+def record_progress_fingerprint(ledger: JobLedger, key: str, fingerprint: dict) -> bool:
+    """Persist a checkpoint fingerprint. True when it was unchanged across the window."""
+    previous_payload = _load_progress_state(ledger, key)
+    previous = previous_payload.get("fingerprint")
+    frozen = progress_fingerprint_frozen(previous, fingerprint)
+    payload: dict[str, object] = {
+        "at_ns": time.time_ns(),
+        "fingerprint": fingerprint,
+        "frozen": frozen,
+        "previous_fingerprint": previous,
+    }
+    JobLedger._write_json(_progress_state_path(ledger, key), payload)
+    current = ledger.state(key)
+    detail = {
+        name: value
+        for name, value in current.items()
+        if name
+        not in ("state", "at_ns", "progress_fingerprint", "progress_stall_reason")
+    }
+    if frozen:
+        ledger._snapshot(
+            key,
+            "stalled",
+            **detail,
+            progress_fingerprint=fingerprint,
+            progress_stall_reason="progress fingerprint unchanged across inactivity window",
+        )
+    else:
+        restore = current.get("state")
+        if restore == "stalled":
+            restore = "running"
+        ledger._snapshot(
+            key,
+            restore if isinstance(restore, str) else "running",
+            **detail,
+            progress_fingerprint=fingerprint,
+        )
+    return frozen
+
+
+def apply_inactivity_progress(
+    ledger: JobLedger,
+    key: str,
+    fingerprint: dict,
+    nudge: Callable[[], None] | None = None,
+) -> bool:
+    """Record one inactivity fingerprint and route a freeze into the stall-nudge ladder."""
+    stalled = record_progress_fingerprint(ledger, key, fingerprint)
+    if stalled and nudge is not None:
+        nudge()
+    return stalled
+
+
+def _token_count_from_status(payload: object) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    for field in ("token_count", "tokens", "total_tokens"):
+        value = payload.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    for field in ("usage", "pane", "agent", "result"):
+        found = _token_count_from_status(payload.get(field))
+        if found is not None:
+            return found
+    return None
+
+
+def capture_worker_progress_fingerprint(
+    pane: str, *, herdr_session: str | None = None
+) -> dict[str, object]:
+    status = _herdr_json(
+        "pane",
+        "get",
+        pane,
+        timeout_seconds=FINGERPRINT_HERDR_TIMEOUT_SECONDS,
+        herdr_session=herdr_session,
+    )
+    output = _pane_recent_output(
+        pane,
+        lines=PROGRESS_OUTPUT_LINES,
+        herdr_session=herdr_session,
+        timeout_seconds=FINGERPRINT_HERDR_TIMEOUT_SECONDS,
+    )
+    return worker_progress_fingerprint(
+        token_count=_token_count_from_status(status),
+        pane_output=output,
+    )
+
+
+def _progress_fingerprint_is_frozen(ledger: JobLedger, key: str) -> bool:
+    return _load_progress_state(ledger, key).get("frozen") is True
+
+
+def _refuse_frozen_extension(ledger: JobLedger, key: str) -> str:
+    reason = "progress fingerprint unchanged across inactivity window"
+    payload = {**_load_progress_state(ledger, key), "extension_refused_reason": reason}
+    JobLedger._write_json(_progress_state_path(ledger, key), payload)
+    current = ledger.state(key)
+    JobLedger._write_json(
+        ledger.request_dir(key) / "state" / "latest.json",
+        {**current, "extension_refused_reason": reason},
+    )
+    ledger._event(key, "extension-refused", reason=reason)
+    return reason
 
 
 def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
@@ -6333,6 +6629,8 @@ class _SentinelWatch:
         )
         terminal_valid = self._terminal_valid()
         status = pane.get("agent_status")
+        if self.ledger.state(self.key).get("state") == "stalled":
+            status = "idle"
         if not terminal_valid and not self._nudge_state_allows(at="delivery"):
             status = "blocked"
         return Probe(
@@ -7036,6 +7334,11 @@ def _may_preserve_worker_result(
 ) -> bool:
     """A wait fault may preserve only a semantically terminal worker result."""
     if not startup_validated or order.get("completion_policy") == "requester_release":
+        return False
+    if result.get("hub_terminal") == "missing-worker" and result.get("verdict") == "failed":
+        return True
+    reason = result.get("reason")
+    if isinstance(reason, str) and reason.startswith("recruiter:"):
         return False
     try:
         return _watchdog_terminal_reason(order, result) is None
@@ -8182,14 +8485,16 @@ def _await_requester_timeout_decision(
     """Ask the recorded owner before a hard stop; return an authorized extension in ms."""
     generation = cast(int, manager["generation"])
     request_id = lifecycle.request_identity(order)
+    config = cast(Any, manager["config"])
     nonce = uuid.uuid4().hex
-    lease = ledger.mark_awaiting_requester(key, token, nonce, timeout_number)
+    lease = ledger.mark_awaiting_requester(
+        key, token, nonce, timeout_number, requester_grace_ms=config.requester_grace_ms
+    )
     if lease is None:
         # Release or feedback delivery won the state race. Permit one bounded finalization
         # grace; a second timeout hard-stops instead of extending forever.
         return ledger.consume_review_transition_grace(key, token)
     control_token = cast(str, lease["requester_control_token"])
-    config = cast(Any, manager["config"])
     response_path = ledger.request_dir(key) / "responses" / f"{nonce}.json"
     command = (
         f"just upagent-respond {shlex.quote(str(ledger.request_dir(key) / 'request.json'))} "
@@ -8223,7 +8528,10 @@ def _await_requester_timeout_decision(
             "worker_pane": worker_pane,
         },
     )
-    deadline = time.monotonic() + config.requester_grace_ms / 1000
+    grace_seconds = config.requester_grace_ms / 1000
+    deadline_epoch = time.time() + grace_seconds
+    ledger.stamp_requester_decision_deadline(key, token, deadline_epoch)
+    deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
         if monitor_finalized is not None and monitor_finalized.is_set():
             ledger._event(
@@ -8243,6 +8551,9 @@ def _await_requester_timeout_decision(
                 ) from error
             if decision.action == "extend":
                 assert decision.extension_ms is not None
+                if _progress_fingerprint_is_frozen(ledger, key):
+                    _refuse_frozen_extension(ledger, key)
+                    return None
                 ledger.extend_lease(key, token, decision.extension_ms)
                 _notify_requester(
                     ledger,
@@ -8268,6 +8579,13 @@ def _await_requester_timeout_decision(
             )
             return None
         time.sleep(HEALTH_PROBE_SECONDS)
+    _terminalize_missing_worker(
+        ledger,
+        key,
+        token,
+        order,
+        "awaiting-requester deadline lapsed without a requester decision",
+    )
     _notify_requester(
         ledger,
         key,
@@ -8608,15 +8926,19 @@ def _run_order(
         else:
             # A filesystem failure writing the fallback propagates.  Without a valid result,
             # the caller must not publish terminal state or DONE.
-            try:
-                # The order's own result contract applies here too: preserving a review result
-                # that lacks its validated verdict_document would republish exactly the
-                # unusable "passed" this contract exists to prevent.
-                existing_result = contracts.result_loader(order)(
-                    worker_result_path, expected_order_id=order_id
+            loader = contracts.result_loader(order)
+            candidate_paths = [worker_result_path]
+            if artifact_manifest is not None:
+                candidate_paths.append(
+                    artifact_manifest.artifact("result").staging_path
                 )
-            except ContractError:
-                existing_result = None
+            existing_result = None
+            for candidate in candidate_paths:
+                try:
+                    existing_result = loader(candidate, expected_order_id=order_id)
+                    break
+                except ContractError:
+                    continue
             preserve_existing = (
                 existing_result is not None
                 and _may_preserve_worker_result(
@@ -8687,9 +9009,22 @@ def _run_order(
     # rejected the worker's own bytes. A worker cannot smuggle the verdict through — its
     # result is measured strictly by `validate()` before this line is ever reached, and any
     # value that reaches `finalize` without a salvage record is re-checked strictly there.
-    result = load_result(
-        worker_result_path, expected_order_id=order_id, allow_synthesized=True
-    )
+    return_paths = [worker_result_path]
+    if artifact_manifest is not None:
+        return_paths.append(artifact_manifest.artifact("result").staging_path)
+    result: dict | None = None
+    for return_path in return_paths:
+        try:
+            result = load_result(
+                return_path, expected_order_id=order_id, allow_synthesized=True
+            )
+            break
+        except ContractError:
+            continue
+    if result is None:
+        raise ContractError(
+            f"no valid worker result at {worker_result_path} or staged artifact path"
+        )
     final_label = "blocked" if fell_back else "done"
     _report_state(
         my_pane,
@@ -10543,6 +10878,74 @@ def _write_required_blocked_bundle(
     )
 
 
+def _write_failed_result(
+    order: dict,
+    reason: str,
+    result_path: str | Path | None = None,
+    *,
+    epilogue: dict | None = None,
+    hub_terminal: str | None = None,
+) -> dict:
+    """Author a valid failed result so a result.json watch can fire."""
+    path = Path(result_path or order["result_path"])
+    stage = order.get("stage_id")
+    if stage not in RECOGNIZED_STAGE_IDS:
+        raise RecruiterError(
+            f"failed result requires a recognized stage_id, got {stage!r}"
+        )
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "failed",
+        "revisit": [stage],
+        "reason": f"recruiter: {reason}",
+        "full_log": "(none — worker did not run to completion)",
+        **({"epilogue": epilogue} if epilogue is not None else {}),
+        **({"hub_terminal": hub_terminal} if hub_terminal is not None else {}),
+    }
+    JobLedger._write_json(path, result)
+    return load_result(path, expected_order_id=order["order_id"])
+
+
+def _write_required_failed_bundle(
+    order: dict, manifest: Any, reason: str, *, hub_terminal: str | None = None
+) -> dict:
+    epilogue = _epilogue_evidence(order, manifest)
+    result = cast(
+        dict,
+        completion.write_failed_bundle(
+            manifest,
+            reason,
+            write_result=lambda path, why: _write_failed_result(
+                order, why, path, epilogue=epilogue, hub_terminal=hub_terminal
+            ),
+            failure_answer=contracts_consult.failure_answer,
+        ),
+    )
+    public_path = Path(order["result_path"])
+    if public_path.resolve() != manifest.artifact("result").staging_path.resolve():
+        JobLedger._write_json(public_path, result)
+    return result
+
+
+def _terminalize_missing_worker(
+    ledger: JobLedger, key: str, token: str, order: dict, reason: str
+) -> dict:
+    """Write a failed bundle when the runner died or requester grace lapsed."""
+    manifest = completion.build_manifest(
+        order, ledger.request_dir(key), token, lifecycle.request_identity(order)
+    )
+    manifest_path = ledger.request_dir(key) / "artifact-manifest.json"
+    try:
+        completion.parse_manifest(manifest_path.read_text(), manifest)
+    except (OSError, CompletionError):
+        completion.write_manifest(manifest_path, manifest)
+    result = _write_required_failed_bundle(
+        order, manifest, reason, hub_terminal="missing-worker"
+    )
+    ledger._event(key, "worker-missing-failed", reason=reason)
+    return result
+
+
 def error_chain(error: BaseException) -> list[str]:
     """The ordered root-cause chain behind one failure, terminal message first.
 
@@ -11172,11 +11575,8 @@ def _reconcile_claim(
             )
             result = salvage["result"]
     else:
-        result = _write_required_blocked_bundle(
-            order,
-            manifest,
-            f"runner reconciliation could not close worker pane {worker_pane}",
-        )
+        reason = f"runner reconciliation could not close worker pane {worker_pane}"
+        result = _write_required_blocked_bundle(order, manifest, reason)
     if salvage is not None:
         result = salvage["result"]
     finalized = ledger.finalize(
@@ -12887,6 +13287,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     sentinel_state: dict[str, object] = {}
     sentinel_context: dict[str, object] = {}
     sentinel_cleanups: list[dict[str, object]] = []
+    watch_holder: dict[str, Any] = {}
     # One requester notification per distinct degrade reason per invocation: the ledger
     # records every attempt's degrade (typed, with the attempt number), but a persona
     # missing on attempt 1 is still missing on attempt 2 and must not spam the requester.
@@ -12969,6 +13370,21 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             assert manager is not None
             with inactivity_lock:
                 try:
+                    fingerprint = capture_worker_progress_fingerprint(
+                        worker_pane, herdr_session=herdr_session
+                    )
+                    watch = watch_holder.get("watch")
+
+                    def issue_nudge() -> None:
+                        if watch is not None:
+                            watch._attempt_stall_nudge(
+                                "progress fingerprint unchanged across inactivity window",
+                                trigger="progress",
+                            )
+
+                    apply_inactivity_progress(
+                        ledger, key, fingerprint, nudge=issue_nudge
+                    )
                     _run_one_shot_checker(
                         ledger,
                         key,
@@ -13272,6 +13688,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             sentinel_watch.status_first = management_config.status_first
             sentinel_watch.generation = generation
             sentinel_watch.attempt = attempt
+        watch_holder["watch"] = sentinel_watch
         before = len(worker_launches)
         try:
             outcome = _run_order(

@@ -27,13 +27,18 @@ init *args:
 # Create/update ~/.shared-llm.yaml. Examples:
 #   just configure -s ~/.shared-llm
 #   just configure -d /path/to/repo -l cc,pi
+#   just configure -d /path/to/repo --ignore    # keep the entry, skip it on update
+#   just configure -d /path/to/repo --unignore
 #   just configure -g cc,pi                     # set the global harness list
 configure *args:
     ${PYTHON_BIN:-python3} tools/harness.py configure {{args}}
 
 # The headline command: copy → compose → link (+ global) across every configured
-# destination. `just update -v` prints per-file detail (always written to the log
-# under /tmp/.shared-llm/log/).
+# destination. Destinations with `ignore: true` are skipped (one line each:
+# `⏭ ignoring <path> (ignore: true)`). One-off filters: `--ignore PATH` (repeatable)
+# and `--only PATH` (repeatable); PATH is the configured path, its expanded form,
+# or the basename. `just update -v` prints per-file detail (always written to the
+# log under /tmp/.shared-llm/log/).
 update *args:
     ${PYTHON_BIN:-python3} tools/harness.py update {{args}}
 

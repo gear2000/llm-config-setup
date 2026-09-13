@@ -11,6 +11,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -237,7 +238,7 @@ def test_verifier_request_ignores_unrelated_invalid_specialist_roster(
                 "--request",
                 REQUEST_ID,
                 "--offering",
-                "pi-gpt-5-4-mini",
+                "pi-gpt-5-6-luna",
                 "--effort",
                 "low",
                 "--agent",
@@ -455,7 +456,7 @@ def test_review_status_preserves_requester_timeout_decision(
         key, token, "worker-pane", "workspace", "worker-address"
     )
     assert ledger.mark_worker_healthy(key, token, {"healthy": True})
-    ledger.mark_awaiting_requester(key, token, "nonce-1", 1)
+    ledger.mark_awaiting_requester(key, token, "nonce-1", 1, requester_grace_ms=300_000)
 
     status = public_api._public_status(store, registered)
     assert status["state"]["state"] == "awaiting-requester"
@@ -886,7 +887,7 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
     commands = [candidate["command"] for candidate in manager["candidates"]]
     assert all("legacy-manager" not in command for command in commands)
     assert commands[0].startswith("cursor-agent --force --trust --model composer-2.5")
-    assert "--model openai-codex/gpt-5.4-mini --thinking low" in commands[1]
+    assert "--model openai-codex/gpt-5.6-luna --thinking high" in commands[1]
 
 
 def test_same_id_same_hash_attaches_without_second_launch_and_changed_prompt_conflicts(
@@ -1120,6 +1121,79 @@ def test_terminal_same_id_attachment_never_resolves_a_new_cockpit_pane(
     )
 
     assert public_api.execute(_args(_worker_argv(tmp_path)), tmp_path) == 0
+
+
+def test_request_cli_response_carries_unresolvable_agent_search_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "recruiter-pane")
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_resolve_current_herdr_session_name",
+        lambda: "current-session",
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_live_pane_ids",
+        lambda *, herdr_session=None: {"recruiter-pane"},
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_herdr_owner_record",
+        lambda: {"herdr_session": "test-session"},
+    )
+    monkeypatch.setattr(
+        public_api.recruiter.shutil, "which", lambda binary: f"/bin/{binary}"
+    )
+    monkeypatch.setattr(
+        public_api.recruiter, "_notify_requester", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        public_api.recruiter,
+        "_direct_manager",
+        lambda *args, **kwargs: {
+            "address": None,
+            "config": args[0],
+            "generation": 1,
+            "health": None,
+            "herdr_session": "test-session",
+            "pane": None,
+            "workspace_id": None,
+        },
+    )
+
+    def spawn(key: str, roster_path: str) -> Any:
+        public_api.recruiter.cmd_run_job(key, roster_path)
+        return SimpleNamespace(poll=lambda: 1)
+
+    monkeypatch.setattr(public_api.recruiter, "_spawn_job", spawn)
+    persona = tmp_path / ".agents/agents/missing-agent-not-installed.md"
+    persona.parent.mkdir(parents=True)
+    persona.write_text("---\nname: missing-agent-not-installed\n---\n")
+    agent = "missing-agent-not-installed"
+    cwd_agent = str(tmp_path / ".claude/agents" / f"{agent}.md")
+    home_agent = str(Path.home() / ".claude/agents" / f"{agent}.md")
+    argv = _worker_argv(
+        tmp_path,
+        offering="claude-sonnet-5",
+        agent=agent,
+    )
+    argv.extend(["--cockpit-pane", "recruiter-pane"])
+
+    assert public_api.execute(_args(argv), tmp_path) == 1
+
+    rendered = capsys.readouterr().out
+    human_lines = [
+        line
+        for line in rendered.splitlines()
+        if line.startswith(f"request {REQUEST_ID}:")
+    ]
+    assert human_lines, rendered
+    assert cwd_agent in human_lines[-1]
+    assert home_agent in human_lines[-1]
 
 
 def test_prompt_bytes_and_offering_snapshot_are_immutable_request_evidence(
