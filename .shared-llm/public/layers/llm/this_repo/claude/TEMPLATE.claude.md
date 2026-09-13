@@ -25,4 +25,4 @@ Every `/do-plan*` plan ends with a docs-check. No relevant changes: no-op.
 
 Long CI waits can go to a subagent so this session stays responsive.
 
-Start with one agent. Add a specialist only when the work needs it. The leader does not read or write code unless the user approved it.
+Start with one agent. Add a specialist only when the work needs it. The session that dispatches agents does not read or write code itself unless the user approved it.

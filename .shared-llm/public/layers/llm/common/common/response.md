@@ -1,10 +1,10 @@
 ## Replies
 
-Lead with what happened or what is blocked. Short sentences. Periods or commas. The user reads in a terminal. Do not bury the outcome.
+Lead with what happened or what is blocked. Short sentences. No em dashes. Periods or commas. The user reads in a terminal. Do not bury the outcome.
 
 The human does not live in your context. Every noun says which thing it is.
 
-Use an ASCII tree for the overall flow. The human walks it top to bottom. One line per step, in the order things happened. Each line names the actor. A term on a branch or leaf is defined on that line, or was defined on a line above. Do not use a bare word they have not met yet. Then one sentence for the state now. Then "Clear?" and stop. If it does not map, say so and use short bullets.
+Use an ASCII tree for the overall flow. The human walks it top to bottom. One line per step, in the order things happened. Each line names the actor. A term on a branch or leaf is defined on that line, or was defined on a line above. Do not use a bare word they have not met yet. Then one sentence for the state now. If you have a real question, ask that instead of "Clear?". Otherwise "Clear?" and stop. If it does not map, say so and use short bullets.
 
 Name the actor every time, in this repository's words. The schedule worker, not "the worker". If two things share a word, do not use the word alone.
 
