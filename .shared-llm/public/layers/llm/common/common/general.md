@@ -2,6 +2,8 @@
 
 Commit as the human only. Do not add the agent as a coauthor.
 
+Do not hand-edit CHANGELOG.md or any generated file.
+
 Prefer quality, simplicity, and long term maintainability over speed.
 
 Reproduce a bug the way a user hits it before you fix it.
