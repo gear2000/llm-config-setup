@@ -7179,6 +7179,9 @@ def _may_preserve_worker_result(
     """A wait fault may preserve only a semantically terminal worker result."""
     if not startup_validated or order.get("completion_policy") == "requester_release":
         return False
+    reason = result.get("reason")
+    if isinstance(reason, str) and reason.startswith("recruiter:"):
+        return False
     try:
         return _watchdog_terminal_reason(order, result) is None
     except ContractError:
@@ -11385,21 +11388,9 @@ def _reconcile_claim(
                 ledger, key, order, manifest, f"runner reconciliation: {error}"
             )
             result = salvage["result"]
-            if result.get("verdict") == "blocked" and not runner_alive:
-                salvage = None
-                result = _write_required_failed_bundle(
-                    order,
-                    manifest,
-                    f"runner pid died; runner reconciliation: {error}",
-                )
     else:
         reason = f"runner reconciliation could not close worker pane {worker_pane}"
-        if not runner_alive:
-            result = _write_required_failed_bundle(
-                order, manifest, f"runner pid died; {reason}"
-            )
-        else:
-            result = _write_required_blocked_bundle(order, manifest, reason)
+        result = _write_required_blocked_bundle(order, manifest, reason)
     if salvage is not None:
         result = salvage["result"]
     finalized = ledger.finalize(

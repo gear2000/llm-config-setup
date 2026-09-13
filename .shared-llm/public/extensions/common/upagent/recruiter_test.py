@@ -2659,6 +2659,17 @@ def test_unreleased_retained_result_is_never_preserved_after_wait_fault() -> Non
     )
 
 
+def test_wait_fault_never_preserves_a_recruiter_authored_missing_worker_result() -> None:
+    order = _order()
+    result = {
+        **_result(order["order_id"], verdict="failed"),
+        "reason": "recruiter: awaiting-requester deadline lapsed without a requester decision",
+    }
+    assert not recruiter._may_preserve_worker_result(
+        order, result, startup_validated=True
+    )
+
+
 def test_finalize_rejects_unreleased_retained_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
