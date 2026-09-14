@@ -16,7 +16,7 @@ notes: |
   plan, the full diff or candidate identity, every phase outcome and the validation evidence, and
   audits the whole scope, not one phase. To run two final audits on a very big plan, list two finalize
   workflows in the assignment; both must pass, one pass cannot override the other's findings, and the
-  list order is the run order unless the assignment says parallel (read-only, same frozen candidate).
+  they run one after the other in list order against the same frozen candidate.
   Failures go to the owning controller and the root HIL; human-authorized repairs go through the
   owning phase and require fresh checks and a fresh final audit. A final pass grants no push,
   deployment or rollback permission.

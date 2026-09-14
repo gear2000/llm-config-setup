@@ -122,7 +122,7 @@ CONVERT   <span class="you">you</span> in a Pi pane (same worktree):
           <span class="cmd">/cc-convert-pattern-10 --plan plan.md</span>  (Pi: <span class="cmd">/do-convert-pattern-10</span>)
             -> grades each phase easy / medium / hard
             -> workflow.draft.yaml, then workflow.yaml after <span class="you">you approve</span> the split
-          
+
 
 LAUNCH    <span class="you">you</span> start Claude Code in a Herdr pane:
           <span class="cmd">/upagent-pattern-10 --plan plan.md --workflow workflow.yaml \
@@ -146,8 +146,9 @@ RUN       plan-implementer, phase by phase, reads the assigned workflow file
 <div>
 <h3 class="mt-0"><code>phase-high-Sol.yaml</code></h3>
 <pre><span class="k">workflow</span>: phase-high-Sol
+<span class="k">kind</span>: phase
 <span class="k">tier</span>: high
-<span class="k">retries</span>: 5            <span class="c"># coder -> reviewers loops, then ask you</span>
+<span class="k">retries</span>: 5            <span class="c"># repair loops after the first attempt, then ask you</span>
 
 <span class="k">stages</span>:
   - <span class="k">role</span>: coder
@@ -158,14 +159,16 @@ RUN       plan-implementer, phase by phase, reads the assigned workflow file
     <span class="k">effort</span>: high
     <span class="k">adversarial</span>: true
   - <span class="k">role</span>: checks
-    <span class="k">workflow</span>: validate-Composer
+    <span class="k">workflow</span>: validation      <span class="c"># the assignment's validation workflow</span>
 
 <span class="k">pass</span>: every reviewer and checks stage passes
-      on the same candidate</pre>
+      on the same candidate
+<span class="k">controller_requirements</span>: controller-requirements.md</pre>
 </div>
 <div>
-<h3 class="mt-0">With a second reviewer and an audit</h3>
-<pre><span class="k">workflow</span>: phase-high-Luna-double
+<h3 class="mt-0">A custom workflow with a second reviewer and an audit</h3>
+<pre><span class="k">workflow</span>: phase-high-Luna-double   <span class="c"># not bundled; put it in your own pool</span>
+<span class="k">kind</span>: phase
 <span class="k">tier</span>: high
 <span class="k">retries</span>: 5
 
@@ -182,14 +185,15 @@ RUN       plan-implementer, phase by phase, reads the assigned workflow file
     <span class="k">effort</span>: low
     <span class="k">adversarial</span>: true
   - <span class="k">role</span>: checks
-    <span class="k">workflow</span>: validate-Composer
+    <span class="k">workflow</span>: validation
   - <span class="k">role</span>: auditor             <span class="c"># optional</span>
     <span class="k">offering</span>: pi-gpt-6-astra
     <span class="k">effort</span>: medium
-    <span class="k">retries</span>: 2                <span class="c"># own bound</span>
+    <span class="k">retries</span>: 2                <span class="c"># own counter for audit findings</span>
 
 <span class="k">pass</span>: every reviewer, checks and auditor
-      stage passes on the same candidate</pre>
+      stage passes on the same candidate
+<span class="k">controller_requirements</span>: controller-requirements.md</pre>
 </div>
 </div>
 <pre class="mt-3"><span class="c"># finalize-adversarial-Sol.yaml   (also -Fable, -Astra; one file per model, no choose-from)</span>
@@ -204,9 +208,9 @@ RUN       plan-implementer, phase by phase, reads the assigned workflow file
   <span class="k">phase-2</span>: phase-medium-Luna
   <span class="k">phase-3</span>: phase-high-Luna-double
 <span class="k">validation</span>: validate-Composer
-<span class="k">finalize</span>: finalize-adversarial-Fable        <span class="c"># or a list of two; both must pass</span>
+<span class="k">finalize</span>: finalize-adversarial-Fable        <span class="c"># or a list of two; both must pass, in list order</span>
 <span class="k">controller</span>: delegated-implementer</pre>
-<p class="mt-2">Retries: one loop is coder, then every reviewer, then checks. Findings go back to the same coder. After the last loop the implementer stops and asks you through the HIL. A stage with its own <code>retries</code> keeps its own counter. This stays an agent-followed contract, not a mechanical gate; attempt counts are recorded in run status.</p>
+<p class="mt-2">Retries: the stages run once, top to bottom. Any finding goes back to the same coder and every later stage reruns; that is one repair loop, and <code>retries</code> is how many are allowed after the first attempt. A stage with its own <code>retries</code> spends that counter instead for findings it raised. When a counter is spent the controller stops and asks you. This stays an agent-followed contract, not a mechanical gate; attempt counts are recorded in run status.</p>
 
 </body>
 </html>

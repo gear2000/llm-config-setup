@@ -1,7 +1,7 @@
 workflow: phase-high-Luna
 kind: phase
 tier: high
-retries: 5            # coder -> reviewers -> checks loops, then stop and ask the human
+retries: 5            # repair loops after the initial attempt, then stop and ask the human
 
 stages:
   - role: coder
@@ -20,7 +20,7 @@ pass: every reviewer, checks and auditor stage passes on the same candidate
 controller_requirements: controller-requirements.md
 notes: |
   Default hard-tier workflow while GPT 5.6 Luna is discounted. No intermediate review, no phase audit.
-  
+
   Findings from any reviewer, checks or auditor go back to the same coder; the coder model never
   changes on retry. After the last loop, stop and ask the human through the root HIL; never add a
   silent extra hire. Advance only when the current candidate passes every stage. The assigned

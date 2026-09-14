@@ -17,20 +17,20 @@ No `--offering` or `--effort`: the controller is the agent the human already sta
 
 ## Pool, workflow and assignment
 
-Identical to `/upagent-pattern-10`: read its installed `SKILL.md` for the workflow file shape (`stages`, `retries`, `pass`, `controller_requirements`), the assignment keys (`phases` or `plan_flow`, `validation`, `finalize`, optional `pool`) and the pre-launch checks. Its `workflows/` pool is this skill's pool too; the same files serve both patterns. The one difference: the assignment's `controller` key is ignored here, because this pane is the controller. `controller-requirements.md` binds this pane directly.
+Identical to `/upagent-pattern-10`: read its installed `SKILL.md` for the workflow file shape (`stages`, `retries`, `pass`, `controller_requirements`), the assignment keys (`phases` or `plan_flow`, `validation`, `finalize`, optional `pool`) and the pre-launch checks. Its `workflows/` pool is this skill's pool too; the same files serve both patterns. The one difference: the assignment's `controller` key is accepted and ignored here, because this pane is the controller. One `workflow.yaml` is valid for both patterns. `controller-requirements.md` binds this pane directly.
 
 ## Run
 
 1. Preflight exactly as Pattern 10: approved plan, every phase assigned once, safe YAML parse, every offering and effort present in `just upagent lists --type offerings --json`, open choices settled with the human and recorded, checkout or worktree authorized.
-2. Create `<plan-dir>/pattern-20/<run-id>/` and write `run-status.md` there: plan path, workflow path, resolved pool, run decisions, then one line per phase and per finalize workflow. Never modify the approved plan.
+2. Create `<plan-dir>/pattern-20/<run-id>/` and freeze the inputs there: copy the assignment, every selected workflow and `controller-requirements.md` into `frozen/`, record each file's SHA-256 in `run-status.md`, and read only those copies for the rest of the run, so a later `just update` or pool edit cannot change a running phase. Then write the rest of `run-status.md`: plan path, canonical pool path, run decisions, one line per phase and per finalize workflow. Never modify the approved plan.
 3. For each phase in plan order, read its assigned workflow and hire its stages top to bottom through `just upagent` with the anchored cockpit arguments. One writer at a time; every reviewer, auditor and checks stage is a fresh worker. After each receipt, record request id, candidate identity, findings and the loop counter in `run-status.md` before placing the next hire.
-4. On findings, hire the same coder again with the findings. That is one loop. Stop after `retries` loops and ask the human, in this pane, plainly. A stage with its own `retries` keeps its own counter. Advance only when the current candidate passes every stage.
+4. On findings, hire the same coder again with the findings, then rerun every later stage: one repair loop, exactly as `/upagent-pattern-10` defines it, including stage-level `retries`. When a counter is spent, stop and ask the human in this pane, plainly. Advance only when the current candidate passes every stage.
 5. After the last phase, run each assigned finalize workflow on the combined candidate, in list order. All must pass.
 6. Report the outcome in this pane: completed, failed or blocked, with the evidence path. A merged candidate or a worker saying "done" is not final acceptance; this run pushes and deploys nothing.
 
 ## Resume and compaction
 
-The human may run `/compact` at any point. After compaction, or on any restart, read `run-status.md` and the UpAgent receipts first and continue from the recorded request; never re-hire from memory and never reset a counter. The hub refuses duplicate requests, which is the mechanical backstop.
+The human may run `/compact` at any point. After compaction, or on any restart, read `run-status.md`, the frozen copies and the UpAgent receipts first and continue from the recorded request; never re-hire from memory and never reset a counter. The hub refuses duplicate requests, which is the mechanical backstop.
 
 ## Rules
 

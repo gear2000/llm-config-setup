@@ -1,7 +1,7 @@
 workflow: phase-medium-sonnet
 kind: phase
 tier: medium
-retries: 5            # coder -> reviewers -> checks loops, then stop and ask the human
+retries: 5            # repair loops after the initial attempt, then stop and ask the human
 
 stages:
   - role: coder
@@ -15,7 +15,7 @@ stages:
   - role: checks                            # the assignment's validation workflow
     workflow: validation
 
-  - role: auditor                           # own bound
+  - role: auditor                           # own counter: audit findings allow 2 repair loops, each re-audited
     offering: pi-gpt-5-6-sol
     effort: high
     retries: 2

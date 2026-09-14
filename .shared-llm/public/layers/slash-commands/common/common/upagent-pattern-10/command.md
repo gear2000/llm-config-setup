@@ -18,7 +18,7 @@ Use Claude Code in a human-started Herdr pane, as `/hil` requires. `--offering` 
 
 ## The workflow pool
 
-The default pool is `workflows/` beside this installed `SKILL.md`. An explicit `pool` in the assignment replaces it; there is no overlay or fallback. A workflow is one `<name>.yaml` file in the pool; a name is a filename stem, not a path. New workflows in a pool need no registry or code change. `controller-requirements.md` in the pool binds every workflow.
+The default pool is `workflows/` beside this installed `SKILL.md`. An explicit `pool` in the assignment replaces it; there is no overlay or fallback. A relative `pool` resolves against the directory containing the supplied `workflow.yaml`; canonicalize that path and record it before reading any workflow. A workflow is one `<name>.yaml` file in the pool; a name is a filename stem, not a path. New workflows in a pool need no registry or code change. `controller-requirements.md` in the pool binds every workflow.
 
 A workflow is an ordered list of stages:
 
@@ -45,7 +45,7 @@ notes: |
   Prose the list cannot carry.
 ```
 
-Run the stages top to bottom. Findings from any reviewer, auditor or checks stage go back to the same coder, and that is one loop. Stop after `retries` loops and ask the human; never add a silent extra hire. A stage with its own `retries` keeps its own counter. A second reviewer is one more list item. `offering` and `effort` must exist in the current UpAgent listings; validate before hiring and never substitute.
+Run the stages top to bottom once; that is the initial attempt. Findings from any reviewer, auditor or checks stage go back to the same coder, and every stage after the coder reruns top to bottom on the new candidate; that is one repair loop. Workflow `retries` is the number of repair loops allowed after the initial attempt. Stop when it is spent and ask the human; never add a silent extra hire. A stage with its own `retries` has its own counter for findings that come from that stage: those loops consume the stage counter instead of the workflow counter, and the rerun still starts at the coder and runs every later stage. A second reviewer is one more list item. `offering` and `effort` must exist in the current UpAgent listings; validate before hiring and never substitute.
 
 ## The assignment
 
@@ -55,7 +55,7 @@ phases:
   phase-2: phase-medium-Luna
   phase-3: phase-high-Sol
 validation: validate-Composer
-finalize: finalize-adversarial-Fable        # or a list of two; both must pass, in list order
+finalize: finalize-adversarial-Fable        # or a list of two; both must pass, run one after the other in list order
 controller: delegated-implementer
 # pool: ./workflows                         # optional human-owned pool
 ```

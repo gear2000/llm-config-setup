@@ -1,7 +1,7 @@
 workflow: phase-low
 kind: phase
 tier: low
-retries: 5            # coder -> reviewers -> checks loops, then stop and ask the human
+retries: 5            # repair loops after the initial attempt, then stop and ask the human
 
 stages:
   - role: coder
@@ -15,7 +15,7 @@ stages:
   - role: checks                            # the assignment's validation workflow
     workflow: validation
 
-  - role: auditor                           # own bound: 2 repair loops, then a second audit, then ask
+  - role: auditor                           # own counter: audit findings allow 2 repair loops, each re-audited, then ask
     offering: pi-gpt-5-6-luna
     effort: max
     retries: 2
