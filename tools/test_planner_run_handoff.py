@@ -104,6 +104,62 @@ def test_convert_commands_share_herdr_core_and_design_required_contract() -> Non
         assert "Do not invent private infrastructure" in text, name
 
 
+def test_pattern_0_converter_composes_without_phase_leader_schema(tmp_path: Path) -> None:
+    recipe = RECIPES / "common/common/do-convert-pattern-0.yaml"
+    command = [
+        sys.executable,
+        "tools/harness.py",
+        "compose",
+        str(recipe.relative_to(ROOT)),
+        "--target",
+        str(tmp_path),
+    ]
+    first = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert first.returncode == 0, first.stderr
+    output = tmp_path / ".claude/skills/do-convert-pattern-0/SKILL.md"
+    content = output.read_bytes()
+    second = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert second.returncode == 0, second.stderr
+    assert output.read_bytes() == content
+    text = content.decode()
+    assert "name: do-convert-pattern-0" in text
+    for required in (
+        "../upagent-pattern-0/SKILL.md",
+        "workflow.draft.yaml",
+        "DESIGN_REQUIRED",
+        "A draft stays a draft",
+        "ready-for-handoff",
+        "safe YAML parser that rejects duplicate keys and unsafe tags",
+        "coverage map",
+        "Do not invoke `/upagent-pattern-0`",
+        "**easy**",
+        "**medium**",
+        "**hard**",
+    ):
+        assert required in text, required
+    assert "stage-1-implementation" not in text
+    assert "meta-plan-format.md" not in recipe.read_text()
+    assert "plan-conversion-contract.md" not in recipe.read_text()
+
+
+def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> None:
+    source = (LAYERS / "common/common/do-convert-pattern-0/command.md").read_text()
+    pool = LAYERS / "common/common/upagent-pattern-0/resources/workflows"
+    for name in (
+        "phase-low",
+        "phase-medium-sonnet",
+        "phase-medium-chatgpt-5.5",
+        "phase-high-Astra",
+        "phase-high-Fable",
+    ):
+        assert f"`{name}`" in source
+        assert (pool / f"{name}.md").is_file()
+    assert "Keep grades and readiness metadata in the review/receipt" in source
+    assert "no extra phases" in source
+    assert "new revision directory" in source
+    assert "/do-convert-pattern-0" in CONVERT_COMMANDS["do-convert"].read_text()
+
+
 def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:
     core = (LAYERS / "common/common/implement-core.md").read_text()
     for name, path in IMPLEMENT_COMMANDS.items():
@@ -168,6 +224,7 @@ def test_recipe_inventory_has_new_surface_and_retired_meta_wrapper_removed() -> 
     }
     assert do_commands == {
         "do-convert",
+        "do-convert-pattern-0",
         "do-full",
         "do-implement",
         "do-plan",

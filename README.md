@@ -380,7 +380,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-rescuer` | Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished… |
 | `upagent-sentinel` | Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout;… |
 
-### Slash-command skills (36)
+### Slash-command skills (37)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, `cc/do-convert --herdr`, and Claude-only `/hil` are the primary workflow surface; `/cc-full` and `/do-full` are disabled; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -396,6 +396,7 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `cc-research` | Claude Code research only: produce research.md, with no plan or implementation. Use fresh Explore… |
 | `codex-delegate` | Delegate a routine coding, refactor, investigation, or review slice to Codex CLI as a peer… |
 | `do-convert` | Pi converter: `/do-convert --herdr <plan.md>` idempotently decomposes an approved big plan into… |
+| `do-convert-pattern-0` | Separate a plan into work phases and Pattern 0 workflow assignments, grading each phase easy,… |
 | `do-full` | Disabled composer. Warns and stops. Use `/do-plan`, then a Claude Code `/hil --plan <plan.md>`… |
 | `do-implement` | Pi direct implementation: implement an approved `plan.md` in one fresh interactive TUI path. It… |
 | `do-plan` | Pi planning front door: research, conditionally resolve design, grill with Planish, run exactly two… |

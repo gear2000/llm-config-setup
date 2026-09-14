@@ -1,0 +1,8 @@
+type: skill
+name: do-convert-pattern-0
+description: .shared-llm/public/layers/slash-commands/common/common/do-convert-pattern-0/description.md
+frontmatter:
+  argument-hint: "--plan <source-plan.md> [--out <conversion-dir>] [--pool <workflow-dir>] [--non-interactive]"
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/do-convert-pattern-0/command.md
+output: .claude/skills/do-convert-pattern-0/SKILL.md

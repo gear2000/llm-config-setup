@@ -1,0 +1,1 @@
+Separate a plan into work phases and Pattern 0 workflow assignments, grading each phase easy, medium or hard. Preserves draft status and unresolved choices. Preparation only, no execution or phase leaders.
