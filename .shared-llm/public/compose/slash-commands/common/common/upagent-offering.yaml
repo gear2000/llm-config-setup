@@ -1,0 +1,9 @@
+type: skill
+name: upagent-offering
+description: .shared-llm/public/layers/slash-commands/common/common/upagent-offering/description.md
+frontmatter:
+  argument-hint: "[offering changes]"
+  disable-model-invocation: true
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/upagent-offering/command.md
+output: .claude/skills/upagent-offering/SKILL.md

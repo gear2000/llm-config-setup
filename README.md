@@ -380,7 +380,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-rescuer` | Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished… |
 | `upagent-sentinel` | Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout;… |
 
-### Slash-command skills (37)
+### Slash-command skills (38)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, `cc/do-convert --herdr`, and Claude-only `/hil` are the primary workflow surface; `/cc-full` and `/do-full` are disabled; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -418,6 +418,7 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `upagent-cleanup` | Dry-run or explicitly apply terminal-only UpAgent history pruning while retaining auditable,… |
 | `upagent-get` | Read one UpAgent request's state, retained result, receipt, and typed artifact pointers, including… |
 | `upagent-ls` | List active, terminal, or all requests known to the canonical machine-local UpAgent Recruiter… |
+| `upagent-offering` | Add or change public UpAgent offerings in the llm-config-setup kit, verify model IDs, update the… |
 | `upagent-pattern-0` | Run an approved plan with named workflow documents through the existing HIL and plan-implementer… |
 | `upagent-pipeline` | Run one issue-sized change end to end through a registry pipeline: optional research and plan… |
 | `upagent-run` | Run one UpAgent task, anchored to your verified live caller pane when invoked inside Herdr, with an… |
