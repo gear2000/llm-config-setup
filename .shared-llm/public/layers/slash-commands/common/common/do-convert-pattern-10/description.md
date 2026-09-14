@@ -1,0 +1,1 @@
+Separate a plan into work phases and Pattern 10 YAML workflow assignments, grading each phase easy, medium or hard; writes workflow.yaml. Pi front door for the shared converter. Preparation only, no execution.

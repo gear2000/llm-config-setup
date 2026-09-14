@@ -1,0 +1,9 @@
+type: skill
+name: cc-convert-pattern-10
+description: .shared-llm/public/layers/slash-commands/common/claude/cc-convert-pattern-10/description.md
+frontmatter:
+  argument-hint: "--plan <source-plan.md> [--out <conversion-dir>] [--pool <workflow-dir>] [--non-interactive]"
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/claude/cc-convert-pattern-10/command.md
+  - .shared-llm/public/layers/slash-commands/common/common/convert-pattern-core.md
+output: .claude/skills/cc-convert-pattern-10/SKILL.md

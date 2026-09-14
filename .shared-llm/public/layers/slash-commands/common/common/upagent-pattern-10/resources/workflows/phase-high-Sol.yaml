@@ -1,0 +1,27 @@
+workflow: phase-high-Sol
+kind: phase
+tier: high
+retries: 5            # coder -> reviewers -> checks loops, then stop and ask the human
+
+stages:
+  - role: coder
+    offering: pi-gpt-5-6-sol
+    effort: high
+
+  - role: reviewer                          # fresh Pi worker, never the coder
+    offering: pi-gpt-5-6-sol
+    effort: high
+    adversarial: true
+
+  - role: checks                            # the assignment's validation workflow
+    workflow: validation
+
+pass: every reviewer, checks and auditor stage passes on the same candidate
+controller_requirements: controller-requirements.md
+notes: |
+  Sol codes and a separate Sol worker reviews adversarially. No intermediate review, no phase audit.
+  
+  Findings from any reviewer, checks or auditor go back to the same coder; the coder model never
+  changes on retry. After the last loop, stop and ask the human through the root HIL; never add a
+  silent extra hire. Advance only when the current candidate passes every stage. The assigned
+  finalize workflow(s) still run on the combined result after the last phase.

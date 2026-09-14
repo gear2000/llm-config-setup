@@ -1,0 +1,27 @@
+workflow: phase-medium-Luna
+kind: phase
+tier: medium
+retries: 5            # coder -> reviewers -> checks loops, then stop and ask the human
+
+stages:
+  - role: coder
+    offering: pi-gpt-5-6-luna
+    effort: max
+
+  - role: reviewer                          # opposite model family, adversarial
+    offering: claude-fable-5-1
+    effort: low
+    adversarial: true
+
+  - role: checks                            # the assignment's validation workflow
+    workflow: validation
+
+pass: every reviewer, checks and auditor stage passes on the same candidate
+controller_requirements: controller-requirements.md
+notes: |
+  Default medium-tier workflow while GPT 5.6 Luna is discounted. No phase audit.
+  
+  Findings from any reviewer, checks or auditor go back to the same coder; the coder model never
+  changes on retry. After the last loop, stop and ask the human through the root HIL; never add a
+  silent extra hire. Advance only when the current candidate passes every stage. The assigned
+  finalize workflow(s) still run on the combined result after the last phase.

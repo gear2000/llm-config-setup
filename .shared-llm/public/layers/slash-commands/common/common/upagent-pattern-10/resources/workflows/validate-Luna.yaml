@@ -1,0 +1,20 @@
+workflow: validate-Luna
+kind: validation
+
+stages:
+  - role: checks
+    offering: pi-gpt-5-6-luna
+    effort: max
+    runs: "the plan's required commands; reports exit codes and logs"
+
+pass: every required command exits 0 with evidence recorded
+controller_requirements: controller-requirements.md
+notes: |
+  Runs the approved plan's integration, acceptance and other required checks with a lower-cost worker;
+  cheaper execution does not mean weaker checks. Give the runner the exact commands or acceptance
+  criteria, the candidate identity and the expected evidence. It may run checks; it may not silently
+  fix production code or weaken tests. Checks that may write files count as mutating work: one writer
+  at a time. Require commands, exit codes, logs and candidate identity. Missing evidence, skipped
+  required checks or a nonzero required check blocks advancement; failures go back to the owning
+  phase's coder within that phase's retries. A passing check is not an adversarial audit, final
+  acceptance or push/deploy permission.

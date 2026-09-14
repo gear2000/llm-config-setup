@@ -10,66 +10,102 @@ Pin it from the kit checkout with `just herdr-pin` (`tools/install-herdr.sh`). D
 `herdr update` or the unpinned `https://herdr.dev/install.sh` installer. Machine setup:
 [UPINSTALL.md](../../../../../UPINSTALL.md).
 
-## Three execution flows
+## Execution patterns
 
-The human talks to one **HIL agent** — a Claude Code pane they started themselves inside Herdr
-(`HERDR_ENV=1`). Automation never creates that pane. `just run-start` stays Flow 3 only.
-
-```text
-human  (Claude Code remote app)
-  └── HIL  (Claude Code, human-started, already in a Herdr pane)
-        │
-        ├── Flow 1   /hil → plan-implementer controller → Recruiter → workers
-        ├── Flow 2   /upagent-run and /upagent-pipeline (HIL hires workers itself)
-        └── Flow 3   /tui-control → phase-leader → Recruiter → workers
-                     (phased meta-run via just run-start; used least)
-```
-
-- **Flow 1** takes an approved `plan.md`. No `route.yaml`. `/hil` is a relay; the
-  plan-implementer is a gated controller like a phase leader. Default is delegate / review /
-  stop-and-ask. After `/cc-plan`, this is the default execution path.
-- **Flow 2** is a single UpAgent hire (or a named pipeline) from the HIL pane. Unchanged.
-- **Flow 3** is the checked `plan.md` + `route.yaml` path. `just run-start` launches
-  `/tui-control` (TUI agent / phased HIL); that controller creates one `/phase-leader` per
-  phase.
+The human talks to one **HIL agent**: a Claude Code (or Pi) pane they started themselves inside
+Herdr (`HERDR_ENV=1`). Automation never creates that pane. Every pattern starts the same way, with
+the human planning in that pane; only the convert and launch steps differ. `just run-start` stays
+Pattern 3 only.
 
 ```text
-human
-  └── HIL  (/hil)                    Claude Code · relay only
-        └── plan-implementer         pi/claude/codex/cursor · smart
-              └── Recruiter
-                    ├── slice workers
-                    ├── reviewers / adversaries
-                    └── specialists (consults)
+Pattern 1    human <-> HIL (relay) <-> plan-implementer -> Recruiter -> workers
+             for driving from the Claude Code remote app; the HIL stays light
+Pattern 2    human <-> HIL is the implementer -> Recruiter -> workers
+             medium to large work when the human manages the pane; the workflow is spoken
+Pattern 3    human -> /tui-control -> one /phase-leader per phase -> Recruiter -> workers
+             checked plan.md + route.yaml via just run-start; used least
+Pattern 10   Pattern 1 + workflow.yaml: one named YAML workflow per phase
+Pattern 20   Pattern 2 + workflow.yaml: the HIL runs the phases itself, no agent in the middle
 ```
 
-The implementer lands in the `control` tab beside the already-running HIL pane; hired workers
-still move to `workers`.
-
-## Pattern 0: select workflow documents, reuse Flow 1
+### Pattern 1
 
 ```text
-/upagent-pattern-0 --plan plan.md --workflow workflow.yaml --offering <controller-id> --effort <effort>
+PLAN      you + Claude Code pane:  /cc-plan  (Pi: /do-plan)  -> plan.md approved
+CONVERT   none; Pattern 1 takes plan.md as is, no route.yaml
+LAUNCH    you, in a Herdr Claude Code pane:
+          /hil --plan plan.md --offering <implementer-id> --effort <e>
+            └── HIL runs  just upagent-implementer-start
+                  └── ONE plan-implementer pane in the control tab (model = --offering)
+RUN       plan-implementer slices the plan and hires workers via the Recruiter
+          questions -> HIL quotes them to you; your messages -> implementer inbox
+          ends with implementer-result.json (completed / failed / blocked)
 ```
 
-Pattern 0 prepares an execution packet containing the approved plan, explicit phase assignments
-and full copies of the selected workflow documents. It then uses the existing `/hil` →
-`/plan-implementer` path; no new scheduler or launcher is involved. The implementer delegates
-all production coding, fixes and reviews for these packets. Flows 1–3 remain available unchanged.
+### Pattern 2
 
-The skill's bundled `workflows/` pool contains `phase-low`, `phase-medium-sonnet`,
-`phase-high-Astra`, `phase-high-Fable`, `phase-high-Sol`, `phase-low-Luna`,
-`phase-medium-Luna`, `phase-high-Luna`, `validate`,
-`finalize-adversarial` and `delegated-implementer`. Each is a separate Markdown document,
-not a parameterized template. An assignment can select an explicit human-owned `pool` directory;
-new documents there require no registry/code change. Missing choices stop before hiring.
+```text
+PLAN      you, in a Herdr pane:  /upagent-pipeline rpi <issue>  (research, plan, approve, implement)
+          or  /upagent-run "<task>"  for one worker
+CONVERT   none
+LAUNCH    none; the pane you are in is the controller
+RUN       this pane hires workers itself, holds the human gate, keeps the run log;
+          you compact it when it fills. Weakness: the workflow is spoken each time.
+```
 
-Edit bundled documents under
-`.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-0/resources/workflows/`
-in the kit, then run `just update`. Do not edit generated home copies. See `/upagent-pattern-0`
-for the assignment format. This is an agent-followed document contract, not software enforcement
-of review semantics. Finalization uses one audit, or two selected independent model audits for
-a very big plan; it does not add plan-review rounds.
+### Pattern 3
+
+```text
+PLAN      /cc-plan -> plan.md approved
+CONVERT   /cc-convert --herdr plan.md  (Pi: /do-convert --herdr) -> run dir with plan.md + route.yaml
+LAUNCH    just run-start <run-dir>   -> opens the controller pane running /tui-control
+RUN       controller loops the phases, one /phase-leader pane per phase, Recruiter hires stages
+          phase-result.json per phase, run-status.md for the run
+```
+
+### Pattern 10
+
+```text
+PLAN      /cc-plan -> plan.md approved
+CONVERT   same pane:  /cc-convert-pattern-10 --plan plan.md  (Pi: /do-convert-pattern-10)
+            grades phases easy / medium / hard, you approve the split -> workflow.yaml
+LAUNCH    you, in a Herdr Claude Code pane:
+          /upagent-pattern-10 --plan plan.md --workflow workflow.yaml --offering <id> --effort <e>
+            freezes one packet (plan + assignment + full workflow copies), then behaves as /hil
+RUN       plan-implementer reads each phase's workflow and hires its stages in order:
+          coder -> reviewer(s) -> checks, loops on findings up to  retries:, then finalize
+          bounded by the implementer's context window: nobody can compact that pane
+```
+
+### Pattern 20
+
+```text
+PLAN      /cc-plan -> plan.md approved
+CONVERT   same pane:  /cc-convert-pattern-20 --plan plan.md  (Pi: /do-convert-pattern-20) -> workflow.yaml
+LAUNCH    same pane:  /upagent-pattern-20 --plan plan.md --workflow workflow.yaml
+            no --offering / --effort: the controller is the agent you already started
+RUN       this pane reads each phase's workflow and hires its stages through the Recruiter,
+          loops on findings up to  retries:, runs finalize on the whole result
+          you compact it whenever you like; it resumes from run-status.md and the receipts
+```
+
+### Workflows
+
+A workflow is one YAML file in the pool bundled with `/upagent-pattern-10` (shared by
+`/upagent-pattern-20`): an ordered `stages` list of `role` / `offering` / `effort` items, a
+`retries` count, a `pass` rule and free `notes`. A second reviewer is one more list item. The
+bundled pool holds `phase-low`, `phase-low-Luna`, `phase-medium-sonnet`, `phase-medium-Luna`,
+`phase-high-Luna`, `phase-high-Sol`, `phase-high-Astra`, `phase-high-Fable`, `validate-Composer`,
+`validate-Luna`, `validate-Grok`, `finalize-adversarial-Fable`, `finalize-adversarial-Sol`,
+`finalize-adversarial-Astra`, `delegated-implementer` (Pattern 10 controller) and the shared
+`controller-requirements.md`. An assignment may point `pool` at a human-owned directory; new
+workflows there need no registry or code change.
+
+Edit bundled workflows under
+`.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/`
+in the kit, then run `just update`. Do not edit generated home copies. This is an agent-followed
+contract, not software enforcement of review semantics; the Recruiter's duplicate-request refusal is
+the mechanical backstop.
 
 ## Per-command execution
 

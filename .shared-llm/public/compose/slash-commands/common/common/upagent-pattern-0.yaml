@@ -1,9 +1,0 @@
-type: skill
-name: upagent-pattern-0
-description: .shared-llm/public/layers/slash-commands/common/common/upagent-pattern-0/description.md
-frontmatter:
-  argument-hint: "--plan <plan.md> --workflow <workflow.yaml> --offering <controller-id> --effort <effort>"
-resources: .shared-llm/public/layers/slash-commands/common/common/upagent-pattern-0/resources
-inputs:
-  - .shared-llm/public/layers/slash-commands/common/common/upagent-pattern-0/command.md
-output: .claude/skills/upagent-pattern-0/SKILL.md

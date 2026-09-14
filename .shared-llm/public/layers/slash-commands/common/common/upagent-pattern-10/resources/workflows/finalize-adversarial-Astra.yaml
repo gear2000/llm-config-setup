@@ -1,0 +1,22 @@
+workflow: finalize-adversarial-Astra
+kind: finalize
+
+stages:
+  - role: reviewer
+    offering: pi-gpt-6-astra
+    effort: medium
+    adversarial: true
+    scope: "the combined candidate: all phases plus checks"
+
+pass: the reviewer passes the combined candidate
+controller_requirements: controller-requirements.md
+notes: |
+  Audits the complete combined candidate after every phase and required check has passed. An earlier
+  merge required by the approved plan does not replace this gate. The reviewer receives the approved
+  plan, the full diff or candidate identity, every phase outcome and the validation evidence, and
+  audits the whole scope, not one phase. To run two final audits on a very big plan, list two finalize
+  workflows in the assignment; both must pass, one pass cannot override the other's findings, and the
+  list order is the run order unless the assignment says parallel (read-only, same frozen candidate).
+  Failures go to the owning controller and the root HIL; human-authorized repairs go through the
+  owning phase and require fresh checks and a fresh final audit. A final pass grants no push,
+  deployment or rollback permission.

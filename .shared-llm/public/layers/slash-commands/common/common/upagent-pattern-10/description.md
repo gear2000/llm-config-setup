@@ -1,0 +1,1 @@
+Run an approved plan with one named YAML workflow per phase through Pattern 1 (HIL relay plus plan-implementer). Pattern 10 adds workflow selection, not a workflow engine; bounded by the implementer's context, so prefer Pattern 20 for long plans. Requires Claude Code in Herdr.
