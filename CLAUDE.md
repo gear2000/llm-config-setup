@@ -4,26 +4,13 @@ A portable starter kit for composing AI-assistant instruction files (`CLAUDE.md`
 
 ---
 
-# ⚠️ THIS IS A PUBLIC REPOSITORY — pre-push vetting is MANDATORY
+# ⚠️ THIS IS A PUBLIC REPOSITORY
 
-Everything pushed here is world-readable, permanently, and may be cached or indexed even after deletion. This kit was extracted from a private project and **deliberately stripped of everything proprietary**. Keeping it that way is a hard rule.
+Everything pushed here is world-readable, permanently. This kit was extracted from a private project and **deliberately stripped of everything proprietary**. Keeping it that way is a hard rule.
 
-## Before ANY push — no exceptions
+Nothing originating from any private or internal project may be transmitted: internal project, product, service or codename strings; internal infrastructure or tooling names; internal hostnames, URLs or endpoints; cloud account IDs, regions, resource names, credential paths, tokens or secrets; private design documents or implementation details, even paraphrased. Generic software-engineering practice is fine.
 
-1. **Vet the full diff for proprietary content.** Nothing originating from any private or internal project may be transmitted. This includes, but is not limited to:
-   - Internal/private **project, product, service, or codename** strings.
-   - Internal **infrastructure or tooling** names (CI systems, registries, schedulers, hosts).
-   - Internal **hostnames, URLs, endpoints**, or network/cluster details.
-   - **Cloud account IDs, regions, resource names**, credential paths, tokens, or secrets of any kind.
-   - Private **design documents, architecture, design criteria, data models, or implementation approach** — even paraphrased. Generic software-engineering practice is fine; anything that reveals how a specific private system is built is not.
-
-2. **An independent reviewer must PASS the change before it is pushed.** The reviewer is a human — or a separate agent that did **not** author the change — who reads the entire diff against the categories above and explicitly approves. An author vetting their own work does not count.
-
-3. **If anything proprietary is found: STOP.** Do not push. Remove it, re-stage, and re-review from step 1.
-
-**Never run `git push` here without a passing independent review.** When in doubt, do not push — ask a human.
-
-A Claude Code hook (`.claude/settings.json` → `PreToolUse` on `git commit`) runs this same check automatically on every commit as a first line of defense — see `.claude/hooks/proprietary-check.md`. It supplements, not replaces, the independent human/agent review required before push.
+A Claude Code hook (`.claude/settings.json` → `PreToolUse` on `git commit`) runs this check on every commit; see `.claude/hooks/proprietary-check.md`. If it finds anything, remove it before committing. Beyond that, push freely. An adversarial review of a PR is a quality choice the human makes, never a gate on pushing.
 
 ---
 

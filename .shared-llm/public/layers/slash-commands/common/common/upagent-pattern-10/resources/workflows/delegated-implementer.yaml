@@ -1,0 +1,26 @@
+workflow: delegated-implementer
+kind: controller
+
+# Pattern 10 only. Pattern 20 has no controller workflow: the HIL pane is the controller.
+#
+#   human <-> HIL (relay) <-> plan-implementer -> UpAgent workers
+
+controller_requirements: controller-requirements.md
+notes: |
+  Reuse Pattern 1's `/hil` start, relay and finish and `/plan-implementer`'s worker-hire contract.
+  The human picks the implementer offering and effort from the plan-implementers roster on the
+  command line. The implementer receives the approved plan, the phase-to-workflow assignments,
+  full copies of the selected workflows and the settled run choices in the frozen execution packet.
+
+  Before each phase the implementer reads the assigned workflow, then hires its stages in order,
+  inspects the actual evidence, records results and attempt counts, and asks the human through the
+  HIL when blocked. Existing request registration, inbox, needs-input, await and completion
+  protocols stay unchanged. It delegates all production coding, fixes, validation and independent
+  reviews through UpAgent; Pattern 1's local-coding exception does not apply.
+
+  At most one intermediate controller. This implementer hires ordinary workers, never another
+  implementer, phase leader or controller. Ordinary workers cannot hire workers. It follows plan
+  dependencies, advances only on evidence for the current candidate, resumes recorded requests and
+  counters without resets, and runs every assigned finalize workflow before a passing result. A
+  merged candidate is not accepted, pushed or deployed by this run. The root HIL is the human's
+  only contact.

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UpAgent Execution Patterns</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+  html,body{background:#14161a;color:#e6e6e6}
+  body{max-width:1100px;margin:0 auto;padding:1.5rem 1rem 4rem;}
+  pre{white-space:pre;overflow-x:auto;font-size:.8rem;line-height:1.4;border-radius:.5rem;padding:.9rem;min-width:0;background:#1e2128;color:#e6e6e6;border:1px solid #2c3039}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:1rem;min-width:0}
+  .grid2>*{min-width:0}
+  .k{color:#7fd1a8}.c{color:#8a8f9a}.you{color:#ffd166;font-weight:600}.cmd{color:#8ab4f8}.gap{color:#ff6b6b;font-weight:600}
+  h2{font-size:1.35rem;font-weight:700;margin:2.2rem 0 .6rem;color:#fff}
+  h3{font-size:1.05rem;font-weight:600;margin:1.2rem 0 .4rem;color:#fff}
+  .card{background:#1b1e24;border:1px solid #2c3039}
+  .q label{display:flex;gap:.5rem;align-items:flex-start;padding:.3rem 0;cursor:pointer}
+  .q input{margin-top:.25rem}
+  code{background:#262a33;padding:.05em .3em;border-radius:.25em}
+</style>
+</head>
+<body>
+
+<header>
+  <p class="text-sm opacity-60">llm-config-setup · UpAgent execution patterns · 2026-09-14</p>
+  <h1 class="text-3xl font-bold text-white">Patterns 1, 2, 3, 10 and 20: who plans, who converts, who launches, what runs</h1>
+  <p class="mt-2">Every pattern starts with the human planning in a Claude Code (or Pi) pane inside Herdr. Only the convert and launch steps differ. <span class="you">Yellow = you</span>, <span class="cmd">blue = a slash command or just recipe</span>. Source of truth for the skills is <code>.shared-llm/public/layers/slash-commands/</code>; this page is the map. Regenerate it by hand when a pattern changes.</p>
+</header>
+
+<h2>0. Pattern 20 · Pattern 10 without the agent in the middle</h2>
+<p>Same plan, same workflow.yaml, same phases, same hiring through the UpAgent hub. The only difference: the HIL agent you are talking to is the one that runs the phases. There is no plan-implementer pane. It hires the coder, then the reviewer, then the checks, loops on findings up to the retry count, moves to the next phase, runs finalize. You watch it, steer it, and compact it when it gets full. It keeps the same run notes the Pattern 10 implementer already keeps, nothing new.</p>
+
+<pre>PLAN      <span class="you">you</span> + Claude Code (or Pi) in a Herdr pane:  <span class="cmd">/cc-plan</span> (Pi: <span class="cmd">/do-plan</span>) -> plan.md approved
+
+CONVERT   same pane:  <span class="cmd">/cc-convert-pattern-20 --plan plan.md</span>   (Pi: <span class="cmd">/do-convert-pattern-20</span>)
+            -> grades phases, you approve the split -> workflow.yaml
+
+LAUNCH    same pane:  <span class="cmd">/upagent-pattern-20 --plan plan.md --workflow workflow.yaml</span>
+            no --offering / --effort: the controller is the agent you already started
+
+RUN       this pane, phase by phase, following each phase's workflow file
+            ├── phase 1: hire coder -> hire reviewer(s) -> hire checks
+            │            findings back to the coder, up to  retries:
+            ├── phase 2 .. N: same
+            └── finalize workflow(s) on the whole result
+          <span class="you">you</span> talk to it directly; <span class="you">you</span> /compact it when it fills up
+          done when the last finalize passes
+
+Pattern 10, for comparison:
+
+          <span class="you">you</span> <-> HIL (relay) <-> plan-implementer -> UpAgent workers
+Pattern 20:
+          <span class="you">you</span> <-> HIL (runs the phases itself) -> UpAgent workers</pre>
+
+<h3>Pattern 2, corrected</h3>
+<p>Pattern 2 is not "small work". It handles medium to large plans when you actively manage the pane. Its weakness is that the workflow is spoken each time. Pattern 20 keeps Pattern 2's shape and gives it the workflow file. If it works, it replaces Pattern 2 for anything with phases.</p>
+
+<h3>Converters must run in either harness</h3>
+<p>Settled: every converter ships for both Claude Code and Pi from one shared layer. <code>/cc-convert-pattern-10</code> and <code>/do-convert-pattern-10</code>, <code>/cc-convert-pattern-20</code> and <code>/do-convert-pattern-20</code>. You never switch panes to convert.</p>
+
+<h2>1. Patterns 1, 2, 3 and 10, start to finish</h2>
+<p>All four start the same way: <span class="you">you</span> open Claude Code (or Pi) and plan. Only the launch step differs. Every controller pane must live inside Herdr (<code>HERDR_ENV=1</code>), and you start that pane yourself; automation never creates it.</p>
+
+<h3>Pattern 1 · HIL relay + plan-implementer <span class="c">(README "Flow 1")</span></h3>
+<pre>PLAN      <span class="you">you</span> + Claude Code pane (anywhere, remote app is fine)
+          <span class="cmd">/cc-plan</span>  -> research, grill, 2 adversary rounds -> plan.md approved
+          (Pi: <span class="cmd">/do-plan</span>)
+
+CONVERT   none. Pattern 1 takes plan.md as is. No route.yaml.
+
+LAUNCH    <span class="you">you</span> start Claude Code in a Herdr pane (can be the planning agent
+          if it already runs in Herdr, or a fresh pane; only the plan path matters)
+          <span class="cmd">/hil --plan plan.md --offering &lt;implementer-id&gt; --effort &lt;e&gt;</span>
+            └── HIL runs <span class="cmd">just upagent-implementer-start</span>
+                  └── opens ONE plan-implementer pane in the control tab
+                      (model = the --offering you picked)
+
+RUN       plan-implementer reads plan.md, slices it, hires UpAgent workers
+            ├── coder / reviewer / specialist hires via the Recruiter
+            ├── questions  -> HIL quotes them to <span class="you">you</span>, you answer, HIL relays
+            └── <span class="you">your</span> messages -> HIL drops them in the implementer inbox
+          ends with implementer-result.json (completed / failed / blocked)</pre>
+
+<h3>Pattern 2 · HIL is the implementer <span class="c">(README "Flow 2"; medium to large work with an active human; archetype for Pattern 20)</span></h3>
+<pre>PLAN      small issue:  <span class="you">you</span> in a Herdr Claude Code pane
+          <span class="cmd">/upagent-pipeline rpi &lt;issue-path-or-url&gt;</span>
+            research worker -> plan worker -> <span class="you">you approve</span> -> implement
+          ad hoc:  <span class="cmd">/upagent-run "&lt;task&gt;"</span>   one worker, one result
+
+CONVERT   none.
+
+LAUNCH    none. The pane you are already in IS the controller.
+
+RUN       this pane hires UpAgent workers itself, holds the human gate,
+          keeps the run log, implements in an isolated worktree.
+          No second controller pane. <span class="you">you</span> compact it when it fills.
+          Weakness: the workflow is spoken each time, never the same twice.</pre>
+
+<h3>Pattern 3 · phase leaders <span class="c">(README "Flow 3", used least)</span></h3>
+<pre>PLAN      <span class="you">you</span> + Claude Code pane:  <span class="cmd">/cc-plan</span> -> plan.md approved
+
+CONVERT   same agent or any Claude Code pane:
+          <span class="cmd">/cc-convert --herdr plan.md</span>  (Pi: <span class="cmd">/do-convert --herdr</span>)
+            -> run dir with plan.md + route.yaml (llm_profiles, per-phase lead/accuracy)
+            -> validated by the runnable gate before it counts as converted
+
+LAUNCH    <span class="you">you</span> in a shell (inside Herdr):
+          <span class="cmd">just run-start &lt;run-dir&gt;</span>
+            └── opens the controller pane and types <span class="cmd">/tui-control</span>
+
+RUN       controller loops the phases
+            └── one <span class="cmd">/phase-leader</span> pane per phase
+                  └── Recruiter -> stage workers, reviewers, advisor
+          phase-result.json per phase, run-status.md for the run</pre>
+
+<h3>Pattern 10 · Pattern 1 + a workflow per phase <span class="c">(limited by plan size, see section 0)</span></h3>
+<pre>PLAN      <span class="you">you</span> + Claude Code pane:  <span class="cmd">/cc-plan</span> -> plan.md approved
+
+CONVERT   <span class="you">you</span> in a Pi pane (same worktree):
+          <span class="cmd">/cc-convert-pattern-10 --plan plan.md</span>  (Pi: <span class="cmd">/do-convert-pattern-10</span>)
+            -> grades each phase easy / medium / hard
+            -> workflow.draft.yaml, then workflow.yaml after <span class="you">you approve</span> the split
+
+
+LAUNCH    <span class="you">you</span> start Claude Code in a Herdr pane:
+          <span class="cmd">/upagent-pattern-10 --plan plan.md --workflow workflow.yaml \
+                              --offering &lt;implementer-id&gt; --effort &lt;e&gt;</span>
+            ├── reads plan + workflow.yaml + every named workflow file
+            ├── settles the open run choices with <span class="you">you</span> (retry bounds, runners)
+            ├── writes one frozen packet  &lt;plan-dir&gt;/pattern-10/&lt;run-id&gt;/plan.md
+            └── then behaves exactly like <span class="cmd">/hil</span>:  <span class="cmd">just upagent-implementer-start</span>
+                  └── ONE plan-implementer pane (the --offering you picked)
+
+RUN       plan-implementer, phase by phase, reads the assigned workflow file
+            └── hires the stages in order: coder -> reviewer(s) -> checks
+                loops back to the coder on findings, up to  retries:
+            └── after the last phase: the finalize workflow(s) you named
+          HIL relay and inbox exactly as Pattern 1</pre>
+
+<p class="mt-2"><b>So, answering your questions directly.</b> You plan with one Claude Code agent. Converting is a second slash command in the same pane, for Claude Code or Pi. Launching is always a fresh Herdr pane where you type the launch command (or <code>just run-start</code> for Pattern 3). The launch command opens the controller pane for you; you never open the implementer or phase leader yourself.</p>
+
+<h2>2. Workflow YAML</h2>
+<div class="grid2 mt-3">
+<div>
+<h3 class="mt-0"><code>phase-high-Sol.yaml</code></h3>
+<pre><span class="k">workflow</span>: phase-high-Sol
+<span class="k">kind</span>: phase
+<span class="k">tier</span>: high
+<span class="k">retries</span>: 5            <span class="c"># repair loops after the first attempt, then ask you</span>
+
+<span class="k">stages</span>:
+  - <span class="k">role</span>: coder
+    <span class="k">offering</span>: pi-gpt-5-6-sol
+    <span class="k">effort</span>: high
+  - <span class="k">role</span>: reviewer
+    <span class="k">offering</span>: pi-gpt-5-6-sol
+    <span class="k">effort</span>: high
+    <span class="k">adversarial</span>: true
+  - <span class="k">role</span>: checks
+    <span class="k">workflow</span>: validation      <span class="c"># the assignment's validation workflow</span>
+
+<span class="k">pass</span>: every reviewer and checks stage passes
+      on the same candidate
+<span class="k">controller_requirements</span>: controller-requirements.md</pre>
+</div>
+<div>
+<h3 class="mt-0">A custom workflow with a second reviewer and an audit</h3>
+<pre><span class="k">workflow</span>: phase-high-Luna-double   <span class="c"># not bundled; put it in your own pool</span>
+<span class="k">kind</span>: phase
+<span class="k">tier</span>: high
+<span class="k">retries</span>: 5
+
+<span class="k">stages</span>:
+  - <span class="k">role</span>: coder
+    <span class="k">offering</span>: pi-gpt-5-6-luna
+    <span class="k">effort</span>: max
+  - <span class="k">role</span>: reviewer
+    <span class="k">offering</span>: pi-gpt-5-6-sol
+    <span class="k">effort</span>: high
+    <span class="k">adversarial</span>: true
+  - <span class="k">role</span>: reviewer            <span class="c"># just another item</span>
+    <span class="k">offering</span>: claude-fable-5-1
+    <span class="k">effort</span>: low
+    <span class="k">adversarial</span>: true
+  - <span class="k">role</span>: checks
+    <span class="k">workflow</span>: validation
+  - <span class="k">role</span>: auditor             <span class="c"># optional</span>
+    <span class="k">offering</span>: pi-gpt-6-astra
+    <span class="k">effort</span>: medium
+    <span class="k">retries</span>: 2                <span class="c"># own counter for audit findings</span>
+
+<span class="k">pass</span>: every reviewer, checks and auditor
+      stage passes on the same candidate
+<span class="k">controller_requirements</span>: controller-requirements.md</pre>
+</div>
+</div>
+<pre class="mt-3"><span class="c"># finalize-adversarial-Sol.yaml   (also -Fable, -Astra; one file per model, no choose-from)</span>
+<span class="k">workflow</span>: finalize-adversarial-Sol
+<span class="k">stages</span>:
+  - { <span class="k">role</span>: reviewer, <span class="k">offering</span>: pi-gpt-5-6-sol, <span class="k">effort</span>: high, <span class="k">adversarial</span>: true, <span class="k">scope</span>: combined candidate }
+<span class="k">pass</span>: reviewer passes
+
+<span class="c"># workflow.yaml  (the assignment)</span>
+<span class="k">phases</span>:
+  <span class="k">phase-1</span>: phase-low-Luna
+  <span class="k">phase-2</span>: phase-medium-Luna
+  <span class="k">phase-3</span>: phase-high-Luna-double
+<span class="k">validation</span>: validate-Composer
+<span class="k">finalize</span>: finalize-adversarial-Fable        <span class="c"># or a list of two; both must pass, in list order</span>
+<span class="k">controller</span>: delegated-implementer</pre>
+<p class="mt-2">Retries: the stages run once, top to bottom. Any finding goes back to the same coder and every later stage reruns; that is one repair loop, and <code>retries</code> is how many are allowed after the first attempt. A stage with its own <code>retries</code> spends that counter instead for findings it raised. When a counter is spent the controller stops and asks you. This stays an agent-followed contract, not a mechanical gate; attempt counts are recorded in run status.</p>
+
+</body>
+</html>

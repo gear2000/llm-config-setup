@@ -1,0 +1,1 @@
+Run an approved plan with one named YAML workflow per phase from the pane you are in: the HIL hires every stage through the UpAgent hub, loops on findings, runs finalize. Pattern 10 without the agent in the middle; compact-safe; requires Herdr.

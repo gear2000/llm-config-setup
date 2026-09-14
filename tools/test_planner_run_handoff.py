@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 import subprocess
+
 import sys
 from pathlib import Path
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -111,10 +114,10 @@ def test_convert_commands_share_herdr_core_and_design_required_contract() -> Non
         assert "Do not invent private infrastructure" in text, name
 
 
-def test_pattern_0_converter_composes_without_phase_leader_schema(
+def test_pattern_10_converter_composes_without_phase_leader_schema(
     tmp_path: Path,
 ) -> None:
-    recipe = RECIPES / "common/common/do-convert-pattern-0.yaml"
+    recipe = RECIPES / "common/common/do-convert-pattern-10.yaml"
     command = [
         sys.executable,
         "tools/harness.py",
@@ -127,7 +130,7 @@ def test_pattern_0_converter_composes_without_phase_leader_schema(
         command, cwd=ROOT, capture_output=True, text=True, check=False
     )
     assert first.returncode == 0, first.stderr
-    output = tmp_path / ".claude/skills/do-convert-pattern-0/SKILL.md"
+    output = tmp_path / ".claude/skills/do-convert-pattern-10/SKILL.md"
     content = output.read_bytes()
     second = subprocess.run(
         command, cwd=ROOT, capture_output=True, text=True, check=False
@@ -135,16 +138,16 @@ def test_pattern_0_converter_composes_without_phase_leader_schema(
     assert second.returncode == 0, second.stderr
     assert output.read_bytes() == content
     text = content.decode()
-    assert "name: do-convert-pattern-0" in text
+    assert "name: do-convert-pattern-10" in text
     for required in (
-        "../upagent-pattern-0/SKILL.md",
+        "../upagent-pattern-10/SKILL.md",
         "workflow.draft.yaml",
         "DESIGN_REQUIRED",
         "A draft stays a draft",
         "ready-for-handoff",
         "safe YAML parser that rejects duplicate keys and unsafe tags",
         "coverage map",
-        "Do not invoke `/upagent-pattern-0`",
+        "Do not invoke `/upagent-pattern-10`",
         "**easy**",
         "**medium**",
         "**hard**",
@@ -153,11 +156,12 @@ def test_pattern_0_converter_composes_without_phase_leader_schema(
     assert "stage-1-implementation" not in text
     assert "meta-plan-format.md" not in recipe.read_text()
     assert "plan-conversion-contract.md" not in recipe.read_text()
+    assert "convert-pattern-core.md" in recipe.read_text()
 
 
-def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> None:
-    source = (LAYERS / "common/common/do-convert-pattern-0/command.md").read_text()
-    pool = LAYERS / "common/common/upagent-pattern-0/resources/workflows"
+def test_pattern_10_converter_uses_existing_pool_and_keeps_runner_unchanged() -> None:
+    source = (LAYERS / "common/common/convert-pattern-core.md").read_text()
+    pool = LAYERS / "common/common/upagent-pattern-10/resources/workflows"
     for name in (
         "phase-low",
         "phase-medium-sonnet",
@@ -169,33 +173,43 @@ def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> 
         "phase-high-Luna",
     ):
         assert f"`{name}`" in source
-        assert (pool / f"{name}.md").is_file()
+        assert (pool / f"{name}.yaml").is_file()
     assert "Keep grades and readiness metadata in the review/receipt" in source
     assert "no extra phases" in source
     assert "new revision directory" in source
-    assert "/do-convert-pattern-0" in CONVERT_COMMANDS["do-convert"].read_text()
+    assert "/do-convert-pattern-10" in CONVERT_COMMANDS["do-convert"].read_text()
+    assert "/cc-convert-pattern-10" in CONVERT_COMMANDS["cc-convert"].read_text()
+    for wf in pool.glob("*.yaml"):
+        data = yaml.safe_load(wf.read_text())
+        assert data["workflow"] == wf.stem, wf
+        if data["kind"] != "controller":
+            assert isinstance(data["stages"], list) and data["stages"], wf
+        assert data["controller_requirements"] == "controller-requirements.md", wf
+    assert (pool / "controller-requirements.md").is_file()
 
 
-def test_phase_high_documents_name_the_exact_pi_sol_reviewer() -> None:
-    pool = LAYERS / "common/common/upagent-pattern-0/resources/workflows"
+def test_phase_high_workflows_name_the_exact_pi_sol_reviewer() -> None:
+    pool = LAYERS / "common/common/upagent-pattern-10/resources/workflows"
     for name in (
         "phase-high-Astra",
         "phase-high-Fable",
         "phase-high-Sol",
         "phase-high-Luna",
     ):
-        text = (pool / f"{name}.md").read_text()
-        assert (
-            "Independent adversarial reviewer: offering `pi-gpt-5-6-sol`; "
-            "model `openai-codex/gpt-5.6-sol`; harness `pi`; effort `high`."
-        ) in text, name
+        data = yaml.safe_load((pool / f"{name}.yaml").read_text())
+        reviewers = [s for s in data["stages"] if s["role"] == "reviewer"]
+        assert reviewers, name
+        assert reviewers[0]["offering"] == "pi-gpt-5-6-sol", name
+        assert reviewers[0]["effort"] == "high", name
+        assert reviewers[0]["adversarial"] is True, name
+        assert data["retries"] == 5, name
 
-    assert (
-        "Coder: offering `pi-gpt-5-6-sol`" in (pool / "phase-high-Sol.md").read_text()
-    )
-    assert (
-        "Coder: offering `pi-gpt-5-6-luna`" in (pool / "phase-high-Luna.md").read_text()
-    )
+    def coder(name: str) -> str:
+        data = yaml.safe_load((pool / f"{name}.yaml").read_text())
+        return next(s["offering"] for s in data["stages"] if s["role"] == "coder")
+
+    assert coder("phase-high-Sol") == "pi-gpt-5-6-sol"
+    assert coder("phase-high-Luna") == "pi-gpt-5-6-luna"
 
 
 def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:
@@ -255,6 +269,8 @@ def test_recipe_inventory_has_new_surface_and_retired_meta_wrapper_removed() -> 
 
     assert cc_commands == {
         "cc-convert",
+        "cc-convert-pattern-10",
+        "cc-convert-pattern-20",
         "cc-full",
         "cc-implement",
         "cc-plan",
@@ -264,7 +280,8 @@ def test_recipe_inventory_has_new_surface_and_retired_meta_wrapper_removed() -> 
     }
     assert do_commands == {
         "do-convert",
-        "do-convert-pattern-0",
+        "do-convert-pattern-10",
+        "do-convert-pattern-20",
         "do-full",
         "do-implement",
         "do-plan",
