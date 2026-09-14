@@ -659,7 +659,7 @@ The caller writes `consult.json` — `{consult_id, specialist, question, answer_
 optional `cwd` and `requested_by` — and the door does the rest: it resolves the specialist
 against the merged roster, briefs a fresh worker, dispatches it in-process, and validates what
 comes back. Beside the `consult.json` it leaves `.brief.md`, `.order.json`,
-`.upagent-result.json` and `.receipt.json`.
+`.upagent-result.json`, `.mailbox/` for requester notifications, and `.receipt.json`.
 
 Two files cross the boundary and they answer different questions. `result.json` is the ordinary
 lifecycle receipt: the specialist worker ran and delivered. `answer.json` is the consult's

@@ -9005,12 +9005,22 @@ def _consult_file(tmp_path: Path, **over: object) -> Path:
     return path
 
 
-def _answering_dispatch(answer: dict | None, seen: list[dict]):
-    """Stand in for the whole worker lifecycle: record the order, write what the specialist would."""
+def _answering_dispatch(
+    answer: dict | None,
+    seen: list[dict],
+    *,
+    publish_requester: bool = False,
+):
+    """Stand in for the worker lifecycle: notify its mailbox and write its answer."""
 
     def dispatch(order_path: str, roster_path: str) -> int:
         path = Path(order_path)
-        seen.append(json.loads(path.read_text()))
+        order = json.loads(path.read_text())
+        seen.append(order)
+        if publish_requester:
+            recruiter.lifecycle.RequestMailbox(order["requester"]["address"]).publish(
+                order["request_id"], 1, "terminal", "finished"
+            )
         if answer is not None:
             consult = path.with_name(path.name.removesuffix(".order.json"))
             target = Path(json.loads(consult.read_text())["answer_path"])
@@ -9046,7 +9056,9 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     consult = _consult_file(tmp_path)
     seen: list[dict] = []
     monkeypatch.setattr(
-        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+        recruiter,
+        "cmd_dispatch",
+        _answering_dispatch(_cited_answer(), seen, publish_requester=True),
     )
 
     assert recruiter.cmd_consult(str(consult), "roster.yaml") == 0
@@ -9062,6 +9074,39 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     assert order["timeout_ms"] == recruiter.CONSULT_TIMEOUT_MS
     assert order["cockpit_pane"] == "ws1:%7"
     assert "management" not in order
+    artifacts = recruiter.consult_artifact_paths(consult)
+    assert Path(order["requester"]["address"]) == artifacts["mailbox"]
+    assert Path(order["requester"]["address"]) != artifacts["receipt"]
+
+    answer_path = Path(order["artifact_publication"]["answer_path"])
+    assert answer_path.is_file()
+    assert recruiter.contracts_consult.load_answer(
+        answer_path, expected_consult_id="phase-2.stage-1.pass-1.consult-1"
+    ) == _cited_answer()
+    receipt_path = artifacts["receipt"]
+    assert receipt_path.is_file()
+    assert _receipt(consult)["answer_verdict"] == "cited"
+
+
+def test_consult_rejects_receipt_directory_before_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _specialist_world(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    receipt_path = recruiter.consult_artifact_paths(consult)["receipt"]
+    receipt_path.mkdir(parents=True)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
+
+    with pytest.raises(
+        recruiter.RecruiterError,
+        match="consult receipt destination is a directory",
+    ):
+        recruiter.cmd_consult(str(consult), "roster.yaml")
+
+    assert seen == []
 
 
 def test_consult_dispatch_uses_active_public_roster_for_snapshot_order(
