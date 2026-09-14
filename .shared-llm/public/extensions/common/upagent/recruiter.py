@@ -14435,8 +14435,17 @@ def consult_artifact_paths(consult_path: str | Path) -> dict[str, Path]:
         "result": path.with_name(path.name + ".upagent-result.json"),
         "compacted": path.with_name(path.name + ".compacted.md"),
         "handoff": path.with_name(path.name + ".handoff.md"),
+        "mailbox": path.with_name(path.name + ".mailbox"),
         "receipt": path.with_name(path.name + ".receipt.json"),
     }
+
+
+def _require_consult_receipt_destination(receipt_path: Path) -> None:
+    """Refuse a path that cannot become the consult's regular JSON receipt."""
+    if receipt_path.is_dir():
+        raise RecruiterError(
+            f"consult receipt destination is a directory: {receipt_path}"
+        )
 
 
 def build_consult_order(
@@ -14464,7 +14473,7 @@ def build_consult_order(
         "requester": {
             "id": "upagent-consult",
             "kind": "file-mailbox",
-            "address": str(artifacts["receipt"]),
+            "address": str(artifacts["mailbox"]),
         },
         "phase_id": CONSULT_PHASE_ID,
         "stage_id": "stage-5-finalization",
@@ -14709,9 +14718,11 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
 
     Everything that can fail lives inside the recoverable block once consult_id is known —
     including the roster load — so a bad roster, an unknown specialist or a Herdr fault still
-    resolves the caller instead of raising past it.
+    resolves the caller instead of raising past it. A receipt path that is already a directory
+    is rejected before any specialist dispatch because no regular receipt can be published there.
     """
     artifacts = consult_artifact_paths(consult_path)
+    _require_consult_receipt_destination(artifacts["receipt"])
     try:
         consult = contracts_consult.load_consult(consult_path)
     except ConsultError as strict_error:
