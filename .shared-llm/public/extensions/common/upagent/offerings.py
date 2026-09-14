@@ -69,7 +69,6 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
     "codex-gpt-6-astra": ("codex", "gpt-6-astra", EFFORTS, "openai"),
-    "codex-gpt-5-5": ("codex", "gpt-5.5", EFFORTS[:-1], "openai"),
     # Cursor model ids carry their native effort tier, so each public cursor
     # offering exposes the canonical default selection only.
     "cursor-composer-2-5": (
@@ -88,7 +87,6 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS, "openai"),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS, "openai"),
     "pi-gpt-6-astra": ("pi", "openai-codex/gpt-6-astra", EFFORTS, "openai"),
-    "pi-gpt-5-5": ("pi", "openai-codex/gpt-5.5", EFFORTS[:-1], "openai"),
     "claudex-gpt-5-6-sol": ("claudex", "gpt-5.6-sol", EFFORTS, "openai"),
 }
 
@@ -258,7 +256,9 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
     if not isinstance(raw, dict):
         raise OfferingError(f"offering roster {source} must be one YAML object")
     _strict_keys(
-        raw, {"schema_version", "offerings", "management", "run_watch"}, "offering roster"
+        raw,
+        {"schema_version", "offerings", "management", "run_watch"},
+        "offering roster",
     )
     if raw.get("schema_version") != 1:
         raise OfferingError("offering roster schema_version must equal 1")
@@ -312,7 +312,10 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
         raise OfferingError("offering roster management must be an object")
     _validate_management(management, parsed)
     return OfferingRoster(
-        parsed, dict(management), source, selected_sets,
+        parsed,
+        dict(management),
+        source,
+        selected_sets,
         validate_run_watch(raw.get("run_watch", {})),
     )
 
@@ -501,7 +504,9 @@ def render_roster(
         ) from error
     if not isinstance(management_raw, dict):
         raise OfferingError("offering management policy must be one YAML object")
-    _strict_keys(management_raw, {"management", "run_watch"}, "offering management policy")
+    _strict_keys(
+        management_raw, {"management", "run_watch"}, "offering management policy"
+    )
 
     # Standard is required by the fixed management candidates. Keeping its authored text as
     # the base preserves the pre-offering-set standard roster byte-for-byte.

@@ -27,11 +27,11 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 14
+    assert len(roster.listing()) == 12
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
-    assert "codex:::gpt-5.5" in rendered_identities
     assert all("5.4" not in identity for identity in rendered_identities)
+    assert all("5.5" not in identity for identity in rendered_identities)
     assert "codex:::gpt-6-astra" in rendered_identities
     assert "cursor:::composer-2.5" in rendered_identities
     assert "cursor:::cursor-grok-4.6-high" in rendered_identities
@@ -134,28 +134,14 @@ def test_every_approved_offering_and_effort_renders_without_yaml_commands() -> N
                 assert argv[argv.index("--thinking") + 1] == effort
 
 
-def test_restricted_offering_has_only_the_pi_catalog_supported_efforts(
-    tmp_path: Path,
-) -> None:
+def test_luna_offering_replaces_gpt55_with_max_effort() -> None:
     roster = offerings.load_selected_roster()
-    gpt55 = roster.offerings["pi-gpt-5-5"]
+    luna = roster.offerings["pi-gpt-5-6-luna"]
 
-    assert gpt55.efforts == ("low", "medium", "high", "xhigh")
-    with pytest.raises(offerings.OfferingError, match="does not allow effort"):
-        roster.resolve(gpt55.offering_id, "max")
-
-    source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["offerings"][gpt55.offering_id]["efforts"] = [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
-    path = tmp_path / "offerings.yaml"
-    path.write_text(offerings.yaml.safe_dump(source))
-    with pytest.raises(offerings.OfferingError, match="efforts must be exactly"):
-        offerings.load_roster(path)
+    assert luna.efforts == ("low", "medium", "high", "xhigh", "max")
+    snapshot = roster.resolve(luna.offering_id, "max")
+    assert snapshot["model"] == "openai-codex/gpt-5.6-luna"
+    assert snapshot["selected_effort"] == "max"
 
 
 def test_cursor_offerings_have_only_default_effort() -> None:
@@ -196,7 +182,6 @@ def test_effortful_offering_still_requires_effort() -> None:
         "claude-sonnet-5",
         "codex-gpt-5-6-sol",
         "pi-gpt-5-6-sol",
-        "pi-gpt-5-5",
     ):
         with pytest.raises(
             offerings.OfferingError, match="requires an explicit effort"
@@ -295,14 +280,12 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "claude-opus-4-8": "anthropic",
         "codex-gpt-5-6-sol": "openai",
         "codex-gpt-6-astra": "openai",
-        "codex-gpt-5-5": "openai",
         "cursor-composer-2-5": "cursor",
         "cursor-grok-4-6": "xai",
         "pi-gpt-5-6-sol": "openai",
         "pi-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-luna": "openai",
         "pi-gpt-6-astra": "openai",
-        "pi-gpt-5-5": "openai",
     }
 
     assert {key: item.provider for key, item in roster.offerings.items()} == expected
@@ -313,7 +296,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
 
 
 def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
-    snapshot = offerings.load_selected_roster().resolve("pi-gpt-5-5", "low")
+    snapshot = offerings.load_selected_roster().resolve("pi-gpt-5-6-luna", "max")
 
     missing = dict(snapshot)
     missing.pop("provider")
@@ -390,7 +373,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "4b67d4b2611538d7a2588a1d71a006bd3a54e021da00c4dcefa150e106f05538"
+        "70546a122be26ed04359182a03f88d81fec920d42f5dfe62c51c5204fa8aca28"
     )
 
 

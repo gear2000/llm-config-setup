@@ -5,7 +5,7 @@
 
 # Load a plan and run the implement loop (write reviewed terraform until approved).
 tf-implement plan:
-    TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts
+    TF_PLAN_PATH={{ plan }} pi -e ~/.pi/agent/extensions/tf-implement.ts
 
 # Terraform apply/destroy with the agent-distilled plan table (tf-approve).
 tf-approve:
@@ -13,7 +13,7 @@ tf-approve:
 
 # Full workflow: plan + implement reviewed code, then the plan-table apply
 tf-auto plan:
-    TF_PLAN_PATH={{plan}} pi -e ~/.pi/agent/extensions/tf-implement.ts && \
+    TF_PLAN_PATH={{ plan }} pi -e ~/.pi/agent/extensions/tf-implement.ts && \
     pi -e ~/.pi/agent/extensions/tf-approve.ts
 
 # Start the terraform reviewer (Claude Code) — run before tf-implement or tf-approve
@@ -29,8 +29,8 @@ tf-reviewer-cc:
     tmux send-keys -t tf-reviewer Enter
 
 # Start the terraform reviewer (Pi) — run before tf-implement or tf-approve
-tf-reviewer-pi model="openai-codex/gpt-5.5":
-    tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'pi --model {{model}} --thinking high -a --no-session'
+tf-reviewer-pi model="openai-codex/gpt-5.6-luna":
+    tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'pi --model {{ model }} --thinking max -a --no-session'
     for i in $(seq 1 60); do \
         pane=$(tmux capture-pane -p -t tf-reviewer 2>/dev/null); \
         echo "$$pane" | grep -q 'Press any key to continue' && tmux send-keys -t tf-reviewer Enter; \

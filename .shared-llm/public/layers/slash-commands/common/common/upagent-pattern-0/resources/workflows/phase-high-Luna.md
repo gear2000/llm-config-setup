@@ -1,19 +1,21 @@
-# phase-high-Fable
+# phase-high-Luna
 
 ```text
-Fable 5.1 low codes -> GPT 5.6 Sol high adversarial review
-  -> required checks + pass -> next phase
+GPT 5.6 Luna max codes -> GPT 5.6 Sol high adversarial review
+  -> repair/review -> required checks + pass -> next phase
 ```
+
+Default hard-tier document while GPT 5.6 Luna is discounted.
 
 ## Models
 
-- Coder: offering `claude-fable-5-1`; model `claude-fable-5-1`; harness `claude`; effort `low`.
+- Coder: offering `pi-gpt-5-6-luna`; model `openai-codex/gpt-5.6-luna`; harness `pi`; effort `max`.
 - Independent adversarial reviewer: offering `pi-gpt-5-6-sol`; model `openai-codex/gpt-5.6-sol`; harness `pi`; effort `high`.
 
 ## Procedure
 
-1. Settle the repair/review limit with the human; record it in the execution packet before hiring. There is no default retry count.
-2. Hire Fable for the assigned scope and original acceptance criteria. Hire a fresh Sol adversary against the resulting candidate. Return findings to Fable within the approved retry bound. Exhaustion means stop and ask the human.
+1. Settle the repair/review limit with the human; record it in the execution packet before hiring. The reviewer offering and high effort are fixed.
+2. Hire Luna for the assigned scope and original acceptance criteria. Hire a fresh GPT 5.6 Sol adversary against the resulting candidate. Return findings to Luna within the approved retry bound. Exhaustion means stop and ask the human.
 3. Run the plan's required checks using its selected validation document. Advance only when the current candidate passes review and checks. Do not add an intermediate review or another phase audit. The assigned final combined-plan audit still runs.
 
 ## Controller requirements

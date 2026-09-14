@@ -1587,7 +1587,7 @@ def test_the_brief_pulse_is_an_event_driven_bounded_wake_wait() -> None:
     assert "sleep 900" not in brief
     assert llm.SENTINEL_PULSE_MINUTES == 5
     pulse_seconds = llm.SENTINEL_PULSE_MINUTES * 60
-    assert llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS > pulse_seconds * 1000
+    assert pulse_seconds * 1000 < llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS
     assert llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS <= 600_000
     assert f"{llm.SENTINEL_PULSE_COMMAND_TIMEOUT_MS} ms" in brief
     assert (
@@ -2992,7 +2992,7 @@ def test_both_nudge_triggers_exclude_exec_retained_and_watchdog_workers(
         order["harness"] = "codex"
         order["offering_snapshot"] = (
             recruiter.offering_catalog.load_selected_roster().resolve(
-                "codex-gpt-5-5", "low"
+                "codex-gpt-5-6-sol", "low"
             )
         )
     elif excluded == "retained":
