@@ -151,6 +151,7 @@ def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> 
         "phase-medium-chatgpt-5.5",
         "phase-high-Astra",
         "phase-high-Fable",
+        "phase-high-Sol",
     ):
         assert f"`{name}`" in source
         assert (pool / f"{name}.md").is_file()
