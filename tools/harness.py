@@ -698,6 +698,7 @@ class Composer:
 #     ext      ~/.shared-llm/generated/pi/extensions/<x> -> ~/.pi/agent/extensions/<x>
 #              (or ~/.pi/extensions for *-hub.ts)
 #     personas ~/.shared-llm/generated/pi/agents/<x>.md  -> ~/.pi/agent/agents/<x>.md
+#     themes   ~/.shared-llm/generated/pi/themes/<x>.json -> ~/.pi/agent/themes/<x>.json
 #
 #   The kit sources under .shared-llm/public/llm/pi/common/ are COPIED into that
 #   generated tree first. No home link ever targets the repo checkout, so a moved,
@@ -897,11 +898,11 @@ def _skill_dirs(root: Path) -> list[Path]:
 
 
 def plan_pi_runtime(root: Path, exclude: list[str] | None = None) -> LinkPlan:
-    """Global Pi RUNTIME links: the bundled extensions and the hand-authored Pi
-    agent personas (tf-reviewer, doc-reviewer, …) under
+    """Global Pi RUNTIME links: bundled extensions, hand-authored Pi agent
+    personas (tf-reviewer, doc-reviewer, …), and themes under
     .shared-llm/public/llm/pi/common/. Skills are handled separately by do_global
     (copied, routed) and the composed generic agents are handled by
-    do_home_runtime, so this plan covers only the stable .ts/.md runtime sources.
+    do_home_runtime, so this plan covers only the stable runtime sources.
 
     The home links point at the DURABLE generated tree, never at the repo
     checkout: each source is copied into ~/.shared-llm/generated/pi/ first, so a
@@ -909,11 +910,13 @@ def plan_pi_runtime(root: Path, exclude: list[str] | None = None) -> LinkPlan:
     Copying is why this planner writes: the desired targets it returns only exist
     because it materialised them."""
     pi_agents = HOME / ".pi/agent/agents"
+    pi_themes = HOME / ".pi/agent/themes"
     agent_ext = HOME / ".pi/agent/extensions"
     hub_ext = HOME / ".pi/extensions"
     kit_shared = root / ".shared-llm" / PUBLIC_DIR
     gen_ext = generated_root() / "pi/extensions"
     gen_personas = generated_root() / "pi/agents"
+    gen_themes = generated_root() / "pi/themes"
 
     def excluded(src: Path) -> bool:
         return bool(exclude) and _is_excluded(src, kit_shared, exclude)
@@ -945,13 +948,21 @@ def plan_pi_runtime(root: Path, exclude: list[str] | None = None) -> LinkPlan:
             gen = gen_ext / name
             sources[gen] = entry
             desired[home_dest] = gen
+    theme_src = kit_shared / "llm/pi/common/themes"
+    if theme_src.is_dir():
+        for theme in sorted(theme_src.glob("*.json")):
+            if excluded(theme):
+                continue
+            gen = gen_themes / theme.name
+            sources[gen] = theme
+            desired[pi_themes / theme.name] = gen
 
     for gen, src in sources.items():
         _sync_generated_any(src, gen)
     # Retiring a source is NOT done here: the generated copy is dropped in the
     # commit phase at the end of the run, after the home links that point at it
     # have been removed (see HomeManifest.commit_generated).
-    return LinkPlan(desired, [pi_agents, agent_ext, hub_ext])
+    return LinkPlan(desired, [pi_agents, pi_themes, agent_ext, hub_ext])
 
 
 def plan_herdr_config(root: Path) -> LinkPlan:
@@ -2571,6 +2582,7 @@ GENERATED_DIR_NAMESPACES = (
     "claude/hooks",
     "pi/extensions",
     "pi/agents",
+    "pi/themes",
 )
 GENERATED_FILES = (
     "claude/statusline.sh",
@@ -4277,7 +4289,7 @@ def do_home_runtime(
     if "cc" in wanted:
         _install_claude_runtime(kit_shared, log, exclude, manifest)
 
-    # 3. Pi runtime — extension/persona symlinks + settings scaffold. Drop any
+    # 3. Pi runtime — extension/persona/theme symlinks + settings scaffold. Drop any
     #    source under an exclude path from the link plan before reconciling.
     if "pi" in wanted:
         plan = plan_pi_runtime(kit, exclude)

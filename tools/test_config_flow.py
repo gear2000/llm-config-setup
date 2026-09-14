@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -595,7 +597,9 @@ def test_compose_this_repo_nested_md_recipes_and_skips_public_examples(
         yaml.safe_dump(
             {
                 "type": "claude-md",
-                "inputs": [".shared-llm/public/layers/llm/this_repo/packages/example.md"],
+                "inputs": [
+                    ".shared-llm/public/layers/llm/this_repo/packages/example.md"
+                ],
                 "output": "samples/src/packages/example_package/CLAUDE.md",
             },
             sort_keys=False,
@@ -606,7 +610,9 @@ def test_compose_this_repo_nested_md_recipes_and_skips_public_examples(
         yaml.safe_dump(
             {
                 "type": "claude-md",
-                "inputs": [".shared-llm/this_repo/layers/llm/this_repo/packages/foo.md"],
+                "inputs": [
+                    ".shared-llm/this_repo/layers/llm/this_repo/packages/foo.md"
+                ],
                 "output": "src/packages/foo/CLAUDE.md",
             },
             sort_keys=False,
@@ -1191,6 +1197,86 @@ def test_home_runtime_migrates_legacy_pi_agents_dir(tmp_path: Path) -> None:
     assert not legacy.exists()
 
 
+def test_rose_theme_has_complete_valid_color_map() -> None:
+    theme_path = (
+        HARNESS.parent.parent / ".shared-llm/public/llm/pi/common/themes/rose.json"
+    )
+    theme = json.loads(theme_path.read_text())
+    required = {
+        "accent",
+        "border",
+        "borderAccent",
+        "borderMuted",
+        "success",
+        "error",
+        "warning",
+        "muted",
+        "dim",
+        "text",
+        "thinkingText",
+        "selectedBg",
+        "userMessageBg",
+        "userMessageText",
+        "customMessageBg",
+        "customMessageText",
+        "customMessageLabel",
+        "toolPendingBg",
+        "toolSuccessBg",
+        "toolErrorBg",
+        "toolTitle",
+        "toolOutput",
+        "mdHeading",
+        "mdLink",
+        "mdLinkUrl",
+        "mdCode",
+        "mdCodeBlock",
+        "mdCodeBlockBorder",
+        "mdQuote",
+        "mdQuoteBorder",
+        "mdHr",
+        "mdListBullet",
+        "toolDiffAdded",
+        "toolDiffRemoved",
+        "toolDiffContext",
+        "syntaxComment",
+        "syntaxKeyword",
+        "syntaxFunction",
+        "syntaxVariable",
+        "syntaxString",
+        "syntaxNumber",
+        "syntaxType",
+        "syntaxOperator",
+        "syntaxPunctuation",
+        "thinkingOff",
+        "thinkingMinimal",
+        "thinkingLow",
+        "thinkingMedium",
+        "thinkingHigh",
+        "thinkingXhigh",
+        "bashMode",
+    }
+    optional = {
+        "scrollbarTrack",
+        "scrollbarThumb",
+        "searchMatchBg",
+        "searchMatchText",
+        "thinkingMax",
+    }
+    assert theme["name"] == theme_path.stem == "rose"
+    assert set(theme["colors"]) == required | optional
+
+    variables = theme["vars"]
+    assert all(re.fullmatch(r"#[0-9a-fA-F]{6}", value) for value in variables.values())
+    for value in [*theme["colors"].values(), *theme["export"].values()]:
+        assert (
+            value == "" or value in variables or re.fullmatch(r"#[0-9a-fA-F]{6}", value)
+        )
+
+    license_text = theme_path.with_name("ROSE-PINE-LICENSE.txt").read_text()
+    assert "Copyright (c) 2023 Rosé Pine" in license_text
+    assert "Permission is hereby granted" in license_text
+
+
 def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:
     m = _load()
     home = tmp_path / "home"
@@ -1205,6 +1291,18 @@ def test_home_runtime_installs_claude_and_pi_runtime(tmp_path: Path) -> None:
     provider_policy_ext = home / ".pi/agent/extensions/disable-amazon-bedrock.ts"
     assert planish_ext.is_symlink()
     assert provider_policy_ext.is_symlink()
+    # Pi themes use the same durable generated-copy deployment as extensions.
+    rose = home / ".pi/agent/themes/rose.json"
+    generated_rose = home / ".shared-llm/generated/pi/themes/rose.json"
+    assert rose.is_symlink()
+    assert rose.resolve() == generated_rose.resolve()
+    assert (
+        generated_rose.read_bytes()
+        == (
+            m.project_root() / ".shared-llm/public/llm/pi/common/themes/rose.json"
+        ).read_bytes()
+    )
+    assert json.loads(rose.read_text())["name"] == "rose"
     # Pi settings scaffolded.
     assert (home / ".pi/agent/settings.json").exists()
 
@@ -1523,6 +1621,7 @@ def test_no_home_link_targets_the_repo_checkout(tmp_path: Path) -> None:
     assert (generated / "claude/statusline.sh").is_file()
     assert any((generated / "pi/extensions").iterdir())
     assert (generated / "pi/agents/doc-reviewer.md").is_file()
+    assert (generated / "pi/themes/rose.json").is_file()
 
 
 def test_ownership_is_resolved_path_not_substring(tmp_path: Path) -> None:
@@ -1722,7 +1821,7 @@ def test_disabling_a_harness_retires_its_whole_generated_pieces(
     tmp_path: Path,
 ) -> None:
     """Emptying `global:` retires the whole pieces too — hooks, statusline, Pi
-    extensions and personas, herdr config — not just skills and agents."""
+    extensions, personas, themes, and herdr config — not just skills and agents."""
     m = _load()
     home = tmp_path / "home"
     _patch_home(m, home)
@@ -1735,6 +1834,7 @@ def test_disabling_a_harness_retires_its_whole_generated_pieces(
         gen / "claude/statusline.sh",
         gen / "pi/extensions",
         gen / "pi/agents",
+        gen / "pi/themes",
         gen / "herdr-config.toml",
     ]
     assert all(p.exists() for p in pieces), "baseline: every whole piece deployed"

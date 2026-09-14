@@ -33,7 +33,9 @@ KIT = TOOLS.parent
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("harness_manifest_under_test", HARNESS)
+    spec = importlib.util.spec_from_file_location(
+        "harness_manifest_under_test", HARNESS
+    )
     assert spec and spec.loader
     m = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = m
@@ -113,13 +115,7 @@ def _home_snapshot(m, home: Path) -> list[tuple[str, str]]:
         if not root.exists():
             continue
         for entry in sorted(root.rglob("*")):
-            kind = (
-                "link"
-                if entry.is_symlink()
-                else "dir"
-                if entry.is_dir()
-                else "file"
-            )
+            kind = "link" if entry.is_symlink() else "dir" if entry.is_dir() else "file"
             out.append((str(entry.relative_to(home)), kind))
     return sorted(out)
 
@@ -500,9 +496,7 @@ def test_corrupt_manifest_is_quarantined_and_ownership_is_rebuilt(
 
 def _manifest_is_rejected(m, entry_key: str, meta) -> bool:
     m.manifest_path().parent.mkdir(parents=True, exist_ok=True)
-    m.manifest_path().write_text(
-        json.dumps({"version": 1, "paths": {entry_key: meta}})
-    )
+    m.manifest_path().write_text(json.dumps({"version": 1, "paths": {entry_key: meta}}))
     return not m.HomeManifest().previous_ok
 
 
@@ -559,9 +553,7 @@ def test_a_manifest_naming_a_path_outside_home_deletes_nothing(tmp_path: Path) -
         json.dumps(
             {
                 "version": 1,
-                "paths": {
-                    str(victim): {"kind": "link", "source": str(victim_target)}
-                },
+                "paths": {str(victim): {"kind": "link", "source": str(victim_target)}},
             }
         )
     )
@@ -711,7 +703,7 @@ def test_a_dangling_settings_symlink_is_preserved(
 
 
 @pytest.mark.parametrize(
-    "rel", ["", "skills", "claude/hooks", "pi/extensions"]
+    "rel", ["", "skills", "claude/hooks", "pi/extensions", "pi/themes"]
 )
 def test_pruning_refuses_to_follow_a_symlinked_generated_path(
     tmp_path: Path, rel: str, capsys
@@ -726,7 +718,9 @@ def test_pruning_refuses_to_follow_a_symlinked_generated_path(
     outside.mkdir()
     _write(outside / "precious.md", "handwritten, not generated\n")
 
-    hijacked = home / ".shared-llm/generated" / rel if rel else home / ".shared-llm/generated"
+    hijacked = (
+        home / ".shared-llm/generated" / rel if rel else home / ".shared-llm/generated"
+    )
     hijacked.parent.mkdir(parents=True, exist_ok=True)
     hijacked.symlink_to(outside)
 
