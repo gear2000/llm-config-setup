@@ -46,6 +46,30 @@ human
 The implementer lands in the `control` tab beside the already-running HIL pane; hired workers
 still move to `workers`.
 
+## Pattern 0: select workflow documents, reuse Flow 1
+
+```text
+/upagent-pattern-0 --plan plan.md --workflow workflow.yaml --offering <controller-id> --effort <effort>
+```
+
+Pattern 0 prepares an execution packet containing the approved plan, explicit phase assignments
+and full copies of the selected workflow documents. It then uses the existing `/hil` →
+`/plan-implementer` path; no new scheduler or launcher is involved. The implementer delegates
+all production coding, fixes and reviews for these packets. Flows 1–3 remain available unchanged.
+
+The skill's bundled `workflows/` pool contains `phase-low`, `phase-medium-sonnet`,
+`phase-medium-chatgpt-5.5`, `phase-high-Astra`, `phase-high-Fable`, `validate`,
+`finalize-adversarial` and `delegated-implementer`. Each is a separate Markdown document,
+not a parameterized template. An assignment can select an explicit human-owned `pool` directory;
+new documents there require no registry/code change. Missing choices stop before hiring.
+
+Edit bundled documents under
+`.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-0/resources/workflows/`
+in the kit, then run `just update`. Do not edit generated home copies. See `/upagent-pattern-0`
+for the assignment format. This is an agent-followed document contract, not software enforcement
+of review semantics. Finalization uses one audit, or two selected independent model audits for
+a very big plan; it does not add plan-review rounds.
+
 ## Per-command execution
 
 Every recipe invokes `client.py`. Before importing any UpAgent runtime module or classifying the

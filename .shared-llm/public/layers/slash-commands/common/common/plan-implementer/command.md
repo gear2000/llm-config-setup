@@ -19,6 +19,12 @@ All flags are required. `--plan` / `--run-root` are the frozen run-tree copies. 
 3. `just upagent-up` is optional. Determine this pane id from `$HERDR_PANE_ID` — that is `--cockpit-pane` on every hire. Do not infer it from UI focus. If `just upagent lists --type offerings --json` fails with `no checked-out main branch UpAgent source found` or `ambiguous checked-out main branch UpAgent sources`, `$UPAGENT_CANONICAL_REPO` should already be set from `start.sh`. Stop fail-loud; do not guess a checkout.
 4. Read `--plan`. Do not invent a five-stage `route.yaml`. Do not start `/tui-control` or `/phase-leader`.
 
+## Pattern 0 execution packets
+
+When the supplied plan begins with `<!-- upagent-pattern-0 -->`, read its frozen document assignments, selected workflow documents and explicit run decisions. Follow the assigned document for each phase and the required validation/finalization documents. Resolve original-plan references against the original location recorded in the packet. Missing assignments, choices or evidence mean ask through the HIL before hiring.
+
+For these packets only, delegate **all** production coding, fixes, validation and independent reviews through UpAgent; the local-coding exception below does not apply. Keep the existing hire, inbox, question/answer and result protocols. Do not hire another workflow controller. A passing result requires all assigned checks and final audits on the current candidate. Ordinary Flow 1 plans retain their existing behavior.
+
 ## Work — hire, don't hoard context
 
 Slice the plan into Recruiter hires using the **Worker hire contract** below. Prefer workers so this pane stays small.
