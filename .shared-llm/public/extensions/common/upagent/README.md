@@ -58,7 +58,8 @@ and full copies of the selected workflow documents. It then uses the existing `/
 all production coding, fixes and reviews for these packets. Flows 1–3 remain available unchanged.
 
 The skill's bundled `workflows/` pool contains `phase-low`, `phase-medium-sonnet`,
-`phase-medium-chatgpt-5.5`, `phase-high-Astra`, `phase-high-Fable`, `phase-high-Sol`, `validate`,
+`phase-medium-chatgpt-5.5`, `phase-high-Astra`, `phase-high-Fable`, `phase-high-Sol`, `phase-low-Luna`,
+`phase-medium-Luna`, `phase-high-Luna`, `validate`,
 `finalize-adversarial` and `delegated-implementer`. Each is a separate Markdown document,
 not a parameterized template. An assignment can select an explicit human-owned `pool` directory;
 new documents there require no registry/code change. Missing choices stop before hiring.

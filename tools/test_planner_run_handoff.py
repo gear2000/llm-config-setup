@@ -152,6 +152,9 @@ def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> 
         "phase-high-Astra",
         "phase-high-Fable",
         "phase-high-Sol",
+        "phase-low-Luna",
+        "phase-medium-Luna",
+        "phase-high-Luna",
     ):
         assert f"`{name}`" in source
         assert (pool / f"{name}.md").is_file()
