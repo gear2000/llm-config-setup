@@ -34,11 +34,6 @@ offerings:
     model: gpt-5.5
     efforts: [low, medium, high, xhigh]
     completion_style: exec
-  codex-gpt-5-4-mini:
-    harness: codex
-    model: gpt-5.4-mini
-    efforts: [low, medium, high, xhigh]
-    completion_style: exec
   cursor-composer-2-5:
     harness: cursor
     # Composer 2.5, deliberately NOT the -fast variant. Cursor model ids carry
@@ -71,8 +66,4 @@ offerings:
   pi-gpt-5-5:
     harness: pi
     model: openai-codex/gpt-5.5
-    efforts: [low, medium, high, xhigh]
-  pi-gpt-5-4-mini:
-    harness: pi
-    model: openai-codex/gpt-5.4-mini
     efforts: [low, medium, high, xhigh]

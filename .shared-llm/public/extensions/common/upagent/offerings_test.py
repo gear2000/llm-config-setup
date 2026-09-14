@@ -27,11 +27,11 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 16
+    assert len(roster.listing()) == 14
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
     assert "codex:::gpt-5.5" in rendered_identities
-    assert "codex:::gpt-5.4-mini" in rendered_identities
+    assert all("5.4" not in identity for identity in rendered_identities)
     assert "codex:::gpt-6-astra" in rendered_identities
     assert "cursor:::composer-2.5" in rendered_identities
     assert "cursor:::cursor-grok-4.6-high" in rendered_identities
@@ -138,14 +138,14 @@ def test_restricted_offering_has_only_the_pi_catalog_supported_efforts(
     tmp_path: Path,
 ) -> None:
     roster = offerings.load_selected_roster()
-    mini = roster.offerings["pi-gpt-5-4-mini"]
+    gpt55 = roster.offerings["pi-gpt-5-5"]
 
-    assert mini.efforts == ("low", "medium", "high", "xhigh")
+    assert gpt55.efforts == ("low", "medium", "high", "xhigh")
     with pytest.raises(offerings.OfferingError, match="does not allow effort"):
-        roster.resolve(mini.offering_id, "max")
+        roster.resolve(gpt55.offering_id, "max")
 
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["offerings"][mini.offering_id]["efforts"] = [
+    source["offerings"][gpt55.offering_id]["efforts"] = [
         "low",
         "medium",
         "high",
@@ -196,7 +196,7 @@ def test_effortful_offering_still_requires_effort() -> None:
         "claude-sonnet-5",
         "codex-gpt-5-6-sol",
         "pi-gpt-5-6-sol",
-        "pi-gpt-5-4-mini",
+        "pi-gpt-5-5",
     ):
         with pytest.raises(
             offerings.OfferingError, match="requires an explicit effort"
@@ -296,7 +296,6 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "codex-gpt-5-6-sol": "openai",
         "codex-gpt-6-astra": "openai",
         "codex-gpt-5-5": "openai",
-        "codex-gpt-5-4-mini": "openai",
         "cursor-composer-2-5": "cursor",
         "cursor-grok-4-6": "xai",
         "pi-gpt-5-6-sol": "openai",
@@ -304,7 +303,6 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "pi-gpt-5-6-luna": "openai",
         "pi-gpt-6-astra": "openai",
         "pi-gpt-5-5": "openai",
-        "pi-gpt-5-4-mini": "openai",
     }
 
     assert {key: item.provider for key, item in roster.offerings.items()} == expected
@@ -315,7 +313,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
 
 
 def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
-    snapshot = offerings.load_selected_roster().resolve("pi-gpt-5-4-mini", "low")
+    snapshot = offerings.load_selected_roster().resolve("pi-gpt-5-5", "low")
 
     missing = dict(snapshot)
     missing.pop("provider")
@@ -392,7 +390,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "1f9202191034f6d38a7601bdc3f0411e21edbb791949e38ee8391d740222a79a"
+        "4b67d4b2611538d7a2588a1d71a006bd3a54e021da00c4dcefa150e106f05538"
     )
 
 

@@ -38,9 +38,9 @@ DEFAULT_OPENAI_SENTINEL_COMMAND = shlex.join(
         "-e",
         str(Path.home() / ".pi/agent/extensions/herdr-agent-state.ts"),
         "--model",
-        "openai-codex/gpt-5.4-mini",
+        "openai-codex/gpt-5.6-luna",
         "--thinking",
-        "low",
+        "high",
         "Read {brief_path}, perform that one sentinel duty cycle for its worker, write "
         "{output_path} when the worker lifecycle ends, then exit.",
     ]

@@ -1,6 +1,6 @@
 {
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.4-mini",
+  "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "medium",
   "_transport_note": "sse forces the Codex provider onto HTTP/SSE instead of the WebSocket. The Codex WS rejects large requests (close 1009 'message too big') and auto-mode then blows the hardcoded 10s SSE-header fallback timeout — 'Codex SSE response headers timed out after 10000ms'. SSE is a plain HTTP POST with no frame-size cap, so large coding payloads go through. Values: sse|websocket|websocket-cached|auto.",
   "transport": "sse",
