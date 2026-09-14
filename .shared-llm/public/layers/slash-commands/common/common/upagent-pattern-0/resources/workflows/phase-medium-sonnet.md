@@ -1,7 +1,7 @@
 # phase-medium-sonnet
 
 ```text
-Sonnet 5 high codes -> GPT 5.5 high reviews
+Sonnet 5 high codes -> GPT 5.6 Luna max reviews
   -> repair/review -> GPT 5.6 Sol high audits the phase
   -> required checks + pass -> next phase
 ```
@@ -9,13 +9,13 @@ Sonnet 5 high codes -> GPT 5.5 high reviews
 ## Models
 
 - Coder: `claude-sonnet-5`, effort `high`.
-- Independent reviewer: `pi-gpt-5-5`, effort `high`.
-- Independent phase auditor: `pi-gpt-5-6-sol`, effort `high`.
+- Independent reviewer: offering `pi-gpt-5-6-luna`; model `openai-codex/gpt-5.6-luna`; harness `pi`; effort `max`.
+- Independent phase auditor: offering `pi-gpt-5-6-sol`; model `openai-codex/gpt-5.6-sol`; harness `pi`; effort `high`.
 
 ## Procedure
 
 1. Before hiring, obtain explicit coding/review and audit-repair limits from the human; record them in the execution packet. There is no default retry count.
-2. Hire Sonnet for the assigned scope. Hire a fresh GPT reviewer against its candidate. Return findings to Sonnet; keep the same coder model through bounded retries.
+2. Hire Sonnet for the assigned scope. Hire a fresh GPT 5.6 Luna reviewer against its candidate. Return findings to Sonnet; keep the same coder model through bounded retries.
 3. Once review passes, hire Sol for the phase audit. Return failures to the coder within the approved bounds, then repeat affected review/audit. Exhausted bounds mean stop and ask, not another automatic hire.
 4. Run the plan's required checks using its selected validation document. Advance only with passing review, audit and checks on the current candidate. The assigned final combined-plan audit still runs.
 

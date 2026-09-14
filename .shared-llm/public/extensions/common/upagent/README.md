@@ -58,7 +58,7 @@ and full copies of the selected workflow documents. It then uses the existing `/
 all production coding, fixes and reviews for these packets. Flows 1–3 remain available unchanged.
 
 The skill's bundled `workflows/` pool contains `phase-low`, `phase-medium-sonnet`,
-`phase-medium-chatgpt-5.5`, `phase-high-Astra`, `phase-high-Fable`, `phase-high-Sol`, `phase-low-Luna`,
+`phase-high-Astra`, `phase-high-Fable`, `phase-high-Sol`, `phase-low-Luna`,
 `phase-medium-Luna`, `phase-high-Luna`, `validate`,
 `finalize-adversarial` and `delegated-implementer`. Each is a separate Markdown document,
 not a parameterized template. An assignment can select an explicit human-owned `pool` directory;
@@ -258,7 +258,7 @@ authenticated terminal cancellation, audit, identical reattachment, and changed-
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
 no-op that also retries removal of a previously swapped runtime-owned residual.
 
-The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing seventeen stable ids: four Claude, four Codex, two Cursor, and seven Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-5-6-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
+The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing twelve stable ids: four Claude, two Codex, two Cursor, and four Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-5-6-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
 
 The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references, and the immutable order snapshot. YAML contains declarations only. Code pins every approved set member, harness, model, provider, effort list, completion style, health identity, executable, command renderer, and preflight. Unknown sets, partial sets, duplicate ids, changed fields, commands in YAML, and management references to absent offerings fail loudly. The runtime roster resolves from the request's starting repository, then `$UPAGENT_CANONICAL_REPO` for the same git repo, then the main checkout for a linked worktree, then the generated home roster.
 

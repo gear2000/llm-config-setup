@@ -5,7 +5,7 @@ Run the approved plan's integration, acceptance and other required checks with a
 ## Select one runner before execution
 
 - `cursor-composer-2-5`, effort `default`.
-- `pi-gpt-5-5`, effort explicitly chosen by the human.
+- offering `pi-gpt-5-6-luna`; model `openai-codex/gpt-5.6-luna`; harness `pi`; effort `max`.
 - `cursor-grok-4-6`, effort `default`; high is already part of its native model.
 
 Record the human's choice and existing persona in the execution packet; never substitute an unavailable offering.

@@ -7,8 +7,8 @@ Fable 5.1 low codes -> GPT 5.6 Sol high adversarial review
 
 ## Models
 
-- Coder: `claude-fable-5-1`, effort `low`.
-- Independent adversarial reviewer: `pi-gpt-5-6-sol`, effort `high`.
+- Coder: offering `claude-fable-5-1`; model `claude-fable-5-1`; harness `claude`; effort `low`.
+- Independent adversarial reviewer: offering `pi-gpt-5-6-sol`; model `openai-codex/gpt-5.6-sol`; harness `pi`; effort `high`.
 
 ## Procedure
 

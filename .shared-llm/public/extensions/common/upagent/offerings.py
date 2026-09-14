@@ -69,7 +69,6 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
     "codex-gpt-6-astra": ("codex", "gpt-6-astra", EFFORTS, "openai"),
-    "codex-gpt-5-5": ("codex", "gpt-5.5", EFFORTS[:-1], "openai"),
     # Cursor model ids carry their native effort tier, so each public cursor
     # offering exposes the canonical default selection only.
     "cursor-composer-2-5": (
@@ -88,7 +87,6 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS, "openai"),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS, "openai"),
     "pi-gpt-6-astra": ("pi", "openai-codex/gpt-6-astra", EFFORTS, "openai"),
-    "pi-gpt-5-5": ("pi", "openai-codex/gpt-5.5", EFFORTS[:-1], "openai"),
     "claudex-gpt-5-6-sol": ("claudex", "gpt-5.6-sol", EFFORTS, "openai"),
 }
 

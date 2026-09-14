@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -148,7 +148,6 @@ def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> 
     for name in (
         "phase-low",
         "phase-medium-sonnet",
-        "phase-medium-chatgpt-5.5",
         "phase-high-Astra",
         "phase-high-Fable",
         "phase-high-Sol",
@@ -162,6 +161,19 @@ def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> 
     assert "no extra phases" in source
     assert "new revision directory" in source
     assert "/do-convert-pattern-0" in CONVERT_COMMANDS["do-convert"].read_text()
+
+
+def test_phase_high_documents_name_the_exact_pi_sol_reviewer() -> None:
+    pool = LAYERS / "common/common/upagent-pattern-0/resources/workflows"
+    for name in ("phase-high-Astra", "phase-high-Fable", "phase-high-Sol", "phase-high-Luna"):
+        text = (pool / f"{name}.md").read_text()
+        assert (
+            "Independent adversarial reviewer: offering `pi-gpt-5-6-sol`; "
+            "model `openai-codex/gpt-5.6-sol`; harness `pi`; effort `high`."
+        ) in text, name
+
+    assert "Coder: offering `pi-gpt-5-6-sol`" in (pool / "phase-high-Sol.md").read_text()
+    assert "Coder: offering `pi-gpt-5-6-luna`" in (pool / "phase-high-Luna.md").read_text()
 
 
 def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:

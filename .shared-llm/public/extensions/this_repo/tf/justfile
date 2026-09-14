@@ -29,8 +29,8 @@ tf-reviewer-cc:
     tmux send-keys -t tf-reviewer Enter
 
 # Start the terraform reviewer (Pi) — run before tf-implement or tf-approve
-tf-reviewer-pi model="openai-codex/gpt-5.5":
-    tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'pi --model {{model}} --thinking high -a --no-session'
+tf-reviewer-pi model="openai-codex/gpt-5.6-luna":
+    tmux has-session -t tf-reviewer 2>/dev/null || tmux new-session -d -s tf-reviewer 'pi --model {{model}} --thinking max -a --no-session'
     for i in $(seq 1 60); do \
         pane=$(tmux capture-pane -p -t tf-reviewer 2>/dev/null); \
         echo "$$pane" | grep -q 'Press any key to continue' && tmux send-keys -t tf-reviewer Enter; \

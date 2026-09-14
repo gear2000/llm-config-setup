@@ -2,7 +2,7 @@
 
 ```text
 Composer 2.5 codes -> Cursor Grok 4.6 high reviews
-  -> repair/review -> GPT 5.5 high audits the phase
+  -> repair/review -> GPT 5.6 Luna max audits the phase
   -> required checks + pass -> next phase
 ```
 
@@ -10,7 +10,7 @@ Composer 2.5 codes -> Cursor Grok 4.6 high reviews
 
 - Coder: `cursor-composer-2-5`, effort `default`.
 - Independent reviewer: `cursor-grok-4-6`, effort `default`. The native model already encodes high; do not pass `--effort high`.
-- Independent phase auditor: `pi-gpt-5-5`, effort `high`.
+- Independent phase auditor: offering `pi-gpt-5-6-luna`; model `openai-codex/gpt-5.6-luna`; harness `pi`; effort `max`.
 
 ## Procedure
 

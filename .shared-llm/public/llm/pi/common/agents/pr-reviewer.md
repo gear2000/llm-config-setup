@@ -1,8 +1,8 @@
 ---
 name: pr-reviewer
 description: Adversarial PR / repo-state reviewer (branches, commits, diffs)
-model: openai/gpt-5.5
-thinking: high
+model: openai-codex/gpt-5.6-luna
+thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
