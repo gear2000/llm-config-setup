@@ -73,7 +73,11 @@ PHASE_EVALUATOR_SOURCE = PUBLIC / "layers/agents/common/phase-evaluator.md"
 
 def test_plan_commands_own_grill_design_and_two_round_plan_adversary() -> None:
     for name, path in PLAN_COMMANDS.items():
-        text = path.read_text() + "\n" + (LAYERS / "common/common/plan-core.md").read_text()
+        text = (
+            path.read_text()
+            + "\n"
+            + (LAYERS / "common/common/plan-core.md").read_text()
+        )
         assert "Planish" in text, name
         assert "conditionally" in text or "conditional design" in text, name
         assert "--adversarial-iterations N" in text, name
@@ -91,7 +95,10 @@ def test_plan_commands_own_grill_design_and_two_round_plan_adversary() -> None:
 def test_convert_commands_share_herdr_core_and_design_required_contract() -> None:
     core = (LAYERS / "common/common/plan-conversion-contract.md").read_text()
     for name, path in CONVERT_COMMANDS.items():
-        recipe = (RECIPES / f"common/{'claude' if name.startswith('cc-') else 'common'}/{name}.yaml").read_text()
+        recipe = (
+            RECIPES
+            / f"common/{'claude' if name.startswith('cc-') else 'common'}/{name}.yaml"
+        ).read_text()
         text = path.read_text() + "\n" + core
         assert "plan-conversion-contract.md" in recipe, name
         assert "--herdr" in text, name
@@ -104,7 +111,9 @@ def test_convert_commands_share_herdr_core_and_design_required_contract() -> Non
         assert "Do not invent private infrastructure" in text, name
 
 
-def test_pattern_0_converter_composes_without_phase_leader_schema(tmp_path: Path) -> None:
+def test_pattern_0_converter_composes_without_phase_leader_schema(
+    tmp_path: Path,
+) -> None:
     recipe = RECIPES / "common/common/do-convert-pattern-0.yaml"
     command = [
         sys.executable,
@@ -114,11 +123,15 @@ def test_pattern_0_converter_composes_without_phase_leader_schema(tmp_path: Path
         "--target",
         str(tmp_path),
     ]
-    first = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    first = subprocess.run(
+        command, cwd=ROOT, capture_output=True, text=True, check=False
+    )
     assert first.returncode == 0, first.stderr
     output = tmp_path / ".claude/skills/do-convert-pattern-0/SKILL.md"
     content = output.read_bytes()
-    second = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    second = subprocess.run(
+        command, cwd=ROOT, capture_output=True, text=True, check=False
+    )
     assert second.returncode == 0, second.stderr
     assert output.read_bytes() == content
     text = content.decode()
@@ -165,15 +178,24 @@ def test_pattern_0_converter_uses_existing_pool_and_keeps_runner_unchanged() -> 
 
 def test_phase_high_documents_name_the_exact_pi_sol_reviewer() -> None:
     pool = LAYERS / "common/common/upagent-pattern-0/resources/workflows"
-    for name in ("phase-high-Astra", "phase-high-Fable", "phase-high-Sol", "phase-high-Luna"):
+    for name in (
+        "phase-high-Astra",
+        "phase-high-Fable",
+        "phase-high-Sol",
+        "phase-high-Luna",
+    ):
         text = (pool / f"{name}.md").read_text()
         assert (
             "Independent adversarial reviewer: offering `pi-gpt-5-6-sol`; "
             "model `openai-codex/gpt-5.6-sol`; harness `pi`; effort `high`."
         ) in text, name
 
-    assert "Coder: offering `pi-gpt-5-6-sol`" in (pool / "phase-high-Sol.md").read_text()
-    assert "Coder: offering `pi-gpt-5-6-luna`" in (pool / "phase-high-Luna.md").read_text()
+    assert (
+        "Coder: offering `pi-gpt-5-6-sol`" in (pool / "phase-high-Sol.md").read_text()
+    )
+    assert (
+        "Coder: offering `pi-gpt-5-6-luna`" in (pool / "phase-high-Luna.md").read_text()
+    )
 
 
 def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:
@@ -199,7 +221,9 @@ def test_aliases_are_warning_delegate_only() -> None:
     for name, path in ALIASES.items():
         text = path.read_text()
         assert "WARNING:" in text, name
-        assert "alias" in text.lower() or "Deprecated" in text or "deprecated" in text, name
+        assert (
+            "alias" in text.lower() or "Deprecated" in text or "deprecated" in text
+        ), name
         assert "Do not" in text, name
         assert "route.todo.yaml" not in text, name
     assert "/cc-plan <same arguments>" in ALIASES["cc-plan-and-grill"].read_text()
@@ -262,7 +286,10 @@ def test_meta_plan_format_names_new_converter_and_controller() -> None:
     source = META_PLAN_FORMAT.read_text()
     for retired_name in RETIRED_RUNNER_NAMES:
         assert retired_name not in source, retired_name
-    assert "The TUI controller is the sole active runner; Herdr supplies its pane transport." in source
+    assert (
+        "The TUI controller is the sole active runner; Herdr supplies its pane transport."
+        in source
+    )
     assert "cc/do-convert --herdr" in source
     assert "/tui-control" in source
     assert "just run-start" in source
@@ -271,7 +298,9 @@ def test_meta_plan_format_names_new_converter_and_controller() -> None:
     assert "/herdr-run" not in source
 
 
-def test_composed_plan_adversary_is_separate_from_code_adversary(tmp_path: Path) -> None:
+def test_composed_plan_adversary_is_separate_from_code_adversary(
+    tmp_path: Path,
+) -> None:
     for recipe, name in (
         (PLAN_ADVERSARY_RECIPE, "plan-adversary"),
         (ADVERSARIAL_EVALUATOR_RECIPE, "adversarial-evaluator"),
@@ -343,8 +372,14 @@ def test_public_route_guidance_uses_the_phase_leader_not_the_evaluator() -> None
 
     evaluator = PHASE_EVALUATOR_SOURCE.read_text()
     assert "optional, independent **phase evaluator**" in evaluator
-    assert "You do not move phase files, start another worker, or fix implementation." in evaluator
-    assert "The phase leader alone makes the durable `phase-result.json` decision" in evaluator
+    assert (
+        "You do not move phase files, start another worker, or fix implementation."
+        in evaluator
+    )
+    assert (
+        "The phase leader alone makes the durable `phase-result.json` decision"
+        in evaluator
+    )
 
 
 def test_hil_action_table_covers_every_event_kind() -> None:

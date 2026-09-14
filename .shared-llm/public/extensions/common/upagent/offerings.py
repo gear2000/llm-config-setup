@@ -256,7 +256,9 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
     if not isinstance(raw, dict):
         raise OfferingError(f"offering roster {source} must be one YAML object")
     _strict_keys(
-        raw, {"schema_version", "offerings", "management", "run_watch"}, "offering roster"
+        raw,
+        {"schema_version", "offerings", "management", "run_watch"},
+        "offering roster",
     )
     if raw.get("schema_version") != 1:
         raise OfferingError("offering roster schema_version must equal 1")
@@ -310,7 +312,10 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
         raise OfferingError("offering roster management must be an object")
     _validate_management(management, parsed)
     return OfferingRoster(
-        parsed, dict(management), source, selected_sets,
+        parsed,
+        dict(management),
+        source,
+        selected_sets,
         validate_run_watch(raw.get("run_watch", {})),
     )
 
@@ -499,7 +504,9 @@ def render_roster(
         ) from error
     if not isinstance(management_raw, dict):
         raise OfferingError("offering management policy must be one YAML object")
-    _strict_keys(management_raw, {"management", "run_watch"}, "offering management policy")
+    _strict_keys(
+        management_raw, {"management", "run_watch"}, "offering management policy"
+    )
 
     # Standard is required by the fixed management candidates. Keeping its authored text as
     # the base preserves the pre-offering-set standard roster byte-for-byte.
