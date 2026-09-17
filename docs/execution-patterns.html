@@ -207,7 +207,7 @@ RUN       plan-implementer, phase by phase, reads the assigned workflow file
   <span class="k">phase-1</span>: phase-low-Luna
   <span class="k">phase-2</span>: phase-medium-Luna
   <span class="k">phase-3</span>: phase-high-Luna-double
-<span class="k">validation</span>: validate-Composer
+<span class="k">validation</span>: validate-Sonnet
 <span class="k">finalize</span>: finalize-adversarial-Fable        <span class="c"># or a list of two; both must pass, in list order</span>
 <span class="k">controller</span>: delegated-implementer</pre>
 <p class="mt-2">Retries: the stages run once, top to bottom. Any finding goes back to the same coder and every later stage reruns; that is one repair loop, and <code>retries</code> is how many are allowed after the first attempt. A stage with its own <code>retries</code> spends that counter instead for findings it raised. When a counter is spent the controller stops and asks you. This stays an agent-followed contract, not a mechanical gate; attempt counts are recorded in run status.</p>

@@ -54,7 +54,7 @@ phases:
   phase-1: phase-low-Luna
   phase-2: phase-medium-Luna
   phase-3: phase-high-Sol
-validation: validate-Composer
+validation: validate-Sonnet
 finalize: finalize-adversarial-Fable        # or a list of two; both must pass, run one after the other in list order
 controller: delegated-implementer
 # pool: ./workflows                         # optional human-owned pool

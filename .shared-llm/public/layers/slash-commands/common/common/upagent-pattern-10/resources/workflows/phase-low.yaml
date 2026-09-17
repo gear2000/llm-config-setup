@@ -8,9 +8,9 @@ stages:
     offering: claude-sonnet-5
     effort: xhigh
 
-  - role: reviewer                          # native model is already high; do not pass --effort high
-    offering: cursor-grok-4-6
-    effort: default
+  - role: reviewer
+    offering: claude-opus-5
+    effort: xhigh
 
   - role: checks                            # the assignment's validation workflow
     workflow: validation

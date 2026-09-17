@@ -1,10 +1,10 @@
-workflow: validate-Grok
+workflow: validate-Sonnet
 kind: validation
 
 stages:
-  - role: checks                            # native model is already high; do not pass --effort high
-    offering: cursor-grok-4-6
-    effort: default
+  - role: checks
+    offering: claude-sonnet-5
+    effort: xhigh
     runs: "the plan's required commands; reports exit codes and logs"
 
 pass: every required command exits 0 with evidence recorded

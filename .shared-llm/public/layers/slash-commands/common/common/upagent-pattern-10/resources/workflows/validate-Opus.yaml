@@ -1,9 +1,9 @@
-workflow: validate-Composer
+workflow: validate-Opus
 kind: validation
 
 stages:
   - role: checks
-    offering: claude-sonnet-5
+    offering: claude-opus-5
     effort: xhigh
     runs: "the plan's required commands; reports exit codes and logs"
 
