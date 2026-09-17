@@ -38,14 +38,14 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
     expected_candidates = [
-        {"offering": "cursor-composer-2-5", "effort": "default"},
+        {"offering": "claude-sonnet-5", "effort": "medium"},
         {"offering": "pi-gpt-5-6-luna", "effort": "high"},
     ]
     assert roster.management["account_manager"]["candidates"] == expected_candidates
     assert roster.management["checker"]["candidates"] == expected_candidates
     assert roster.management["sentinel"]["candidates"] == expected_candidates
     assert all(
-        roster.management[role]["candidates"][0]["offering"] == "cursor-composer-2-5"
+        roster.management[role]["candidates"][0]["offering"] == "claude-sonnet-5"
         for role in ("account_manager", "checker", "sentinel")
     )
 
@@ -317,18 +317,20 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     candidates = role["candidates"]
 
     assert [candidate["offering_id"] for candidate in candidates] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate["provider"] for candidate in candidates] == [
-        "cursor",
+        "anthropic",
         "openai",
     ]
-    assert candidates[0]["expected_agent"] == "cursor"
-    assert candidates[0]["expected_process"] == "cursor-agent"
+    assert candidates[0]["expected_agent"] == "claude"
+    assert candidates[0]["expected_process"] == "claude"
     assert candidates[0]["command"].startswith(
-        "cursor-agent --force --trust --model composer-2.5"
+        "claude --dangerously-skip-permissions"
     )
+    assert "--model claude-sonnet-5" in candidates[0]["command"]
+    assert "--effort medium" in candidates[0]["command"]
     assert candidates[1]["expected_agent"] == "pi"
     assert candidates[1]["expected_process"] == "pi"
     assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
@@ -356,7 +358,7 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
         offerings.load_roster(path)
 
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["management"]["sentinel"]["candidates"][0]["effort"] = "medium"
+    source["management"]["sentinel"]["candidates"][0]["effort"] = "default"
     path = tmp_path / "effort.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
     with pytest.raises(offerings.OfferingError, match="not allowed"):
@@ -373,7 +375,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "323ec1985ffc0501dc957f72afad7bdb8f767ef02bfb2e9aaae30f605cd8b4c6"
+        "022a6699d45b9f02f481e18cbfb9acc842b3d307d2d8c8f95964118fcd09725c"
     )
 
 

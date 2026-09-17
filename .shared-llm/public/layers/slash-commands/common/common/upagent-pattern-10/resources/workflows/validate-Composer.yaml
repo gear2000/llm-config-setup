@@ -3,8 +3,8 @@ kind: validation
 
 stages:
   - role: checks
-    offering: cursor-composer-2-5
-    effort: default
+    offering: claude-sonnet-5
+    effort: xhigh
     runs: "the plan's required commands; reports exit codes and logs"
 
 pass: every required command exits 0 with evidence recorded

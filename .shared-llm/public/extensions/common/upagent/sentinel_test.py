@@ -2483,17 +2483,17 @@ def test_public_sentinel_candidates_preserve_order_and_filter_the_worker_provide
     )
 
     assert [item.offering_id for item in anthropic] == [
-        "cursor-composer-2-5",
         "pi-gpt-5-6-luna",
     ]
     assert [item.offering_id for item in cursor] == [
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
     assert [item.offering_id for item in openai] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
     ]
     assert [item.offering_id for item in openrouter] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
 
@@ -2502,7 +2502,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger, order, key, _manifest = _claimed_request(tmp_path, monkeypatch)
-    order["offering_snapshot"] = {"provider": "anthropic"}
+    order["offering_snapshot"] = {"provider": "cursor"}
     config = _public_management()
     selections = recruiter._resolve_sentinel_roles(order, config)
     attempted: list[str] = []
@@ -2510,8 +2510,8 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
     def start(*args: object, **kwargs: object) -> dict[str, object]:
         role = args[5]
         attempted.append(role.expected_process)
-        if role.expected_process == "cursor-agent":
-            raise recruiter.RecruiterError("cursor startup refused")
+        if role.expected_process == "claude":
+            raise recruiter.RecruiterError("claude startup refused")
         return {"pane": "sentinel-pi"}
 
     monkeypatch.setattr(recruiter, "_start_sentinel", start)
@@ -2530,7 +2530,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
         liftoff_deadline_ms=300_000,
     )
 
-    assert attempted == ["cursor-agent", "pi"]
+    assert attempted == ["claude", "pi"]
     assert started == {"pane": "sentinel-pi"}
     assert selected.offering_id == "pi-gpt-5-6-luna"
     failures = [
@@ -2539,7 +2539,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
         if item["event"] == "sentinel-candidate-failed"
     ]
     assert [(item["offering_id"], item["reason"]) for item in failures] == [
-        ("cursor-composer-2-5", "cursor startup refused")
+        ("claude-sonnet-5", "claude startup refused")
     ]
 
 
@@ -2547,7 +2547,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger, order, key, _manifest = _claimed_request(tmp_path, monkeypatch)
-    order["offering_snapshot"] = {"provider": "anthropic"}
+    order["offering_snapshot"] = {"provider": "cursor"}
     config = _public_management()
     selections = recruiter._resolve_sentinel_roles(order, config)
     monkeypatch.setattr(
@@ -2575,7 +2575,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
         )
 
     assert raised.value.reason_type == "sentinel-candidates-exhausted"
-    assert "cursor-agent failed" in str(raised.value)
+    assert "claude failed" in str(raised.value)
     assert "pi failed" in str(raised.value)
     failures = [
         item
@@ -2583,7 +2583,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
         if item["event"] == "sentinel-candidate-failed"
     ]
     assert [item["offering_id"] for item in failures] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
     assert all(item["attempt"] == 2 for item in failures)

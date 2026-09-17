@@ -5,8 +5,8 @@ retries: 5            # repair loops after the initial attempt, then stop and as
 
 stages:
   - role: coder
-    offering: cursor-composer-2-5
-    effort: default
+    offering: claude-sonnet-5
+    effort: xhigh
 
   - role: reviewer                          # native model is already high; do not pass --effort high
     offering: cursor-grok-4-6

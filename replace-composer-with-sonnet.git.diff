@@ -1,0 +1,358 @@
+diff --git a/.shared-llm/public/extensions/common/upagent/offerings-management.yaml b/.shared-llm/public/extensions/common/upagent/offerings-management.yaml
+index 3b0c549..c47ce5b 100644
+--- a/.shared-llm/public/extensions/common/upagent/offerings-management.yaml
++++ b/.shared-llm/public/extensions/common/upagent/offerings-management.yaml
+@@ -11,24 +11,24 @@ management:
+   requester_grace_ms: 300000
+   account_manager:
+     candidates:
+-      - offering: cursor-composer-2-5
+-        effort: default
++      - offering: claude-sonnet-5
++        effort: medium
+       - offering: pi-gpt-5-6-luna
+         effort: high
+     agent: upagent-account-manager
+     timeout_ms: 120000
+   checker:
+     candidates:
+-      - offering: cursor-composer-2-5
+-        effort: default
++      - offering: claude-sonnet-5
++        effort: medium
+       - offering: pi-gpt-5-6-luna
+         effort: high
+     agent: upagent-checker
+     timeout_ms: 120000
+   sentinel:
+     candidates:
+-      - offering: cursor-composer-2-5
+-        effort: default
++      - offering: claude-sonnet-5
++        effort: medium
+       - offering: pi-gpt-5-6-luna
+         effort: high
+     agent: upagent-sentinel
+diff --git a/.shared-llm/public/extensions/common/upagent/offerings_test.py b/.shared-llm/public/extensions/common/upagent/offerings_test.py
+index 619da09..46187bf 100644
+--- a/.shared-llm/public/extensions/common/upagent/offerings_test.py
++++ b/.shared-llm/public/extensions/common/upagent/offerings_test.py
+@@ -38,14 +38,14 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
+     assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
+     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
+     expected_candidates = [
+-        {"offering": "cursor-composer-2-5", "effort": "default"},
++        {"offering": "claude-sonnet-5", "effort": "medium"},
+         {"offering": "pi-gpt-5-6-luna", "effort": "high"},
+     ]
+     assert roster.management["account_manager"]["candidates"] == expected_candidates
+     assert roster.management["checker"]["candidates"] == expected_candidates
+     assert roster.management["sentinel"]["candidates"] == expected_candidates
+     assert all(
+-        roster.management[role]["candidates"][0]["offering"] == "cursor-composer-2-5"
++        roster.management[role]["candidates"][0]["offering"] == "claude-sonnet-5"
+         for role in ("account_manager", "checker", "sentinel")
+     )
+ 
+@@ -317,18 +317,20 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
+     candidates = role["candidates"]
+ 
+     assert [candidate["offering_id"] for candidate in candidates] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [candidate["provider"] for candidate in candidates] == [
+-        "cursor",
++        "anthropic",
+         "openai",
+     ]
+-    assert candidates[0]["expected_agent"] == "cursor"
+-    assert candidates[0]["expected_process"] == "cursor-agent"
++    assert candidates[0]["expected_agent"] == "claude"
++    assert candidates[0]["expected_process"] == "claude"
+     assert candidates[0]["command"].startswith(
+-        "cursor-agent --force --trust --model composer-2.5"
++        "claude --dangerously-skip-permissions"
+     )
++    assert "--model claude-sonnet-5" in candidates[0]["command"]
++    assert "--effort medium" in candidates[0]["command"]
+     assert candidates[1]["expected_agent"] == "pi"
+     assert candidates[1]["expected_process"] == "pi"
+     assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
+@@ -356,7 +358,7 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
+         offerings.load_roster(path)
+ 
+     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
+-    source["management"]["sentinel"]["candidates"][0]["effort"] = "medium"
++    source["management"]["sentinel"]["candidates"][0]["effort"] = "default"
+     path = tmp_path / "effort.yaml"
+     path.write_text(offerings.yaml.safe_dump(source))
+     with pytest.raises(offerings.OfferingError, match="not allowed"):
+@@ -373,7 +375,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
+     )
+     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
+     assert hashlib.sha256(rendered.encode()).hexdigest() == (
+-        "323ec1985ffc0501dc957f72afad7bdb8f767ef02bfb2e9aaae30f605cd8b4c6"
++        "022a6699d45b9f02f481e18cbfb9acc842b3d307d2d8c8f95964118fcd09725c"
+     )
+ 
+ 
+diff --git a/.shared-llm/public/extensions/common/upagent/public_api_test.py b/.shared-llm/public/extensions/common/upagent/public_api_test.py
+index 6f480c5..8644a8f 100644
+--- a/.shared-llm/public/extensions/common/upagent/public_api_test.py
++++ b/.shared-llm/public/extensions/common/upagent/public_api_test.py
+@@ -886,7 +886,9 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
+     manager = public_roster["management"]["account_manager"]
+     commands = [candidate["command"] for candidate in manager["candidates"]]
+     assert all("legacy-manager" not in command for command in commands)
+-    assert commands[0].startswith("cursor-agent --force --trust --model composer-2.5")
++    assert commands[0].startswith("claude --dangerously-skip-permissions")
++    assert "--model claude-sonnet-5" in commands[0]
++    assert "--effort medium" in commands[0]
+     assert "--model openai-codex/gpt-5.6-luna --thinking high" in commands[1]
+ 
+ 
+diff --git a/.shared-llm/public/extensions/common/upagent/recruiter_test.py b/.shared-llm/public/extensions/common/upagent/recruiter_test.py
+index 680fcb3..85377a0 100644
+--- a/.shared-llm/public/extensions/common/upagent/recruiter_test.py
++++ b/.shared-llm/public/extensions/common/upagent/recruiter_test.py
+@@ -4718,14 +4718,14 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
+     )
+ 
+     assert [candidate.offering_id for candidate in anthropic] == [
+-        "cursor-composer-2-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [candidate.offering_id for candidate in cursor] == [
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [candidate.offering_id for candidate in openai] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+     ]
+ 
+ 
+@@ -4744,14 +4744,14 @@ def test_public_checker_candidates_filter_same_provider_and_preserve_order() ->
+     )
+ 
+     assert [candidate.offering_id for candidate in anthropic] == [
+-        "cursor-composer-2-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [candidate.offering_id for candidate in cursor] == [
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [candidate.offering_id for candidate in openai] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+     ]
+ 
+ 
+@@ -4760,7 +4760,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
+ ) -> None:
+     order = _order(
+         cwd=str(tmp_path),
+-        offering_snapshot={"provider": "anthropic"},
++        offering_snapshot={"provider": "cursor"},
+     )
+     worker_result = tmp_path / "worker-result.json"
+     worker_result.write_text(json.dumps(_result(order["order_id"])))
+@@ -4799,7 +4799,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
+ 
+     def health(pane: str, **kwargs: object) -> dict[str, object]:
+         if pane == "checker-pane-1":
+-            raise recruiter.RecruiterError("cursor startup failed")
++            raise recruiter.RecruiterError("claude startup failed")
+         return {"healthy": True}
+ 
+     assessment = SimpleNamespace(
+@@ -4822,7 +4822,9 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
+     )
+ 
+     assert result is assessment
+-    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
++    assert attempted[0].startswith("claude --dangerously-skip-permissions")
++    assert "--model claude-sonnet-5" in attempted[0]
++    assert "--effort medium" in attempted[0]
+     assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
+     failures = [
+         event
+@@ -4830,7 +4832,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
+         if event["event"] == "checker-candidate-failed"
+     ]
+     assert [(event["offering_id"], event["reason"]) for event in failures] == [
+-        ("cursor-composer-2-5", "cursor startup failed")
++        ("claude-sonnet-5", "claude startup failed")
+     ]
+ 
+ 
+@@ -4907,7 +4909,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
+         cwd=str(tmp_path),
+         instructions_path=str(instructions),
+         result_path=str(tmp_path / "result.json"),
+-        offering_snapshot={"provider": "anthropic"},
++        offering_snapshot={"provider": "cursor"},
+     )
+     ledger = recruiter.JobLedger(tmp_path / "hub")
+     key, _ = ledger.submit(order)
+@@ -4929,7 +4931,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
+ 
+     def health(pane: str, **kwargs: object) -> dict[str, object]:
+         if pane == "manager-pane-1":
+-            raise recruiter.RecruiterError("cursor startup failed")
++            raise recruiter.RecruiterError("claude startup failed")
+         return {"healthy": True}
+ 
+     decision = recruiter.lifecycle.ManagerDecision(
+@@ -4950,7 +4952,9 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
+     )
+ 
+     assert len(attempted) == 2
+-    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
++    assert attempted[0].startswith("claude --dangerously-skip-permissions")
++    assert "--model claude-sonnet-5" in attempted[0]
++    assert "--effort medium" in attempted[0]
+     assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
+     assert manager["management_offering_id"] == "pi-gpt-5-6-luna"
+     failures = [
+@@ -4959,7 +4963,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
+         if event["event"] == "account-manager-candidate-failed"
+     ]
+     assert [(event["offering_id"], event["reason"]) for event in failures] == [
+-        ("cursor-composer-2-5", "cursor startup failed")
++        ("claude-sonnet-5", "claude startup failed")
+     ]
+ 
+     def reject_every_candidate(*args: object, **kwargs: object) -> dict[str, object]:
+@@ -4978,7 +4982,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
+         if event["event"] == "account-manager-candidate-failed"
+     ][-2:]
+     assert [event["offering_id"] for event in exhausted] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert all(
+diff --git a/.shared-llm/public/extensions/common/upagent/sentinel_test.py b/.shared-llm/public/extensions/common/upagent/sentinel_test.py
+index 454c0fd..48aa3c2 100644
+--- a/.shared-llm/public/extensions/common/upagent/sentinel_test.py
++++ b/.shared-llm/public/extensions/common/upagent/sentinel_test.py
+@@ -2483,17 +2483,17 @@ def test_public_sentinel_candidates_preserve_order_and_filter_the_worker_provide
+     )
+ 
+     assert [item.offering_id for item in anthropic] == [
+-        "cursor-composer-2-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [item.offering_id for item in cursor] == [
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert [item.offering_id for item in openai] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+     ]
+     assert [item.offering_id for item in openrouter] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+ 
+@@ -2502,7 +2502,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+     ledger, order, key, _manifest = _claimed_request(tmp_path, monkeypatch)
+-    order["offering_snapshot"] = {"provider": "anthropic"}
++    order["offering_snapshot"] = {"provider": "cursor"}
+     config = _public_management()
+     selections = recruiter._resolve_sentinel_roles(order, config)
+     attempted: list[str] = []
+@@ -2510,8 +2510,8 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
+     def start(*args: object, **kwargs: object) -> dict[str, object]:
+         role = args[5]
+         attempted.append(role.expected_process)
+-        if role.expected_process == "cursor-agent":
+-            raise recruiter.RecruiterError("cursor startup refused")
++        if role.expected_process == "claude":
++            raise recruiter.RecruiterError("claude startup refused")
+         return {"pane": "sentinel-pi"}
+ 
+     monkeypatch.setattr(recruiter, "_start_sentinel", start)
+@@ -2530,7 +2530,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
+         liftoff_deadline_ms=300_000,
+     )
+ 
+-    assert attempted == ["cursor-agent", "pi"]
++    assert attempted == ["claude", "pi"]
+     assert started == {"pane": "sentinel-pi"}
+     assert selected.offering_id == "pi-gpt-5-6-luna"
+     failures = [
+@@ -2539,7 +2539,7 @@ def test_sentinel_startup_failure_falls_back_in_candidate_order(
+         if item["event"] == "sentinel-candidate-failed"
+     ]
+     assert [(item["offering_id"], item["reason"]) for item in failures] == [
+-        ("cursor-composer-2-5", "cursor startup refused")
++        ("claude-sonnet-5", "claude startup refused")
+     ]
+ 
+ 
+@@ -2547,7 +2547,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+     ledger, order, key, _manifest = _claimed_request(tmp_path, monkeypatch)
+-    order["offering_snapshot"] = {"provider": "anthropic"}
++    order["offering_snapshot"] = {"provider": "cursor"}
+     config = _public_management()
+     selections = recruiter._resolve_sentinel_roles(order, config)
+     monkeypatch.setattr(
+@@ -2575,7 +2575,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
+         )
+ 
+     assert raised.value.reason_type == "sentinel-candidates-exhausted"
+-    assert "cursor-agent failed" in str(raised.value)
++    assert "claude failed" in str(raised.value)
+     assert "pi failed" in str(raised.value)
+     failures = [
+         item
+@@ -2583,7 +2583,7 @@ def test_sentinel_candidate_exhaustion_is_explicit_and_records_every_failure(
+         if item["event"] == "sentinel-candidate-failed"
+     ]
+     assert [item["offering_id"] for item in failures] == [
+-        "cursor-composer-2-5",
++        "claude-sonnet-5",
+         "pi-gpt-5-6-luna",
+     ]
+     assert all(item["attempt"] == 2 for item in failures)
+diff --git a/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/phase-low.yaml b/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/phase-low.yaml
+index 0bf3448..0bf8999 100644
+--- a/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/phase-low.yaml
++++ b/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/phase-low.yaml
+@@ -5,8 +5,8 @@ retries: 5            # repair loops after the initial attempt, then stop and as
+ 
+ stages:
+   - role: coder
+-    offering: cursor-composer-2-5
+-    effort: default
++    offering: claude-sonnet-5
++    effort: xhigh
+ 
+   - role: reviewer                          # native model is already high; do not pass --effort high
+     offering: cursor-grok-4-6
+diff --git a/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/validate-Composer.yaml b/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/validate-Composer.yaml
+index 7be3240..89c7d1a 100644
+--- a/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/validate-Composer.yaml
++++ b/.shared-llm/public/layers/slash-commands/common/common/upagent-pattern-10/resources/workflows/validate-Composer.yaml
+@@ -3,8 +3,8 @@ kind: validation
+ 
+ stages:
+   - role: checks
+-    offering: cursor-composer-2-5
+-    effort: default
++    offering: claude-sonnet-5
++    effort: xhigh
+     runs: "the plan's required commands; reports exit codes and logs"
+ 
+ pass: every required command exits 0 with evidence recorded

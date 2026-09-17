@@ -4718,14 +4718,14 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
     )
 
     assert [candidate.offering_id for candidate in anthropic] == [
-        "cursor-composer-2-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
     ]
 
 
@@ -4744,14 +4744,14 @@ def test_public_checker_candidates_filter_same_provider_and_preserve_order() -> 
     )
 
     assert [candidate.offering_id for candidate in anthropic] == [
-        "cursor-composer-2-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
     ]
 
 
@@ -4760,7 +4760,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
 ) -> None:
     order = _order(
         cwd=str(tmp_path),
-        offering_snapshot={"provider": "anthropic"},
+        offering_snapshot={"provider": "cursor"},
     )
     worker_result = tmp_path / "worker-result.json"
     worker_result.write_text(json.dumps(_result(order["order_id"])))
@@ -4799,7 +4799,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
 
     def health(pane: str, **kwargs: object) -> dict[str, object]:
         if pane == "checker-pane-1":
-            raise recruiter.RecruiterError("cursor startup failed")
+            raise recruiter.RecruiterError("claude startup failed")
         return {"healthy": True}
 
     assessment = SimpleNamespace(
@@ -4822,7 +4822,9 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
     )
 
     assert result is assessment
-    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert attempted[0].startswith("claude --dangerously-skip-permissions")
+    assert "--model claude-sonnet-5" in attempted[0]
+    assert "--effort medium" in attempted[0]
     assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
     failures = [
         event
@@ -4830,7 +4832,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "checker-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("cursor-composer-2-5", "cursor startup failed")
+        ("claude-sonnet-5", "claude startup failed")
     ]
 
 
@@ -4907,7 +4909,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         cwd=str(tmp_path),
         instructions_path=str(instructions),
         result_path=str(tmp_path / "result.json"),
-        offering_snapshot={"provider": "anthropic"},
+        offering_snapshot={"provider": "cursor"},
     )
     ledger = recruiter.JobLedger(tmp_path / "hub")
     key, _ = ledger.submit(order)
@@ -4929,7 +4931,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
 
     def health(pane: str, **kwargs: object) -> dict[str, object]:
         if pane == "manager-pane-1":
-            raise recruiter.RecruiterError("cursor startup failed")
+            raise recruiter.RecruiterError("claude startup failed")
         return {"healthy": True}
 
     decision = recruiter.lifecycle.ManagerDecision(
@@ -4950,7 +4952,9 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
     )
 
     assert len(attempted) == 2
-    assert attempted[0].startswith("cursor-agent --force --trust --model composer-2.5")
+    assert attempted[0].startswith("claude --dangerously-skip-permissions")
+    assert "--model claude-sonnet-5" in attempted[0]
+    assert "--effort medium" in attempted[0]
     assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
     assert manager["management_offering_id"] == "pi-gpt-5-6-luna"
     failures = [
@@ -4959,7 +4963,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "account-manager-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("cursor-composer-2-5", "cursor startup failed")
+        ("claude-sonnet-5", "claude startup failed")
     ]
 
     def reject_every_candidate(*args: object, **kwargs: object) -> dict[str, object]:
@@ -4978,7 +4982,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "account-manager-candidate-failed"
     ][-2:]
     assert [event["offering_id"] for event in exhausted] == [
-        "cursor-composer-2-5",
+        "claude-sonnet-5",
         "pi-gpt-5-6-luna",
     ]
     assert all(
