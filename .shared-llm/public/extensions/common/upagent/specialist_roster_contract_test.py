@@ -115,7 +115,7 @@ def _write_repo_overlay_roster(repo_root: Path, runtime_dir: Path) -> None:
         OVERLAY_EXTRA.format(runtime=runtime_dir) + f"{ROSTER_KEY}:\n"
         "  - name: reviewer\n"
         "    description: repo reviewer with private routing\n"
-        "    offering: claude-opus-4-8\n"
+        "    offering: claude-opus-5\n"
         "    effort: high\n"
         "    agent: reviewer\n"
         "  - name: payments\n"
@@ -187,7 +187,7 @@ def test_an_overlay_entry_clobbers_the_same_named_kit_entry(
     """Union, not concatenation: overriding a specialist replaces it rather than duplicating it."""
     merged = _merged_specialists()
 
-    assert merged["reviewer"]["offering"] == "claude-opus-4-8"
+    assert merged["reviewer"]["offering"] == "claude-opus-5"
     assert merged["reviewer"]["description"] == "repo reviewer with private routing"
 
 

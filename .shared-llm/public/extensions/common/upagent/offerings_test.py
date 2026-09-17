@@ -54,7 +54,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     ("offering_id", "effort", "persona", "expected"),
     [
         (
-            "claude-opus-4-8",
+            "claude-opus-5",
             "max",
             "reviewer",
             [
@@ -63,7 +63,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "--agent",
                 "reviewer",
                 "--model",
-                "claude-opus-4-8",
+                "claude-opus-5",
                 "--effort",
                 "max",
                 "Read /lease/instructions.md and do exactly that work.",
@@ -277,7 +277,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "claude-fable-5-1": "anthropic",
         "claude-sonnet-5": "anthropic",
         "claude-sonnet-4-6": "anthropic",
-        "claude-opus-4-8": "anthropic",
+        "claude-opus-5": "anthropic",
         "codex-gpt-5-6-sol": "openai",
         "codex-gpt-6-astra": "openai",
         "cursor-composer-2-5": "cursor",
@@ -373,7 +373,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy() -> Non
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "70546a122be26ed04359182a03f88d81fec920d42f5dfe62c51c5204fa8aca28"
+        "323ec1985ffc0501dc957f72afad7bdb8f767ef02bfb2e9aaae30f605cd8b4c6"
     )
 
 

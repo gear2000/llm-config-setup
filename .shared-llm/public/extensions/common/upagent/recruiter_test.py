@@ -8767,7 +8767,7 @@ def test_the_phone_book_caps_the_whole_line_not_just_the_description(
                     {
                         "name": "payments-integration-reviewer",
                         "description": "long ownership sentence " * 40,
-                        "offering": "claude-opus-4-8",
+                        "offering": "claude-opus-5",
                         "effort": "high",
                         "agent": "payments-integration-reviewer",
                     }
@@ -8802,7 +8802,7 @@ def test_a_specialist_with_no_description_falls_back_to_its_persona_frontmatter(
                     {
                         "name": "reviewer",
                         "location": ".claude/agents/reviewer.md",
-                        "offering": "claude-opus-4-8",
+                        "offering": "claude-opus-5",
                         "effort": "high",
                         "agent": "reviewer",
                     }
@@ -8849,7 +8849,7 @@ def _two_reviewers_roster() -> str:
                 {
                     "name": "reviewer",
                     "description": "first",
-                    "offering": "claude-opus-4-8",
+                    "offering": "claude-opus-5",
                     "effort": "high",
                     "agent": "reviewer",
                 },
@@ -8974,7 +8974,7 @@ def _specialist_world(
                     {
                         "name": "reviewer",
                         "description": "Independent read-only review.",
-                        "offering": "claude-opus-4-8",
+                        "offering": "claude-opus-5",
                         "effort": "high",
                         "agent": "reviewer",
                         **entry_over,
@@ -9066,7 +9066,7 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     order = seen[0]
     assert set(order) <= set(recruiter.ORDER_INTAKE_ALIASES) | {"offering_snapshot"}
     assert "consult" not in order
-    assert order["offering_snapshot"]["id"] == "claude-opus-4-8"
+    assert order["offering_snapshot"]["id"] == "claude-opus-5"
     recruiter.contracts.parse_order(
         json.dumps(order)
     )  # must satisfy the ordinary contract

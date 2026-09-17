@@ -95,7 +95,7 @@ A workflow is one YAML file in the pool bundled with `/upagent-pattern-10` (shar
 `/upagent-pattern-20`): an ordered `stages` list of `role` / `offering` / `effort` items, a
 `retries` count, a `pass` rule and free `notes`. A second reviewer is one more list item. The
 bundled pool holds `phase-low`, `phase-low-Luna`, `phase-medium-sonnet`, `phase-medium-Luna`,
-`phase-high-Luna`, `phase-high-Sol`, `phase-high-Astra`, `phase-high-Fable`, `validate-Composer`,
+`phase-high-Luna`, `phase-high-Sol`, `phase-high-Astra`, `phase-high-Fable`, `phase-high-Opus`, `validate-Composer`,
 `validate-Luna`, `validate-Grok`, `finalize-adversarial-Fable`, `finalize-adversarial-Sol`,
 `finalize-adversarial-Astra`, `delegated-implementer` (Pattern 10 controller) and the shared
 `controller-requirements.md`. An assignment may point `pool` at a human-owned directory; new

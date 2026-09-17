@@ -66,7 +66,7 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-fable-5-1": ("claude", "claude-fable-5-1", EFFORTS, "anthropic"),
     "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS, "anthropic"),
     "claude-sonnet-4-6": ("claude", "claude-sonnet-4-6", EFFORTS, "anthropic"),
-    "claude-opus-4-8": ("claude", "claude-opus-4-8", EFFORTS, "anthropic"),
+    "claude-opus-5": ("claude", "claude-opus-5", EFFORTS, "anthropic"),
     "codex-gpt-5-6-sol": ("codex", "gpt-5.6-sol", EFFORTS, "openai"),
     "codex-gpt-6-astra": ("codex", "gpt-6-astra", EFFORTS, "openai"),
     # Cursor model ids carry their native effort tier, so each public cursor

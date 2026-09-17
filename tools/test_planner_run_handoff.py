@@ -167,6 +167,7 @@ def test_pattern_10_converter_uses_existing_pool_and_keeps_runner_unchanged() ->
         "phase-medium-sonnet",
         "phase-high-Astra",
         "phase-high-Fable",
+        "phase-high-Opus",
         "phase-high-Sol",
         "phase-low-Luna",
         "phase-medium-Luna",
@@ -193,6 +194,7 @@ def test_phase_high_workflows_name_the_exact_pi_sol_reviewer() -> None:
     for name in (
         "phase-high-Astra",
         "phase-high-Fable",
+        "phase-high-Opus",
         "phase-high-Sol",
         "phase-high-Luna",
     ):
@@ -210,6 +212,7 @@ def test_phase_high_workflows_name_the_exact_pi_sol_reviewer() -> None:
 
     assert coder("phase-high-Sol") == "pi-gpt-5-6-sol"
     assert coder("phase-high-Luna") == "pi-gpt-5-6-luna"
+    assert coder("phase-high-Opus") == "claude-opus-5"
 
 
 def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:
