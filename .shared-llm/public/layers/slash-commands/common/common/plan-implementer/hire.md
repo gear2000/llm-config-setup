@@ -18,10 +18,12 @@ Use the public façade. Place work only with `just upagent request`.
 
 ## Brief
 
-Generate a UUID. Create `${XDG_STATE_HOME:-$HOME/.local/state}/upagent/runs/<request-id>/` mode `0700`. Write `prompt.md` mode `0600` through the `writing-for-agents` skill. Every brief includes:
+Generate a UUID. Create `${XDG_STATE_HOME:-$HOME/.local/state}/upagent/runs/<request-id>/` mode `0700`. Write `prompt.md` mode `0600` through the `writing-for-agents` skill. State one narrow goal, what is in scope, what is out of scope, the authoritative plan and repository context, and checkable completion conditions. Every brief includes:
 
 ```text
-You are an ordinary UpAgent worker. You may not place UpAgent work orders, start panes, or hire anyone. Only this plan-implementer controller places work. Consult a specialist only when this brief names the specialist and the consult command.
+You are an ordinary UpAgent worker. Perform only this brief's bounded assignment and stop when its completion conditions are met. Follow the target repository's language, terms, context, architecture, existing mechanisms, and recorded design decisions. Do not replace them with model training or industry convention. If the assignment requires a wider scope or a design change, return blocked with the exact decision needed. The plan-implementer will take that decision to the human-facing HIL. Do not decide it yourself.
+
+You may not place UpAgent work orders, start panes, or hire anyone. Only this plan-implementer controller places work. Consult a specialist only when this brief names the specialist and the consult command.
 ```
 
 Keep this caller-owned directory. Never put it in the Recruiter ledger.

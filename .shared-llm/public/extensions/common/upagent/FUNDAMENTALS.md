@@ -53,6 +53,7 @@ PYTHON RECRUITER
 │
 ├─ validates any proposed manager action against the request and ownership token
 ├─ continues under direct Python supervision when the manager is unavailable
+├─ appends the mandatory repository-first assignment boundary to the worker brief
 ├─ atomically starts the worker through Herdr
 ├─ proves that the expected process and detected agent became healthy
 └─ publishes worker-healthy before anybody may report "running"
@@ -60,7 +61,7 @@ PYTHON RECRUITER
    ▼
 UPAGENT WORKER
 │
-├─ performs only the requested work
+├─ performs only the requested work and stops at its completion conditions
 ├─ stages lease-private result.json (mandatory — it carries the verdict)
 ├─ stages compacted.md and handoff.md when it can (best-effort summaries)
 ├─ additionally stages answer.json when it is a specialist (mandatory)
@@ -178,7 +179,10 @@ A managed requester may opt one worker into `completion_policy: requester_releas
 18. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
     can pass only with matching Recruiter-verified receipts whose answers are cited successes. Absent,
     rejected, failed, borrowed, or forged claims block finalization; direct source reading is not
-    consult evidence.
+    consult evidence. Every worker brief also receives one Recruiter-authored assignment boundary:
+    follow the target repository's language and recorded design, stop at the brief's completion
+    conditions, and return `blocked` instead of widening scope or making a design decision for the
+    human.
 19. Startup is proven twice: worker health, then a first observable action recorded in the
     ledger. The liftoff deadline is clamped to the smaller of 5 minutes and half the order's
     own work cap, so a never-started worker is always classified before the hard timeout

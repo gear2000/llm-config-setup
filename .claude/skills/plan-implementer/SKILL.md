@@ -25,6 +25,12 @@ All flags are required. `--plan` / `--run-root` are the frozen run-tree copies. 
 3. `just upagent-up` is optional. Determine this pane id from `$HERDR_PANE_ID` — that is `--cockpit-pane` on every hire. Do not infer it from UI focus. If `just upagent lists --type offerings --json` fails with `no checked-out main branch UpAgent source found` or `ambiguous checked-out main branch UpAgent sources`, `$UPAGENT_CANONICAL_REPO` should already be set from `start.sh`. Stop fail-loud; do not guess a checkout.
 4. Read `--plan`. Do not invent a five-stage `route.yaml`. Do not start `/tui-control` or `/phase-leader`.
 
+## Pattern 10 execution packets
+
+When the supplied plan begins with `<!-- upagent-pattern-10 -->`, read its frozen workflow assignments, the selected YAML workflows and the explicit run decisions. Follow the assigned workflow for each phase, stage by stage within its `retries`, and the assigned validation and finalize workflows. Resolve original-plan references against the original location recorded in the packet. Missing assignments, choices or evidence mean ask through the HIL before hiring.
+
+For these packets only, delegate **all** production coding, fixes, validation and independent reviews through UpAgent; the local-coding exception below does not apply. Keep the existing hire, inbox, question/answer and result protocols. Do not hire another workflow controller. A passing result requires all assigned checks and final audits on the current candidate. Ordinary Pattern 1 plans retain their existing behavior.
+
 ## Work — hire, don't hoard context
 
 Slice the plan into Recruiter hires using the **Worker hire contract** below. Prefer workers so this pane stays small.
@@ -32,6 +38,14 @@ Slice the plan into Recruiter hires using the **Worker hire contract** below. Pr
 Hire independent reviewers the same way when a slice needs a check. Consult specialists with `just upagent-consult` when a listed specialist owns the area (`just upagent-specialists` is the phone book). Ordinary workers must not nest-hire; only this controller places work orders (consults excepted, through the Recruiter).
 
 You may write code yourself only when a hire is the wrong tool. Record that choice in `implementer-status.md`.
+
+## Human inbox
+
+At every slice boundary, before placing the next hire and after reading its result, read `<run-root>/inbox/msg-<seq>.json` in numeric `seq` order. Also read it immediately on the fixed nudge `read your inbox`, and once more before writing the final result. The run root is the invocation's `--run-root`, never cwd. `control/inbox/` carries events for the HIL and is a separate directory.
+
+Each envelope has `{seq, text, at_ns, acked}`. Act on every message with `acked: false` as human steering of the approved plan. Quote its entire `text` verbatim, with its `seq` and the action taken, in `<run-root>/implementer-status.md`. Resolve a blocker through the HIL's question/answer path below. After acting and recording the quote, atomically set `acked: true`: write the complete envelope to a unique temporary sibling, flush and fsync it, then rename it over the original. Preserve `seq`, `text`, and `at_ns`. Never delete envelopes or acknowledge one just because a nudge arrived.
+
+Skip envelopes already acknowledged. A duplicate nudge is only a request to read the files again. If a restart finds a quoted but unacknowledged sequence, inspect the recorded action before repeating it, then finish its acknowledgement. Human text stays in files and never becomes a pane command.
 
 ## Stop and ask — never guess
 
@@ -86,10 +100,12 @@ Use the public façade. Place work only with `just upagent request`.
 
 ## Brief
 
-Generate a UUID. Create `${XDG_STATE_HOME:-$HOME/.local/state}/upagent/runs/<request-id>/` mode `0700`. Write `prompt.md` mode `0600` through the `writing-for-agents` skill. Every brief includes:
+Generate a UUID. Create `${XDG_STATE_HOME:-$HOME/.local/state}/upagent/runs/<request-id>/` mode `0700`. Write `prompt.md` mode `0600` through the `writing-for-agents` skill. State one narrow goal, what is in scope, what is out of scope, the authoritative plan and repository context, and checkable completion conditions. Every brief includes:
 
 ```text
-You are an ordinary UpAgent worker. You may not place UpAgent work orders, start panes, or hire anyone. Only this plan-implementer controller places work. Consult a specialist only when this brief names the specialist and the consult command.
+You are an ordinary UpAgent worker. Perform only this brief's bounded assignment and stop when its completion conditions are met. Follow the target repository's language, terms, context, architecture, existing mechanisms, and recorded design decisions. Do not replace them with model training or industry convention. If the assignment requires a wider scope or a design change, return blocked with the exact decision needed. The plan-implementer will take that decision to the human-facing HIL. Do not decide it yourself.
+
+You may not place UpAgent work orders, start panes, or hire anyone. Only this plan-implementer controller places work. Consult a specialist only when this brief names the specialist and the consult command.
 ```
 
 Keep this caller-owned directory. Never put it in the Recruiter ledger.
@@ -117,7 +133,25 @@ if [[ "$request_rc" -ne 0 ]]; then
 fi
 ```
 
-Redact `.state.requester_control_token` into `$run_dir/control-token` mode `0600` before any further use of `request.json`. Then:
+Redact `.state.requester_control_token` into `$run_dir/control-token` mode `0600`, then remove that field from `request.json` before any further use.
+
+After every accepted response, including attachment to an existing request, register it
+before awaiting. `$run_root` is the absolute `--run-root` supplied to this implementer,
+not `$run_dir` and never a directory inferred from cwd. Two runs can share one cwd.
+
+```bash
+just upagent-register-worker "$run_root" "$response"
+```
+
+This atomically writes `<run-root>/control/workers/<request-id>.json` with only
+`request_id` from `.request_id`, `payload_sha256` from `.payload_sha256`, `order_id`
+from `.state.order_id`, `generation` from `.state.generation`, and `placed_at_ns`.
+It stores no `cockpit_pane` or control token. An identical attachment preserves the
+record and its placement time. Identity or retry-generation mismatch fails loud;
+do not overwrite the previous generation or silently await it. Resolve that mismatch
+with the HIL. A registration failure stops this hire's await path.
+
+Then:
 
 ```bash
 just upagent await --request "$request_id" --json >"$run_dir/terminal.json"

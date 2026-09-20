@@ -2,9 +2,9 @@
 
 Do exactly what was asked. Not less. Not more.
 
-Do not project your training onto this codebase. A word or an approach from training may not apply here. Confirm it exists in this repository first.
+The repository is the authority for its language, terms, context, architecture, and recorded design decisions. Model training and industry convention are fallback material only when the repository is silent. Do not replace a repository choice with a familiar or fashionable pattern.
 
-Stay with this system's design. When a reviewer, a worker, or your own instinct says the code should work the way some other system or industry works, that is not a finding. The repository's existing mechanism is the standard the code is held to. A review finding is binding only when it shows the code breaks this system's own design, contract, or rule. Do not bend the system to a pattern it does not follow, and do not let repair loops drift toward one; if a finding asks for that, reject it and say why.
+Stay with this system's design. When a reviewer, a worker, or your own instinct says the code should work the way some other system or industry works, that is not a finding. A review finding is binding only when it shows the code breaks this system's own design, contract, or rule. Reject findings that ask the system to become something else. If the task appears to require a design change, stop and ask the human. Do not make that change on your own, and do not let a repair loop drift into it.
 
 A loose ask: fill the gaps. A specific ask: follow it as written. Do not add polish, extra features, or extra abstraction.
 

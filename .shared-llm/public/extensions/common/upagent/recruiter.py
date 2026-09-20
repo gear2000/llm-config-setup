@@ -3795,7 +3795,9 @@ def worker_progress_fingerprint(
 
 
 def progress_fingerprint_frozen(previous: object, current: object) -> bool:
-    return isinstance(previous, dict) and isinstance(current, dict) and previous == current
+    return (
+        isinstance(previous, dict) and isinstance(current, dict) and previous == current
+    )
 
 
 def _progress_state_path(ledger: JobLedger, key: str) -> Path:
@@ -4839,6 +4841,23 @@ def _write_worker_instructions(
         if carried_question
         else ""
     )
+    assignment_boundary = (
+        "\n\n# Assignment boundary (mandatory)\n\n"
+        "Perform only the work in the original brief. Use its exact goal, scope, and "
+        "completion conditions. If the brief does not define those boundaries clearly "
+        "enough to act, write a `blocked` result that names what is missing.\n\n"
+        "Follow the target repository's language, terms, context, architecture, existing "
+        "mechanisms, and recorded design decisions. Repository evidence overrides model "
+        "training and industry convention.\n\n"
+        "Take the shortest repository-consistent path that satisfies the brief. Stop when "
+        "its completion conditions are met. Extra features, abstractions, cleanup, "
+        "refactors, review passes, and redesign are outside this assignment unless the "
+        "brief explicitly requires them.\n\n"
+        "If the work requires a design change, a wider scope, or a choice between "
+        "conflicting repository rules, do not choose for the human. Write a `blocked` "
+        "result that names the exact decision needed. The requester or controller owns "
+        "escalation to the human."
+    )
     suffix = (
         "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
         "The Recruiter, not this worker, publishes completion artifacts. "
@@ -4847,7 +4866,9 @@ def _write_worker_instructions(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(original.rstrip() + handoff_section + suffix)
+        temporary.write_text(
+            original.rstrip() + handoff_section + assignment_boundary + suffix
+        )
         os.replace(temporary, destination)
     except OSError as e:
         temporary.unlink(missing_ok=True)
@@ -5090,14 +5111,17 @@ def _wait_for_interactive_completion(
                 f"interactive worker {worker_pane} recorded no first observable action "
                 "within its startup-activity deadline of proven health"
             )
-        if supervised:
-            # VALID-BUNDLE LANDING (shared with the exec wait): a validated staged bundle
-            # wakes the Sentinel and opens one bounded landing window; a lapse — or
-            # the hard deadline clipping the window — ends the wait on the validated
-            # bundle. Checked BEFORE the generic timeout so work that is already done
-            # is accepted rather than timed out.
-            if sentinel_watch.landing_pass(monitor_finalized, deadline) == "mechanical":
-                return False
+        # VALID-BUNDLE LANDING (shared with the exec wait): a validated staged bundle
+        # wakes the Sentinel and opens one bounded landing window; a lapse — or
+        # the hard deadline clipping the window — ends the wait on the validated
+        # bundle. Checked BEFORE the generic timeout so work that is already done
+        # is accepted rather than timed out.
+        if (
+            sentinel_watch is not None
+            and supervised
+            and sentinel_watch.landing_pass(monitor_finalized, deadline) == "mechanical"
+        ):
+            return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             # The timeout decision RE-OBSERVES the finalized event: a validation
@@ -5143,11 +5167,12 @@ def _wait_for_interactive_completion(
                     # left for the Sentinel to add, so skip the closeout grace window.
                     sentinel_watch.note_bypassed_at_exit()
                     return False
-                if supervised and _await_sentinel_closeout_after_worker_gone(
-                    sentinel_watch, deadline, reason="worker-gone"
-                ):
-                    return False
-                return True
+                return not (
+                    supervised
+                    and _await_sentinel_closeout_after_worker_gone(
+                        sentinel_watch, deadline, reason="worker-gone"
+                    )
+                )
         wait_seconds = min(
             remaining,
             max(0.0, next_liveness_probe - time.monotonic()),
@@ -5264,15 +5289,18 @@ def _wait_for_agent_status(
                 f"exec worker {worker_pane} recorded no first observable action "
                 "within its startup-activity deadline of proven health"
             )
-        if _supervised():
-            # VALID-BUNDLE LANDING (shared with the interactive wait): a validated staged
-            # bundle from a still-live exec worker wakes the Sentinel and opens the
-            # bounded landing window; a lapse — or the hard deadline clipping the
-            # window — ends the wait on the validated bundle instead of holding it
-            # for process exit, a pulse, or the timeout.
-            if sentinel_watch.landing_pass(monitor_finalized, deadline) == "mechanical":
-                _terminate(process)
-                return False
+        # VALID-BUNDLE LANDING (shared with the interactive wait): a validated staged
+        # bundle from a still-live exec worker wakes the Sentinel and opens the
+        # bounded landing window; a lapse — or the hard deadline clipping the
+        # window — ends the wait on the validated bundle instead of holding it
+        # for process exit, a pulse, or the timeout.
+        if (
+            sentinel_watch is not None
+            and _supervised()
+            and sentinel_watch.landing_pass(monitor_finalized, deadline) == "mechanical"
+        ):
+            _terminate(process)
+            return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate(process)
@@ -5304,11 +5332,12 @@ def _wait_for_agent_status(
                     if _supervised() and _bundle_already_valid():
                         sentinel_watch.note_bypassed_at_exit()
                         return False
-                    if _supervised() and _await_sentinel_closeout_after_worker_gone(
-                        sentinel_watch, deadline, reason="worker-gone"
-                    ):
-                        return False
-                    return True
+                    return not (
+                        _supervised()
+                        and _await_sentinel_closeout_after_worker_gone(
+                            sentinel_watch, deadline, reason="worker-gone"
+                        )
+                    )
             else:
                 pane_missing_streak = 0
         wait_seconds = min(COMPLETION_MONITOR_POLL_SECONDS, remaining)
@@ -5331,11 +5360,12 @@ def _wait_for_agent_status(
         if _supervised() and _bundle_already_valid():
             sentinel_watch.note_bypassed_at_exit()
             return False
-        if _supervised() and _await_sentinel_closeout_after_worker_gone(
-            sentinel_watch, deadline, reason="worker-gone"
-        ):
-            return False
-        return True
+        return not (
+            _supervised()
+            and _await_sentinel_closeout_after_worker_gone(
+                sentinel_watch, deadline, reason="worker-gone"
+            )
+        )
     if (
         monitor_finalized is not None
         and monitor_finalized.is_set()
@@ -5350,11 +5380,12 @@ def _wait_for_agent_status(
         if _supervised() and _bundle_already_valid():
             sentinel_watch.note_bypassed_at_exit()
             return False
-        if _supervised() and _await_sentinel_closeout_after_worker_gone(
-            sentinel_watch, deadline, reason="worker-gone"
-        ):
-            return False
-        return True
+        return not (
+            _supervised()
+            and _await_sentinel_closeout_after_worker_gone(
+                sentinel_watch, deadline, reason="worker-gone"
+            )
+        )
     raise RecruiterError(f"{' '.join(argv)} failed: {(stderr or stdout).strip()}")
 
 
@@ -7335,7 +7366,10 @@ def _may_preserve_worker_result(
     """A wait fault may preserve only a semantically terminal worker result."""
     if not startup_validated or order.get("completion_policy") == "requester_release":
         return False
-    if result.get("hub_terminal") == "missing-worker" and result.get("verdict") == "failed":
+    if (
+        result.get("hub_terminal") == "missing-worker"
+        and result.get("verdict") == "failed"
+    ):
         return True
     reason = result.get("reason")
     if isinstance(reason, str) and reason.startswith("recruiter:"):
@@ -13136,8 +13170,12 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     token = ledger.claim(key, order["order_id"], lease_window_ms, owner=owner)
     if token is None:
         return 0
-    ledger._event(key, "management-start", status_first=management_config.status_first,
-                  run_watch=roster["run_watch"])
+    ledger._event(
+        key,
+        "management-start",
+        status_first=management_config.status_first,
+        run_watch=roster["run_watch"],
+    )
     artifact_manifest = completion.build_manifest(
         order, ledger.request_dir(key), token, request_id
     )
@@ -14832,7 +14870,9 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
 
         # In-process, no subprocess hop: the door is a caller of the ordinary lifecycle, not a
         # second one. This blocks until the durable ORDER_RECEIPT exists.
-        cmd_dispatch(str(artifacts["order"]), str(_resolved_public_offering_roster_path()))
+        cmd_dispatch(
+            str(artifacts["order"]), str(_resolved_public_offering_roster_path())
+        )
         receipt["order_receipt_state"] = "finished"
         _log_request_event(
             "CONSULT_WORKER_DONE",

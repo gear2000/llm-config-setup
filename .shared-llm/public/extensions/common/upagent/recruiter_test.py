@@ -17,8 +17,8 @@ import json
 import multiprocessing
 import os
 import stat
-import threading
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -1765,7 +1765,9 @@ def test_configuration_inspection_finds_missing_agent_before_launch(
     assert any("not-installed-here" in error for error in evidence["errors"])
     cwd_agent = str(tmp_path / ".claude/agents/not-installed-here.md")
     home_agent = str(Path.home() / ".claude/agents/not-installed-here.md")
-    assert any(cwd_agent in error and home_agent in error for error in evidence["errors"])
+    assert any(
+        cwd_agent in error and home_agent in error for error in evidence["errors"]
+    )
 
 
 def test_configuration_inspection_finds_missing_agent_on_public_claude_roster(
@@ -1797,7 +1799,9 @@ def test_configuration_inspection_finds_missing_agent_on_public_claude_roster(
     cwd_agent = str(tmp_path / ".claude/agents" / f"{agent}.md")
     home_agent = str(Path.home() / ".claude/agents" / f"{agent}.md")
     assert evidence["valid"] is False
-    assert any(cwd_agent in error and home_agent in error for error in evidence["errors"])
+    assert any(
+        cwd_agent in error and home_agent in error for error in evidence["errors"]
+    )
 
 
 def test_unresolvable_agent_blocks_with_both_search_paths_in_result_and_request_response(
@@ -2587,7 +2591,6 @@ def test_soft_timeout_extension_is_refused_when_fingerprint_is_frozen(
     assert "fingerprint" in str(stored.get("extension_refused_reason", "")).lower()
 
 
-
 def test_worker_instructions_have_no_result_only_fallback(tmp_path: Path) -> None:
     original = tmp_path / "instructions.md"
     original.write_text("Do the stage. An older brief mentioned /public/result.json.\n")
@@ -2684,7 +2687,8 @@ def test_wait_fault_preserves_hub_authored_missing_worker_failure() -> None:
 
 
 def test_run_order_keeps_failed_bundle_after_requester_grace_hard_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private_result = tmp_path / "private-result.json"
     public_result = tmp_path / "public-result.json"
@@ -2709,7 +2713,10 @@ def test_run_order_keeps_failed_bundle_after_requester_grace_hard_timeout(
     active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
     ledger._snapshot(key, "running", **active_lease)
     manifest = recruiter.completion.build_manifest(
-        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+        order,
+        ledger.request_dir(key),
+        token,
+        recruiter.lifecycle.request_identity(order),
     )
     monkeypatch.setattr(
         recruiter,
@@ -2841,6 +2848,8 @@ def test_pane_recent_output_caps_herdr_stdout_and_survives_timeout(
 ) -> None:
     payload = b"x" * (1024 * 1024)
     read_fd, write_fd = os.pipe()
+    stderr_read_fd, stderr_write_fd = os.pipe()
+    os.close(stderr_write_fd)
 
     def _fill_pipe() -> None:
         os.write(write_fd, payload)
@@ -2849,9 +2858,9 @@ def test_pane_recent_output_caps_herdr_stdout_and_survives_timeout(
     threading.Thread(target=_fill_pipe, daemon=True).start()
 
     class FakeProcess:
-        def __init__(self, stdout: object) -> None:
+        def __init__(self, stdout: object, stderr: object) -> None:
             self.stdout = stdout
-            self.stderr = open(os.devnull, "rb")
+            self.stderr = stderr
             self.returncode: int | None = None
 
         def poll(self) -> int | None:
@@ -2875,7 +2884,9 @@ def test_pane_recent_output_caps_herdr_stdout_and_survives_timeout(
     monkeypatch.setattr(
         recruiter.subprocess,
         "Popen",
-        lambda *args, **kwargs: FakeProcess(os.fdopen(read_fd, "rb")),
+        lambda *args, **kwargs: FakeProcess(
+            os.fdopen(read_fd, "rb"), os.fdopen(stderr_read_fd, "rb")
+        ),
     )
 
     output = recruiter._pane_recent_output(
@@ -2889,7 +2900,9 @@ def test_pane_recent_output_caps_herdr_stdout_and_survives_timeout(
     hang_read, hang_write = os.pipe()
 
     def fake_hanging_popen(*_args: object, **_kwargs: object) -> FakeProcess:
-        return FakeProcess(os.fdopen(hang_read, "rb"))
+        empty_read_fd, empty_write_fd = os.pipe()
+        os.close(empty_write_fd)
+        return FakeProcess(os.fdopen(hang_read, "rb"), os.fdopen(empty_read_fd, "rb"))
 
     monkeypatch.setattr(recruiter.subprocess, "Popen", fake_hanging_popen)
     with pytest.raises(recruiter.RecruiterError, match="timed out"):
@@ -2916,7 +2929,8 @@ def test_worker_progress_fingerprint_bounds_captured_output_bytes() -> None:
 
 
 def test_inactivity_callback_survives_fingerprint_timeout_without_stall_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ledger = recruiter.JobLedger(tmp_path / "hub")
     order = _order(result_path=str(tmp_path / "result.json"))
@@ -3266,7 +3280,26 @@ def test_typed_worker_instructions_name_every_private_artifact_and_no_public_ans
         order, manifest.artifact("result").staging_path, generated, manifest
     )
 
-    final_contract = generated.read_text().split(
+    generated_text = generated.read_text()
+    assert (
+        generated_text.index("Legacy public destination")
+        < generated_text.index("# Assignment boundary (mandatory)")
+        < generated_text.index(
+            "# Recruiter delivery contract (final and authoritative)"
+        )
+    )
+    assignment_boundary = generated_text.split(
+        "# Assignment boundary (mandatory)", maxsplit=1
+    )[1].split("# Recruiter delivery contract", maxsplit=1)[0]
+    assert "exact goal, scope, and completion conditions" in assignment_boundary
+    assert "language, terms, context, architecture" in assignment_boundary
+    assert "Repository evidence overrides model training" in assignment_boundary
+    assert "Stop when its completion conditions are met" in assignment_boundary
+    assert "Extra features, abstractions, cleanup" in assignment_boundary
+    assert "do not choose for the human" in assignment_boundary
+    assert "requester or controller owns escalation" in assignment_boundary
+
+    final_contract = generated_text.split(
         "# Recruiter delivery contract (final and authoritative)", maxsplit=1
     )[1]
     for artifact in manifest.artifacts:
@@ -9084,9 +9117,12 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
 
     answer_path = Path(order["artifact_publication"]["answer_path"])
     assert answer_path.is_file()
-    assert recruiter.contracts_consult.load_answer(
-        answer_path, expected_consult_id="phase-2.stage-1.pass-1.consult-1"
-    ) == _cited_answer()
+    assert (
+        recruiter.contracts_consult.load_answer(
+            answer_path, expected_consult_id="phase-2.stage-1.pass-1.consult-1"
+        )
+        == _cited_answer()
+    )
     receipt_path = artifacts["receipt"]
     assert receipt_path.is_file()
     assert _receipt(consult)["answer_verdict"] == "cited"
@@ -9117,10 +9153,7 @@ def test_consult_dispatch_uses_active_public_roster_for_snapshot_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _specialist_world(tmp_path, monkeypatch)
-    public_roster = (
-        repo
-        / ".shared-llm/public/extensions/common/upagent/offerings.yaml"
-    )
+    public_roster = repo / ".shared-llm/public/extensions/common/upagent/offerings.yaml"
     public_roster.parent.mkdir(parents=True)
     public_roster.write_text(recruiter.offering_catalog.render_roster(["standard"]))
     consult = _consult_file(tmp_path)

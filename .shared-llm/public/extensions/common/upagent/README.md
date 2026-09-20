@@ -506,7 +506,10 @@ Durable files are the source of truth; terminal text is display-only.
   startup, mutate a lease, publish artifacts, invent success, or terminalize the request.
 - Every accepted order carries `artifact_publication`. Compatibility/controller orders that omit it
   receive deterministic result-adjacent paths and an explicit mandatory-consult list before the
-  first ledger mutation. The Recruiter writes a closed-schema typed manifest
+  first ledger mutation. Before launch, the Recruiter appends one mandatory assignment boundary to
+  every worker brief. It tells the worker to follow the target repository's language and recorded
+  design, stop at the brief's completion conditions, and return `blocked` instead of widening scope
+  or making a design decision for the human. The Recruiter then writes a closed-schema typed manifest
   and appends literal lease-private paths for `result.json`, `compacted.md`, and `handoff.md`;
   specialist workers additionally receive `answer.json`. Workers never receive a public answer
   destination. Only `result.json` — and `answer.json` for a specialist — is mandatory: the result
