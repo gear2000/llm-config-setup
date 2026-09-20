@@ -770,6 +770,35 @@ where existing phase routes still provide raw harness/model profiles and may con
 raw lifecycle-role commands; the public candidate-list schema is rejected there. Four launch
 properties remain load-bearing:
 
+### Per-offering worker prompt addenda
+
+Each shipped offering has a `prompt_addendum: |` block in its source fragment under
+`offerings.d/`. Edit that block to adjust one offering's standing reminders. The workflow YAML
+continues to select the offering, effort, and stage; it does not repeat the model's prompt.
+The offerings listing exposes the addendum so a requester can inspect it before hiring.
+
+The public request stores the exact addendum in its immutable offering snapshot. The Recruiter
+inserts it into each worker's `worker-instructions.md`, after the common assignment boundary and
+before the final delivery contract. This covers ordinary worker and specialist requests, including
+retained review-loop workers and fresh retry leases. Editing the roster affects new requests, not
+stored requests. Existing same-session workers already have the initial brief; follow-up messages
+do not append duplicate copies. Pre-addendum snapshots and legacy raw orders retain the common
+boundary without silently borrowing a new addendum from the current roster.
+
+- Opus and Sonnet receive the most explicit reminders against extra work and assumed decisions.
+  Astra and Fable receive additional scope reminders; Sol receives a shorter reminder.
+  Every other shipped offering also has its own editable addendum, including optional ClaudeX.
+- The reminders supplement repository rules and the common boundary. They grant no additional
+  authority and waive no required checks. Authority comes from the assigned role, not the model.
+- Missing evidence, wider scope, and unresolved design decisions go back to the requester or
+  controller. Existing human approval gates still apply.
+- A supplied addendum must be non-empty text without NUL characters. It is plain brief content,
+  not a shell command, template, or new launch argument.
+- This injection applies to Recruiter worker briefs. It does not modify manually started HIL
+  sessions, separate controller startup briefs, or lifecycle-management prompts.
+- Tests verify delivery and snapshot retention, not model obedience. Independent review remains
+  necessary to detect scope drift.
+
 ### Changing models and management defaults
 
 Edit the kit source, not a generated hub or destination copy:

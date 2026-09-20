@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,80 @@ assert spec and spec.loader
 offerings = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = offerings
 spec.loader.exec_module(offerings)
+
+
+def test_every_offering_has_its_own_listed_and_snapshotted_addendum() -> None:
+    roster = offerings.load_selected_roster(["standard", "claudex"])
+    listing = {item["id"]: item for item in roster.listing()}
+    for offering_id, offering in roster.offerings.items():
+        text = offering.prompt_addendum
+        assert isinstance(text, str) and text.strip()
+        assert "requester" in text
+        assert "explicit authorization" in text
+        snapshot = roster.resolve(offering_id, offering.efforts[0])
+        assert snapshot["prompt_addendum"] == text
+        assert listing[offering_id]["prompt_addendum"] == text
+        assert offerings.validate_snapshot(snapshot) == snapshot
+
+    # Same model, different harness: the shipped reminders remain consistent.
+    assert (
+        roster.offerings["pi-gpt-5-6-sol"].prompt_addendum
+        == (roster.offerings["codex-gpt-5-6-sol"].prompt_addendum)
+        == roster.offerings["claudex-gpt-5-6-sol"].prompt_addendum
+    )
+    assert roster.offerings["pi-gpt-6-astra"].prompt_addendum == (
+        roster.offerings["codex-gpt-6-astra"].prompt_addendum
+    )
+
+
+@pytest.mark.parametrize("invalid", [None, "", " \n", 42, False, [], {}, "bad\x00text"])
+def test_invalid_addenda_fail_in_rosters_and_snapshots(
+    tmp_path: Path, invalid: object
+) -> None:
+    source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
+    source["offerings"]["claude-opus-5"]["prompt_addendum"] = invalid
+    path = tmp_path / "offerings.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    with pytest.raises(offerings.OfferingError, match="prompt_addendum"):
+        offerings.load_roster(path)
+
+    snapshot = offerings.load_selected_roster().resolve("claude-opus-5", "high")
+    snapshot["prompt_addendum"] = invalid
+    with pytest.raises(offerings.OfferingError, match="prompt_addendum"):
+        offerings.validate_snapshot(snapshot)
+
+
+def test_addendum_is_frozen_without_changing_launch_tokens(tmp_path: Path) -> None:
+    source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
+    path = tmp_path / "offerings.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    frozen = offerings.load_roster(path).resolve("claude-opus-5", "high")
+    original = frozen["prompt_addendum"]
+    argv = offerings.render_argv(frozen, "backend", "/lease.md")
+    source["offerings"]["claude-opus-5"]["prompt_addendum"] = (
+        "A revised reminder with literal shell text: $(exit 99) {brief_path}"
+    )
+    path.write_text(offerings.yaml.safe_dump(source))
+    revised = offerings.load_roster(path).resolve("claude-opus-5", "high")
+    assert revised["prompt_addendum"] != original
+    assert offerings.validate_snapshot(frozen)["prompt_addendum"] == original
+    assert offerings.render_argv(revised, "backend", "/lease.md") == argv
+
+
+def test_pre_addendum_rosters_and_snapshots_keep_their_original_shape(
+    tmp_path: Path,
+) -> None:
+    source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
+    for value in source["offerings"].values():
+        value.pop("prompt_addendum")
+    path = tmp_path / "offerings.yaml"
+    path.write_text(offerings.yaml.safe_dump(source))
+    roster = offerings.load_roster(path)
+    for offering in roster.offerings.values():
+        snapshot = offering.snapshot(offering.efforts[0])
+        assert "prompt_addendum" not in snapshot
+        assert offerings.validate_snapshot(snapshot) == snapshot
+    assert all("prompt_addendum" not in item for item in roster.listing())
 
 
 def test_roster_contains_exactly_the_approved_offerings() -> None:
@@ -326,9 +401,7 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     ]
     assert candidates[0]["expected_agent"] == "claude"
     assert candidates[0]["expected_process"] == "claude"
-    assert candidates[0]["command"].startswith(
-        "claude --dangerously-skip-permissions"
-    )
+    assert candidates[0]["command"].startswith("claude --dangerously-skip-permissions")
     assert "--model claude-sonnet-5" in candidates[0]["command"]
     assert "--effort medium" in candidates[0]["command"]
     assert candidates[1]["expected_agent"] == "pi"
@@ -365,8 +438,14 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
         offerings.load_roster(path)
 
 
-def test_standard_render_preserves_the_roster_except_supervision_policy() -> None:
+def test_standard_render_preserves_the_roster_except_supervision_policy_and_addenda() -> (
+    None
+):
     rendered = offerings.render_roster(["standard"])
+    # The separately tested prose must not alter model/effort/launch configuration.
+    rendered = re.sub(
+        r"^    prompt_addendum: \|\n(?:      .*\n)+", "", rendered, flags=re.MULTILINE
+    )
 
     rendered = rendered.replace(
         "  # False disables status recovery only; Sentinel closeouts still use the shared ladder.\n"

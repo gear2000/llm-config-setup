@@ -146,6 +146,7 @@ class Offering:
     model: str
     efforts: tuple[str, ...]
     provider: str
+    prompt_addendum: str | None = None
 
     def snapshot(self, effort: str) -> dict[str, object]:
         if effort not in self.efforts:
@@ -160,6 +161,11 @@ class Offering:
             "provider": self.provider,
             "efforts": list(self.efforts),
             "selected_effort": effort,
+            **(
+                {"prompt_addendum": self.prompt_addendum}
+                if self.prompt_addendum is not None
+                else {}
+            ),
         }
 
 
@@ -197,6 +203,11 @@ class OfferingRoster:
                 "provider": item.provider,
                 "efforts": list(item.efforts),
                 "rendered_identity": f"{item.harness}:::{item.model}",
+                **(
+                    {"prompt_addendum": item.prompt_addendum}
+                    if item.prompt_addendum is not None
+                    else {}
+                ),
             }
             for item in self.offerings.values()
         ]
@@ -281,7 +292,7 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
             )
         _strict_keys(
             value,
-            {"harness", "model", "efforts", "completion_style"},
+            {"harness", "model", "efforts", "completion_style", "prompt_addendum"},
             f"offering {offering_id}",
         )
         harness, model, efforts, provider = expected
@@ -306,7 +317,14 @@ def _parse_roster(raw: object, source: Path) -> OfferingRoster:
             for item in raw_efforts
         ):
             raise OfferingError(f"offering {offering_id!r} has invalid efforts")
-        parsed[offering_id] = Offering(offering_id, harness, model, efforts, provider)
+        parsed[offering_id] = Offering(
+            offering_id,
+            harness,
+            model,
+            efforts,
+            provider,
+            _prompt_addendum(value, f"offering {offering_id}"),
+        )
     management = raw.get("management", {})
     if not isinstance(management, dict):
         raise OfferingError("offering roster management must be an object")
@@ -620,6 +638,19 @@ def _validate_management(
             seen.add(identity)
 
 
+def _prompt_addendum(value: dict[str, Any], where: str) -> str | None:
+    # Absence preserves pre-addendum rosters and persisted requests. A declared
+    # addendum must be usable prose; never silently discard a malformed value.
+    if "prompt_addendum" not in value:
+        return None
+    text = value["prompt_addendum"]
+    if not isinstance(text, str) or not text.strip() or "\x00" in text:
+        raise OfferingError(
+            f"{where} prompt_addendum must be non-empty text without NUL"
+        )
+    return text
+
+
 def validate_snapshot(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise OfferingError("offering snapshot must be an object")
@@ -631,7 +662,8 @@ def validate_snapshot(value: object) -> dict[str, object]:
         "efforts",
         "selected_effort",
     }
-    _strict_keys(value, snapshot_keys, "offering snapshot")
+    _strict_keys(value, snapshot_keys | {"prompt_addendum"}, "offering snapshot")
+    _prompt_addendum(value, "offering snapshot")
     missing = sorted(snapshot_keys - set(value))
     if missing:
         raise OfferingError(f"offering snapshot is missing keys: {', '.join(missing)}")

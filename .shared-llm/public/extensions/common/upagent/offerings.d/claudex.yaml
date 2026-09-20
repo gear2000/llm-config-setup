@@ -6,3 +6,6 @@ offerings:
     harness: claudex
     model: gpt-5.6-sol
     efforts: [low, medium, high, xhigh, max]
+    prompt_addendum: |
+      - Follow the brief and repository decisions. Use the smallest sufficient change and complete every required check.
+      - Stop at the completion conditions. If evidence is missing or wider scope or a design decision is needed, report the exact blocker to your requester and await explicit authorization.

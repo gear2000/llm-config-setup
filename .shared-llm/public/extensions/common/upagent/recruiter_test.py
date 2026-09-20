@@ -3253,6 +3253,88 @@ def test_internal_retained_review_commands_continue_and_release_same_worker(
     assert "release_delivery_reserved_at_ns" not in final_state
 
 
+@pytest.mark.parametrize("offering_id", list(recruiter.offering_catalog.APPROVED))
+@pytest.mark.parametrize("retained", [False, True])
+def test_worker_instructions_include_only_the_selected_frozen_addendum(
+    tmp_path: Path, offering_id: str, retained: bool
+) -> None:
+    roster = recruiter.offering_catalog.load_selected_roster(["standard", "claudex"])
+    offering = roster.offerings[offering_id]
+    snapshot = offering.snapshot(offering.efforts[0])
+    original = tmp_path / "instructions.md"
+    original.write_text("Implement only the specified task and required checks.\n")
+    order = _order(
+        instructions_path=str(original),
+        offering_snapshot=snapshot,
+        artifact_publication={
+            "schema_version": 1,
+            "compacted_path": str(tmp_path / "compacted.md"),
+            "handoff_path": str(tmp_path / "handoff.md"),
+        },
+    )
+    if retained:
+        order["completion_policy"] = "requester_release"
+    manifest = recruiter.completion.build_manifest(
+        order, tmp_path / "hub/request", "token", "request-1"
+    )
+    destination = tmp_path / "worker-instructions.md"
+    for generation in (1, 2):
+        recruiter._write_worker_instructions(
+            order,
+            manifest.artifact("result").staging_path,
+            destination,
+            manifest,
+            review_generation=generation,
+            carried_question="Confirm the missing design decision."
+            if generation == 2
+            else None,
+        )
+        text = destination.read_text()
+        heading = f"# Model addendum ({offering_id})"
+        assert text.count("# Model addendum (") == 1
+        assert text.count(snapshot["prompt_addendum"].rstrip()) == 1
+        assert (
+            text.index("# Assignment boundary")
+            < text.index(heading)
+            < text.index("# Recruiter delivery contract")
+        )
+        assert "override repository rules or human approval gates" in text
+        assert ("REVIEW_RELEASE" in text) == retained
+    assert (
+        original.read_text()
+        == "Implement only the specified task and required checks.\n"
+    )
+
+
+def test_pre_addendum_worker_snapshot_keeps_common_boundary_only(
+    tmp_path: Path,
+) -> None:
+    snapshot = recruiter.offering_catalog.load_selected_roster().resolve(
+        "claude-opus-5", "high"
+    )
+    snapshot.pop("prompt_addendum")
+    original = tmp_path / "instructions.md"
+    original.write_text("Do the bounded task.\n")
+    order = _order(
+        instructions_path=str(original),
+        offering_snapshot=snapshot,
+        artifact_publication={
+            "schema_version": 1,
+            "compacted_path": str(tmp_path / "compacted.md"),
+            "handoff_path": str(tmp_path / "handoff.md"),
+        },
+    )
+    manifest = recruiter.completion.build_manifest(
+        order, tmp_path / "hub/request", "token", "request-1"
+    )
+    destination = tmp_path / "worker-instructions.md"
+    recruiter._write_worker_instructions(
+        order, manifest.artifact("result").staging_path, destination, manifest
+    )
+    assert "# Assignment boundary" in destination.read_text()
+    assert "# Model addendum" not in destination.read_text()
+
+
 def test_typed_worker_instructions_name_every_private_artifact_and_no_public_answer(
     tmp_path: Path,
 ) -> None:

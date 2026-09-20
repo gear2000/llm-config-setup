@@ -826,6 +826,53 @@ def test_specialist_resolves_pinned_offering_and_rejects_public_override(
         )
 
 
+@pytest.mark.parametrize("request_type", ["worker", "specialist"])
+def test_persisted_request_keeps_addendum_for_relaunch_after_roster_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request_type: str
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    if request_type == "worker":
+        argv = _worker_argv(tmp_path)
+    else:
+        argv = [
+            "request",
+            "--type",
+            "specialist",
+            "--request-id",
+            REQUEST_ID,
+            "--specialist",
+            "backend",
+            "--prompt-file",
+            str(_prompt(tmp_path)),
+            "--cwd",
+            str(tmp_path),
+        ]
+    validated = public_api.validate_request(_args(argv), tmp_path)
+    frozen = validated.payload["offering_snapshot"]["prompt_addendum"]
+    store = public_api.PublicRequestStore()
+    registered = store.register(validated, "recruiter-pane")
+
+    roster_path = tmp_path / public_api.offerings.ROSTER_RELATIVE_PATH
+    raw = public_api.offerings.yaml.safe_load(roster_path.read_text())
+    raw["offerings"][validated.payload["offering"]]["prompt_addendum"] = (
+        "Changed for future requests."
+    )
+    roster_path.write_text(public_api.offerings.yaml.safe_dump(raw))
+    order = recruiter.load_order(store.load(REQUEST_ID).order_path)
+    assert order["offering_snapshot"]["prompt_addendum"] == frozen
+    for attempt in ("first-lease", "retry-lease"):
+        manifest = recruiter.completion.build_manifest(
+            order, registered.request_dir, attempt, REQUEST_ID
+        )
+        destination = tmp_path / attempt / "worker-instructions.md"
+        recruiter._write_worker_instructions(
+            order, manifest.artifact("result").staging_path, destination, manifest
+        )
+        text = destination.read_text()
+        assert frozen.rstrip() in text
+        assert "Changed for future requests." not in text
+
+
 def test_public_specialist_uses_private_staging_and_dedicated_manager(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1847,7 +1894,11 @@ def test_plan_implementer_listing_keeps_only_controller_harnesses(
         def listing(self) -> list[dict[str, object]]:
             return [
                 {"id": "claude-sonnet-5", "harness": "claude", "efforts": ["medium"]},
-                {"id": "claudex-gpt-5-6-sol", "harness": "claudex", "efforts": ["high"]},
+                {
+                    "id": "claudex-gpt-5-6-sol",
+                    "harness": "claudex",
+                    "efforts": ["high"],
+                },
             ]
 
     monkeypatch.setattr(public_api, "_offering_roster", lambda cwd=None: _Roster())

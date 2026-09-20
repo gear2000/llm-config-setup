@@ -4858,6 +4858,22 @@ def _write_worker_instructions(
         "result that names the exact decision needed. The requester or controller owns "
         "escalation to the human."
     )
+    model_addendum = ""
+    snapshot = order.get("offering_snapshot")
+    if snapshot is not None:
+        try:
+            selected = offering_catalog.validate_snapshot(snapshot)
+        except OfferingError as error:
+            raise RecruiterError(f"invalid offering snapshot: {error}") from error
+        addendum = selected.get("prompt_addendum")
+        if addendum is not None:
+            model_addendum = (
+                f"\n\n# Model addendum ({selected['id']})\n\n"
+                "These reminders supplement the assignment boundary above. They do not "
+                "expand your assigned role or authority, waive required checks, or "
+                "override repository rules or human approval gates.\n\n"
+                f"{addendum.rstrip()}\n"
+            )
     suffix = (
         "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
         "The Recruiter, not this worker, publishes completion artifacts. "
@@ -4867,7 +4883,11 @@ def _write_worker_instructions(
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(
-            original.rstrip() + handoff_section + assignment_boundary + suffix
+            original.rstrip()
+            + handoff_section
+            + assignment_boundary
+            + model_addendum
+            + suffix
         )
         os.replace(temporary, destination)
     except OSError as e:
