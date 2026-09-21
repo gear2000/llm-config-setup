@@ -130,6 +130,7 @@ test:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/meta-plan/meta-plan-schema.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/auto-compact.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/disable-amazon-bedrock.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-approve.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
 
 # Runs planish_resolve.py and both Pi extensions that delegate to it over one corpus.
@@ -141,6 +142,9 @@ test-auto-compact:
 
 test-provider-policy:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/disable-amazon-bedrock.test.ts
+
+test-tf-approve:
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-approve.test.ts
 
 test-memsearch:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/memsearch.test.ts

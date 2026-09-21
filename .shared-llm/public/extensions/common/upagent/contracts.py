@@ -71,7 +71,7 @@ MANAGER_PLACEMENT_MODES = ("shared", "requester", "workspace")
 # llm_management.MANAGEMENT_MODES (both modules load standalone by path).
 MANAGEMENT_MODES = ("direct", "dedicated")
 COMPLETION_POLICIES = ("requester_release",)
-OPERATIONS = ("plan", "apply")
+OPERATIONS = ("plan",)
 WATCHDOG_KINDS = {
     "phase-watchdog": "phase",
     "plan-lifecycle-watchdog": "plan",
@@ -359,10 +359,13 @@ def parse_order(text: str) -> dict:
                 raise ContractError("order.json: mandatory consult ids must be unique")
             seen_consults.add(requirement["consult_id"])
     operation = order.get("operation", "plan")
-    if operation not in OPERATIONS:
+    if operation == "apply":
         raise ContractError(
-            "order.json: `operation` must be one of " + ", ".join(OPERATIONS)
+            "order.json: workers are plan-only; apply and destroy require a fresh "
+            "command in the human-facing TUI"
         )
+    if operation not in OPERATIONS:
+        raise ContractError("order.json: `operation` must be `plan`")
     if "requires_apply" in order and not isinstance(order["requires_apply"], bool):
         raise ContractError(
             "order.json: `requires_apply` must be a boolean when present"
@@ -406,37 +409,6 @@ def parse_order(text: str) -> dict:
             raise ContractError(
                 "order.json: `watchdog_terminal.identity` must match "
                 f"{('plan_id' if kind == 'plan' else 'phase_id')}"
-            )
-    if operation == "apply":
-        if mode != "direct":
-            raise ContractError(
-                "order.json: saved-plan-artifact apply is banned for the TUI-driven "
-                "phase system (mode: phase) — apply always re-plans fresh in the TUI; "
-                "only the separate mode: direct controller may bind an approval to a "
-                "plan_artifact"
-            )
-        approval, artifact = order.get("approval"), order.get("plan_artifact")
-        if not isinstance(approval, dict):
-            raise ContractError(
-                "order.json: apply operation requires an `approval` object"
-            )
-        if not isinstance(artifact, dict):
-            raise ContractError(
-                "order.json: apply operation requires a `plan_artifact` object"
-            )
-        for field in ("approved_by", "approved_at", "nonce", "plan_sha256"):
-            if not isinstance(approval.get(field), str) or not approval[field]:
-                raise ContractError(
-                    f"order.json: `approval.{field}` must be a non-empty string"
-                )
-        for field in ("path", "sha256"):
-            if not isinstance(artifact.get(field), str) or not artifact[field]:
-                raise ContractError(
-                    f"order.json: `plan_artifact.{field}` must be a non-empty string"
-                )
-        if approval["plan_sha256"] != artifact["sha256"]:
-            raise ContractError(
-                "order.json: approval.plan_sha256 must match plan_artifact.sha256"
             )
     return order
 
@@ -820,7 +792,11 @@ def parse_event(
 
 
 def is_cleanup_advisory(event: dict) -> bool:
-    return event.get("kind") == "advisory" and isinstance(event.get("dedupe_key"), str) and event["dedupe_key"].startswith("flow1:cleanup-failed:")
+    return (
+        event.get("kind") == "advisory"
+        and isinstance(event.get("dedupe_key"), str)
+        and event["dedupe_key"].startswith("flow1:cleanup-failed:")
+    )
 
 
 class _OrderedEvent(dict):
@@ -831,14 +807,20 @@ class _OrderedEvent(dict):
         self.terminal_event = terminal
 
 
-def validate_event_order(previous: dict | None, current: dict, *, terminal_event: dict | None = None) -> dict:
+def validate_event_order(
+    previous: dict | None, current: dict, *, terminal_event: dict | None = None
+) -> dict:
     terminal = terminal_event
     if previous is not None:
         if current["sequence"] <= previous["sequence"]:
             raise ContractError(
                 f"event order: sequence {current['sequence']} must exceed {previous['sequence']}"
             )
-        terminal = terminal or (previous if previous.get("terminal") else getattr(previous, "terminal_event", None))
+        terminal = terminal or (
+            previous
+            if previous.get("terminal")
+            else getattr(previous, "terminal_event", None)
+        )
     if terminal is not None:
         prev_gen = terminal.get("generation", 1)
         cur_gen = current.get("generation", 1)

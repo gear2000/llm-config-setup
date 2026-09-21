@@ -1,66 +1,125 @@
 # Code Context
 
 ## Files Retrieved
-1. `tools/harness.py` (lines 697-704, 733-757, 899-954) - documents and implements Pi whole-runtime planning; currently handles only extensions and personas.
-2. `tools/harness.py` (lines 2549-2579, 3191-3259) - defines manifest-safe home roots and generated namespaces used for orphan retirement.
-3. `tools/harness.py` (lines 3949-4005, 4260-4310) - global flow gates runtime on `global: [pi]`, reconciles the Pi plan, and records links/generated sources.
-4. `.shared-llm/public/llm/pi/common/` (directory listing) - portable Pi source tree; contains `agents/`, `extensions/`, settings, and third-party-extension docs/manifest, but no `themes/` directory today.
-5. `tools/test_config_flow.py` (lines 1194-1210, 1490-1525, 1727-1750) - full runtime deployment, generated-tree portability, and harness-disable retirement tests.
-6. `tools/test_home_manifest.py` (lines 609-632, 713-735) - verifies planning does not prematurely delete generated artifacts and guards against pruning through symlinked generated namespaces.
-7. `README.md` (lines 103-111, 180-208, 292-307) - describes copy/global runtime architecture and deployed Pi runtime inventory.
-8. `UPINSTALL.md` (lines 124-130) - installation documentation distinguishing kit-owned Pi runtime from `pi install` packages.
+1. `.shared-llm/public/layers/agents/common/terraform.md` (lines 1-22) - canonical Terraform/OpenTofu persona layer, including apply/destroy approval and saved-plan rules.
+2. `.shared-llm/public/layers/agents/common/terraform.description.md` (line 1) - source description declaring the human-approval gate.
+3. `.shared-llm/public/compose/agents/terraform.yaml` (lines 1-9) - compose recipe for the Terraform agent.
+4. `.claude/agents/terraform.md` (lines 1-43) - checked-in generated Terraform agent output.
+5. `.shared-llm/public/layers/slash-commands/common/common/phase-leader/command.md` (lines 126-149) - IaC phase orchestration, saved planning artifact, approval evidence, and fresh-apply rules.
+6. `.shared-llm/public/compose/slash-commands/common/common/phase-leader.yaml` (lines 1-10) - recipe targeting `.claude/skills/phase-leader/SKILL.md`.
+7. `.shared-llm/public/layers/slash-commands/common/common/tui-control/command.md` (lines 136-149) - direct human approval/apply procedure.
+8. `.shared-llm/public/compose/slash-commands/common/common/tui-control.yaml` (lines 1-10) - recipe targeting `.claude/skills/tui-control/SKILL.md`.
+9. `.shared-llm/public/llm/pi/common/meta-plan/meta-plan-format.md` (lines 253-257) - whole-file Pi runtime source defining IaC phase semantics.
+10. `.shared-llm/public/compose/slash-commands/common/common/do-convert.yaml` (lines 1-10) and `.shared-llm/public/compose/slash-commands/common/claude/cc-convert.yaml` (lines 1-10) - recipes that include `meta-plan-format.md` and target generated conversion skills.
+11. `.shared-llm/public/llm/pi/common/agents/tf-reviewer.md` (lines 1-40) - whole-file Pi reviewer persona used to turn raw plans into human approval evidence.
 
 ## Key Code
 
-### Review findings
+### Canonical Terraform agent policy
 
-- **Medium — themes are not currently deployable by `just update`.** `plan_pi_runtime()` explicitly scans only `.shared-llm/public/llm/pi/common/agents/*.md` and `.../extensions/*`, creates generated copies under `~/.shared-llm/generated/pi/{agents,extensions}`, and returns only the agent/extension home directories for reconciliation (`tools/harness.py:899-954`). Merely adding a theme JSON under the Pi common tree would copy it to destination `public/` trees through the existing common-runtime sync, but would not install it globally.
+`.shared-llm/public/layers/agents/common/terraform.md:7-19`:
 
-- **Medium — retirement support must be extended with deployment support.** Generated cleanup only enumerates `pi/extensions` and `pi/agents` (`tools/harness.py:2565-2574`). A new generated `pi/themes` tree must be added to `GENERATED_DIR_NAMESPACES`; otherwise a renamed/deleted theme source would survive as an orphan. The manifest entry format itself needs no new kind: ordinary theme symlinks can use existing `record_link`, and `~/.pi` is already an allowed managed home root (`tools/harness.py:2557-2560, 3020-3062`).
+> `tofu apply`, `tofu destroy` (and the terraform equivalents) are allowed, but only after a human
+> approves — never on a natural-language "sounds good." Before asking, run `tofu plan`, show its
+> output, and present a table summarizing the changes (create / update / replace / destroy counts
+> and the notable resources — call out replace explicitly, since it destroys and recreates the
+> resource). Then show the human exactly what will run: `cd <absolute path>` on one line, the
+> command on the next — never a bare relative path, never an implied cwd. Only after approval that
+> follows that presentation, run the command. Destroys get the same treatment plus any stronger
+> confirmation already required (e.g. typing the destroy count).
+>
+> Never save a plan to a file and apply that file (`plan -out=<file>` then `apply <file>`) — that
+> pattern is banned. A saved plan is opaque to the human reviewing it, and it is only useful when
+> you need an immutable plan, which is not how these runs work. Always plan, summarize, get
+> approval, then run a fresh apply.
 
-- **Low — documentation currently promises only extensions/personas/settings.** `README.md:298` and `UPINSTALL.md:130` omit themes, so behavior and portable source placement would be undiscoverable without doc updates.
+The one-line description at `.shared-llm/public/layers/agents/common/terraform.description.md:1` is:
 
-### Minimal change recommendation
+> Terraform infrastructure specialist that writes and validates IaC, produces plans, and gates apply/destroy on human approval.
 
-1. Add the portable theme source as `.shared-llm/public/llm/pi/common/themes/<theme-name>.json` (validate it against Pi's theme schema separately).
-2. Extend `plan_pi_runtime()` in `tools/harness.py:899-954` with:
-   - source directory: `llm/pi/common/themes`
-   - generated directory: `~/.shared-llm/generated/pi/themes`
-   - home destination: `~/.pi/agent/themes/<theme-name>.json`
-   - only regular `*.json` entries; honor the existing `exclude` predicate
-   - include `~/.pi/agent/themes` in `LinkPlan.dest_dirs` so retired managed links are reconciled.
-3. Add `"pi/themes"` to `GENERATED_DIR_NAMESPACES` at `tools/harness.py:2568-2574`. No manifest version/schema bump is needed because this remains a normal generated-backed `kind: link` under the already-managed `.pi` root.
-4. Keep the existing `do_home_runtime()` loop (`tools/harness.py:4280-4299`): it already records every returned desired link and marks every generated source. Thus the new theme is deployed only when `global` includes `pi`, is portable because home links target the durable generated copy, and is retired by normal reconciliation when removed or Pi is disabled.
-5. Update comments/docstrings near `tools/harness.py:697-704, 899-910, 4280-4282` from “extensions/personas” to “extensions/personas/themes.”
+The compose mapping is `.shared-llm/public/compose/agents/terraform.yaml:5-9`:
 
-### Tests to add/update
+```yaml
+description: .shared-llm/public/layers/agents/common/terraform.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/terraform.md
+  - .shared-llm/public/layers/agents/common/_report-contract.md
+output: .claude/agents/terraform.md
+```
 
-- `tools/test_config_flow.py:1194-1210`: assert the shipped theme is a symlink at `~/.pi/agent/themes/<name>.json`, resolves under `~/.shared-llm/generated/pi/themes/`, and has source-identical bytes.
-- `tools/test_config_flow.py:1490-1525`: include/assert the generated theme in the “no home link targets checkout” portability test.
-- `tools/test_config_flow.py:1727-1750`: add `gen / "pi/themes"` to whole-piece retirement and ensure no theme home link survives after `global` becomes empty.
-- `tools/test_home_manifest.py:609-632`: optionally add a retired generated theme fixture to prove it survives planning and is removed only in commit.
-- `tools/test_home_manifest.py:713-735`: add `pi/themes` to the symlinked-generated-namespace parameterization so cleanup cannot traverse a hostile namespace symlink.
+### Generated agent output
 
-### Documentation paths
+`.claude/agents/terraform.md:14-26` reproduces the policy:
 
-- `README.md:180-208`: identify themes as Pi whole-runtime source, not compose input.
-- `README.md:292-305`: change Pi runtime inventory to extensions, personas, themes, and settings; state theme destination `~/.pi/agent/themes/` and generated source `~/.shared-llm/generated/pi/themes/`.
-- `UPINSTALL.md:124-130`: mention kit-owned themes alongside kit-owned extensions and that `just update` (not `pi install`) deploys them.
-- `AGENTS.md` background/runtime paragraphs should be kept consistent because this root governance file explicitly enumerates Pi whole pieces and generated namespaces, though it is not generated output.
+> `tofu apply`, `tofu destroy` (and the terraform equivalents) are allowed, but only after a human
+> approves — never on a natural-language "sounds good." ... Only after approval that
+> follows that presentation, run the command. Destroys get the same treatment plus any stronger
+> confirmation already required (e.g. typing the destroy count).
+>
+> Never save a plan to a file and apply that file (`plan -out=<file>` then `apply <file>`) — that
+> pattern is banned. ... Always plan, summarize, get
+> approval, then run a fresh apply.
+
+### IaC orchestration policy
+
+`.shared-llm/public/layers/slash-commands/common/common/phase-leader/command.md:130-143` says stage workers never apply, but Stage 3 may create a saved plan strictly as review evidence:
+
+> Every IaC stage brief restricts the worker to `fmt`, `validate`, `init`, `plan`, and `show` — a stage worker never applies...
+>
+> Stage-3 runs `init` and `plan -out <pass-dir>/iac/plan.bin`, saves `terraform show -json` output as `<pass-dir>/iac/plan.json`, builds the human table ... and records the artifact's SHA-256...
+>
+> Stage-4 is the TUI-performed apply ... The TUI always re-plans fresh at apply time ... rather than applying `plan.bin`, so what runs is never an opaque saved-plan artifact. There is no unattended variant...
+
+Its recipe, `.shared-llm/public/compose/slash-commands/common/common/phase-leader.yaml:6-10`, composes the shared phase/handoff protocols plus this command and declares:
+
+```yaml
+output: .claude/skills/phase-leader/SKILL.md
+```
+
+`.shared-llm/public/layers/slash-commands/common/common/tui-control/command.md:138-149` gives the human-facing gate:
+
+> The TUI runs this flow itself; the apply is never delegated:
+>
+> 1. ... Print the table to the human VERBATIM — never summarize it away.
+> 2. Show the human exactly what will run: `cd <absolute pass-dir>` ... the apply (or destroy) command...
+> 3. ... When the table shows "Destroy total to confirm: N" with N above zero, the human approves by typing that exact number; any other answer is a decline. A zero-destroy plan accepts a plain yes.
+> 4. Write `<pass-dir>/iac/approval.json` ... `"by": "human"` ...
+> 5. On approval, apply DIRECTLY in this pane with a FRESH plan ... NEVER save a plan to a file and apply that file ... apply always re-plans fresh...
+> 7. On decline ... expect the phase to end `blocked`.
+
+Its recipe declares `.claude/skills/tui-control/SKILL.md` as output.
+
+### Pi whole-file sources
+
+`.shared-llm/public/llm/pi/common/meta-plan/meta-plan-format.md:255` restates the complete model: workers are plan-only; Stage 3 captures plan evidence and a replacement-aware approval table; the TUI shows the exact command and requires typed destroy count when nonzero; Stage 4 executes a fresh apply, never a saved plan.
+
+`.shared-llm/public/llm/pi/common/agents/tf-reviewer.md:23-39` accepts raw plan output and says:
+
+> Your job is to produce a message the human will read to decide whether to approve or deny this terraform apply/destroy. ... The human cannot see the raw plan — what you write is all they get.
+
+It orders REMOVE first and treats replacement as paired REMOVE + ADD rows. This is a whole Pi runtime persona, not a compose-layer output.
 
 ## Architecture
 
-`just update` runs the global home-runtime flow. When `~/.shared-llm.yaml` includes `pi` in `global`, `do_home_runtime()` calls `plan_pi_runtime()`. The planner copies authored whole pieces from the checkout into the durable machine-local generated tree, then returns desired home-link mappings. `reconcile()` creates/repoints/removes only provably managed symlinks; `HomeManifest` records those links and generated sources, then prunes stale generated artifacts after links are safely retired. Themes should follow this exact path rather than being scaffolded into settings or installed through the third-party package manifest.
+The direct agent path is `terraform.md` + description + shared report contract → `terraform.yaml` → checked-in `.claude/agents/terraform.md`.
 
-## Start Here
+The Herdr/IaC path splits responsibility: phase leader creates review evidence and waits; TUI presents that evidence, obtains a human decision, and performs a fresh direct apply; workers cannot apply. A binary saved plan (`plan.bin`) is permitted as Stage-3 evidence, but passing that file to `apply` is forbidden. `meta-plan-format.md` supplies matching semantics to conversion skills and is also deployed as Pi whole-file runtime content.
 
-Open `tools/harness.py:899-954`. It is the narrow planner to extend; all manifest recording is already generic downstream in `tools/harness.py:4280-4299`.
+## Review Findings
+
+- **Informational:** The canonical agent source and checked-in generated agent output agree on apply/destroy requiring human approval and on banning `apply <saved-plan>`.
+- **Informational:** “Never save a plan to a file and apply that file” does not prohibit creating `plan.bin` for inspection/evidence. The phase flow explicitly creates it, hashes/reviews related output, then performs a fresh apply instead of applying the artifact.
+- **Informational:** Destroy approval is stronger in the TUI flow: a nonzero destroy total must be typed exactly; a plain yes is accepted only for zero destroys.
+- **Informational:** No OpenTofu-named separate persona/recipe exists; the Terraform persona explicitly covers `tofu` and Terraform equivalents.
 
 ## Residual Risks
 
-- The installed Pi package was not available in the searched global Node locations, so this scout could not locally verify the exact current theme JSON schema or whether the project’s pinned Pi version imposes required color keys. Confirm against Pi >= 0.74.0 documentation/tests before authoring the theme.
-- A foreign real file or foreign symlink at the same theme destination will intentionally be preserved, meaning the portable theme can be skipped on machines with a collision; this matches existing foreign-safe runtime policy.
-- `PUBLIC_COPY_DIRS` already includes all of `llm/pi/common`, so no copy-list change appears necessary; tests should still prove destination syncing if theme presence in destination `public/` is a requirement beyond global deployment.
+- The declared generated outputs `.claude/skills/phase-leader/SKILL.md`, `.claude/skills/tui-control/SKILL.md`, `.claude/skills/do-convert/SKILL.md`, and `.claude/skills/cc-convert/SKILL.md` are not present in this checkout, so their current materialized text could not be compared with source. This is consistent with generated/global artifacts not necessarily being checked in, but leaves their local deployed copies unverified.
+- Home deployment targets under `~/.shared-llm/generated/` / `~/.pi/` were outside the requested repository inspection and were not read.
+
+## Start Here
+
+Open `.shared-llm/public/layers/agents/common/terraform.md` first: it is the concise canonical persona policy. Then read the IaC sections in `phase-leader/command.md` and `tui-control/command.md` to understand the more detailed approval/apply execution flow.
 
 ```acceptance-report
 {
@@ -68,29 +127,26 @@ Open `tools/harness.py:899-954`. It is the narrow planner to extend; all manifes
     {
       "id": "criterion-1",
       "status": "satisfied",
-      "evidence": "review-findings identify the missing theme planner and cleanup namespace with exact paths/line ranges and severity; residual-risks explicitly cover schema validation and collision behavior"
+      "evidence": "review-findings identify the canonical source, recipes, checked-in generated agent, IaC orchestration sources, and absent declared generated skills with exact paths and informational severity."
     }
   ],
   "changedFiles": [],
   "testsAddedOrUpdated": [],
   "commandsRun": [
     {
-      "command": "grep/find/read inspection of tools/harness.py, tools/test_config_flow.py, tools/test_home_manifest.py, README.md, UPINSTALL.md, and .shared-llm/public/llm/pi/common",
+      "command": "targeted find/grep/read inspection plus git status --short and numbered source/output excerpts",
       "result": "passed",
-      "summary": "Confirmed existing Pi runtime data flow and that no theme source or deployment branch exists."
-    },
-    {
-      "command": "git status --porcelain=v1; git diff --cached --name-only",
-      "result": "passed",
-      "summary": "No staged files; context.md was already a modified requested report artifact before replacement."
+      "summary": "Located Terraform/OpenTofu policy sources, compose recipes, generated output, Pi whole-file sources, and verified the working tree status before writing this requested report."
     }
   ],
-  "validationOutput": [],
+  "validationOutput": [
+    "Canonical terraform.md lines 7-19 match generated .claude/agents/terraform.md lines 14-26 for approval and saved-plan policy.",
+    "Declared phase-leader and tui-control generated skill outputs are absent from this checkout."
+  ],
   "residualRisks": [
-    "Exact Pi theme JSON schema was not locally verifiable because the installed package source was unavailable in searched global Node locations.",
-    "Foreign destination collisions are preserved by design and may skip theme deployment."
+    "Absent generated skill files and out-of-repository home deployments were not textually verified."
   ],
   "noStagedFiles": true,
-  "notes": "Read-only investigation: no source, test, or documentation files were edited; only the requested context.md findings artifact was written."
+  "notes": "Read-only investigation; context.md is the sole requested report artifact and is excluded from changedFiles because no project source/config was edited."
 }
 ```

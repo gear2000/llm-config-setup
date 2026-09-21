@@ -7900,14 +7900,7 @@ def test_a_recognized_field_owns_its_own_subtree(tmp_path: Path) -> None:
     )
 
 
-def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -> None:
-    approval = {
-        "approved_by": "human",
-        "approved_at": "2026-01-01T00:00:00Z",
-        "nonce": "nonce-1",
-        "plan_sha256": "a" * 64,
-    }
-    artifact = {"path": str(tmp_path / "plan.tfplan"), "sha256": "a" * 64}
+def test_order_intake_rejects_direct_worker_apply_authority(tmp_path: Path) -> None:
     sloppy = {
         "order_id": "apply-step-1",
         "phase_id": "plan-x",
@@ -7916,16 +7909,22 @@ def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -
         "mode": "direct",
         "operation": "apply",
         "requires_apply": True,
-        "approval": approval,
-        "plan_artifact": artifact,
+        "approval": {
+            "approved_by": "human",
+            "approved_at": "2026-01-01T00:00:00Z",
+            "nonce": "nonce-1",
+            "plan_sha256": "a" * 64,
+        },
+        "plan_artifact": {
+            "path": str(tmp_path / "plan.tfplan"),
+            "sha256": "a" * 64,
+        },
         "manager_placement": {"mode": "requester"},
         "requester": {
             "id": "leader",
             "kind": "file-mailbox",
             "address": str(tmp_path / "inbox"),
         },
-        "env": {"SAFE": "yes"},
-        "timeout": "120000",
         "harness": "claude",
         "model": "some-model",
         "agent": "terraform",
@@ -7938,22 +7937,12 @@ def test_order_intake_preserves_direct_apply_authority_exactly(tmp_path: Path) -
     order_path = tmp_path / "order.json"
     order_path.write_text(json.dumps(sloppy))
 
-    repaired = recruiter._intake_order(str(order_path), "unused.yaml")
+    with pytest.raises(recruiter.IntakeOutcomeError, match="workers are plan-only"):
+        recruiter._intake_order(str(order_path), "unused.yaml")
 
-    for field in (
-        "mode",
-        "operation",
-        "requires_apply",
-        "approval",
-        "plan_artifact",
-        "manager_placement",
-        "requester",
-        "env",
-        "plan_id",
-        "step_id",
-    ):
-        assert repaired[field] == sloppy[field]
-    assert repaired["timeout_ms"] == 120000
+    validation = json.loads((tmp_path / "order.json.validation.json").read_text())
+    assert validation["valid"] is False
+    assert any("workers are plan-only" in error for error in validation["errors"])
 
 
 def test_explicit_invalid_stage_and_timeout_are_not_silently_rewritten(

@@ -132,10 +132,6 @@ upagent-direct-steps route:
 upagent-direct-order route plan_id step_id cwd run_root tui_pane:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}"
 
-[no-cd]
-upagent-direct-apply-order route plan_id step_id cwd run_root tui_pane approval plan_artifact:
-    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target direct-controller apply-order --route "{{route}}" --plan-id "{{plan_id}}" --step-id "{{step_id}}" --cwd "{{cwd}}" --run-root "{{run_root}}" --tui-pane "{{tui_pane}}" --approval "{{approval}}" --plan-artifact "{{plan_artifact}}"
-
 # Wait without burning LLM turns. Exit 0/1 is terminal; exit 2 means the requester must decide.
 # Waits past notify_after_ms also ping the human via herdr notification (0 disables).
 [no-cd]

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -58,68 +56,39 @@ def test_direct_steps_are_dependency_ordered_and_profiled(tmp_path: Path) -> Non
     }
 
 
-def test_direct_apply_order_binds_human_approval_to_exact_artifact(
-    tmp_path: Path,
-) -> None:
+def test_direct_apply_orders_are_rejected(tmp_path: Path) -> None:
     cwd = tmp_path / "worktree"
     run_root = tmp_path / "run"
     cwd.mkdir()
     run_root.mkdir()
-    artifact = tmp_path / "approved.plan"
-    artifact.write_text("exact plan")
-    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    approval = {
-        "approved_by": "human",
-        "approved_at": "2026-07-15T00:00:00Z",
-        "nonce": "approval-1",
-        "plan_sha256": digest,
-    }
+
+    with pytest.raises(DirectRunError, match="human-facing TUI"):
+        direct_controller.build_order(
+            plan_id="network",
+            step_id="apply-network",
+            operation="apply",
+            cwd=cwd,
+            run_root=run_root,
+            tui_pane="tui-pane",
+        )
+
+
+def test_requires_apply_remains_plan_routing_metadata(tmp_path: Path) -> None:
+    cwd = tmp_path / "worktree"
+    run_root = tmp_path / "run"
+    cwd.mkdir()
+    run_root.mkdir()
 
     order = direct_controller.build_order(
         plan_id="network",
-        step_id="apply-network",
-        operation="apply",
+        step_id="plan-network",
+        operation="plan",
         cwd=cwd,
         run_root=run_root,
         tui_pane="tui-pane",
-        plan_artifact=artifact,
-        approval=approval,
+        requires_apply=True,
     )
 
-    assert order["mode"] == "direct"
-    assert order["operation"] == "apply"
-    assert order["approval"] == approval
-    assert order["plan_artifact"] == {"path": str(artifact), "sha256": digest}
-    assert "Do not re-plan" in Path(order["instructions_path"]).read_text()
-
-
-def test_direct_apply_rejects_non_object_or_stale_approval(tmp_path: Path) -> None:
-    cwd = tmp_path / "worktree"
-    run_root = tmp_path / "run"
-    cwd.mkdir()
-    run_root.mkdir()
-    artifact = tmp_path / "approved.plan"
-    artifact.write_text("exact plan")
-
-    with pytest.raises(DirectRunError, match="human approval"):
-        direct_controller.build_order(
-            plan_id="network",
-            step_id="apply-network",
-            operation="apply",
-            cwd=cwd,
-            run_root=run_root,
-            tui_pane="tui-pane",
-            plan_artifact=artifact,
-            approval=json.loads("[]"),
-        )
-    with pytest.raises(DirectRunError, match="does not match"):
-        direct_controller.build_order(
-            plan_id="network",
-            step_id="apply-network",
-            operation="apply",
-            cwd=cwd,
-            run_root=run_root,
-            tui_pane="tui-pane",
-            plan_artifact=artifact,
-            approval={"plan_sha256": "stale"},
-        )
+    assert order["operation"] == "plan"
+    assert order["requires_apply"] is True
+    assert "plan" in Path(order["instructions_path"]).read_text().lower()

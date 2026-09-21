@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 import sys
@@ -147,10 +146,6 @@ def step_config(path: Path, step_id: str) -> dict[str, Any]:
     }
 
 
-def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def build_order(
     *,
     plan_id: str,
@@ -159,8 +154,6 @@ def build_order(
     cwd: Path,
     run_root: Path,
     tui_pane: str,
-    approval: dict[str, str] | None = None,
-    plan_artifact: Path | None = None,
     workspace_id: str | None = None,
     workspace_label: str | None = None,
     harness: str = "claude",
@@ -171,12 +164,13 @@ def build_order(
     kind: str = "implement",
     review_of: list[str] | None = None,
 ) -> dict[str, Any]:
-    if (
-        operation not in ("plan", "apply")
-        or kind not in DIRECT_STEP_KINDS
-        or (kind == "review" and operation == "apply")
-    ):
-        raise DirectRunError("review steps cannot create apply orders")
+    if operation != "plan":
+        raise DirectRunError(
+            "direct workers are plan-only; apply and destroy require a fresh command "
+            "in the human-facing TUI"
+        )
+    if kind not in DIRECT_STEP_KINDS:
+        raise DirectRunError(f"unknown direct step kind: {kind}")
     if (
         not cwd.is_absolute()
         or not cwd.is_dir()
@@ -238,24 +232,7 @@ def build_order(
     order["request_id"] = order["order_id"]
     if effort:
         order["effort"] = effort
-    if operation == "apply":
-        if (
-            not plan_artifact
-            or not plan_artifact.is_file()
-            or not isinstance(approval, dict)
-        ):
-            raise DirectRunError(
-                "apply requires a readable plan artifact and human approval"
-            )
-        digest = _digest(plan_artifact)
-        if approval.get("plan_sha256") != digest:
-            raise DirectRunError(
-                "approval plan_sha256 does not match the current plan artifact"
-            )
-        order["plan_artifact"] = {"path": str(plan_artifact), "sha256": digest}
-        order["approval"] = approval
-        text = f"# Direct IaC apply\n\nApply only approved artifact `{plan_artifact}` with SHA-256 `{digest}`. Do not re-plan, broaden scope, or destroy resources.\n"
-    elif kind == "review":
+    if kind == "review":
         text = f"# Direct adversarial review\n\nReview completed direct step(s) `{', '.join(review_of or [])}` in `{cwd}`. This is a read-only independent review: do not modify files, apply, destroy, or approve anything.\n"
     else:
         text = f"# Direct IaC plan\n\nImplement only direct plan step `{step_id}` in `{cwd}`. Run init/validate/plan as appropriate; never run apply or destroy.\n"
@@ -269,35 +246,26 @@ def build_order(
 
 def main(argv: list[str] | None = None) -> int:
     p = command_runtime.ArgumentParser()
-    p.add_argument("command", choices=("steps", "order", "apply-order"))
+    p.add_argument("command", choices=("steps", "order"))
     p.add_argument("--route", type=Path, required=True)
     p.add_argument("--plan-id")
     p.add_argument("--step-id")
     p.add_argument("--cwd", type=Path)
     p.add_argument("--run-root", type=Path)
     p.add_argument("--tui-pane")
-    p.add_argument("--approval", type=Path)
-    p.add_argument("--plan-artifact", type=Path)
     a = p.parse_args(argv)
     if a.command == "steps":
         command_runtime.command_print(json.dumps(step_order(a.route)))
         return 0
     if not all((a.plan_id, a.step_id, a.cwd, a.run_root, a.tui_pane)):
         raise DirectRunError("missing direct order arguments")
-    approval = (
-        json.loads(a.approval.read_text())
-        if a.command == "apply-order" and a.approval
-        else None
-    )
     order = build_order(
         plan_id=a.plan_id,
         step_id=a.step_id,
-        operation="apply" if a.command == "apply-order" else "plan",
+        operation="plan",
         cwd=a.cwd,
         run_root=a.run_root,
         tui_pane=a.tui_pane,
-        approval=approval,
-        plan_artifact=a.plan_artifact,
         **step_config(a.route, a.step_id),
     )
     path = Path(order["instructions_path"]).with_name(
