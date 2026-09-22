@@ -29,6 +29,8 @@ For these packets only, delegate **all** production coding, fixes, validation an
 
 Slice the plan into Recruiter hires using the **Worker hire contract** below. Prefer workers so this pane stays small.
 
+**Size the slice to the seat.** Most hires should land on the cheaper seats in `staffing-guide.yaml` (Luna, Sonnet, Opus, Sol). Those models write clean code but lose the long horizon: given a wide brief they do too much and invent structure. So cut the plan into slices with one goal, one module or package, and done-conditions a command can check, and give each slice enough context to see the agreed work without asking it to hold the whole plan. Reserve Astra and Fable for slices that truly need cross-module reasoning or adversarial review. Consult `model-picker` before every hire; when it says `split-first`, split. Every hire is a work order for one small thing, not a delegation of a phase.
+
 Hire independent reviewers the same way when a slice needs a check. Consult specialists with `just upagent-consult` when a listed specialist owns the area (`just upagent-specialists` is the phone book). Ordinary workers must not nest-hire; only this controller places work orders (consults excepted, through the Recruiter).
 
 You may write code yourself only when a hire is the wrong tool. Record that choice in `implementer-status.md`.

@@ -6,7 +6,11 @@ Use the public façade. Place work only with `just upagent request`.
 
 ## Select offering, effort, persona
 
-1. Run `just upagent lists --type offerings --json`. Pick one existing id and one effort that offering permits. Do not invent an id.
+1. **Consult `model-picker` before every hire.** Send it the draft brief and the role (`coder`, `reviewer`, `checks`, `auditor`) through `just upagent-consult`. Use the `offering` and `effort` it returns. It reads `staffing-guide.yaml`; you do not pick a seat yourself, and you do not raise its effort.
+   - `requires_approval: true` → ask the human through the HIL before hiring that seat, quoting the picker's reason and its cheaper alternative. Hire the alternative if the human says no or does not answer.
+   - `fit: split-first` → re-brief as the slices it proposes, each hired on its own seat. Hiring the whole brief anyway needs one line in the brief saying why.
+   - If you hire above the recommended seat, write the reason in the brief. The picker's JSON is recorded with the hire.
+   - The picker is unreachable → run `just upagent lists --type offerings --json` and take the kind's seat straight from `staffing-guide.yaml`. Do not invent an id.
 2. Pick one existing persona from the repository/home agent definitions. Fail loud if it does not exist. Typical: a domain agent for implementation, `reviewer` or `adversarial-evaluator` for independent review. Do not create a persona.
 3. `--offering` on `/plan-implementer` is this controller's model, not the worker's. Choose worker offerings independently.
 

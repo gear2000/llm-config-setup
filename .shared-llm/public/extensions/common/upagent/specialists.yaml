@@ -116,3 +116,9 @@ specialists:
     offering: claude-sonnet-5
     effort: medium
     agent: docs-writer
+  - name: model-picker
+    location: .claude/agents/model-picker.md
+    description: "Which offering and effort a piece of work should get, per staffing-guide.yaml; also whether the brief fits that seat."
+    offering: pi-gpt-5-6-luna
+    effort: low
+    agent: model-picker

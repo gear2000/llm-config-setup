@@ -1,0 +1,8 @@
+type: agent
+name: model-picker
+model: sonnet
+color: cyan
+description: .shared-llm/public/layers/agents/common/model-picker.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/model-picker.md
+output: .claude/agents/model-picker.md

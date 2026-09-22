@@ -133,6 +133,6 @@ After every finish recipe return, read `"$RUN_ROOT"/control/implementer-finish.j
 ## Hard rules
 
 1. Herdr-only: require `HERDR_ENV=1`. This pane is human-started, never `just run-start`.
-2. Relay only. The plan-implementer hires UpAgent workers and owns the plan.
+2. Relay only. The plan-implementer hires UpAgent workers and owns the plan. It consults the `model-picker` specialist before each hire (`staffing-guide.yaml` sets the seats). When it asks about a `requires_approval` seat (Astra or Fable at high or above), put that question to the human as-is with the picker's reason and cheaper alternative; relay the answer, do not decide it. If a hire arrives with no picker consult, nudge once: `consult model-picker before hiring`.
 3. Durable files are the source of truth (`implementer-result.json`, the journal). Pane text is display-only.
 4. Do not convert for Herdr, write `route.yaml`, or start `/tui-control`.

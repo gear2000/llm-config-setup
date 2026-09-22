@@ -1,0 +1,90 @@
+# staffing-guide.yaml — which offering and effort a kind of work should get.
+#
+# Read by the `model-picker` specialist (and by any HIL / plan-implementer / upagent-run
+# caller that wants to check an answer). Nothing here is enforced by code: the guide is
+# advice that the hiring agent is told to follow. Edit this file to change the advice; no
+# code change is needed.
+#
+# Every `offering` must be an id from offerings.d/standard.yaml. Every kind pins ONE effort:
+# the picker never chooses effort, so it cannot drift to the top of the allowed list.
+schema_version: 1
+
+# One seat per kind. `alternate` is the fallback when the primary seat is unavailable.
+kinds:
+  ci-run:
+    matches: "run a CI job, trigger a pipeline, watch logs, report pass/fail from output"
+    offering: pi-gpt-5-6-luna
+    effort: max
+    alternate: {offering: claude-sonnet-5, effort: medium}
+  user-story:
+    matches: "run or verify a user story, acceptance check, QA pass, regression run"
+    offering: claude-sonnet-5
+    effort: medium
+    alternate: {offering: pi-gpt-5-6-luna, effort: max}
+  small-edit:
+    matches: "a bounded edit in one module, a doc change, a config tweak, a rename"
+    offering: claude-opus-5
+    effort: high
+    alternate: {offering: pi-gpt-5-6-luna, effort: max}
+  medium-implementation:
+    matches: "a feature slice touching a few files in one area, with tests"
+    offering: pi-gpt-5-6-sol
+    effort: high
+    alternate: {offering: claude-opus-5, effort: high}
+  hard-implementation:
+    matches: "cross-module change, unclear design, long-horizon reasoning, tricky debugging"
+    offering: pi-gpt-6-astra
+    effort: medium
+    alternate: {offering: claude-fable-5-1, effort: medium}
+  review:
+    matches: "independent read-only review of a candidate; never the coder's own model"
+    offering: pi-gpt-5-6-sol
+    effort: high
+    alternate: {offering: claude-opus-5, effort: high}
+  adversarial:
+    matches: "adversarial evaluation, finalize audit, hunting for what the coder missed"
+    offering: claude-fable-5-1
+    effort: low
+    alternate: {offering: pi-gpt-6-astra, effort: medium}
+
+# Seats the hiring agent must ask the human about before using. Not enforced: if the
+# agent hires anyway the work still runs, it just costs more. Ask, record the answer.
+requires_approval:
+  - {offering: pi-gpt-6-astra, effort: high}
+  - {offering: pi-gpt-6-astra, effort: xhigh}
+  - {offering: pi-gpt-6-astra, effort: max}
+  - {offering: codex-gpt-6-astra, effort: high}
+  - {offering: codex-gpt-6-astra, effort: xhigh}
+  - {offering: codex-gpt-6-astra, effort: max}
+  - {offering: claude-fable-5-1, effort: high}
+  - {offering: claude-fable-5-1, effort: xhigh}
+  - {offering: claude-fable-5-1, effort: max}
+
+# Never a default. Only on an explicit human request.
+demoted:
+  - pi-gpt-5-6-terra
+
+# Offerings out of quota or credit. The picker skips them until the date passes and uses
+# the kind's alternate. Remove an entry when the window resets.
+unavailable_until:
+  cursor-grok-4-6: 2026-09-24
+  claude-sonnet-5: 2026-09-24
+  claude-sonnet-4-6: 2026-09-24
+
+# Which seats the reserved frontier models are for. Outside these kinds the picker names a
+# cheaper seat and says why.
+reserved:
+  claude-fable-5-1: [hard-implementation, adversarial]
+  pi-gpt-6-astra: [hard-implementation, adversarial]
+  codex-gpt-6-astra: [hard-implementation, adversarial]
+
+# The slicing rule the picker applies when it judges fit. A brief that does not fit the
+# seat gets `fit: split-first` and a suggested split; the HIL decides.
+fit:
+  one_goal: "one sentence, one outcome"
+  one_area: "one module or package; a cross-module change is hard-implementation"
+  done_when: "completion conditions a command can check"
+  why: |
+    Sonnet, Opus and Luna write good code but lose the long horizon: given a wide brief they
+    try to do too much and invent structure. Keep the picture small and these seats produce
+    clean work. Reserve Fable and Astra for the slices that truly need the horizon.

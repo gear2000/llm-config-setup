@@ -6,6 +6,8 @@ The kit already ships **generic** specialists (`clickhouse`, `kafka`, `backend`,
 
 Run kit commands from the kit checkout. Write dest files only after the user accepts the specialist list.
 
+One kit specialist is not domain-shaped: `model-picker`. Every hiring agent (plan-implementer, `/upagent-run`, the pattern converters) consults it before a hire, and it answers from `.shared-llm/public/extensions/common/upagent/staffing-guide.yaml`: which offering and effort a kind of work gets, which seats need a human yes first (`requires_approval`), which are out of quota (`unavailable_until`), and whether the brief is small enough for the seat. Nothing enforces it; edit the guide to change the advice.
+
 ---
 
 ## When to use
