@@ -56,7 +56,7 @@ def _prompt(tmp_path: Path, text: str = "Do the bounded task.\n") -> Path:
 def _worker_argv(tmp_path: Path, **overrides: str) -> list[str]:
     values = {
         "request_id": REQUEST_ID,
-        "offering": "pi-gpt-5-6-sol",
+        "offering": "pi-gpt-6-sol",
         "effort": "high",
         "agent": "backend",
         "prompt_file": str(_prompt(tmp_path)),
@@ -176,6 +176,100 @@ def _finish_registered_request(
     )
     assert receipt is not None
     return store, registered, ledger, token, control_token
+
+
+def test_resident_specialist_routes_without_job_and_replays_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "test-pane")
+    monkeypatch.setattr(public_api.residents, "preflight", lambda *_args: None)
+    monkeypatch.setattr(
+        public_api.residents, "enabled", lambda name, cwd: name == "backend"
+    )
+    turns = []
+
+    def answer(consult, cockpit):
+        turns.append(consult)
+        return {
+            "consult_id": consult["consult_id"],
+            "answer": "Verified source.",
+            "citations": ["source.py:1"],
+        }
+
+    monkeypatch.setattr(public_api.residents, "consult", answer)
+    monkeypatch.setattr(
+        recruiter,
+        "cmd_request_strict",
+        lambda *_args: pytest.fail("resident created Recruiter job"),
+    )
+    args = _args(
+        [
+            "request",
+            "--type",
+            "specialist",
+            "--specialist",
+            "backend",
+            "--request-id",
+            REQUEST_ID,
+            "--cwd",
+            str(tmp_path),
+            "--prompt-file",
+            str(_prompt(tmp_path)),
+            "--json",
+        ]
+    )
+    assert public_api.execute(args, tmp_path) == 0
+    monkeypatch.setattr(
+        public_api, "_cockpit_pane", lambda: pytest.fail("replay resolved cockpit")
+    )
+    assert public_api.execute(args, tmp_path) == 0
+    assert len(turns) == 1
+    registered = public_api.PublicRequestStore().load(REQUEST_ID)
+    status = public_api._public_status(public_api.PublicRequestStore(), registered)
+    assert status["resident"] is True and status["state"]["state"] == "finished"
+    assert all(a["present"] for a in status["artifacts"])
+    assert public_api.execute(_args(["await", "--request", REQUEST_ID]), tmp_path) == 0
+    assert public_api.execute(_args(["get", "--request", REQUEST_ID]), tmp_path) == 0
+    assert "requester_control_token" not in status["state"]
+    with pytest.raises(public_api.PublicError, match="not supported for resident"):
+        public_api.execute(_args(["cleanup", "--request", REQUEST_ID]), tmp_path)
+
+
+def test_resident_preflight_blocks_worker_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "test-pane")
+
+    def failed_refresh(*_args):
+        raise public_api.residents.SpecialistError("replacement not ready")
+
+    monkeypatch.setattr(public_api.residents, "preflight", failed_refresh)
+    monkeypatch.setattr(
+        recruiter,
+        "cmd_request_strict",
+        lambda *_args: pytest.fail("launched before ready"),
+    )
+    with pytest.raises(public_api.residents.SpecialistError, match="not ready"):
+        public_api.execute(_args(_worker_argv(tmp_path)), tmp_path)
+    assert not public_api.PublicRequestStore().path(REQUEST_ID).exists()
+
+
+def test_resident_preflight_precedes_worker_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(public_api, "_cockpit_pane", lambda: "test-pane")
+    events = []
+    monkeypatch.setattr(
+        public_api.residents, "preflight", lambda *_args: events.append("ready")
+    )
+    monkeypatch.setattr(
+        recruiter, "cmd_request_strict", lambda *_args: events.append("worker") or 0
+    )
+    assert public_api.execute(_args(_worker_argv(tmp_path)), tmp_path) == 0
+    assert events == ["ready", "worker"]
 
 
 def test_public_help_describes_manager_degradation_and_cursor_map() -> None:
@@ -323,7 +417,7 @@ def test_sentinel_must_be_boolean_and_respects_file_flag_exclusivity(
             {
                 "schema_version": 1,
                 "type": "worker",
-                "offering": "pi-gpt-5-6-sol",
+                "offering": "pi-gpt-6-sol",
                 "effort": "high",
                 "agent": "backend",
                 "prompt_file": str(_prompt(tmp_path)),
@@ -608,7 +702,7 @@ def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:
                 "schema_version": 1,
                 "request_id": REQUEST_ID,
                 "type": "worker",
-                "offering": "pi-gpt-5-6-sol",
+                "offering": "pi-gpt-6-sol",
                 "effort": "high",
                 "agent": "backend",
                 "prompt_file": str(prompt),
@@ -664,7 +758,7 @@ def test_invalid_file_requests_fail_before_store_or_launch(
         "schema_version": 1,
         "request_id": REQUEST_ID,
         "type": "worker",
-        "offering": "pi-gpt-5-6-sol",
+        "offering": "pi-gpt-6-sol",
         "effort": "high",
         "agent": "backend",
         "prompt_file": str(prompt),
@@ -819,7 +913,7 @@ def test_specialist_resolves_pinned_offering_and_rejects_public_override(
                 "--specialist",
                 "backend",
                 "--offering",
-                "pi-gpt-5-6-sol",
+                "pi-gpt-6-sol",
                 "--prompt-file",
                 str(prompt),
             ]
@@ -1895,7 +1989,7 @@ def test_plan_implementer_listing_keeps_only_controller_harnesses(
             return [
                 {"id": "claude-sonnet-5", "harness": "claude", "efforts": ["medium"]},
                 {
-                    "id": "claudex-gpt-5-6-sol",
+                    "id": "claudex-gpt-6-sol",
                     "harness": "claudex",
                     "efforts": ["high"],
                 },
@@ -1919,7 +2013,7 @@ def test_cursor_rejects_every_global_effort(tmp_path: Path) -> None:
 def test_effortful_offering_rejects_omitted_effort(tmp_path: Path) -> None:
     _persona(tmp_path)
     argv = _cursor_argv(tmp_path)
-    argv[argv.index("cursor-composer-2-5")] = "pi-gpt-5-6-sol"
+    argv[argv.index("cursor-composer-2-5")] = "pi-gpt-6-sol"
 
     with pytest.raises(public_api.PublicError, match="requires an explicit effort"):
         public_api.validate_request(_args(argv), tmp_path)
