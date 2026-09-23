@@ -125,3 +125,106 @@ just upagent-specialists
 Done when the new name is listed, `.claude/agents/<name>.md` exists as composed output, and the second `just update` is a no-op.
 
 Future agents consult it with `just upagent-consult` (see the UpAgent README). A worker that must ask this specialist before changing that area lists it under `artifact_publication.mandatory_consults`.
+
+## Optional resident specialists
+
+Residents keep one interactive specialist session available for repeated questions.
+They are off by default. No daemon, cron entry, or Herdr upgrade is installed.
+
+From the destination working directory, using the kit's justfile:
+
+```bash
+just --justfile /path/to/kit/justfile upagent-specialist-up "backend,kafka"
+just --justfile /path/to/kit/justfile upagent-specialist-status
+just --justfile /path/to/kit/justfile upagent-specialist-restart "backend"
+just --justfile /path/to/kit/justfile upagent-specialist-down "backend,kafka"
+```
+
+Use names from `upagent-specialists`. Startup needs a running Herdr session and a
+live `HERDR_PANE_ID`, or the existing UpAgent services pane. The selected offering
+must use interactive Pi, Claude, ClaudeX, or Cursor. Codex exec is not resident-capable.
+
+- The lifetime is fixed at **two hours**. There is no time flag.
+- `up` is idempotent and does not reset a healthy instance's clock.
+- `down` disables the specialist before cleanup. Later requests cannot revive it.
+- `restart` verifies cleanup before creating a replacement.
+- Status reports the registry plus live identity checks, including expired,
+  missing, and uncertain instances. It does not rotate anything.
+
+Public agent requests and legacy client request/dispatch commands refresh enabled
+specialists before launching their worker. Phase, implementer, and pipeline launch
+commands also check the invocation context. Failed refresh blocks the launch.
+Direct Python calls that bypass the client are not covered. With no requests,
+expired specialists stay running until the next check or an explicit lifecycle
+command. There are no idle model calls.
+
+Residents are scoped to the **same resolved working directory**, not merely the
+same specialist name. A different worktree or `--cwd` does not borrow the session.
+Use the same directory for `up` and consultations. Definition, offering, and
+root `AGENTS.md`/`CLAUDE.md` changes trigger replacement. Other repository files
+can change within two hours; specialists are instructed to check current sources
+before answering. This is not a source cache, a sandbox, or a token-savings guarantee.
+
+A replacement must acknowledge its generation after reading its context, and the
+command must verify the named Herdr agent, pane, process birth, working directory,
+and idle state. Readiness has a three-minute bound. Each resident answers one
+question at a time under a cross-process lock; a background refresh (before a
+worker launch or another request) skips a resident whose lock is currently held
+instead of waiting for it, so one busy resident never stalls unrelated work — the
+answering path still re-verifies identity and freshness itself, so a skipped
+rotation never authorizes a stale answer. Waiting for a busy resident and
+answering a question each have a ten-minute bound. Missing or uncertain delivery
+is reported rather than retried blindly, and delivery that is known to have never
+reached the resident restores it to ready without waiting for the full bound.
+A turn that fails validation, or whose deadline passes while the pane is
+verifiably idle, is recorded as a failed or abandoned turn and the resident
+becomes reusable on the very next call — no operator `restart` is required.
+Cleanup never interrupts an unresolved answer, and never closes or replaces a
+pane whose ownership cannot be verified; a pane confirmed gone is recycled
+safely, and a merely uncertain or still-working one stays blocked.
+
+### Consultation behavior
+
+`upagent-consult` and public `upagent request --type specialist` reuse enabled
+residents. Disabled specialists retain the existing fresh-worker path.
+**Resident public requests block until their answer is collected**, including
+when `--wait` is omitted. They publish private answer/result/receipt artifacts;
+`get`, `status`, and `await` can read the durable result. Repeating a request ID
+reattaches instead of sending the question again. If the process that submitted
+the question is confirmed gone and delivery is unresolved, repeating the request
+ID reports blocked rather than either replaying the question or hanging forever.
+Resident questions do not issue Recruiter control tokens and do not support
+`cancel`, `respond`, `verify`, `await-any`, retained-worker review, or public
+request cleanup.
+
+Resident receipts describe a completed question, not a finished Recruiter job:
+they never carry `order_receipt_state`, because no Recruiter order or worker ever
+runs for a resident turn. **`upagent-consult`'s resident path does satisfy
+`mandatory_consults`/`consults_verified`** — a successfully executed turn is
+indexed under its requester with `resident_turn_state: finished` plus the exact
+resident `generation`/`turn` that produced the validated answer, and the same
+`resolve_consult_claims` reader that checks a finished Recruiter job accepts
+that signal too. A pre-run rejection, an uncompleted turn, or a stale/mismatched
+answer is never indexed, exactly like a cold consult rejected before any
+specialist ran. `upagent-consult`'s resident path only refreshes the TARGET
+specialist before answering; it never refreshes every other enabled resident in
+the working directory first, so one unrelated wedged or slow-to-verify resident
+cannot cost an otherwise-unrelated question its answer. The public `upagent
+request --type specialist` path is unrelated to this: it never calls the consult
+door, so it is never indexed and never satisfies `mandatory_consults` — keep
+that distinction when inspecting a worker's consultation evidence. The
+Recruiter supervisor and job lifecycle remain unchanged.
+
+The registry and generation-specific turn files live beside the machine-local
+UpAgent ledger under `specialists/`. Resident directories use mode 0700 and
+controller-written JSON uses 0600; each delivered question is also written to
+its own private 0600 file, and the resident is pointed at that file rather than
+being sent the question text inline. Old generation evidence is retained. A
+lost `agent start` reply is recovered automatically once the named agent can be
+positively re-verified (same generation name, harness, working directory, and a
+live process); only a genuine identity mismatch — wrong working directory,
+wrong process, or a pane that is still active — fails closed. Do not delete the
+registry to bypass a fail-closed block, since that can lose ownership of a
+still-running pane. Use status to identify the recorded session and pane before
+manual investigation. No live-provider residency or two-hour soak test is
+implied by the unit suite.

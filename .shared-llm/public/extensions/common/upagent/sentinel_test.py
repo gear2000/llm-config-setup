@@ -2992,7 +2992,7 @@ def test_both_nudge_triggers_exclude_exec_retained_and_watchdog_workers(
         order["harness"] = "codex"
         order["offering_snapshot"] = (
             recruiter.offering_catalog.load_selected_roster().resolve(
-                "codex-gpt-5-6-sol", "low"
+                "codex-gpt-6-sol", "low"
             )
         )
     elif excluded == "retained":

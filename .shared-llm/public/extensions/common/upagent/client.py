@@ -142,6 +142,7 @@ command_runtime = _load("upagent_command_runtime", HERE / "command_runtime.py")
 
 TARGETS = {
     "public": "public_api.py",
+    "specialists": "specialist_lifecycle.py",
     "recruiter": "recruiter.py",
     "phase-controller": "phase_controller.py",
     "phase-await": "phase_await.py",
@@ -156,8 +157,15 @@ RUNNER_TARGETS = {
     "run-lifecycle": "run_lifecycle.py",
 }
 RECRUITER_TARGETS = frozenset(
-    ("public", "recruiter", "phase-controller", "implementer-controller",
-     "direct-controller", "run-watch")
+    (
+        "public",
+        "specialists",
+        "recruiter",
+        "phase-controller",
+        "implementer-controller",
+        "direct-controller",
+        "run-watch",
+    )
 )
 READ_ONLY_PUBLIC = frozenset(("help", "status", "get", "lists"))
 READ_ONLY_RECRUITER = frozenset(("status", "specialists"))
@@ -187,6 +195,8 @@ def _recruiter_command(argv: list[str]) -> str | None:
 def _is_mutating(target: str, argv: list[str]) -> bool:
     """Classify command entry points; unknown commands fail closed as mutations."""
     command = argv[0] if argv else None
+    if target == "specialists":
+        return command != "status"
     if target == "run-watch":
         return False
     if target == "public":
@@ -262,6 +272,42 @@ def _invoke_module(module: Any, argv: list[str], cwd: Path) -> int:
     environment["UPAGENT_HUB_DIR"] = str(transport.ledger_path(HERE))
     environment["UPAGENT_STATE"] = str(transport.state_path(HERE))
     with command_runtime.activate(cwd, environment):
+        # Legacy callers still enter through this client. Keep resident routing out of
+        # the Recruiter's per-job supervisor and its cleanup authority.
+        recruiter = sys.modules["upagent_recruiter_command"]
+        if module is recruiter:
+            command = _recruiter_command(argv)
+            if command in ("request", "dispatch", "consult", "verify"):
+                residents = _load(
+                    "upagent_specialist_lifecycle_client",
+                    HERE / "specialist_lifecycle.py",
+                )
+                residents._bind_recruiter_runtime(recruiter)
+                index = argv.index(command)
+                if index + 1 < len(argv):
+                    path = argv[index + 1]
+                    if command == "consult":
+                        result = residents.legacy_consult(path)
+                        if result is not None:
+                            return result
+                    else:
+                        order = recruiter.load_order(path)
+                        residents.preflight(order["cwd"], order["cockpit_pane"])
+        filename = Path(module.__file__).name
+        if (
+            filename == "phase_controller.py"
+            or (
+                filename == "implementer_controller.py"
+                and argv
+                and argv[0] not in ("finish", "inject")
+            )
+            or (filename == "pipelines.py" and argv[:1] == ["launch"])
+        ):
+            residents = _load(
+                "upagent_specialist_lifecycle_client", HERE / "specialist_lifecycle.py"
+            )
+            residents._bind_recruiter_runtime(recruiter)
+            residents.preflight(cwd, os.environ.get("HERDR_PANE_ID"))
         try:
             returned = module.main(argv)
         except SystemExit as error:
@@ -304,9 +350,10 @@ def main(argv: list[str] | None = None) -> int:
     # liveness fence would silently fail open (cancels stop waiting for live
     # owners; reconcilers can kill running requests).
     # UPAGENT_ALLOW_UNSUPPORTED_PLATFORM=1 is a test-suite-only override.
-    if sys.platform not in ("linux", "darwin") and os.environ.get(
-        "UPAGENT_ALLOW_UNSUPPORTED_PLATFORM"
-    ) != "1":
+    if (
+        sys.platform not in ("linux", "darwin")
+        and os.environ.get("UPAGENT_ALLOW_UNSUPPORTED_PLATFORM") != "1"
+    ):
         raise ClientError(
             f"unsupported platform {sys.platform!r}: the UpAgent runtime "
             "requires exact process identity (supported: Linux, macOS)"

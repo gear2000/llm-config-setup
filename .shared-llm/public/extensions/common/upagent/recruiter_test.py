@@ -1113,6 +1113,23 @@ def test_herdr_json_converts_timeout_to_recruiter_error(monkeypatch) -> None:
         )
 
 
+def test_silent_herdr_delivery_honors_bounded_timeout(monkeypatch) -> None:
+    def timeout(*_args, **kwargs):
+        assert kwargs["timeout"] == 0.1
+        raise recruiter.subprocess.TimeoutExpired("herdr", 0.1)
+
+    monkeypatch.setattr(recruiter.subprocess, "run", timeout)
+    with pytest.raises(RecruiterError, match="timed out after 0.1 seconds"):
+        recruiter._herdr(
+            "pane",
+            "run",
+            "pane-test",
+            "question",
+            timeout_seconds=0.1,
+            herdr_session="llm-lab-test",
+        )
+
+
 def test_explicit_session_command_still_checks_herdr_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1688,10 +1705,10 @@ def test_resolve_rejects_snapshot_not_enabled_by_runtime_roster(
     roster = recruiter.load_roster(roster_path)
     snapshot = recruiter.offering_catalog.load_selected_roster(
         ["standard", "claudex"]
-    ).resolve("claudex-gpt-5-6-sol", "high")
+    ).resolve("claudex-gpt-6-sol", "high")
     order = _order(
         harness="claudex",
-        model="gpt-5.6-sol",
+        model="gpt-6-sol",
         effort="high",
         offering_snapshot=snapshot,
     )
@@ -1893,10 +1910,10 @@ def test_configuration_inspection_blocks_claudex_when_preflight_fails(
     instructions.write_text("Do work.\n")
     snapshot = recruiter.offering_catalog.load_selected_roster(
         ["standard", "claudex"]
-    ).resolve("claudex-gpt-5-6-sol", "high")
+    ).resolve("claudex-gpt-6-sol", "high")
     order = _order(
         harness="claudex",
-        model="gpt-5.6-sol",
+        model="gpt-6-sol",
         effort="high",
         cwd=str(tmp_path),
         instructions_path=str(instructions),
@@ -3310,7 +3327,7 @@ def test_pre_addendum_worker_snapshot_keeps_common_boundary_only(
     tmp_path: Path,
 ) -> None:
     snapshot = recruiter.offering_catalog.load_selected_roster().resolve(
-        "claude-opus-5", "high"
+        "claude-opus-5-5", "high"
     )
     snapshot.pop("prompt_addendum")
     original = tmp_path / "instructions.md"
@@ -8875,7 +8892,7 @@ def test_the_phone_book_caps_the_whole_line_not_just_the_description(
                     {
                         "name": "payments-integration-reviewer",
                         "description": "long ownership sentence " * 40,
-                        "offering": "claude-opus-5",
+                        "offering": "claude-opus-5-5",
                         "effort": "high",
                         "agent": "payments-integration-reviewer",
                     }
@@ -8910,7 +8927,7 @@ def test_a_specialist_with_no_description_falls_back_to_its_persona_frontmatter(
                     {
                         "name": "reviewer",
                         "location": ".claude/agents/reviewer.md",
-                        "offering": "claude-opus-5",
+                        "offering": "claude-opus-5-5",
                         "effort": "high",
                         "agent": "reviewer",
                     }
@@ -8957,7 +8974,7 @@ def _two_reviewers_roster() -> str:
                 {
                     "name": "reviewer",
                     "description": "first",
-                    "offering": "claude-opus-5",
+                    "offering": "claude-opus-5-5",
                     "effort": "high",
                     "agent": "reviewer",
                 },
@@ -9082,7 +9099,7 @@ def _specialist_world(
                     {
                         "name": "reviewer",
                         "description": "Independent read-only review.",
-                        "offering": "claude-opus-5",
+                        "offering": "claude-opus-5-5",
                         "effort": "high",
                         "agent": "reviewer",
                         **entry_over,
@@ -9174,7 +9191,7 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     order = seen[0]
     assert set(order) <= set(recruiter.ORDER_INTAKE_ALIASES) | {"offering_snapshot"}
     assert "consult" not in order
-    assert order["offering_snapshot"]["id"] == "claude-opus-5"
+    assert order["offering_snapshot"]["id"] == "claude-opus-5-5"
     recruiter.contracts.parse_order(
         json.dumps(order)
     )  # must satisfy the ordinary contract
@@ -9872,6 +9889,174 @@ def test_a_planted_index_entry_with_no_finished_order_is_not_verified(
 
     stamp = recruiter.resolve_consult_claims(order, _worker_result([claim], order))
 
+    assert stamp["consults_verified"] == []
+    assert stamp["consults_unverified"] == [
+        {"consult_id": claim["consult_id"], "request_id": claim["request_id"]}
+    ]
+
+
+# --- resident (warm) consult receipts: no Recruiter job, still verifiable -----------------------
+#
+# A resident turn runs inside an already-owned `specialist_lifecycle` instance -- no ordinary
+# UpAgent order and no fresh worker ever exist for it, so `order_receipt_state` never applies.
+# `specialist_lifecycle.legacy_consult` (proven in `specialist_lifecycle_test.py`) instead writes
+# `resident_turn_state == "finished"` plus the exact `generation`/`turn` that produced a validated
+# answer, ONLY once `consult()` returns that answer. These tests exercise the real
+# `_record_consult_in_index` / `_recorded_consult` / `resolve_consult_claims` gates in THIS module
+# against receipts shaped exactly like that writer's output, the same way the cold tests above
+# exercise them against `cmd_consult`'s output.
+
+
+def _resident_receipt(**over: object) -> dict:
+    base = {
+        "consult_id": "phase-2.stage-1.pass-1.consult-1",
+        "request_id": recruiter.consult_request_id("phase-2.stage-1.pass-1.consult-1"),
+        "specialist": "reviewer",
+        "resolved_specialist": "reviewer",
+        "requested_by": "phase-2.stage-1-implementation.pass-1.try-1",
+        "answer_path": "/tmp/answers/c1.answer.json",
+        "cwd": "/tmp/repo",
+        "answer_verdict": "cited",
+        "resident": True,
+        "resident_turn_state": "finished",
+        "generation": "a" * 32,
+        "turn": "b" * 32,
+    }
+    base.update(over)
+    return base
+
+
+def test_a_resident_turn_that_really_happened_is_verified_from_the_hubs_own_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The warm-path control, mirroring the cold one above: a resident turn indexed through the
+    real write gate (`_publish_consult_receipt` -> `_record_consult_in_index`) is verified
+    through the real read gate (`resolve_consult_claims` -> `_recorded_consult`) -- the same
+    guarantee a finished Recruiter job has, on the resident's own truthful completion signal
+    instead of a synthesized `order_receipt_state`."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    receipt = _resident_receipt(requested_by=order["order_id"])
+    receipt_path = tmp_path / "consult.json.receipt.json"
+
+    recruiter._publish_consult_receipt(receipt, receipt_path)
+
+    published = json.loads(receipt_path.read_text())
+    assert "order_receipt_state" not in published  # never synthesized for a resident
+    assert "index_path" in published
+
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
+    assert stamp["consults_unverified"] == []
+    assert stamp["consults_verified"] == [
+        {
+            "answer_verdict": "cited",
+            "consult_id": "phase-2.stage-1.pass-1.consult-1",
+            "request_id": _claim()["request_id"],
+            "specialist": "reviewer",
+        }
+    ]
+
+
+def test_a_resident_turn_missing_generation_or_turn_is_not_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth for the resident read path, mirroring
+    `test_a_planted_index_entry_with_no_finished_order_is_not_verified` above: a record claiming
+    `resident_turn_state == "finished"` without the generation/turn identity that only a real,
+    validated resident answer carries is refused at the write gate (never indexed), and refused
+    again at the read gate if planted directly."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    claim = _claim()
+    incomplete = _resident_receipt(requested_by=order["order_id"])
+    del incomplete["turn"]
+
+    assert recruiter._record_consult_in_index(incomplete) is None
+
+    entry_path = recruiter.consult_index_entry_path(
+        order["order_id"], claim["consult_id"]
+    )
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry_path.write_text(json.dumps(incomplete))
+
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([claim], order))
+    assert stamp["consults_verified"] == []
+    assert stamp["consults_unverified"] == [
+        {"consult_id": claim["consult_id"], "request_id": claim["request_id"]}
+    ]
+
+
+def test_a_resident_turn_another_worker_made_cannot_be_claimed_as_your_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index is keyed by REQUESTER for a resident turn exactly as it is for a cold one: one
+    real warm turn anywhere must not launder another worker's claim to have made it."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    mine = _worker_order(tmp_path)
+    theirs = _order(order_id="phase-2.stage-1-implementation.pass-1.try-2")
+    recruiter._publish_consult_receipt(
+        _resident_receipt(requested_by=theirs["order_id"]), tmp_path / "c.receipt.json"
+    )
+
+    assert (
+        recruiter.resolve_consult_claims(mine, _worker_result([_claim()], mine))[
+            "consults_verified"
+        ]
+        == []
+    )
+    assert recruiter.resolve_consult_claims(theirs, _worker_result([_claim()], theirs))[
+        "consults_verified"
+    ]
+
+
+def test_a_resident_turn_answer_failure_is_verifiable_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The specialist genuinely ran the turn and signaled failure through the answer envelope --
+    a real completed turn, distinct from a pre-run rejection -- and stays verifiable as `failed`,
+    never conflated with a citation-gate `rejected` or a forged claim."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    recruiter._publish_consult_receipt(
+        _resident_receipt(requested_by=order["order_id"], answer_verdict="failed"),
+        tmp_path / "c.receipt.json",
+    )
+
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([_claim()], order))
+    assert stamp["consults_verified"] == [
+        {
+            "answer_verdict": "failed",
+            "consult_id": "phase-2.stage-1.pass-1.consult-1",
+            "request_id": _claim()["request_id"],
+            "specialist": "reviewer",
+        }
+    ]
+
+
+def test_a_resident_turn_that_failed_before_running_is_not_verifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-run rejection -- the resident was never confirmed ready for delivery, so no turn was
+    ever delivered -- carries no `resident_turn_state` at all: `specialist_lifecycle.legacy_consult`
+    sets it only once a genuine answer is validated. The write gate refuses to index it, exactly
+    like a cold consult rejected before any specialist ran."""
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    order = _worker_order(tmp_path)
+    claim = _claim()
+    rejected = {
+        "consult_id": claim["consult_id"],
+        "request_id": claim["request_id"],
+        "specialist": "reviewer",
+        "resolved_specialist": "reviewer",
+        "requested_by": order["order_id"],
+        "answer_path": "/tmp/answers/c1.answer.json",
+        "answer_verdict": "failed",
+        "reason": "resident is not ready for delivery",
+        "resident": True,
+    }
+
+    assert recruiter._record_consult_in_index(rejected) is None
+    stamp = recruiter.resolve_consult_claims(order, _worker_result([claim], order))
     assert stamp["consults_verified"] == []
     assert stamp["consults_unverified"] == [
         {"consult_id": claim["consult_id"], "request_id": claim["request_id"]}
