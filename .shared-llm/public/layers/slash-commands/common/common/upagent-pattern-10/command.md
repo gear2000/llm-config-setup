@@ -31,9 +31,9 @@ retries: 5               # coder -> reviewers -> checks loops, then stop and ask
 stages:
   - role: coder          # coder | reviewer | auditor | checks
     offering: pi-gpt-5-6-luna
-    effort: max
+    effort: high
   - role: reviewer
-    offering: pi-gpt-5-6-sol
+    offering: pi-gpt-6-sol
     effort: high
     adversarial: true
   - role: checks

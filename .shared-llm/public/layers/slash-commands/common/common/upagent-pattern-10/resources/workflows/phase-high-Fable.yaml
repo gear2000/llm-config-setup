@@ -9,7 +9,7 @@ stages:
     effort: low
 
   - role: reviewer                          # fresh Pi worker, never the coder
-    offering: pi-gpt-5-6-sol
+    offering: pi-gpt-6-sol
     effort: high
     adversarial: true
 

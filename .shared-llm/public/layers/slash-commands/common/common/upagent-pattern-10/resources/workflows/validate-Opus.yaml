@@ -3,7 +3,7 @@ kind: validation
 
 stages:
   - role: checks
-    offering: claude-opus-5
+    offering: claude-opus-5-5
     effort: xhigh
     runs: "the plan's required commands; reports exit codes and logs"
 

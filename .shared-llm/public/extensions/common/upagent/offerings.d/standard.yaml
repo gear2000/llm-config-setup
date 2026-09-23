@@ -34,9 +34,9 @@ offerings:
       - Do not turn a bounded assignment into cleanup, refactoring, redesign, extra features, or extra review rounds.
       - When information is missing, report what you cannot establish. If the task needs wider scope or an unresolved design decision, stop the affected work and ask your requester for that exact decision. Wait for explicit authorization.
       - Simplicity does not waive required tests or checks. Complete those, then stop.
-  claude-opus-5:
+  claude-opus-5-5:
     harness: claude
-    model: claude-opus-5
+    model: claude-opus-5-5
     efforts: [low, medium, high, xhigh, max]
     prompt_addendum: |
       - Treat the brief's exact goal, scope, and completion conditions as a firm boundary.
@@ -46,15 +46,35 @@ offerings:
       - Repository evidence and recorded decisions take priority over your training, preferred architecture, and industry convention.
       - If evidence is missing or the task requires wider scope or an unresolved design decision, stop the affected work. Report the blocker, evidence, and exact decision needed to your requester. Wait for explicit authorization; do not make that decision yourself.
       - Keep all required tests and checks. Stop when the assigned work and those checks are complete.
-  codex-gpt-5-6-sol:
+  codex-gpt-6-sol:
     harness: codex
-    model: gpt-5.6-sol
+    model: gpt-6-sol
     efforts: [low, medium, high, xhigh, max]
     # codex exec exits when done; no live repair prompt is possible.
     completion_style: exec
     prompt_addendum: |
       - Follow the brief and repository decisions. Use the smallest sufficient change and complete every required check.
       - Stop at the completion conditions. If evidence is missing or wider scope or a design decision is needed, report the exact blocker to your requester and await explicit authorization.
+  codex-gpt-5-6-terra:
+    harness: codex
+    model: gpt-5.6-terra
+    efforts: [low, medium, high, xhigh, max]
+    completion_style: exec
+    prompt_addendum: |
+      - Complete the brief using established repository mechanisms and recorded decisions.
+      - Keep investigation and changes proportional to the assigned task. Extra cleanup, abstractions, and features need explicit authorization.
+      - If evidence is missing or completion needs wider scope or a design decision, stop the affected work and report the exact blocker to your requester. Await explicit authorization.
+      - Preserve required checks and stop at the completion conditions.
+  codex-gpt-5-6-luna:
+    harness: codex
+    model: gpt-5.6-luna
+    efforts: [low, medium, high, xhigh, max]
+    completion_style: exec
+    prompt_addendum: |
+      - Follow the brief's goal, scope, and completion conditions using the repository's existing approach.
+      - Prefer a bounded change over extra features, abstractions, cleanup, or redesign.
+      - If evidence is missing or the task needs wider scope or an unresolved design decision, stop the affected work and report the exact blocker to your requester. Await explicit authorization rather than guessing.
+      - Complete every required check and stop when the assignment is complete.
   codex-gpt-6-astra:
     harness: codex
     model: gpt-6-astra
@@ -79,9 +99,9 @@ offerings:
       - Do not bundle unrelated cleanup or features into the task.
       - If evidence is missing or wider scope or a design decision is needed, stop the affected work and report the exact blocker to your requester. Await explicit authorization.
       - Run the required checks and stop at the completion conditions.
-  cursor-grok-4-6:
+  cursor-grok-4-7:
     harness: cursor
-    model: cursor-grok-4.6-high
+    model: grok-4.7-high
     efforts: [default]
     completion_style: interactive
     prompt_addendum: |
@@ -89,9 +109,9 @@ offerings:
       - Do not add work based only on general practice or a preferred design.
       - If evidence is missing or wider scope or a design decision is needed, stop the affected work and report the exact blocker to your requester. Await explicit authorization.
       - Finish every required check and stop when the assignment is complete.
-  pi-gpt-5-6-sol:
+  pi-gpt-6-sol:
     harness: pi
-    model: openai-codex/gpt-5.6-sol
+    model: openai-codex/gpt-6-sol
     efforts: [low, medium, high, xhigh, max]
     prompt_addendum: |
       - Follow the brief and repository decisions. Use the smallest sufficient change and complete every required check.

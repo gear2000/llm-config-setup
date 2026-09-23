@@ -10,13 +10,13 @@ stages:
 
   - role: reviewer
     offering: pi-gpt-5-6-luna
-    effort: max
+    effort: high
 
   - role: checks                            # the assignment's validation workflow
     workflow: validation
 
   - role: auditor                           # own counter: audit findings allow 2 repair loops, each re-audited
-    offering: pi-gpt-5-6-sol
+    offering: pi-gpt-6-sol
     effort: high
     retries: 2
 

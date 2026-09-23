@@ -45,7 +45,7 @@ Return exactly one JSON object through the delivery channel your brief names, th
 ```json
 {
   "kind": "medium-implementation",
-  "offering": "pi-gpt-5-6-sol",
+  "offering": "pi-gpt-6-sol",
   "effort": "high",
   "requires_approval": false,
   "fit": "fits",

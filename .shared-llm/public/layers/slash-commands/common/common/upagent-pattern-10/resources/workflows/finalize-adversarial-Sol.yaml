@@ -3,7 +3,7 @@ kind: finalize
 
 stages:
   - role: reviewer
-    offering: pi-gpt-5-6-sol
+    offering: pi-gpt-6-sol
     effort: high
     adversarial: true
     scope: "the combined candidate: all phases plus checks"

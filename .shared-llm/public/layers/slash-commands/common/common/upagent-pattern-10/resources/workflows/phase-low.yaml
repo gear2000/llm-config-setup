@@ -9,7 +9,7 @@ stages:
     effort: xhigh
 
   - role: reviewer
-    offering: claude-opus-5
+    offering: claude-opus-5-5
     effort: xhigh
 
   - role: checks                            # the assignment's validation workflow
@@ -17,7 +17,7 @@ stages:
 
   - role: auditor                           # own counter: audit findings allow 2 repair loops, each re-audited, then ask
     offering: pi-gpt-5-6-luna
-    effort: max
+    effort: high
     retries: 2
 
 pass: every reviewer, checks and auditor stage passes on the same candidate

@@ -38,12 +38,18 @@ def test_every_offering_has_its_own_listed_and_snapshotted_addendum() -> None:
 
     # Same model, different harness: the shipped reminders remain consistent.
     assert (
-        roster.offerings["pi-gpt-5-6-sol"].prompt_addendum
-        == (roster.offerings["codex-gpt-5-6-sol"].prompt_addendum)
-        == roster.offerings["claudex-gpt-5-6-sol"].prompt_addendum
+        roster.offerings["pi-gpt-6-sol"].prompt_addendum
+        == (roster.offerings["codex-gpt-6-sol"].prompt_addendum)
+        == roster.offerings["claudex-gpt-6-sol"].prompt_addendum
     )
     assert roster.offerings["pi-gpt-6-astra"].prompt_addendum == (
         roster.offerings["codex-gpt-6-astra"].prompt_addendum
+    )
+    assert roster.offerings["pi-gpt-5-6-terra"].prompt_addendum == (
+        roster.offerings["codex-gpt-5-6-terra"].prompt_addendum
+    )
+    assert roster.offerings["pi-gpt-5-6-luna"].prompt_addendum == (
+        roster.offerings["codex-gpt-5-6-luna"].prompt_addendum
     )
 
 
@@ -52,13 +58,13 @@ def test_invalid_addenda_fail_in_rosters_and_snapshots(
     tmp_path: Path, invalid: object
 ) -> None:
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["offerings"]["claude-opus-5"]["prompt_addendum"] = invalid
+    source["offerings"]["claude-opus-5-5"]["prompt_addendum"] = invalid
     path = tmp_path / "offerings.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
     with pytest.raises(offerings.OfferingError, match="prompt_addendum"):
         offerings.load_roster(path)
 
-    snapshot = offerings.load_selected_roster().resolve("claude-opus-5", "high")
+    snapshot = offerings.load_selected_roster().resolve("claude-opus-5-5", "high")
     snapshot["prompt_addendum"] = invalid
     with pytest.raises(offerings.OfferingError, match="prompt_addendum"):
         offerings.validate_snapshot(snapshot)
@@ -68,14 +74,14 @@ def test_addendum_is_frozen_without_changing_launch_tokens(tmp_path: Path) -> No
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
     path = tmp_path / "offerings.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
-    frozen = offerings.load_roster(path).resolve("claude-opus-5", "high")
+    frozen = offerings.load_roster(path).resolve("claude-opus-5-5", "high")
     original = frozen["prompt_addendum"]
     argv = offerings.render_argv(frozen, "backend", "/lease.md")
-    source["offerings"]["claude-opus-5"]["prompt_addendum"] = (
+    source["offerings"]["claude-opus-5-5"]["prompt_addendum"] = (
         "A revised reminder with literal shell text: $(exit 99) {brief_path}"
     )
     path.write_text(offerings.yaml.safe_dump(source))
-    revised = offerings.load_roster(path).resolve("claude-opus-5", "high")
+    revised = offerings.load_roster(path).resolve("claude-opus-5-5", "high")
     assert revised["prompt_addendum"] != original
     assert offerings.validate_snapshot(frozen)["prompt_addendum"] == original
     assert offerings.render_argv(revised, "backend", "/lease.md") == argv
@@ -102,15 +108,19 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 12
+    assert len(roster.listing()) == 14
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
     assert all("5.4" not in identity for identity in rendered_identities)
-    assert all("5.5" not in identity for identity in rendered_identities)
+    assert all("gpt-5.5" not in identity for identity in rendered_identities)
+    assert "claude:::claude-opus-5-5" in rendered_identities
+    assert "codex:::gpt-5.6-terra" in rendered_identities
+    assert "codex:::gpt-5.6-luna" in rendered_identities
+    assert "codex:::gpt-6-sol" in rendered_identities
     assert "codex:::gpt-6-astra" in rendered_identities
     assert "cursor:::composer-2.5" in rendered_identities
-    assert "cursor:::cursor-grok-4.6-high" in rendered_identities
-    assert "pi:::openai-codex/gpt-5.6-sol" in rendered_identities
+    assert "cursor:::grok-4.7-high" in rendered_identities
+    assert "pi:::openai-codex/gpt-6-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
     expected_candidates = [
         {"offering": "claude-sonnet-5", "effort": "medium"},
@@ -129,7 +139,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     ("offering_id", "effort", "persona", "expected"),
     [
         (
-            "claude-opus-5",
+            "claude-opus-5-5",
             "max",
             "reviewer",
             [
@@ -138,14 +148,14 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "--agent",
                 "reviewer",
                 "--model",
-                "claude-opus-5",
+                "claude-opus-5-5",
                 "--effort",
                 "max",
                 "Read /lease/instructions.md and do exactly that work.",
             ],
         ),
         (
-            "codex-gpt-5-6-sol",
+            "codex-gpt-6-sol",
             "high",
             "backend",
             [
@@ -154,14 +164,14 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
                 "--model",
-                "gpt-5.6-sol",
+                "gpt-6-sol",
                 "-c",
                 "model_reasoning_effort=high",
                 "Read /lease/instructions.md and do exactly that work.",
             ],
         ),
         (
-            "pi-gpt-5-6-sol",
+            "pi-gpt-6-sol",
             "xhigh",
             "backend",
             [
@@ -171,7 +181,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "-e",
                 str(Path.home() / ".pi/agent/extensions/herdr-agent-state.ts"),
                 "--model",
-                "openai-codex/gpt-5.6-sol",
+                "openai-codex/gpt-6-sol",
                 "--thinking",
                 "xhigh",
                 "Read /lease/instructions.md and do exactly that work.",
@@ -227,7 +237,7 @@ def test_cursor_offerings_have_only_default_effort() -> None:
 
     assert {item.offering_id for item in cursor_offerings} == {
         "cursor-composer-2-5",
-        "cursor-grok-4-6",
+        "cursor-grok-4-7",
     }
     for cursor in cursor_offerings:
         assert cursor.efforts == (offerings.DEFAULT_EFFORT,)
@@ -241,7 +251,7 @@ def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
 
     for offering_id in (
         "cursor-composer-2-5",
-        "cursor-grok-4-6",
+        "cursor-grok-4-7",
     ):
         omitted = roster.resolve(offering_id, None)
         explicit = roster.resolve(offering_id, "default")
@@ -255,8 +265,8 @@ def test_effortful_offering_still_requires_effort() -> None:
 
     for offering_id in (
         "claude-sonnet-5",
-        "codex-gpt-5-6-sol",
-        "pi-gpt-5-6-sol",
+        "codex-gpt-6-sol",
+        "pi-gpt-6-sol",
     ):
         with pytest.raises(
             offerings.OfferingError, match="requires an explicit effort"
@@ -268,7 +278,7 @@ def test_effortful_offering_still_requires_effort() -> None:
     ("offering_id", "model"),
     [
         ("cursor-composer-2-5", "composer-2.5"),
-        ("cursor-grok-4-6", "cursor-grok-4.6-high"),
+        ("cursor-grok-4-7", "grok-4.7-high"),
     ],
 )
 def test_cursor_renderer_is_interactive_trusted_and_has_no_effort_flag(
@@ -352,12 +362,14 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "claude-fable-5-1": "anthropic",
         "claude-sonnet-5": "anthropic",
         "claude-sonnet-4-6": "anthropic",
-        "claude-opus-5": "anthropic",
-        "codex-gpt-5-6-sol": "openai",
+        "claude-opus-5-5": "anthropic",
+        "codex-gpt-6-sol": "openai",
+        "codex-gpt-5-6-terra": "openai",
+        "codex-gpt-5-6-luna": "openai",
         "codex-gpt-6-astra": "openai",
         "cursor-composer-2-5": "cursor",
-        "cursor-grok-4-6": "xai",
-        "pi-gpt-5-6-sol": "openai",
+        "cursor-grok-4-7": "xai",
+        "pi-gpt-6-sol": "openai",
         "pi-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-luna": "openai",
         "pi-gpt-6-astra": "openai",
@@ -454,7 +466,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy_and_adde
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "022a6699d45b9f02f481e18cbfb9acc842b3d307d2d8c8f95964118fcd09725c"
+        "529af081304398466f2c8cb3145ff6d8990c9dcf03455054db429d814c62d585"
     )
 
 
@@ -463,7 +475,7 @@ def test_claudex_set_adds_exactly_one_offering_without_changing_management() -> 
     enabled = offerings.load_selected_roster(["standard", "claudex"])
 
     assert enabled.selected_sets == ("standard", "claudex")
-    assert list(enabled.offerings) == [*standard.offerings, "claudex-gpt-5-6-sol"]
+    assert list(enabled.offerings) == [*standard.offerings, "claudex-gpt-6-sol"]
     assert enabled.management == standard.management
 
 
@@ -487,12 +499,12 @@ def test_offering_set_selection_rejects_unknown_duplicates_and_partial_union(
 
 def test_claudex_renderer_is_interactive_and_keeps_claude_health_identity() -> None:
     snapshot = offerings.load_selected_roster(["standard", "claudex"]).resolve(
-        "claudex-gpt-5-6-sol", "xhigh"
+        "claudex-gpt-6-sol", "xhigh"
     )
 
     assert offerings.render_argv(snapshot, "backend", "/lease/instructions.md") == [
         "claudex",
-        "gpt-5.6-sol",
+        "gpt-6-sol",
         "--dangerously-skip-permissions",
         "--agent",
         "backend",
@@ -508,7 +520,7 @@ def test_claudex_preflight_uses_only_code_owned_doctor_and_exact_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = offerings.load_selected_roster(["standard", "claudex"]).resolve(
-        "claudex-gpt-5-6-sol", "high"
+        "claudex-gpt-6-sol", "high"
     )
     calls: list[list[str]] = []
 
@@ -528,8 +540,8 @@ def test_claudex_preflight_uses_only_code_owned_doctor_and_exact_model(
 
     result = offerings.preflight_snapshot(snapshot)
 
-    assert calls == [["/bin/claudex-doctor", "gpt-5.6-sol"]]
-    assert result["model"] == "gpt-5.6-sol"
+    assert calls == [["/bin/claudex-doctor", "gpt-6-sol"]]
+    assert result["model"] == "gpt-6-sol"
 
 
 def test_roster_resolution_prefers_repo_then_linked_main_then_home(
@@ -696,7 +708,7 @@ def test_claudex_preflight_failure_never_substitutes_native_claude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = offerings.load_selected_roster(["standard", "claudex"]).resolve(
-        "claudex-gpt-5-6-sol", "high"
+        "claudex-gpt-6-sol", "high"
     )
     monkeypatch.setattr(
         offerings.shutil,
@@ -712,12 +724,12 @@ def test_claudex_preflight_failure_never_substitutes_native_claude(
             [],
             1,
             stdout="",
-            stderr="proxy unavailable; model gpt-5.6-sol not advertised",
+            stderr="proxy unavailable; model gpt-6-sol not advertised",
         ),
     )
 
     with pytest.raises(
-        offerings.OfferingError, match="required model 'gpt-5.6-sol'.*proxy unavailable"
+        offerings.OfferingError, match="required model 'gpt-6-sol'.*proxy unavailable"
     ):
         offerings.preflight_snapshot(snapshot)
     assert offerings.render_argv(snapshot, "backend", "/lease.md")[0] == "claudex"

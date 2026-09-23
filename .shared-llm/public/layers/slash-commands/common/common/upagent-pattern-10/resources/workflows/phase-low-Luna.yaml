@@ -6,7 +6,7 @@ retries: 5            # repair loops after the initial attempt, then stop and as
 stages:
   - role: coder
     offering: pi-gpt-5-6-luna
-    effort: max
+    effort: high
 
   - role: reviewer                          # always the opposite model family from the coder
     offering: claude-sonnet-5

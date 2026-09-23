@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""examples:
   just upagent lists --type offerings
   just upagent lists --type plan-implementers
-  just upagent request --type worker --offering pi-gpt-5-6-sol --effort high \\
+  just upagent request --type worker --offering pi-gpt-6-sol --effort high \\
     --agent backend --prompt-file /abs/brief.md
   just upagent request --file /abs/request.json --cockpit-pane LIVE_PANE --wait --json
   just upagent get --request 01957f4e-7f7f-7f8b-9c42-6e7f52f9321a --json
