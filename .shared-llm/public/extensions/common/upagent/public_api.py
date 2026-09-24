@@ -40,6 +40,8 @@ command_runtime = sys.modules.get("upagent_command_runtime") or _module(
     "upagent_command_runtime", "command_runtime.py"
 )
 recruiter: Any = None
+residents = _module("upagent_specialist_lifecycle", "specialist_lifecycle.py")
+resident_requests = _module("upagent_specialist_requests", "specialist_requests.py")
 
 
 def _bind_recruiter_runtime(runtime: Any) -> None:
@@ -48,6 +50,7 @@ def _bind_recruiter_runtime(runtime: Any) -> None:
     if recruiter is not None and recruiter is not runtime:
         raise RuntimeError("public API Recruiter runtime is already bound")
     recruiter = runtime
+    residents._bind_recruiter_runtime(runtime)
 
 
 SCHEMA_VERSION = 1
@@ -615,6 +618,8 @@ class PublicRequestStore:
                 )
             if registered.pruned:
                 return False, None
+            if resident_requests.marker(registered).exists():
+                return False, None
             order = recruiter.load_order(registered.order_path)
             submission = self.submission(registered)
             if submission["state"] == "submitted":
@@ -1063,6 +1068,11 @@ def _public_status(
 ) -> dict[str, object]:
     if registered.pruned:
         return _tombstone_status(registered.record)
+    resident_status = resident_requests.status(
+        sys.modules[__name__], residents, registered
+    )
+    if resident_status is not None:
+        return resident_status
     order = recruiter.load_order(registered.order_path)
     ledger = recruiter.JobLedger()
     key = ledger.key_for_order(order)
@@ -1810,6 +1820,11 @@ def _submit_registered(
             result = registered.record.get("result")
             verdict = result.get("verdict") if isinstance(result, dict) else None
             return (0 if verdict == "passed" else 1), False
+        resident_submission = resident_requests.submit(
+            sys.modules[__name__], residents, registered, cockpit_pane
+        )
+        if resident_submission is not None:
+            return resident_submission
         order = recruiter.load_order(registered.order_path)
         ledger = recruiter.JobLedger()
         ledger_tombstone = _read_json_optional(
@@ -1858,6 +1873,8 @@ def _request(args: Any, cwd: Path) -> int:
         if resolve_cockpit
         else accepted_cockpit
     )
+    if resolve_cockpit:
+        residents.preflight(validated.payload["cwd"], cockpit_pane)
     registered = store.register(validated, cockpit_pane)
     code, submitted_now = _submit_registered(
         store, registered, wait=args.wait, cockpit_pane=cockpit_pane
@@ -1889,6 +1906,16 @@ def execute(args: Any, cwd: Path) -> int:
             separate_workspaces=args.separate_workspaces,
         )
     store = PublicRequestStore()
+    requested = getattr(args, "request", None)
+    requested_ids = (
+        requested if isinstance(requested, list) else ([requested] if requested else [])
+    )
+    if args.command not in ("status", "get", "await"):
+        for request_id in requested_ids:
+            if (store.path(request_id) / "resident.json").exists():
+                raise PublicError(
+                    f"{args.command} is not supported for resident questions; use get/status/await"
+                )
     if args.command in ("status", "get"):
         if args.command == "get" or args.request:
             status = _public_status(store, store.load(args.request))
@@ -1934,6 +1961,14 @@ def execute(args: Any, cwd: Path) -> int:
         return _request(args, cwd)
     if args.command == "await":
         registered = store.load(args.request)
+        if resident_requests.marker(registered).exists():
+            code, status = resident_requests.wait(
+                sys.modules[__name__], residents, registered
+            )
+            _emit(
+                status, args.json, f"request {args.request}: {status['state']['state']}"
+            )
+            return code
         if registered.pruned:
             status = _public_status(store, registered)
             _emit(status, args.json, f"request {args.request}: pruned")
@@ -1966,6 +2001,7 @@ def execute(args: Any, cwd: Path) -> int:
         return code
     if args.command == "verify":
         registered = store.load(args.request)
+        residents.preflight(cwd)
         if registered.pruned:
             raise PublicError("cannot verify a pruned terminal request")
         roster = _offering_roster(cwd)
@@ -2044,6 +2080,7 @@ def main(argv: list[str] | None = None) -> int:
         contract.PublicCommandError,
         offerings.OfferingError,
         recruiter.RecruiterError,
+        residents.SpecialistError,
     ) as error:
         raise SystemExit(f"upagent: {error}") from error
 
