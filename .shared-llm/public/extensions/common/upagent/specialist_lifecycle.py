@@ -33,6 +33,17 @@ class SpecialistError(RuntimeError):
     """A resident could not be safely used or changed."""
 
 
+class LaunchUnresolved(SpecialistError):
+    """The journaled launch has no recorded pane and Herdr has no agent under its name.
+
+    Herdr 0.7.1 never cancels a queued `agent start` (a killed or timed-out CLI does not
+    withdraw it), so absence proves nothing about a later launch. The generation's unique
+    `warm-<generation>` name is the only fence: Herdr refuses a second live agent with that
+    name. So this generation is never abandoned: it is resumed under the same name, or
+    probed again by name, never replaced by a new generation.
+    """
+
+
 class SpecialistBusy(SpecialistError):
     """A resident's lock could not be acquired without waiting for someone else.
 
@@ -176,7 +187,7 @@ def _identity(state: dict, *, initial: bool = False) -> dict | None:
         if "agent_not_found" not in str(error):
             raise
         if not state.get("pane"):
-            raise SpecialistError(
+            raise LaunchUnresolved(
                 "launch outcome uncertain; refusing duplicate launch"
             ) from error
         try:
@@ -224,6 +235,11 @@ def _identity(state: dict, *, initial: bool = False) -> dict | None:
         "birth": birth,
         "idle": pane.get("agent_status") in ("idle", "done"),
     }
+
+
+def _launch_unresolved(state: dict) -> bool:
+    """True while no `agent start` reply has recorded a pane for this generation."""
+    return state["state"] == "starting" and not state.get("pane")
 
 
 def _expired(state: dict) -> bool:
@@ -392,6 +408,7 @@ def _start(
     generation = uuid.uuid4().hex
     attempt = _private_dir(directory / generation)
     fingerprint, files = _context(entry, cwd)
+    prompt = attempt / "instructions.md"
     state = {
         "name": name,
         "cwd": str(Path(cwd).resolve()),
@@ -405,9 +422,12 @@ def _start(
         "context": fingerprint,
         "launched_at": time.time(),
         "launched_monotonic": time.monotonic(),
+        # Journaled so a resumed launch replays exactly the same command.
+        "launch": recruiter.offering_catalog.render_shell(
+            snapshot, entry["agent"], str(prompt)
+        ),
     }
     ack = attempt / "ready.json"
-    prompt = attempt / "instructions.md"
     prompt.write_text(
         f"You are the resident {name} specialist. Load your persona {entry['agent']} and read "
         f"these context files that exist: {json.dumps(files)}. Repository: {state['cwd']}. "
@@ -427,8 +447,33 @@ def _start(
         + "\n"
     )
     os.chmod(prompt, 0o600)
-    launch = recruiter.offering_catalog.render_shell(
-        snapshot, entry["agent"], str(prompt)
+    return _launch(directory, state, entry, cockpit)
+
+
+def _launch(
+    directory: Path,
+    state: dict,
+    entry: dict,
+    cockpit: str | None,
+    *,
+    resume: bool = False,
+) -> dict:
+    """Launch the journaled generation, or resume its unresolved launch, then await readiness.
+
+    A resume re-sends `agent start` under the SAME `warm-<generation>` name. Herdr checks name
+    conflicts and names the new terminal inside one app handler, so at most one live agent can
+    hold that name. Either this call wins the name (any earlier queued start then fails with
+    `agent_name_taken`), or the earlier start already holds it and is adopted here.
+    """
+    generation = state["generation"]
+    attempt = directory / generation
+    ack = attempt / "ready.json"
+    # Records journaled before the launch command was recorded render it the same way.
+    state.setdefault(
+        "launch",
+        recruiter.offering_catalog.render_shell(
+            entry["offering_snapshot"], entry["agent"], str(attempt / "instructions.md")
+        ),
     )
     if not cockpit:
         raise SpecialistError("a live caller pane is required to start specialists")
@@ -438,32 +483,63 @@ def _start(
     # Journal BEFORE launching. A lost response must block, never cause an orphan duplicate.
     _save(directory, state)
     # Start the bound before IPC: a hung launch must not bypass readiness.
-    # A timed-out reply leaves the journaled generation in `starting`; later commands
-    # may adopt a positively verified launch, never blindly start a duplicate.
+    # A timed-out reply leaves the journaled generation in `starting` with no pane; later
+    # commands resume it under the same name (see `_ensure`), never under a new generation.
     deadline = time.monotonic() + START_SECONDS
-    result = _herdr(
-        state,
-        "agent",
-        "start",
-        state["agent_name"],
-        "--cwd",
-        state["cwd"],
-        "--tab",
-        tab,
-        "--split",
-        "right",
-        "--no-focus",
-        "--",
-        "bash",
-        "-lc",
-        launch,
-        timeout_seconds=START_SECONDS,
-    )
-    agent = result.get("result", {}).get("agent", {})
-    if agent.get("name") != state["agent_name"] or not agent.get("pane_id"):
-        raise SpecialistError("specialist launch returned no matching agent identity")
-    state["pane"] = agent["pane_id"]
+    adopted = None
+    if resume:
+        # No pane was ever recorded, so no process identity is proven yet either.
+        state.pop("pid", None)
+        state.pop("birth", None)
+        # Probe by name first: an earlier start that did land is adopted, never duplicated.
+        try:
+            adopted = _identity(state, initial=True)
+        except LaunchUnresolved:
+            # No live agent holds the name, so any acknowledgement on disk came from a
+            # process that no longer exists; it must not satisfy this launch's readiness.
+            ack.unlink(missing_ok=True)
+    if adopted is None:
+        try:
+            result = _herdr(
+                state,
+                "agent",
+                "start",
+                state["agent_name"],
+                "--cwd",
+                state["cwd"],
+                "--tab",
+                tab,
+                "--split",
+                "right",
+                "--no-focus",
+                "--",
+                "bash",
+                "-lc",
+                state["launch"],
+                timeout_seconds=START_SECONDS,
+            )
+        except recruiter.RecruiterError as error:
+            if "agent_name_taken" not in str(error):
+                raise
+            # An earlier start of this generation won the name between the probe and this
+            # start. Adopt it only once `_identity` proves its harness, cwd and process.
+            adopted = _identity(state, initial=True)
+        else:
+            agent = result.get("result", {}).get("agent", {})
+            if agent.get("name") != state["agent_name"] or not agent.get("pane_id"):
+                raise SpecialistError(
+                    "specialist launch returned no matching agent identity"
+                )
+            state.update(
+                pane=agent["pane_id"],
+                launched_at=time.time(),
+                launched_monotonic=time.monotonic(),
+            )
+    if adopted is not None:
+        state["pane"] = adopted["pane"]
     _save(directory, state)
+    cwd = state["cwd"]
+    fingerprint = state["context"]
     last_error = "no readiness acknowledgement"
     while time.monotonic() < deadline:
         try:
@@ -510,6 +586,11 @@ def _ensure(
     context, _ = _context(entry, cwd)
     if state:
         _finish_busy(directory, state)
+        if _launch_unresolved(state):
+            # Never mint a new generation over an unresolved launch: resume it by name. The
+            # process this starts (or adopts) is fresh, so it also satisfies `restart`.
+            state["enabled"] = True
+            return _launch(directory, state, entry, cockpit, resume=True)
         if state["state"] == "ready":
             identity = _identity(state)
             if identity and not identity["idle"]:
@@ -525,6 +606,28 @@ def _ensure(
                 return state
         _stop(directory, state)
     return _start(directory, name, cwd, entry, cockpit)
+
+
+def _down(directory: Path, state: dict) -> None:
+    """Disable, then stop what can be proven to exist. Never launches anything.
+
+    An unresolved launch with no agent under its name stays `starting` (disabled) instead of
+    `stopped`: a later `down` probes the same name again and a later `up` resumes it, so a
+    late launch is always found by name rather than orphaned behind a new generation.
+    """
+    state["enabled"] = False
+    _save(directory, state)
+    if _launch_unresolved(state):
+        try:
+            _identity(state, initial=True)
+        except LaunchUnresolved:
+            return
+    _stop(directory, state)
+
+
+def configured() -> bool:
+    """True once any resident has been journaled; otherwise every caller stays cold."""
+    return any((root() / "residents").glob("*/state.json"))
 
 
 def enabled(name: str, cwd: str | Path) -> bool:
@@ -693,7 +796,7 @@ def consult(
 
 def legacy_consult(path: str) -> int | None:
     # No resident configuration means the cold path is completely unchanged.
-    if not any((root() / "residents").glob("*/state.json")):
+    if not configured():
         return None
     # Leave malformed inputs and unknown names to the existing cold error publisher.
     try:
@@ -824,9 +927,7 @@ def main(argv: list[str] | None = None) -> int:
             state = _read(directory / "state.json")
             if args.action == "down":
                 if state:
-                    state["enabled"] = False
-                    _save(directory, state)
-                    _stop(directory, state)
+                    _down(directory, state)
             else:
                 state = _ensure(
                     directory,

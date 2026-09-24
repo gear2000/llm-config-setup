@@ -49,6 +49,15 @@ class FakeRecruiter:
         # B2: delivery starts (the prompt is recorded) but the send itself then fails --
         # UNCERTAIN, not known non-delivery.
         self.fail_send = False
+        # Next `agent start` fails once: "error" is rejected outright (nothing queued);
+        # "lost" loses the reply while Herdr keeps the request queued (never cancelled),
+        # to land later through `deliver_pending_starts`.
+        self.fail_start = None
+        self.pending_starts = []
+        self.start_calls = 0
+        # Lands every queued start just before the next `agent start` is handled: the
+        # original wins the name between the resume's probe and its own start.
+        self.deliver_before_start = False
         self.contracts_consult = load("contracts_consult")
         self.entry = {
             "name": "advisor",
@@ -104,27 +113,56 @@ class FakeRecruiter:
         if not self.available:
             raise BackendError("backend unavailable")
         if args[:2] == ("agent", "start"):
-            name = args[2]
-            self.starts += 1
-            pane = "pane-" + str(self.starts)
-            cwd = args[args.index("--cwd") + 1]
-            self.agents[name] = {
-                "name": name,
-                "pane_id": pane,
-                "cwd": cwd,
-                "pid": 100 + self.starts,
-                "status": "idle",
-            }
-            prompt = Path(args[-1])
-            if self.acknowledge:
-                (prompt.parent / "ready.json").write_text(
-                    json.dumps({"generation": name[5:], "ready": True})
-                )
-            return {"result": {"agent": self.agents[name]}}
+            self.start_calls += 1
+            if self.deliver_before_start:
+                self.deliver_before_start = False
+                self.deliver_pending_starts()
+            if self.fail_start:
+                mode, self.fail_start = self.fail_start, None
+                if mode == "lost":
+                    self.pending_starts.append(args)
+                raise BackendError("agent start timed out after 180 seconds")
+            return self._register(args)
         if args[:2] == ("agent", "get"):
             if args[2] not in self.agents:
                 raise BackendError("agent_not_found")
             return {"result": {"agent": self.agents[args[2]]}}
+        return self._pane_command(args)
+
+    def deliver_pending_starts(self):
+        """Herdr handles a queued start late; its name check refuses a live duplicate."""
+        outcomes = []
+        while self.pending_starts:
+            try:
+                self._register(self.pending_starts.pop(0))
+                outcomes.append("started")
+            except BackendError as error:
+                outcomes.append(str(error))
+        return outcomes
+
+    def _register(self, args):
+        name = args[2]
+        # Herdr 0.7.1 `start_agent`: name conflict check and naming in one handler.
+        if name in self.agents:
+            raise BackendError("agent_name_taken")
+        self.starts += 1
+        pane = "pane-" + str(self.starts)
+        cwd = args[args.index("--cwd") + 1]
+        self.agents[name] = {
+            "name": name,
+            "pane_id": pane,
+            "cwd": cwd,
+            "pid": 100 + self.starts,
+            "status": "idle",
+        }
+        prompt = Path(args[-1])
+        if self.acknowledge:
+            (prompt.parent / "ready.json").write_text(
+                json.dumps({"generation": name[5:], "ready": True})
+            )
+        return {"result": {"agent": self.agents[name]}}
+
+    def _pane_command(self, args):
         if args[:2] == ("pane", "get") and args[2] == "caller":
             return {"result": {"pane": {"tab_id": "tab-test"}}}
         pane_id = args[3] if args[:2] == ("pane", "process-info") else args[2]
@@ -784,9 +822,13 @@ def test_lost_launch_reply_does_not_duplicate(runtime):
     state.update(state="starting", pane=None)
     backend.agents.clear()
     module._save(directory, state)
-    with pytest.raises(module.SpecialistError, match="launch outcome uncertain"):
-        module.preflight(cwd, "caller")
-    assert backend.starts == 1
+    # Resumed under the SAME generation name, never a second generation.
+    module.preflight(cwd, "caller")
+    resumed = module._read(directory / "state.json")
+    assert resumed["generation"] == state["generation"]
+    assert resumed["state"] == "ready"
+    assert list(backend.agents) == [state["agent_name"]]
+    assert backend.starts == 2
 
 
 def test_lost_launch_reply_adopts_live_agent_and_recycles(runtime):
@@ -800,10 +842,13 @@ def test_lost_launch_reply_adopts_live_agent_and_recycles(runtime):
     orphan.pop("birth", None)
     module._save(directory, orphan)
     module.preflight(cwd, "caller")
-    # Adopted the real agent (never rejected it as "replaced"), safely closed it once
-    # verified idle, and launched exactly one fresh replacement -- never a duplicate.
-    assert backend.closes == [state["pane"]]
-    assert backend.starts == 2
+    # Adopted the real agent by its generation name (never rejected it as "replaced") and
+    # kept it: no close and no second launch -- never a duplicate.
+    adopted = module._read(directory / "state.json")
+    assert adopted["state"] == "ready"
+    assert (adopted["pane"], adopted["pid"]) == (state["pane"], state["pid"])
+    assert backend.closes == []
+    assert backend.starts == 1 and backend.start_calls == 1
 
 
 def test_lost_launch_reply_wrong_cwd_is_rejected_not_adopted(runtime, tmp_path):
@@ -820,6 +865,136 @@ def test_lost_launch_reply_wrong_cwd_is_rejected_not_adopted(runtime, tmp_path):
         module.preflight(cwd, "caller")
     assert not backend.closes
     assert backend.starts == 1
+
+
+def _failed_up(runtime, mode):
+    """`up` whose `agent start` fails; mode "lost" keeps the request queued in Herdr."""
+    module, backend, cwd = runtime
+    backend.fail_start = mode
+    with pytest.raises(BackendError, match="timed out"):
+        module.main(["up", "advisor"])
+    directory = module._directory("advisor", cwd)
+    state = module._read(directory / "state.json")
+    assert (state["state"], state["pane"], state["enabled"]) == ("starting", None, True)
+    return directory, state
+
+
+def test_failed_start_down_then_up_resumes_same_generation(runtime, capsys):
+    module, backend, cwd = runtime
+    directory, failed = _failed_up(runtime, "error")
+    capsys.readouterr()
+    # `down` never launches and never claims a stop it cannot prove: the generation stays
+    # `starting` (disabled) so its name is probed again later instead of being forgotten.
+    assert module.main(["down", "advisor"]) == 0
+    assert json.loads(capsys.readouterr().out) == [
+        {"enabled": False, "name": "advisor", "state": "starting"}
+    ]
+    assert backend.start_calls == 1
+    assert module.main(["up", "advisor"]) == 0
+    state = module._read(directory / "state.json")
+    assert state["generation"] == failed["generation"]
+    assert (state["state"], state["enabled"]) == ("ready", True)
+    assert list(backend.agents) == [failed["agent_name"]]
+    assert (backend.start_calls, backend.starts, backend.closes) == (2, 1, [])
+
+
+def test_failed_start_preflight_retries_until_resumed(runtime):
+    module, backend, cwd = runtime
+    directory, failed = _failed_up(runtime, "error")
+    backend.fail_start = "error"
+    with pytest.raises(BackendError, match="timed out"):
+        module.preflight(cwd, "caller")
+    # A failed resume leaves the same generation resumable, not wedged or replaced.
+    retry = module._read(directory / "state.json")
+    assert (retry["generation"], retry["state"], retry["pane"]) == (
+        failed["generation"],
+        "starting",
+        None,
+    )
+    module.preflight(cwd, "caller")
+    state = module._read(directory / "state.json")
+    assert (state["generation"], state["state"]) == (failed["generation"], "ready")
+    assert (backend.start_calls, backend.starts) == (3, 1)
+
+
+def test_failed_start_restart_launches_exactly_once(runtime):
+    module, backend, _ = runtime
+    directory, failed = _failed_up(runtime, "error")
+    assert module.main(["restart", "advisor"]) == 0
+    state = module._read(directory / "state.json")
+    assert (state["generation"], state["state"]) == (failed["generation"], "ready")
+    assert (backend.start_calls, backend.starts, backend.closes) == (2, 1, [])
+
+
+def test_lost_reply_launch_landing_before_recovery_is_adopted(runtime):
+    module, backend, _ = runtime
+    directory, failed = _failed_up(runtime, "lost")
+    assert backend.deliver_pending_starts() == ["started"]
+    assert module.main(["up", "advisor"]) == 0
+    state = module._read(directory / "state.json")
+    assert (state["generation"], state["state"], state["pane"]) == (
+        failed["generation"],
+        "ready",
+        "pane-1",
+    )
+    # The probe found the late launch by name: no second `agent start` at all.
+    assert (backend.start_calls, backend.starts, backend.closes) == (1, 1, [])
+
+
+def test_lost_reply_delayed_launch_after_resume_is_refused_by_name(runtime):
+    module, backend, _ = runtime
+    directory, failed = _failed_up(runtime, "lost")
+    assert module.main(["up", "advisor"]) == 0
+    # Herdr handles the original queued start only now; the live resumed agent holds the
+    # generation name, so Herdr refuses it and no second resident ever exists.
+    assert backend.deliver_pending_starts() == ["agent_name_taken"]
+    assert list(backend.agents) == [failed["agent_name"]]
+    state = module._read(directory / "state.json")
+    assert (state["state"], state["pane"]) == ("ready", "pane-1")
+    assert backend.starts == 1
+
+
+def test_lost_reply_landing_between_probe_and_resume_start_is_adopted(runtime):
+    module, backend, _ = runtime
+    directory, failed = _failed_up(runtime, "lost")
+    backend.deliver_before_start = True
+    assert module.main(["up", "advisor"]) == 0
+    state = module._read(directory / "state.json")
+    assert (state["generation"], state["state"], state["pane"]) == (
+        failed["generation"],
+        "ready",
+        "pane-1",
+    )
+    assert list(backend.agents) == [failed["agent_name"]]
+    assert (backend.start_calls, backend.starts, backend.closes) == (2, 1, [])
+
+
+def test_down_reprobes_and_closes_a_late_launch(runtime, capsys):
+    module, backend, _ = runtime
+    directory, failed = _failed_up(runtime, "lost")
+    assert module.main(["down", "advisor"]) == 0
+    assert backend.deliver_pending_starts() == ["started"]
+    capsys.readouterr()
+    assert module.main(["down", "advisor"]) == 0
+    assert json.loads(capsys.readouterr().out) == [
+        {"enabled": False, "name": "advisor", "state": "stopped"}
+    ]
+    assert backend.closes == ["pane-1"] and not backend.agents
+    assert backend.start_calls == 1
+
+
+def test_resume_ignores_acknowledgement_from_a_vanished_launch(runtime, monkeypatch):
+    module, backend, _ = runtime
+    directory, failed = _failed_up(runtime, "lost")
+    # The late launch lands and acknowledges, then dies before anything recorded it.
+    assert backend.deliver_pending_starts() == ["started"]
+    backend.agents.clear()
+    assert (directory / failed["generation"] / "ready.json").is_file()
+    backend.acknowledge = False
+    monkeypatch.setattr(module, "START_SECONDS", 0.3)
+    with pytest.raises(module.SpecialistError, match="did not load context"):
+        module.main(["up", "advisor"])
+    assert module._read(directory / "state.json")["state"] == "starting"
 
 
 def test_time_flag_rejected(runtime):

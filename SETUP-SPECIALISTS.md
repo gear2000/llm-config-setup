@@ -220,10 +220,16 @@ UpAgent ledger under `specialists/`. Resident directories use mode 0700 and
 controller-written JSON uses 0600; each delivered question is also written to
 its own private 0600 file, and the resident is pointed at that file rather than
 being sent the question text inline. Old generation evidence is retained. A
-lost `agent start` reply is recovered automatically once the named agent can be
-positively re-verified (same generation name, harness, working directory, and a
-live process); only a genuine identity mismatch — wrong working directory,
-wrong process, or a pane that is still active — fails closed. Do not delete the
+failed, timed-out, or interrupted `agent start` leaves its generation `starting`
+with no pane. Herdr does not cancel a queued start, so that generation is never
+replaced by a new one. The next `up`, `restart`, or refresh resumes it under the
+same `warm-<generation>` name, which Herdr allows only one live agent to hold:
+it adopts the named agent if that start did land (same harness, working
+directory, and a live process), or starts it again. `down` never launches. If no
+agent holds the name, `down` reports the specialist `starting` and disabled, and
+a later `down` or `up` checks the name again. Only a genuine identity mismatch —
+wrong working directory, wrong process, or a pane that is still active — fails
+closed. Do not delete the
 registry to bypass a fail-closed block, since that can lose ownership of a
 still-running pane. Use status to identify the recorded session and pane before
 manual investigation. No live-provider residency or two-hour soak test is
