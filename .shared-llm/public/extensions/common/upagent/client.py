@@ -284,15 +284,21 @@ def _invoke_module(module: Any, argv: list[str], cwd: Path) -> int:
                 )
                 residents._bind_recruiter_runtime(recruiter)
                 index = argv.index(command)
-                if index + 1 < len(argv):
+                # No resident journaled means the cold path is completely unchanged.
+                if index + 1 < len(argv) and residents.configured():
                     path = argv[index + 1]
                     if command == "consult":
                         result = residents.legacy_consult(path)
                         if result is not None:
                             return result
                     else:
-                        order = recruiter.load_order(path)
-                        residents.preflight(order["cwd"], order["cockpit_pane"])
+                        try:
+                            order = recruiter.load_order(path)
+                        except recruiter.ContractError:
+                            # The Recruiter's own `_strict_order` reports an invalid order.
+                            order = None
+                        if order is not None:
+                            residents.preflight(order["cwd"], order["cockpit_pane"])
         filename = Path(module.__file__).name
         if (
             filename == "phase_controller.py"

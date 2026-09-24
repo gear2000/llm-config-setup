@@ -325,3 +325,155 @@ def test_ambiguous_main_candidates_require_explicit_canonical_repo(
 def test_removed_hub_target_fails_loudly() -> None:
     with pytest.raises(client.ClientError, match="singleton Hub target was removed"):
         client.main(["--target", "hub", "status"])
+
+
+# --- Legacy request/dispatch/verify intercept for resident specialists -------------------
+
+
+def _isolate_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {**_environment(tmp_path), "HOME": str(home)}
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    return environment
+
+
+def _register_resident(tmp_path: Path) -> None:
+    # The resident registry lives beside the ledger (`UPAGENT_HUB_DIR`'s parent).
+    state = tmp_path / "specialists" / "residents" / "resident" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {"name": "advisor", "cwd": str(tmp_path), "enabled": True, "state": "ready"}
+        )
+    )
+
+
+def _bad_order(tmp_path: Path, kind: str) -> Path:
+    order = tmp_path / "order.json"
+    if kind == "malformed":
+        order.write_text("{not json")
+    return order
+
+
+def _valid_order_file(tmp_path: Path) -> Path:
+    order = tmp_path / "order.json"
+    order.write_text(
+        json.dumps(
+            {
+                "order_id": "phase-0.stage-1-implementation.pass-1.try-1",
+                "phase_id": "phase-0",
+                "stage_id": "stage-1-implementation",
+                "harness": "claude",
+                "model": "",
+                "agent": "backend",
+                "cwd": str(tmp_path),
+                "instructions_path": str(tmp_path / "instructions.md"),
+                "result_path": str(tmp_path / "result.json"),
+                "cockpit_pane": "1-1",
+            }
+        )
+    )
+    return order
+
+
+def _record_preflight(monkeypatch: pytest.MonkeyPatch, calls: list) -> None:
+    load = client._load
+
+    def patched(name: str, path: Path):
+        module = load(name, path)
+        if name == "upagent_specialist_lifecycle_client":
+            module.preflight = lambda cwd, cockpit=None: calls.append(
+                ("preflight", cwd, cockpit)
+            )
+        return module
+
+    monkeypatch.setattr(client, "_load", patched)
+
+
+@pytest.mark.parametrize("resident", [False, True])
+@pytest.mark.parametrize("kind", ["missing", "malformed"])
+@pytest.mark.parametrize("command", ["request", "dispatch"])
+def test_legacy_launch_invalid_order_reports_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    kind: str,
+    resident: bool,
+) -> None:
+    _isolate_client(tmp_path, monkeypatch)
+    if resident:
+        _register_resident(tmp_path)
+    calls: list = []
+    _record_preflight(monkeypatch, calls)
+
+    code = client.invoke(
+        "recruiter", [command, str(_bad_order(tmp_path, kind))], tmp_path
+    )
+
+    # The Recruiter's own clean `recruiter: invalid order` exit, never a ContractError.
+    assert code == 1
+    assert "recruiter: invalid order" in capsys.readouterr().err
+    assert calls == []
+
+
+@pytest.mark.parametrize("command", ["request", "dispatch", "verify"])
+def test_legacy_launch_preflights_registered_resident_then_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    _isolate_client(tmp_path, monkeypatch)
+    _register_resident(tmp_path)
+    calls: list = []
+    _record_preflight(monkeypatch, calls)
+    recruiter, module = client._load_command_modules("recruiter", HERE)
+    monkeypatch.setattr(module, "main", lambda argv: calls.append(("main", argv)) or 0)
+    order = str(_valid_order_file(tmp_path))
+
+    assert client._invoke_module(module, [command, order], tmp_path) == 0
+
+    assert calls == [("preflight", str(tmp_path), "1-1"), ("main", [command, order])]
+
+
+def test_legacy_launch_without_residents_skips_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_client(tmp_path, monkeypatch)
+    calls: list = []
+    _record_preflight(monkeypatch, calls)
+    recruiter, module = client._load_command_modules("recruiter", HERE)
+    monkeypatch.setattr(module, "main", lambda argv: calls.append(("main", argv)) or 0)
+    order = str(_valid_order_file(tmp_path))
+
+    assert client._invoke_module(module, ["request", order], tmp_path) == 0
+
+    assert calls == [("main", ["request", order])]
+    assert not (tmp_path / "specialists").exists()
+
+
+def test_legacy_request_missing_order_with_resident_has_no_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _isolate_client(tmp_path, monkeypatch)
+    _register_resident(tmp_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(HERE / "client.py"),
+            "--target",
+            "recruiter",
+            "request",
+            str(tmp_path / "missing.json"),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 1
+    assert "Traceback" not in completed.stderr
+    assert "recruiter: invalid order" in completed.stderr
