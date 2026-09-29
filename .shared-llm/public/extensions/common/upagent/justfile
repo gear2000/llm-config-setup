@@ -181,6 +181,24 @@ upagent-review-release order control_token checkpoint checkpoint_sha256:
 upagent-specialists *args:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter specialists {{args}}
 
+# Opt-in residents in the invocation repository. Fixed two-hour lifetime, no daemon.
+# Other requests refresh expired residents before launching. Repeated up does not renew.
+[no-cd]
+upagent-specialist-up names:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target specialists up "{{names}}"
+
+[no-cd]
+upagent-specialist-status names='':
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target specialists status "{{names}}"
+
+[no-cd]
+upagent-specialist-down names:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target specialists down "{{names}}"
+
+[no-cd]
+upagent-specialist-restart names:
+    ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target specialists restart "{{names}}"
+
 # Ask one specialist one question. Blocking: returns only after the consult is terminal, having
 # written an answer.json (real or failure) at the consult's answer_path plus a sidecar receipt.
 # The consult runs as an ordinary UpAgent order — same ledger, same worker lifecycle.

@@ -169,7 +169,7 @@ def test_rescuer_role_is_configured_like_every_other_management_role() -> None:
     config = management.load_management_config({"harnesses": {"claude": "claude {model}"}})
     assert config.rescuer.timeout_ms > 0
     assert "upagent-rescuer" in config.rescuer.command
-    assert "--effort low" in config.rescuer.command
+    assert "--effort medium" in config.rescuer.command
     assert "{brief_path}" in config.rescuer.command
     assert "{output_path}" in config.rescuer.command
 

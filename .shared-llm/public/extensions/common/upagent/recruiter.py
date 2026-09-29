@@ -3615,11 +3615,22 @@ def _herdr_json(
         ) from e
 
 
-def _herdr(*args: str, herdr_session: str | None = None) -> None:
-    """Run a herdr subcommand that prints nothing on success. Fail-loud on non-zero."""
+def _herdr(
+    *args: str,
+    herdr_session: str | None = None,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Run a silent herdr command; callers can bound uncertain delivery."""
     _herdr_available()
     session, argv = _herdr_argv(args, herdr_session)
-    proc = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout_seconds
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RecruiterError(
+            f"{_herdr_command_display(session, args)} timed out after {timeout_seconds} seconds"
+        ) from error
     if proc.returncode != 0:
         raise RecruiterError(
             f"{_herdr_command_display(session, args)} failed: {proc.stderr.strip()}"
@@ -14620,6 +14631,39 @@ def consult_index_entry_path(requested_by: str, consult_id: str) -> Path:
     )
 
 
+def _consult_ran_to_completion(record: dict) -> bool:
+    """Whether a consult record (a fresh receipt or one read back from the index) describes a
+    consultation that actually happened, under either of two DISTINCT completion signals that
+    must never be conflated:
+
+    - `order_receipt_state == "finished"` -- a COLD consult, whose door built an ordinary
+      UpAgent order and ran it, through `cmd_dispatch`, to a durable ORDER_RECEIPT.
+    - `resident_turn_state == "finished"` -- a WARM consult, answered by an already-owned
+      resident instance. No order and no fresh worker ever existed for that path, so nothing
+      would ever set `order_receipt_state` for it; synthesizing "finished" there would claim a
+      Recruiter job that never ran. Its own truthful completion signal instead names the exact
+      `generation` and `turn` that produced the answer -- the resident identity
+      `specialist_lifecycle._validated_answer` already checked before `consult()` ever returned
+      -- and a record missing either as a non-empty string is refused here. This is a check
+      against a careless or incomplete write, not a cryptographic guarantee: the index is
+      trusted filesystem state under the same-UID model the rest of this module assumes, so a
+      hand-planted entry naming a plausible generation/turn pair is not detected here.
+
+    Either signal alone, with its required fields, is sufficient; a record satisfying neither
+    describes a consult that was rejected before any specialist ran, one still unresolved, or
+    one this function has never heard of.
+    """
+    if record.get("order_receipt_state") == "finished":
+        return True
+    return (
+        record.get("resident_turn_state") == "finished"
+        and isinstance(record.get("generation"), str)
+        and bool(record.get("generation"))
+        and isinstance(record.get("turn"), str)
+        and bool(record.get("turn"))
+    )
+
+
 def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
     """The Recruiter's own record of one claimed consult, or None when nothing backs the claim."""
     consult_id = claim.get("consult_id")
@@ -14635,10 +14679,10 @@ def _recorded_consult(requested_by: object, claim: dict) -> dict | None:
         return None
     if not isinstance(recorded, dict):
         return None
-    # Only a consult whose order actually finished is verifiable. The write side already keeps
-    # unfinished consults out of the index; refusing one here too means the forgery guarantee
-    # holds even against an index entry some other path may have written.
-    if recorded.get("order_receipt_state") != "finished":
+    # Only a consult that actually ran to completion -- cold or resident -- is verifiable. The
+    # write side already keeps everything else out of the index; refusing one here too means the
+    # forgery guarantee holds even against an index entry some other path may have written.
+    if not _consult_ran_to_completion(recorded):
         return None
     # The digest in the filename already binds requester and consult_id, so these two compare
     # the CONTENT of the claim against the content of the record: a worker naming a consult that
@@ -14656,12 +14700,15 @@ def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
     WHAT THIS CLOSES: forgery. A `consults` entry used to be four keys of prose that nothing
     ever read, so a worker could bank a receipt for a consultation that never happened. Now each
     claim has to resolve to an entry the CONSULT DOOR wrote, under the Recruiter's own state
-    root, keyed by the requester — and only a consult whose order actually RAN TO COMPLETION
-    (`order_receipt_state == "finished"`) creates one. A consult rejected before a specialist
-    ran — unknown specialist, Recruiter down, dispatch failure — leaves a rejected receipt but no
-    index entry, so it can never be verified. A consult whose worker ran stays verifiable whatever
-    verdict its answer earned — `cited`, a specialist-signaled `failed`, or a citation-gate
-    `rejected` — because its order finished.
+    root, keyed by the requester — and only a consult that actually RAN TO COMPLETION
+    (see `_consult_ran_to_completion`) creates one. A consult rejected before a specialist
+    ran — unknown specialist, Recruiter down, dispatch failure, a resident not ready for
+    delivery, an uncompleted or stale/mismatched resident turn — leaves a rejected or failure
+    receipt but no index entry, so it can never be verified. A consult whose worker (cold) or
+    resident (warm) produced a validated answer stays verifiable as `cited` or a
+    specialist-signaled `failed`. A cold consult also remains verifiable when its completed job
+    produced an answer the citation gate rejected. A malformed resident answer is not currently
+    indexed, so the warm path fails closed rather than claiming that parity.
 
     WHAT THIS DOES NOT CLOSE, and no mechanism here could: whether a consult SHOULD have
     happened. Judging that means judging whether the work touched an area a listed specialist
@@ -14706,20 +14753,28 @@ def resolve_consult_claims(order: dict, result: dict) -> dict[str, list]:
 def _record_consult_in_index(receipt: dict) -> Path | None:
     """Record a brokered consult under its requester, or explain why it could not be.
 
-    Only a consult that actually RAN TO COMPLETION is indexed. `order_receipt_state` becomes
-    "finished" at exactly one point — after `cmd_dispatch` returns a durable ORDER_RECEIPT — so
-    this admits every consult whose worker ran, whatever its answer earned: `cited`, a
-    specialist-signaled failure (`answer_verdict == "failed"`), or an answer the citation gate
-    rejected (`answer_verdict == "rejected"`). It excludes only a consult rejected BEFORE a
-    specialist ran: an unknown specialist, a Recruiter that is down, or a dispatch failure.
-    Indexing one of those would let a worker bank a `consults` receipt for a consultation that
-    never happened.
+    Only a consult that actually RAN TO COMPLETION is indexed (`_consult_ran_to_completion`).
+    For a COLD consult, `order_receipt_state` becomes "finished" at exactly one point — after
+    `cmd_dispatch` returns a durable ORDER_RECEIPT — so this admits every consult whose worker
+    ran, whatever its answer earned: `cited`, a specialist-signaled failure
+    (`answer_verdict == "failed"`), or an answer the citation gate rejected
+    (`answer_verdict == "rejected"`). It excludes only a consult rejected BEFORE a specialist
+    ran: an unknown specialist, a Recruiter that is down, or a dispatch failure. Indexing one of
+    those would let a worker bank a `consults` receipt for a consultation that never happened.
+
+    A WARM consult never has a Recruiter order, so it can never earn `order_receipt_state`; a
+    resident's own truthful completion signal is `resident_turn_state == "finished"` plus the
+    non-empty `generation`/`turn` naming the exact resident instance and turn that produced the
+    answer (`specialist_lifecycle.legacy_consult` sets these only once `consult()` has validated
+    a genuine answer). A resident receipt missing that identity — a pre-run rejection, an
+    uncompleted turn, or a stale/mismatched answer — is refused here for the same reason: it
+    describes a consultation that did not verifiably happen.
 
     A consult with no `requested_by` is likewise not indexed and therefore not later verifiable.
-    Both omissions fail in the SAFE direction: a worker can only ever understate its own
+    All of these omissions fail in the SAFE direction: a worker can only ever understate its own
     consulting, never overstate it.
     """
-    if receipt.get("order_receipt_state") != "finished":
+    if not _consult_ran_to_completion(receipt):
         return None
     requested_by = receipt.get("requested_by")
     if not isinstance(requested_by, str) or not requested_by:
