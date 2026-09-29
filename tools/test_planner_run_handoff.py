@@ -201,7 +201,7 @@ def test_phase_high_workflows_name_the_exact_pi_sol_reviewer() -> None:
         data = yaml.safe_load((pool / f"{name}.yaml").read_text())
         reviewers = [s for s in data["stages"] if s["role"] == "reviewer"]
         assert reviewers, name
-        assert reviewers[0]["offering"] == "pi-gpt-5-6-sol", name
+        assert reviewers[0]["offering"] == "pi-gpt-6-sol", name
         assert reviewers[0]["effort"] == "high", name
         assert reviewers[0]["adversarial"] is True, name
         assert data["retries"] == 5, name
@@ -210,9 +210,9 @@ def test_phase_high_workflows_name_the_exact_pi_sol_reviewer() -> None:
         data = yaml.safe_load((pool / f"{name}.yaml").read_text())
         return next(s["offering"] for s in data["stages"] if s["role"] == "coder")
 
-    assert coder("phase-high-Sol") == "pi-gpt-5-6-sol"
+    assert coder("phase-high-Sol") == "pi-gpt-6-sol"
     assert coder("phase-high-Luna") == "pi-gpt-5-6-luna"
-    assert coder("phase-high-Opus") == "claude-opus-5"
+    assert coder("phase-high-Opus") == "claude-opus-5-5"
 
 
 def test_direct_implement_commands_do_not_decompose_for_herdr() -> None:

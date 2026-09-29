@@ -763,7 +763,7 @@ def test_upagent_roster_contains_new_specialists_with_required_offering_and_loca
         entry = by_name[name]
         assert entry["location"] == f".claude/agents/{name}.md"
         assert entry["offering"] == "claude-sonnet-5-5"
-        assert entry["effort"] == "medium"
+        assert entry["effort"] == "high"
         assert len(entry["description"]) < 160
         assert "..." not in entry["description"]
 

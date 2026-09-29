@@ -902,7 +902,7 @@ def test_specialist_resolves_pinned_offering_and_rejects_public_override(
     request = public_api.validate_request(parsed, tmp_path)
 
     assert request.payload["offering"] == "claude-sonnet-5-5"
-    assert request.payload["effort"] == "medium"
+    assert request.payload["effort"] == "high"
     assert request.payload["agent"] == "backend"
     with pytest.raises(public_api.contract.PublicCommandError, match="request"):
         _args(

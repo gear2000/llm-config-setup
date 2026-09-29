@@ -193,8 +193,8 @@ def test_roster_materialization_is_deterministic_and_replacement_removes_claudex
     assert not m.materialize_offering_roster(("standard", "claudex"), inherited)
     assert m.materialize_offering_roster(("standard",), replaced)
 
-    assert list(policy.load_roster(inherited).offerings)[-1] == "claudex-gpt-5-6-sol"
-    assert "claudex-gpt-5-6-sol" not in policy.load_roster(replaced).offerings
+    assert list(policy.load_roster(inherited).offerings)[-1] == "claudex-gpt-6-sol"
+    assert "claudex-gpt-6-sol" not in policy.load_roster(replaced).offerings
 
 
 def test_configure_sets_machine_and_destination_offering_replacements(
