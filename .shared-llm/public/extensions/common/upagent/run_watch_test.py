@@ -45,7 +45,7 @@ def receipt(root, **over):
         "run_id": root.name,
         "phase_id": "plan",
         "harness": "claude",
-        "model": "claude-sonnet-5",
+        "model": "claude-sonnet-5-5",
         "agent_name": "implementer",
         "workspace_id": "workspace",
         "implementer_pane": "implementer-pane",
@@ -99,7 +99,7 @@ class FakeRuntime:
             1,
             {
                 "harness": style,
-                "model": "claude-sonnet-5",
+                "model": "claude-sonnet-5-5",
                 "cwd": str(self.ctx.run_root),
             },
             record,

@@ -14,7 +14,7 @@ from pathlib import Path
 ROLE_TEMPLATE_FIELDS = {"brief_path", "cwd", "output_path"}
 MAX_INTAKE_CLERK_TIMEOUT_MS = 300_000
 DEFAULT_ACCOUNT_MANAGER_COMMAND = (
-    "claude --dangerously-skip-permissions --agent upagent-account-manager --model claude-sonnet-5 --effort low "
+    "claude --dangerously-skip-permissions --agent upagent-account-manager --model claude-sonnet-5-5 --effort medium "
     '"Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available."'
 )
 DEFAULT_CHECKER_COMMAND = (
@@ -22,7 +22,7 @@ DEFAULT_CHECKER_COMMAND = (
     '"Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."'
 )
 DEFAULT_RESCUER_COMMAND = (
-    "claude --dangerously-skip-permissions --agent upagent-rescuer --model claude-sonnet-5 --effort low "
+    "claude --dangerously-skip-permissions --agent upagent-rescuer --model claude-sonnet-5-5 --effort medium "
     '"Read {brief_path}, perform that one bounded salvage assessment, write {output_path}, then exit."'
 )
 DEFAULT_SENTINEL_COMMAND = (

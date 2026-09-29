@@ -1777,7 +1777,7 @@ def test_configuration_inspection_finds_missing_agent_on_public_claude_roster(
     instructions.write_text("Do work.\n")
     monkeypatch.setattr(recruiter.shutil, "which", lambda binary: f"/bin/{binary}")
     snapshot = recruiter.offering_catalog.load_selected_roster(["standard"]).resolve(
-        "claude-sonnet-5", "high"
+        "claude-sonnet-5-5", "high"
     )
     agent = "missing-agent-not-installed"
     order = _order(
@@ -1785,7 +1785,7 @@ def test_configuration_inspection_finds_missing_agent_on_public_claude_roster(
         instructions_path=str(instructions),
         result_path=str(tmp_path / "result.json"),
         harness="claude",
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         effort="high",
         agent=agent,
         offering_snapshot=snapshot,
@@ -4836,11 +4836,11 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
     ]
 
 
@@ -4862,11 +4862,11 @@ def test_public_checker_candidates_filter_same_provider_and_preserve_order() -> 
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
     ]
 
 
@@ -4938,7 +4938,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
 
     assert result is assessment
     assert attempted[0].startswith("claude --dangerously-skip-permissions")
-    assert "--model claude-sonnet-5" in attempted[0]
+    assert "--model claude-sonnet-5-5" in attempted[0]
     assert "--effort medium" in attempted[0]
     assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
     failures = [
@@ -4947,7 +4947,7 @@ def test_checker_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "checker-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("claude-sonnet-5", "claude startup failed")
+        ("claude-sonnet-5-5", "claude startup failed")
     ]
 
 
@@ -5068,7 +5068,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
 
     assert len(attempted) == 2
     assert attempted[0].startswith("claude --dangerously-skip-permissions")
-    assert "--model claude-sonnet-5" in attempted[0]
+    assert "--model claude-sonnet-5-5" in attempted[0]
     assert "--effort medium" in attempted[0]
     assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
     assert manager["management_offering_id"] == "pi-gpt-5-6-luna"
@@ -5078,7 +5078,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "account-manager-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("claude-sonnet-5", "claude startup failed")
+        ("claude-sonnet-5-5", "claude startup failed")
     ]
 
     def reject_every_candidate(*args: object, **kwargs: object) -> dict[str, object]:
@@ -5097,7 +5097,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "account-manager-candidate-failed"
     ][-2:]
     assert [event["offering_id"] for event in exhausted] == [
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "pi-gpt-5-6-luna",
     ]
     assert all(
@@ -8964,7 +8964,7 @@ def _two_reviewers_roster() -> str:
                 {
                     "name": "reviewer",
                     "description": "second",
-                    "offering": "claude-sonnet-5",
+                    "offering": "claude-sonnet-5-5",
                     "effort": "low",
                     "agent": "other",
                 },
@@ -8978,7 +8978,7 @@ def test_consult_order_binds_same_id_to_the_canonical_payload(tmp_path: Path) ->
     entry = {
         "agent": "reviewer",
         "effort": "low",
-        "offering_snapshot": {"harness": "claude", "model": "claude-sonnet-5"},
+        "offering_snapshot": {"harness": "claude", "model": "claude-sonnet-5-5"},
     }
     base = {
         "consult_id": "consult-1",
@@ -9046,7 +9046,7 @@ def test_a_duplicate_specialist_name_in_the_kit_base_fails_loud(
                     {
                         "name": "payments",
                         "description": "clean",
-                        "offering": "claude-sonnet-5",
+                        "offering": "claude-sonnet-5-5",
                         "effort": "medium",
                         "agent": "payments",
                     },

@@ -17,14 +17,14 @@ specialists:
   - name: backend
     location: .claude/agents/backend.md
     description: "Backend services and APIs; Kafka client/cluster semantics route to kafka."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: backend
   - name: frontend
     location: .claude/agents/frontend.md
     description: "Frontend pages, components, routing, data fetching, and accessibility."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: frontend
   - name: reviewer
     location: .claude/agents/reviewer.md
@@ -35,85 +35,85 @@ specialists:
   - name: qa
     location: .claude/agents/qa.md
     description: "Test execution, regression diagnosis, and acceptance evidence."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: qa
   - name: terraform
     location: .claude/agents/terraform.md
     description: "Terraform implementation and plan analysis; apply remains human-gated."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: terraform
   - name: aws
     location: .claude/agents/aws.md
     description: "AWS architecture, IAM, networking, MSK provisioning, and diagnostics."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: aws
   - name: github
     location: .claude/agents/github.md
     description: "GitHub repository, pull request, Actions, and collaboration workflows."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: github
   - name: security
     location: .claude/agents/security.md
     description: "Auth flows, access control, secrets handling, and security review."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: security
   - name: database
     location: .claude/agents/database.md
     description: "Relational/PostgreSQL schemas, migrations, and data access; ClickHouse routes to clickhouse."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: database
   - name: clickhouse
     location: .claude/agents/clickhouse.md
     description: "ClickHouse analytics schemas, ingestion, query tuning, replication, and operations."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: clickhouse
   - name: kafka
     location: .claude/agents/kafka.md
     description: "Kafka topics, producers, consumers, Connect/Streams, schemas, and operations."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: kafka
   - name: lucidchart
     location: .claude/agents/lucidchart.md
     description: "Lucidchart MCP diagrams, Standard Import setup, inspection, and sharing gates."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: lucidchart
   - name: drawio
     location: .claude/agents/drawio.md
     description: "Draw.io native XML diagrams, semantic validation, preservation, and conversion gates."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: drawio
   - name: create-html
     location: .claude/agents/create-html.md
     description: "Self-contained static HTML artifacts, inline assets, accessibility, and local verification."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: create-html
   - name: architecture
     location: .claude/agents/architecture.md
     description: "Module boundaries, package scaffolding, and cross-service design decisions."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: architecture
   - name: devops
     location: .claude/agents/devops.md
     description: "Infrastructure-as-code, deployment, containers, and operational tasks."
-    offering: claude-sonnet-5
-    effort: medium
+    offering: claude-sonnet-5-5
+    effort: high
     agent: devops
   - name: docs
     location: .claude/agents/docs-writer.md
     description: "Documentation structure, docs accuracy against code, and navigation."
-    offering: claude-sonnet-5
+    offering: claude-sonnet-5-5
     effort: medium
     agent: docs-writer
   - name: model-picker

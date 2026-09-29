@@ -9,7 +9,7 @@ stages:
     effort: high
 
   - role: reviewer                          # always the opposite model family from the coder
-    offering: claude-sonnet-5
+    offering: claude-sonnet-5-5
     effort: high
 
   - role: checks                            # the assignment's validation workflow

@@ -100,7 +100,7 @@ management:
   account_manager:
     command: >-
       claude --dangerously-skip-permissions --agent upagent-account-manager
-      --model claude-sonnet-5 --effort low
+      --model claude-sonnet-5-5 --effort low
       "Read {brief_path}, perform that one lifecycle review, write {output_path},
       then remain available."
     expected_agent: claude
@@ -123,7 +123,7 @@ management:
   rescuer:
     command: >-
       claude --dangerously-skip-permissions --agent upagent-rescuer
-      --model claude-sonnet-5 --effort low
+      --model claude-sonnet-5-5 --effort low
       "Read {brief_path}, perform that one bounded salvage assessment, write {output_path},
       then exit."
     expected_agent: claude

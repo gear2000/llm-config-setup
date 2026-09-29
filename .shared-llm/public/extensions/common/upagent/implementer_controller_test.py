@@ -78,7 +78,7 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
             "effort": effort,
             "harness": "claude",
             "id": offering_id,
-            "model": "claude-sonnet-5",
+            "model": "claude-sonnet-5-5",
         },
     )
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ def test_implementer_start_releases_verified_controller_without_a_watchdog(
 
     receipt = implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -158,7 +158,7 @@ def test_implementer_start_releases_verified_controller_without_a_watchdog(
     assert receipt["implementer_pane"] == "implementer-pane"
     assert receipt["leader_pane"] == "implementer-pane"
     assert receipt["watchdog"]["state"] == "not-configured"
-    assert receipt["offering"] == "claude-sonnet-5"
+    assert receipt["offering"] == "claude-sonnet-5-5"
     assert (run_root / "plan.md").read_text() == plan.read_text()
     assert started == ["plan-implementer-sample-run"]
     assert closed == []
@@ -180,7 +180,7 @@ def test_start_script_exports_canonical_repo_when_set(
     monkeypatch.setenv("UPAGENT_CANONICAL_REPO", str(checkout))
     receipt = implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -203,7 +203,7 @@ def test_implementer_start_requires_herdr(
     with pytest.raises(ImplementerStartError, match="HERDR_ENV=1"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -222,7 +222,7 @@ def test_missing_plan_implementers_template_fails_loud(
     with pytest.raises(ImplementerStartError, match="plan_implementers.claude"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -248,7 +248,7 @@ def test_startup_failure_closes_the_gated_implementer(
     with pytest.raises(ImplementerStartError, match="implementer never became healthy"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -278,7 +278,7 @@ def test_gate_release_sees_implementer_identity(
     monkeypatch.setattr(implementer_controller, "_release_gate", _release)
     implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -298,7 +298,7 @@ def test_ready_receipt_reattach_requires_live_matching_launch(
     _patch_runtime(monkeypatch)
     first = implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -308,7 +308,7 @@ def test_ready_receipt_reattach_requires_live_matching_launch(
     )
     again = implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -323,7 +323,7 @@ def test_ready_receipt_reattach_requires_live_matching_launch(
     with pytest.raises(ImplementerStartError, match="no longer live"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -340,7 +340,7 @@ def test_ready_receipt_rejects_offering_mismatch(
     _patch_runtime(monkeypatch)
     implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -380,7 +380,7 @@ def test_failed_receipt_requires_a_new_run_root(
     with pytest.raises(ImplementerStartError, match="new run-root"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -397,7 +397,7 @@ def test_finish_closes_only_the_recorded_implementer_pane(
     _started, closed = _patch_runtime(monkeypatch)
     receipt = implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -431,7 +431,7 @@ def test_finish_force_closes_without_a_result(
     _started, closed = _patch_runtime(monkeypatch)
     implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -521,7 +521,7 @@ def test_start_places_the_implementer_in_the_control_tab(
     )
     implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -551,7 +551,7 @@ def test_start_rejects_a_leftover_result_without_a_ready_receipt(
     with pytest.raises(ImplementerStartError, match="new run-root"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -568,7 +568,7 @@ def test_ready_receipt_rejects_a_changed_source_plan_without_rewriting_frozen_pl
     _patch_runtime(monkeypatch)
     implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -582,7 +582,7 @@ def test_ready_receipt_rejects_a_changed_source_plan_without_rewriting_frozen_pl
     with pytest.raises(ImplementerStartError, match="plan does not match"):
         implementer_controller.start_implementer(
             plan_path=other,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -601,7 +601,7 @@ def test_ready_receipt_rejects_a_tampered_frozen_plan_without_reattaching(
     _patch_runtime(monkeypatch)
     first = implementer_controller.start_implementer(
         plan_path=plan,
-        offering_id="claude-sonnet-5",
+        offering_id="claude-sonnet-5-5",
         effort="medium",
         run_root=run_root,
         hil_pane="hil-pane",
@@ -615,7 +615,7 @@ def test_ready_receipt_rejects_a_tampered_frozen_plan_without_reattaching(
     with pytest.raises(ImplementerStartError, match="frozen plan does not match"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",
@@ -641,7 +641,7 @@ def test_start_rejects_leftover_control_events_without_a_ready_receipt(
     with pytest.raises(ImplementerStartError, match="new run-root"):
         implementer_controller.start_implementer(
             plan_path=plan,
-            offering_id="claude-sonnet-5",
+            offering_id="claude-sonnet-5-5",
             effort="medium",
             run_root=run_root,
             hil_pane="hil-pane",

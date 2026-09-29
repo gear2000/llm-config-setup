@@ -5,7 +5,7 @@ retries: 5            # repair loops after the initial attempt, then stop and as
 
 stages:
   - role: coder
-    offering: claude-sonnet-5
+    offering: claude-sonnet-5-5
     effort: xhigh
 
   - role: reviewer

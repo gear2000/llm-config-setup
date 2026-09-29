@@ -807,7 +807,7 @@ def test_specialist_resolves_pinned_offering_and_rejects_public_override(
 
     request = public_api.validate_request(parsed, tmp_path)
 
-    assert request.payload["offering"] == "claude-sonnet-5"
+    assert request.payload["offering"] == "claude-sonnet-5-5"
     assert request.payload["effort"] == "medium"
     assert request.payload["agent"] == "backend"
     with pytest.raises(public_api.contract.PublicCommandError, match="request"):
@@ -934,7 +934,7 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
     commands = [candidate["command"] for candidate in manager["candidates"]]
     assert all("legacy-manager" not in command for command in commands)
     assert commands[0].startswith("claude --dangerously-skip-permissions")
-    assert "--model claude-sonnet-5" in commands[0]
+    assert "--model claude-sonnet-5-5" in commands[0]
     assert "--effort medium" in commands[0]
     assert "--model openai-codex/gpt-5.6-luna --thinking high" in commands[1]
 
@@ -1227,7 +1227,7 @@ def test_request_cli_response_carries_unresolvable_agent_search_paths(
     home_agent = str(Path.home() / ".claude/agents" / f"{agent}.md")
     argv = _worker_argv(
         tmp_path,
-        offering="claude-sonnet-5",
+        offering="claude-sonnet-5-5",
         agent=agent,
     )
     argv.extend(["--cockpit-pane", "recruiter-pane"])
@@ -1893,7 +1893,7 @@ def test_plan_implementer_listing_keeps_only_controller_harnesses(
     class _Roster:
         def listing(self) -> list[dict[str, object]]:
             return [
-                {"id": "claude-sonnet-5", "harness": "claude", "efforts": ["medium"]},
+                {"id": "claude-sonnet-5-5", "harness": "claude", "efforts": ["medium"]},
                 {
                     "id": "claudex-gpt-5-6-sol",
                     "harness": "claudex",
@@ -1903,7 +1903,7 @@ def test_plan_implementer_listing_keeps_only_controller_harnesses(
 
     monkeypatch.setattr(public_api, "_offering_roster", lambda cwd=None: _Roster())
     rows = public_api._plan_implementer_listing(tmp_path)
-    assert [row["id"] for row in rows] == ["claude-sonnet-5"]
+    assert [row["id"] for row in rows] == ["claude-sonnet-5-5"]
 
 
 def test_cursor_rejects_every_global_effort(tmp_path: Path) -> None:

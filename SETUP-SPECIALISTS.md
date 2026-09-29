@@ -97,7 +97,7 @@ For each accepted specialist, add dest-owned source under `<dest>/.shared-llm/th
      - name: clickhouse-mv-pipeline
        location: .claude/agents/clickhouse-mv-pipeline.md
        description: "This repo's ClickHouse MV pipelines: insert chains, naming, and consult gates."
-       offering: claude-sonnet-5
+       offering: claude-sonnet-5-5
        effort: medium
        agent: clickhouse-mv-pipeline
    ```

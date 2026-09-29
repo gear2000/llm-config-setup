@@ -15,6 +15,7 @@ from typing import Any, cast
 import yaml
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+EFFORTS_HIGH_PLUS = ("high", "xhigh", "max")
 # Canonical selection for offerings whose harness exposes no effort control.
 # Omitted and explicit "default" requests normalize to the same snapshot/hash.
 DEFAULT_EFFORT = "default"
@@ -64,10 +65,10 @@ def _load_yaml(text: str) -> object:
 
 APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "claude-fable-5-1": ("claude", "claude-fable-5-1", EFFORTS, "anthropic"),
-    "claude-sonnet-5": ("claude", "claude-sonnet-5", EFFORTS, "anthropic"),
+    "claude-sonnet-5-5": ("claude", "claude-sonnet-5-5", EFFORTS, "anthropic"),
     "claude-sonnet-4-6": ("claude", "claude-sonnet-4-6", EFFORTS, "anthropic"),
-    "claude-opus-5-5": ("claude", "claude-opus-5-5", EFFORTS, "anthropic"),
-    "codex-gpt-6-sol": ("codex", "gpt-6-sol", EFFORTS, "openai"),
+    "claude-opus-5-5": ("claude", "claude-opus-5-5", EFFORTS_HIGH_PLUS, "anthropic"),
+    "codex-gpt-6-sol": ("codex", "gpt-6-sol", EFFORTS_HIGH_PLUS, "openai"),
     "codex-gpt-5-6-terra": ("codex", "gpt-5.6-terra", EFFORTS, "openai"),
     "codex-gpt-5-6-luna": ("codex", "gpt-5.6-luna", EFFORTS, "openai"),
     "codex-gpt-6-astra": ("codex", "gpt-6-astra", EFFORTS, "openai"),
@@ -85,11 +86,11 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         (DEFAULT_EFFORT,),
         "xai",
     ),
-    "pi-gpt-6-sol": ("pi", "openai-codex/gpt-6-sol", EFFORTS, "openai"),
+    "pi-gpt-6-sol": ("pi", "openai-codex/gpt-6-sol", EFFORTS_HIGH_PLUS, "openai"),
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS, "openai"),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS, "openai"),
     "pi-gpt-6-astra": ("pi", "openai-codex/gpt-6-astra", EFFORTS, "openai"),
-    "claudex-gpt-6-sol": ("claudex", "gpt-6-sol", EFFORTS, "openai"),
+    "claudex-gpt-6-sol": ("claudex", "gpt-6-sol", EFFORTS_HIGH_PLUS, "openai"),
 }
 
 STANDARD_IDS = tuple(

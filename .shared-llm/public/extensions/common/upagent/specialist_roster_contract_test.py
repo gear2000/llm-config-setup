@@ -98,7 +98,7 @@ def _write_kit_base_roster(engine_dir: Path) -> None:
         + "".join(
             f"  - name: {name}\n"
             f"    description: kit {name} specialist\n"
-            "    offering: claude-sonnet-5\n"
+            "    offering: claude-sonnet-5-5\n"
             "    effort: medium\n"
             f"    agent: {name}\n"
             for name in ("docs", "reviewer", "database", "security")
@@ -120,7 +120,7 @@ def _write_repo_overlay_roster(repo_root: Path, runtime_dir: Path) -> None:
         "    agent: reviewer\n"
         "  - name: payments\n"
         "    description: repo-only payments specialist\n"
-        "    offering: claude-sonnet-5\n"
+        "    offering: claude-sonnet-5-5\n"
         "    effort: medium\n"
         "    agent: payments\n"
     )
@@ -197,7 +197,7 @@ def test_a_repo_only_specialist_is_added_to_the_kit_roster(
     merged = _merged_specialists()
 
     assert merged["payments"]["agent"] == "payments"
-    assert merged["docs"]["offering"] == "claude-sonnet-5"
+    assert merged["docs"]["offering"] == "claude-sonnet-5-5"
 
 
 def test_every_specialist_records_which_roster_produced_it(
@@ -334,7 +334,7 @@ def test_the_phone_book_caps_an_essay_description_to_one_bounded_line(
         "    description: |\n"
         "      " + "long first line " * 30 + "\n"
         "      second line that must never appear\n"
-        "    offering: claude-sonnet-5\n"
+        "    offering: claude-sonnet-5-5\n"
         "    effort: medium\n"
         "    agent: essayist\n"
     )
@@ -369,7 +369,7 @@ def _entry(name: str, **overrides: object) -> dict:
     entry = {
         "name": name,
         "description": f"{name} specialist",
-        "offering": "claude-sonnet-5",
+        "offering": "claude-sonnet-5-5",
         "effort": "medium",
         "agent": name,
     }
