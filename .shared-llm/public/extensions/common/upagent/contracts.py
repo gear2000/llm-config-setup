@@ -523,9 +523,9 @@ def parse_result(
             f"result.json: decision {decision!r} must be one of {', '.join(ADVISOR_DECISIONS)}"
         )
 
-    # `blocked` is exempt: Python authors blocked terminals itself (repair exhausted, dead
-    # pane, cleanup failure) and a machine-written outcome cannot carry a review it never
-    # performed. A worker-earned verdict — passed or failed — must carry its document.
+    # `blocked` is exempt: a worker may report a blocker before finishing its review, and
+    # Python may also author one after repair exhaustion or a lifecycle failure. Neither
+    # outcome can be required to carry a completed review document.
     if result_contract == "review" and result["verdict"] in ("passed", "failed"):
         document = result.get("verdict_document")
         if (

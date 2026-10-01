@@ -2192,12 +2192,27 @@ def test_drill_dead_sentinel_falls_to_the_hard_timeout_backstop(
     assert receipt["cleanup"]["verified_absent"] is True
 
 
-def test_drill_complete_closeout_publishes_passed_through_ordinary_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+@pytest.mark.parametrize("verdict", ["passed", "blocked"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_drill_complete_closeout_publishes_worker_bundle_through_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    verdict: str,
+    cleanup_fails: bool,
 ) -> None:
-    """The healthy landing: a COMPLETE closeout over a valid staged bundle tears down into
-    the ordinary validation and publishes `passed`; both panes reaped."""
+    """A COMPLETE closeout over a valid staged bundle preserves the worker's verdict."""
     ledger, order, key, roster_path, drill = _drill_job(tmp_path, monkeypatch)
+    if cleanup_fails:
+        close_pane = recruiter._close_worker_pane
+
+        def close_with_sentinel_failure(pane: str, **kwargs: object) -> dict:
+            if pane == "sentinel-pane":
+                drill.closed.append(pane)
+                raise recruiter.RecruiterError("sentinel close transport failed")
+            return close_pane(pane, **kwargs)
+
+        monkeypatch.setattr(recruiter, "_close_worker_pane", close_with_sentinel_failure)
 
     outcome: list[int] = []
     runner = threading.Thread(
@@ -2207,29 +2222,74 @@ def test_drill_complete_closeout_publishes_passed_through_ordinary_validation(
     assert drill.hired.wait(timeout=5)
     staging = drill.staging[0]
     staging.parent.mkdir(parents=True, exist_ok=True)
-    staging.write_text(
-        json.dumps(
-            {
-                "order_id": order["order_id"],
-                "verdict": "passed",
-                "reason": "did the work",
-                "full_log": "worker-session",
-            }
-        )
+    worker_result = {
+        "order_id": order["order_id"],
+        "verdict": verdict,
+        "full_log": "worker-session",
+        **(
+            {"summary": "The required input is absent."}
+            if verdict == "blocked"
+            else {"reason": "did the work"}
+        ),
+    }
+    staging.write_text(json.dumps(worker_result))
+    if verdict == "blocked":
+        staging.with_name("compacted.md").write_text("# Worker context\n\nInput is absent.\n")
+        staging.with_name("handoff.md").write_text("# Handoff\n\nAsk for the input.\n")
+    sentinel_question = "Which input should be used?" if verdict == "blocked" else None
+    _pre_write_closeout(
+        ledger,
+        key,
+        order,
+        1,
+        bundle=str(staging),
+        blocking_question=sentinel_question,
     )
-    _pre_write_closeout(ledger, key, order, 1, bundle=str(staging))
     runner.join(timeout=10)
     assert not runner.is_alive()
 
-    assert outcome == [0]
+    assert outcome == [1 if cleanup_fails else 0]
     # The wait must have ended by CONSUMING the closeout, not through the old staged-
     # artifact path: only `_SentinelWatch.poll` writes the sentinel-closeout event.
     closeout_event = _event(ledger, key, "sentinel-closeout")
     assert closeout_event["outcome"] == "COMPLETE"
     receipt = ledger.completed_receipt(key, order)
-    assert receipt["verdict"] == "passed"
+    assert receipt["verdict"] == ("blocked" if cleanup_fails else verdict)
     assert drill.closed == ["worker-pane", "sentinel-pane"]
-    assert json.loads(Path(order["result_path"]).read_text())["verdict"] == "passed"
+    published = json.loads(Path(order["result_path"]).read_text())
+    if sentinel_question is not None:
+        assert published["blocking_question"] == sentinel_question
+        assert receipt["blocking_question"] == sentinel_question
+    if cleanup_fails:
+        assert receipt["state"] == "cleanup-failed"
+        assert "sentinel cleanup failed" in published["reason"]
+        archived = list((ledger.request_dir(key) / "artifacts").glob("*/review/overridden/*"))
+        assert len(archived) == 1
+        assert json.loads((archived[0] / "result.json").read_text()) == worker_result
+        if verdict == "blocked":
+            assert (archived[0] / "compacted.md").read_text() == "# Worker context\n\nInput is absent.\n"
+            assert (archived[0] / "handoff.md").read_text() == "# Handoff\n\nAsk for the input.\n"
+        assert {
+            item["kind"]: item["bytes"]
+            for item in published["epilogue"]["staged_artifacts"]
+        } == {
+            Path(filename).stem: (archived[0] / filename).stat().st_size
+            for filename in (
+                ("result.json", "compacted.md", "handoff.md")
+                if verdict == "blocked"
+                else ("result.json",)
+            )
+        }
+        assert str(archived[0]) not in json.dumps(published)
+    else:
+        assert published == {
+            **worker_result,
+            **({"blocking_question": sentinel_question} if sentinel_question else {}),
+        }
+    if verdict == "blocked" and not cleanup_fails:
+        publication = order["artifact_publication"]
+        assert Path(publication["compacted_path"]).read_text() == "# Worker context\n\nInput is absent.\n"
+        assert Path(publication["handoff_path"]).read_text() == "# Handoff\n\nAsk for the input.\n"
 
 
 # --- Stall nudge ladder (hub-owned "continue") ---------------------------------

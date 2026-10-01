@@ -533,7 +533,11 @@ Durable files are the source of truth; terminal text is display-only.
   positively confirmed gone, or the request reaches its deadline. If repair or deterministic
   recovery still cannot validate the bundle, Python writes a schema-valid blocked
   result/compacted/handoff bundle and, for specialists, a valid failure answer. A missing optional
-  summary never triggers a repair and never blocks.
+  summary never triggers a repair and never blocks. A valid worker-authored `blocked` bundle keeps
+  its explanation, log reference, summaries, and specialist answer through publication. Worker,
+  manager, and Sentinel cleanup failures still publish a Python-authored blocked bundle; the
+  epilogue inventories staged file kinds and byte counts before those files are archived under
+  the lease-private `review/overridden/` directory.
 - Four mechanical reliability gates run inside this lifecycle. A startup marker records the
   worker's first observable action in the ledger once Python proves health (agent activity, a
   staged artifact, or changed pane output). The liftoff deadline is the smaller of 5 minutes

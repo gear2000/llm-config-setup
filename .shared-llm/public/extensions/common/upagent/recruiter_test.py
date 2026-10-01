@@ -3008,8 +3008,9 @@ def test_finalize_rejects_unreleased_retained_success(
         )
 
 
+@pytest.mark.parametrize("released_verdict", ["passed", "blocked"])
 def test_retained_completion_monitor_quarantines_result_until_release(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, released_verdict: str
 ) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     submitted = _order(
@@ -3106,11 +3107,33 @@ def test_retained_completion_monitor_quarantines_result_until_release(
         )
         assert list((authoritative.parent / "quarantine").glob("*.json"))
         ledger.complete_review_release(key, token, reservation_id)
-        result_path.write_text(json.dumps(_result(order["order_id"])))
+        released_result = {
+            **_result(order["order_id"], released_verdict),
+            "summary": "Original retained worker conclusion",
+        }
+        result_path.write_text(json.dumps(released_result))
+        result_path.with_name("compacted.md").write_text("# Original retained context\n")
+        result_path.with_name("handoff.md").write_text("# Original retained handoff\n")
         assert finalized.wait(timeout=2)
     finally:
         stop.set()
         thread.join(timeout=2)
+    assert recruiter.completion.validate_bundle(
+        manifest,
+        load_result=recruiter.contracts.result_loader(order),
+        load_answer=recruiter.contracts_consult.load_answer,
+    ) == released_result
+    assert ledger.finalize(
+        key,
+        token,
+        order,
+        released_result,
+        cleanup=_cleanup(),
+    )
+    assert json.loads(Path(order["result_path"]).read_text()) == released_result
+    publication = order["artifact_publication"]
+    assert Path(publication["compacted_path"]).read_text() == "# Original retained context\n"
+    assert Path(publication["handoff_path"]).read_text() == "# Original retained handoff\n"
 
 
 def test_internal_retained_review_commands_continue_and_release_same_worker(
@@ -4427,8 +4450,9 @@ def test_compatibility_order_gets_required_manifest_metadata_before_submit(
     assert json.loads(order_path.read_text()) == normalized
 
 
-def test_worker_cleanup_failure_replaces_the_entire_success_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("worker_verdict", ["passed", "blocked"])
+def test_worker_cleanup_failure_replaces_and_archives_worker_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_verdict: str
 ) -> None:
     result_path = tmp_path / "public/result.json"
     private_result = tmp_path / "private/result.json"
@@ -4452,7 +4476,18 @@ def test_worker_cleanup_failure_replaces_the_entire_success_bundle(
     )
 
     def finish(*args: object, **kwargs: object) -> bool:
-        _write_typed_worker_result(private_result, _result(order["order_id"]))
+        _write_typed_worker_result(
+            private_result,
+            {
+                **_result(order["order_id"], worker_verdict),
+                "summary": "Worker's original explanation",
+                **(
+                    {"reason": "recruiter: worker claims cleanup passed"}
+                    if worker_verdict == "blocked"
+                    else {}
+                ),
+            },
+        )
         return True
 
     monkeypatch.setattr(recruiter, "_wait_for_agent_status", finish)
@@ -4480,6 +4515,24 @@ def test_worker_cleanup_failure_replaces_the_entire_success_bundle(
         text = manifest.artifact(kind).staging_path.read_text().lower()
         assert "blocked" in text and "worker close transport failed" in text
         assert "worker compacted evidence" not in text
+    archived = list(private_result.parent.glob("review/overridden/*"))
+    assert len(archived) == 1
+    original = json.loads((archived[0] / "result.json").read_text())
+    assert original["verdict"] == worker_verdict
+    assert original["summary"] == "Worker's original explanation"
+    assert (archived[0] / "compacted.md").read_text() == "# Worker compacted evidence\n"
+    assert (archived[0] / "handoff.md").read_text() == "# Worker handoff evidence\n"
+    assert {
+        item["kind"]: item["bytes"] for item in result["epilogue"]["staged_artifacts"]
+    } == {
+        kind: (archived[0] / filename).stat().st_size
+        for kind, filename in (
+            ("result", "result.json"),
+            ("compacted", "compacted.md"),
+            ("handoff", "handoff.md"),
+        )
+    }
+    assert str(archived[0]) not in json.dumps(result)
 
 
 def test_run_order_repairs_a_malformed_finished_worker_bundle_before_cleanup(
@@ -4561,8 +4614,9 @@ def test_run_order_repairs_a_malformed_finished_worker_bundle_before_cleanup(
     assert cleanup["verified_absent"] is True
 
 
-def test_manager_cleanup_failure_replaces_the_entire_success_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("worker_verdict", ["passed", "blocked"])
+def test_manager_cleanup_failure_replaces_and_archives_worker_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_verdict: str
 ) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     order = _order(
@@ -4600,10 +4654,19 @@ def test_manager_cleanup_failure_replaces_the_entire_success_bundle(
         *args: object, **kwargs: object
     ) -> tuple[int, dict, dict[str, object]]:
         manifest = kwargs["artifact_manifest"]
+        worker_result = {
+            **_result(order["order_id"], verdict=worker_verdict),
+            "summary": "Worker's original explanation",
+            **(
+                {"reason": "recruiter: worker claims cleanup passed"}
+                if worker_verdict == "blocked"
+                else {}
+            ),
+        }
         _write_typed_worker_result(
-            manifest.artifact("result").staging_path, _result(order["order_id"])
+            manifest.artifact("result").staging_path, worker_result
         )
-        return 0, _result(order["order_id"]), _cleanup("worker-pane")
+        return 0, worker_result, _cleanup("worker-pane")
 
     monkeypatch.setattr(recruiter, "_run_order", run_order)
     monkeypatch.setattr(
@@ -4618,10 +4681,139 @@ def test_manager_cleanup_failure_replaces_the_entire_success_bundle(
     assert recruiter.cmd_run_job(key, str(roster_path)) == 1
     receipt = ledger.completed_receipt(key, order)
     assert receipt["verdict"] == "blocked"
+    assert receipt["state"] == "cleanup-failed"
+    assert "account manager cleanup failed" in json.loads(
+        Path(order["result_path"]).read_text()
+    )["reason"]
     for field in ("compacted_path", "handoff_path"):
         text = Path(order["artifact_publication"][field]).read_text().lower()
         assert "blocked" in text and "manager close transport failed" in text
         assert "worker compacted evidence" not in text
+    archived = list((ledger.request_dir(key) / "artifacts").glob("*/review/overridden/*"))
+    assert len(archived) == 1
+    assert json.loads((archived[0] / "result.json").read_text())["summary"] == (
+        "Worker's original explanation"
+    )
+    assert (archived[0] / "compacted.md").read_text() == "# Worker compacted evidence\n"
+    assert (archived[0] / "handoff.md").read_text() == "# Worker handoff evidence\n"
+    published = json.loads(Path(order["result_path"]).read_text())
+    assert {
+        item["kind"]: item["bytes"]
+        for item in published["epilogue"]["staged_artifacts"]
+    } == {
+        kind: (archived[0] / filename).stat().st_size
+        for kind, filename in (
+            ("result", "result.json"),
+            ("compacted", "compacted.md"),
+            ("handoff", "handoff.md"),
+        )
+    }
+    assert str(archived[0]) not in json.dumps(published)
+
+
+@pytest.mark.parametrize(
+    ("reason", "worker_question", "sentinel_question", "consult"),
+    [
+        (None, None, None, False),
+        ("waiting for a decision", None, "Which option should proceed?", False),
+        ("recruiter: worker text", "Use option A?", "Use option B?", False),
+        ("source is unavailable", None, None, True),
+    ],
+)
+def test_run_job_publishes_valid_worker_blocked_bundle_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str | None,
+    worker_question: str | None,
+    sentinel_question: str | None,
+    consult: bool,
+) -> None:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "_sentinel_enabled", lambda order: False)
+    monkeypatch.setattr(
+        recruiter, "_sentinel_blocking_question", lambda ledger, key: sentinel_question
+    )
+    order = _order(
+        cwd=str(tmp_path),
+        result_path=str(tmp_path / "public/result.json"),
+        instructions_path=str(tmp_path / "instructions.md"),
+    )
+    if consult:
+        recruiter.completion.ensure_publication_contract(order)
+        order["artifact_publication"].update(
+            {
+                "consult_id": "consult-example",
+                "answer_path": str(tmp_path / "public/answer.json"),
+                "mandatory_consults": [
+                    {"consult_id": "required-consult", "specialist": "reviewer"}
+                ],
+            }
+        )
+    Path(order["instructions_path"]).write_text("Do the bounded task.\n")
+    roster_path = tmp_path / "upagent.yaml"
+    roster_path.write_text(
+        'harnesses:\n  claude: "claude read:{instructions_path} write:{result_path}"\n'
+    )
+    ledger = recruiter.JobLedger()
+    key, _ = ledger.submit(order)
+    monkeypatch.setattr(
+        recruiter, "inspect_worker_configuration", lambda *args, **kwargs: {"errors": []}
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_direct_manager",
+        lambda *args, **kwargs: {
+            "address": None,
+            "config": args[0],
+            "generation": 1,
+            "health": None,
+            "herdr_session": "llm-lab-test",
+            "pane": None,
+            "workspace_id": None,
+        },
+    )
+    worker_result = {
+        **_result(order["order_id"], verdict="blocked"),
+        "summary": "The input is missing; the requester must choose a value.",
+        **({"reason": reason} if reason is not None else {}),
+        **({"blocking_question": worker_question} if worker_question else {}),
+    }
+
+    def run_order(*args: object, **kwargs: object) -> tuple[int, dict, dict[str, object]]:
+        manifest = kwargs["artifact_manifest"]
+        _write_typed_worker_result(manifest.artifact("result").staging_path, worker_result)
+        if consult:
+            recruiter.JobLedger._write_json(
+                manifest.artifact("answer").staging_path,
+                {
+                    "consult_id": "consult-example",
+                    "error": "Source material is unavailable.",
+                },
+            )
+        return 0, worker_result, _cleanup("worker-pane")
+
+    monkeypatch.setattr(recruiter, "_run_order", run_order)
+    monkeypatch.setattr(recruiter, "_notify_requester", lambda *args, **kwargs: None)
+
+    assert recruiter.cmd_run_job(key, str(roster_path)) == 0
+    published = json.loads(Path(order["result_path"]).read_text())
+    expected = dict(worker_result)
+    if worker_question is None and sentinel_question is not None:
+        expected["blocking_question"] = sentinel_question
+    assert published == expected
+    publication = order["artifact_publication"]
+    assert Path(publication["compacted_path"]).read_text() == "# Worker compacted evidence\n"
+    assert Path(publication["handoff_path"]).read_text() == "# Worker handoff evidence\n"
+    receipt = ledger.completed_receipt(key, order)
+    assert receipt["verdict"] == "blocked"
+    assert receipt["state"] == "finished"
+    if consult:
+        assert json.loads(Path(publication["answer_path"]).read_text()) == {
+            "consult_id": "consult-example",
+            "error": "Source material is unavailable.",
+        }
+    if worker_question or sentinel_question:
+        assert receipt["blocking_question"] == (worker_question or sentinel_question)
 
 
 def test_typed_publication_receipt_precedes_terminal_event(
@@ -5525,8 +5717,10 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     assert "worker-healthy-degraded" in notifications
 
 
-def test_run_job_keeps_worker_result_when_status_wait_fails(
-    tmp_path: Path, monkeypatch, capsys
+@pytest.mark.parametrize("verdict", ["passed", "blocked"])
+@pytest.mark.parametrize("wait_fails", [False, True])
+def test_run_job_keeps_worker_result_through_real_run_order(
+    tmp_path: Path, monkeypatch, capsys, verdict: str, wait_fails: bool
 ) -> None:
     # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
     # herdr stubs must see only the launches it fakes.
@@ -5554,12 +5748,18 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
-    def fail_wait(*args: object, **kwargs: object) -> bool:
+    def finish_wait(*args: object, **kwargs: object) -> bool:
         worker_result_paths[0].parent.mkdir(parents=True, exist_ok=True)
         _write_typed_worker_result(
-            worker_result_paths[0], _result(order["order_id"], verdict="passed")
+            worker_result_paths[0],
+            {
+                **_result(order["order_id"], verdict=verdict),
+                "summary": "The worker's own conclusion",
+            },
         )
-        raise recruiter.RecruiterError("wait transport failed")
+        if wait_fails:
+            raise recruiter.RecruiterError("wait transport failed")
+        return True
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
     monkeypatch.setattr(
@@ -5568,17 +5768,19 @@ def test_run_job_keeps_worker_result_when_status_wait_fails(
     monkeypatch.setattr(
         recruiter, "_close_worker_pane", lambda pane, **kwargs: _cleanup(pane)
     )
-    monkeypatch.setattr(recruiter, "_wait_for_agent_status", fail_wait)
+    monkeypatch.setattr(recruiter, "_wait_for_agent_status", finish_wait)
     monkeypatch.setattr(recruiter, "_report_state", lambda *args, **kwargs: None)
 
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
     output = capsys.readouterr()
     assert f"ORDER {order['order_id']} DONE" in output.out
-    assert "kept existing worker result" in output.err
-    assert json.loads(result_path.read_text()) == _result(
-        order["order_id"], verdict="passed"
-    )
+    if wait_fails:
+        assert "kept existing worker result" in output.err
+    assert json.loads(result_path.read_text()) == {
+        **_result(order["order_id"], verdict=verdict),
+        "summary": "The worker's own conclusion",
+    }
 
 
 def test_cleanup_waits_for_post_notification_runner_completion(

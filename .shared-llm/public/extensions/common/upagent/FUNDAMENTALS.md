@@ -172,9 +172,11 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     request at the original worker address. A completely absent bundle keeps a live worker under
     supervision until valid artifacts, positively confirmed process/pane exit, or the deadline;
     turn-level `done` is not a repair or terminal boundary. A second worker is never launched. One
-    failed revalidation, crash reconciliation, or worker/manager cleanup failure regenerates one
+    failed revalidation, crash reconciliation, or worker/manager/Sentinel cleanup failure regenerates one
     Python-authored schema-valid blocked three-file bundle; specialists also receive a valid failure
-    answer. Success prose is never retained beside a blocked result.
+    answer. A validated worker-authored blocked bundle keeps its result, summaries, and specialist
+    answer through publication. Cleanup overrides first archive staged content under the lease-private
+    `review/overridden/` directory. Success prose is never published beside a cleanup-blocked result.
 17. Retained review is explicit and release-gated. A valid checkpoint keeps the same worker pane live; it is not a terminal result. Feedback and release require the current requester control token and current lease identity. Premature terminal artifacts are quarantined, and a worker that exits before release blocks rather than entering artifact repair. The default order shape and one-shot cleanup path are unchanged when no completion policy is present.
 18. Mandatory consultations are machine-readable `{consult_id, specialist}` requirements. A stage
     can pass only with matching Recruiter-verified receipts whose answers are cited successes. Absent,

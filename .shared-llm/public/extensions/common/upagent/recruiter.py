@@ -7751,6 +7751,21 @@ def _archive_premature_retained_bundle(
             os.replace(artifact.staging_path, archive / artifact.staging_path.name)
 
 
+def _archive_cleanup_overridden_bundle(manifest: Any) -> None:
+    """Keep staged worker content lease-private before a cleanup failure replaces it."""
+    staged = [item for item in manifest.artifacts if item.staging_path.is_file()]
+    if not staged:
+        return
+    archive = (
+        _review_dir(manifest.artifact("result").staging_path)
+        / "overridden"
+        / str(time.time_ns())
+    )
+    archive.mkdir(parents=True, exist_ok=False)
+    for item in staged:
+        os.replace(item.staging_path, archive / item.staging_path.name)
+
+
 def _start_completion_monitor(
     order: dict,
     worker_result_path: Path,
@@ -9053,7 +9068,10 @@ def _run_order(
                         "worker cleanup failed without the required typed artifact manifest"
                     ) from e
                 result = _write_required_blocked_bundle(
-                    order, artifact_manifest, f"worker cleanup failed: {e}"
+                    order,
+                    artifact_manifest,
+                    f"worker cleanup failed: {e}",
+                    archive_overridden=True,
                 )
                 fell_back = True
                 # The failed pane address remains in the active lease for the supervisor to retry.
@@ -10916,6 +10934,7 @@ def _write_required_blocked_bundle(
     reason: str,
     *,
     blocking_question: str | None = None,
+    archive_overridden: bool = False,
 ) -> dict:
     """Regenerate every required staged artifact with one consistent blocked reason.
 
@@ -10925,6 +10944,8 @@ def _write_required_blocked_bundle(
     work but skipped its bundle can no longer terminalize as an empty result.
     """
     epilogue = _epilogue_evidence(order, manifest)
+    if archive_overridden:
+        _archive_cleanup_overridden_bundle(manifest)
     return cast(
         dict,
         completion.write_blocked_bundle(
@@ -13874,6 +13895,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             order,
             artifact_manifest,
             f"account manager cleanup failed: {error}",
+            archive_overridden=True,
         )
         result_code = 1
         manager_cleanup = {
@@ -13914,6 +13936,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
                 order,
                 artifact_manifest,
                 f"sentinel cleanup failed: {sentinel_cleanup.get('reason')}",
+                archive_overridden=True,
             )
             result_code = 1
         cleanup["sentinel"] = sentinel_cleanup
@@ -13941,18 +13964,21 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             "confirmation": "unconfirmed",
         }
     elif result.get("verdict") == "blocked":
-        # Regeneration must not drop the cold handoff the earlier writer attached.
+        # The completion reactor already validated this bundle. Preserve worker prose and
+        # Python-authored cleanup/fallback evidence; only add a missing cold handoff.
         question = result.get("blocking_question")
-        result = _write_required_blocked_bundle(
-            order,
-            artifact_manifest,
-            str(result.get("reason", "worker lifecycle blocked")),
-            blocking_question=(
-                question
-                if isinstance(question, str) and question.strip()
-                else _sentinel_blocking_question(ledger, key)
-            ),
-        )
+        if not isinstance(question, str) or not question.strip():
+            sentinel_question = _sentinel_blocking_question(ledger, key)
+            if sentinel_question is not None:
+                JobLedger._write_json(
+                    artifact_manifest.artifact("result").staging_path,
+                    {**result, "blocking_question": sentinel_question},
+                )
+                result = completion.validate_bundle(
+                    artifact_manifest,
+                    load_result=contracts.result_loader(order),
+                    load_answer=contracts_consult.load_answer,
+                )
     finalized = ledger.finalize(
         key,
         token,
