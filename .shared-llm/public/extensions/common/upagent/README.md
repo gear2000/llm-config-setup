@@ -294,11 +294,11 @@ authenticated terminal cancellation, audit, identical reattachment, and changed-
 after the disposable prompt/order/staging/event/launch history is gone. Repeating cleanup is a
 no-op that also retries removal of a previously swapped runtime-owned residual.
 
-The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing fourteen stable ids: four Claude, four Codex, two Cursor, and four Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-6-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
+The engine assembles `offerings.yaml` from code-approved names under `offerings.d/`. Omitted machine configuration selects only `standard`, which contains the existing fifteen stable ids: five Claude, four Codex, two Cursor, and four Pi. Selecting `[standard, claudex]` adds exactly `claudex-gpt-6-1-sol`; a destination `[standard]` replacement removes it. Management policy stays in `offerings-management.yaml`, so set selection cannot change specialist defaults, lifecycle commands, or management candidates.
 
 The same parsed object drives text/JSON listing, request validation, specialist/lifecycle references, and the immutable order snapshot. YAML contains declarations only. Code pins every approved set member, harness, model, provider, effort list, completion style, health identity, executable, command renderer, and preflight. Unknown sets, partial sets, duplicate ids, changed fields, commands in YAML, and management references to absent offerings fail loudly. The runtime roster resolves from the request's starting repository, then `$UPAGENT_CANONICAL_REPO` for the same git repo, then the main checkout for a linked worktree, then the generated home roster.
 
-`offerings.py` renders child tokens: Claude uses `--effort`, Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit `--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default` effort. ClaudeX uses the `claudex` executable with the exact `gpt-6-sol` model and remains interactive; because the wrapper uses `exec`, Herdr health still requires the final `claude` process. Before any ClaudeX worker pane is created, UpAgent requires both `claudex` and `claudex-doctor`, runs `claudex-doctor gpt-6-sol`, and blocks on a missing executable, proxy/OAuth failure, or absent model. It never substitutes native Claude. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass no lifecycle validation, but ClaudeX is accepted only through public offering snapshots.
+`offerings.py` renders child tokens: Claude uses `--effort`, Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit `--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default` effort. ClaudeX uses the `claudex` executable with the exact `gpt-6.1-sol` model and remains interactive; because the wrapper uses `exec`, Herdr health still requires the final `claude` process. Before any ClaudeX worker pane is created, UpAgent requires both `claudex` and `claudex-doctor`, runs `claudex-doctor gpt-6.1-sol`, and blocks on a missing executable, proxy/OAuth failure, or absent model. It never substitutes native Claude. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass no lifecycle validation, but ClaudeX is accepted only through public offering snapshots.
 
 A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
 atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
@@ -500,7 +500,7 @@ Durable files are the source of truth; terminal text is display-only.
   without ever creating a worker, even if the LLM mistakenly recommends approval.
 - Public requests use one dedicated advisory Account Manager selected from the ordered approved
   candidates in `offerings.yaml`: `cursor-composer-2-5` at `default`, then `pi-gpt-5-6-luna` at
-  `high`, all with the `upagent-account-manager` brief. The Recruiter removes
+  `high`, then `claude-sonnet-5-5` at `medium`, all with the `upagent-account-manager` brief. The Recruiter removes
   same-provider candidates, tries the first eligible candidate, and records each startup failure
   before trying the next. Exhaustion degrades supervision only: it cannot veto Python-valid
   startup, mutate a lease, publish artifacts, invent success, or terminalize the request.
@@ -653,7 +653,8 @@ Durable files are the source of truth; terminal text is display-only.
   including retries. Public worker offerings pin code-owned provider metadata in
   their immutable snapshots; legacy orders fall back to known harness/model identity
   only when no snapshot provider exists. For the public roster, the Recruiter filters the
-  YAML-ordered Sentinel candidates (`cursor-composer-2-5`/default, then `pi-gpt-5-6-luna`/high)
+  YAML-ordered Sentinel candidates (`cursor-composer-2-5`/default, then `pi-gpt-5-6-luna`/max,
+  then `claude-sonnet-5-5`/medium)
   by provider and tries every eligible startup in order. Each failure is
   recorded; only exhaustion degrades to mechanical supervision through the existing
   `sentinel-degraded` path with a typed `reason_type`. An explicit legacy
@@ -765,9 +766,9 @@ the kit root [SETUP-SPECIALISTS.md](../../../../../SETUP-SPECIALISTS.md). After 
 
 Public workers and management candidates never read a YAML launch command. `offerings.yaml`
 selects approved harness/model identities and effort allowlists, plus the candidate order;
-`offerings.py` validates every reference and renders the exact child argv. Public Account Manager,
-Checker, and Sentinel candidates are `cursor-composer-2-5`/default first, then
-`pi-gpt-5-6-luna`/high. The Recruiter filters the worker's
+`offerings.py` validates every reference and renders the exact child argv. Public Account Manager candidates are `cursor-composer-2-5`/default, then `pi-gpt-5-6-luna`/high,
+then `claude-sonnet-5-5`/medium. Checker candidates remain Sonnet/medium then Luna/high. Sentinel
+candidates are Composer/default, Luna/max, then Sonnet/medium. The Recruiter filters the worker's
 provider and falls back on startup
 failure. A legacy `upagent.yaml` remains only for explicitly route-driven controller compatibility,
 where existing phase routes still provide raw harness/model profiles and may configure singular

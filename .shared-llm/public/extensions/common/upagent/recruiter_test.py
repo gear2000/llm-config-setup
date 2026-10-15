@@ -1705,10 +1705,10 @@ def test_resolve_rejects_snapshot_not_enabled_by_runtime_roster(
     roster = recruiter.load_roster(roster_path)
     snapshot = recruiter.offering_catalog.load_selected_roster(
         ["standard", "claudex"]
-    ).resolve("claudex-gpt-6-sol", "high")
+    ).resolve("claudex-gpt-6-1-sol", "high")
     order = _order(
         harness="claudex",
-        model="gpt-6-sol",
+        model="gpt-6.1-sol",
         effort="high",
         offering_snapshot=snapshot,
     )
@@ -1910,10 +1910,10 @@ def test_configuration_inspection_blocks_claudex_when_preflight_fails(
     instructions.write_text("Do work.\n")
     snapshot = recruiter.offering_catalog.load_selected_roster(
         ["standard", "claudex"]
-    ).resolve("claudex-gpt-6-sol", "high")
+    ).resolve("claudex-gpt-6-1-sol", "high")
     order = _order(
         harness="claudex",
-        model="gpt-6-sol",
+        model="gpt-6.1-sol",
         effort="high",
         cwd=str(tmp_path),
         instructions_path=str(instructions),
@@ -5042,13 +5042,15 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
     )
 
     assert [candidate.offering_id for candidate in anthropic] == [
+        "cursor-composer-2-5",
         "pi-gpt-5-6-luna",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
-        "claude-sonnet-5-5",
         "pi-gpt-5-6-luna",
+        "claude-sonnet-5-5",
     ]
     assert [candidate.offering_id for candidate in openai] == [
+        "cursor-composer-2-5",
         "claude-sonnet-5-5",
     ]
 
@@ -5255,7 +5257,7 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
 
     def health(pane: str, **kwargs: object) -> dict[str, object]:
         if pane == "manager-pane-1":
-            raise recruiter.RecruiterError("claude startup failed")
+            raise recruiter.RecruiterError("pi startup failed")
         return {"healthy": True}
 
     decision = recruiter.lifecycle.ManagerDecision(
@@ -5276,18 +5278,19 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
     )
 
     assert len(attempted) == 2
-    assert attempted[0].startswith("claude --dangerously-skip-permissions")
-    assert "--model claude-sonnet-5-5" in attempted[0]
-    assert "--effort medium" in attempted[0]
-    assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[1]
-    assert manager["management_offering_id"] == "pi-gpt-5-6-luna"
+    assert attempted[0].startswith("pi ")
+    assert "--model openai-codex/gpt-5.6-luna --thinking high" in attempted[0]
+    assert attempted[1].startswith("claude --dangerously-skip-permissions")
+    assert "--model claude-sonnet-5-5" in attempted[1]
+    assert "--effort medium" in attempted[1]
+    assert manager["management_offering_id"] == "claude-sonnet-5-5"
     failures = [
         event
         for event in ledger.events(key)
         if event["event"] == "account-manager-candidate-failed"
     ]
     assert [(event["offering_id"], event["reason"]) for event in failures] == [
-        ("claude-sonnet-5-5", "claude startup failed")
+        ("pi-gpt-5-6-luna", "pi startup failed")
     ]
 
     def reject_every_candidate(*args: object, **kwargs: object) -> dict[str, object]:
@@ -5306,8 +5309,8 @@ def test_account_manager_startup_failure_tries_the_next_eligible_candidate(
         if event["event"] == "account-manager-candidate-failed"
     ][-2:]
     assert [event["offering_id"] for event in exhausted] == [
-        "claude-sonnet-5-5",
         "pi-gpt-5-6-luna",
+        "claude-sonnet-5-5",
     ]
     assert all(
         event["reason"] == "management startup unavailable" for event in exhausted

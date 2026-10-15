@@ -33,7 +33,7 @@ stages:
     offering: pi-gpt-5-6-luna
     effort: high
   - role: reviewer
-    offering: pi-gpt-6-sol
+    offering: pi-gpt-6-1-sol
     effort: high
     adversarial: true
   - role: checks

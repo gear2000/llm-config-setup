@@ -28,7 +28,7 @@ kinds:
     alternate: {offering: pi-gpt-5-6-luna, effort: high}
   medium-implementation:
     matches: "a feature slice touching a few files in one area, with tests"
-    offering: pi-gpt-6-sol
+    offering: pi-gpt-6-1-sol
     effort: high
     alternate: {offering: claude-opus-5-5, effort: high}
   hard-implementation:
@@ -38,7 +38,7 @@ kinds:
     alternate: {offering: claude-fable-5-1, effort: medium}
   review:
     matches: "independent read-only review of a candidate; never the coder's own model"
-    offering: pi-gpt-6-sol
+    offering: pi-gpt-6-1-sol
     effort: high
     alternate: {offering: claude-opus-5-5, effort: high}
   adversarial:

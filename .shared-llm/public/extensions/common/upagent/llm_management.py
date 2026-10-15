@@ -18,7 +18,7 @@ DEFAULT_ACCOUNT_MANAGER_COMMAND = (
     '"Read {brief_path}, perform that one lifecycle review, write {output_path}, then remain available."'
 )
 DEFAULT_CHECKER_COMMAND = (
-    "claude --dangerously-skip-permissions --agent upagent-checker --model haiku --effort low "
+    "claude --dangerously-skip-permissions --agent upagent-checker --model claude-haiku-5-5 --effort low "
     '"Read {brief_path}, perform that one bounded assessment, write {output_path}, then exit."'
 )
 DEFAULT_RESCUER_COMMAND = (
@@ -26,7 +26,7 @@ DEFAULT_RESCUER_COMMAND = (
     '"Read {brief_path}, perform that one bounded salvage assessment, write {output_path}, then exit."'
 )
 DEFAULT_SENTINEL_COMMAND = (
-    "claude --dangerously-skip-permissions --agent upagent-sentinel --model haiku --effort low "
+    "claude --dangerously-skip-permissions --agent upagent-sentinel --model claude-haiku-5-5 --effort low "
     '"Read {brief_path}, perform that one sentinel duty cycle for its worker, write '
     '{output_path} when the worker lifecycle ends, then exit."'
 )

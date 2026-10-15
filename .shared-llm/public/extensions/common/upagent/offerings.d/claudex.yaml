@@ -2,10 +2,10 @@
 # model, effort allowlist, health identity, and preflight stay code-owned.
 schema_version: 1
 offerings:
-  claudex-gpt-6-sol:
+  claudex-gpt-6-1-sol:
     harness: claudex
-    model: gpt-6-sol
-    efforts: [high, xhigh, max]
+    model: gpt-6.1-sol
+    efforts: [medium, high, xhigh, max]
     prompt_addendum: |
       - Follow the brief and repository decisions. Use the smallest sufficient change and complete every required check.
       - Stop at the completion conditions. If evidence is missing or wider scope or a design decision is needed, report the exact blocker to your requester and await explicit authorization.

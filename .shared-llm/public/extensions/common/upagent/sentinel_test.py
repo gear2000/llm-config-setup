@@ -1660,7 +1660,7 @@ def test_the_persona_pre_check_names_the_exact_missing_paths(
     names the candidate paths the operator must fix, and the answer is cached per
     process invocation instead of being re-diagnosed on every attempt."""
     agent = f"upagent-sentinel-test-{uuid.uuid4().hex}"
-    command = f"claude --dangerously-skip-permissions --agent {agent} --model haiku"
+    command = f"claude --dangerously-skip-permissions --agent {agent} --model claude-haiku-5-5"
     cwd = tmp_path / "wt"
     cwd.mkdir()
     missing = recruiter._sentinel_persona_missing(command, str(cwd))
@@ -1681,7 +1681,7 @@ def test_the_persona_pre_check_names_the_exact_missing_paths(
     (other / ".claude/agents" / f"{agent}.md").write_text("persona\n")
     assert recruiter._sentinel_persona_missing(command, str(other)) is None
     # A command with no --agent needs no persona file.
-    assert recruiter._sentinel_persona_missing("claude --model haiku", str(cwd)) is None
+    assert recruiter._sentinel_persona_missing("claude --model claude-haiku-5-5", str(cwd)) is None
 
 
 def test_a_failed_sentinel_hire_degrades_supervision_and_notifies_once(
@@ -2548,13 +2548,16 @@ def test_public_sentinel_candidates_preserve_order_and_filter_the_worker_provide
     ]
     assert [item.offering_id for item in cursor] == [
         "pi-gpt-5-6-luna",
+        "claude-sonnet-5-5",
     ]
     assert [item.offering_id for item in openai] == [
         "cursor-composer-2-5",
+        "claude-sonnet-5-5",
     ]
     assert [item.offering_id for item in openrouter] == [
         "cursor-composer-2-5",
         "pi-gpt-5-6-luna",
+        "claude-sonnet-5-5",
     ]
 
 
@@ -2922,7 +2925,7 @@ def test_a_cursor_worker_nudge_uses_the_paste_settle_delivery(
 def test_an_override_violating_disjointness_degrades_with_a_typed_reason() -> None:
     config = _management(
         sentinel={
-            "command": "claude --agent upagent-sentinel --model haiku {brief_path}",
+            "command": "claude --agent upagent-sentinel --model claude-haiku-5-5 {brief_path}",
             "expected_agent": "claude",
             "expected_process": "claude",
         }
@@ -2940,7 +2943,7 @@ def test_an_override_violating_disjointness_degrades_with_a_typed_reason() -> No
 def test_a_disjoint_override_is_honored_as_is() -> None:
     config = _management(
         sentinel={
-            "command": "claude --agent upagent-sentinel --model haiku {brief_path}",
+            "command": "claude --agent upagent-sentinel --model claude-haiku-5-5 {brief_path}",
             "expected_agent": "claude",
             "expected_process": "claude",
         }
@@ -3052,7 +3055,7 @@ def test_both_nudge_triggers_exclude_exec_retained_and_watchdog_workers(
         order["harness"] = "codex"
         order["offering_snapshot"] = (
             recruiter.offering_catalog.load_selected_roster().resolve(
-                "codex-gpt-6-sol", "high"
+                "codex-gpt-6-1-sol", "high"
             )
         )
     elif excluded == "retained":

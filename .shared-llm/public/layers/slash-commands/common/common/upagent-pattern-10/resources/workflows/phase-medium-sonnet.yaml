@@ -16,7 +16,7 @@ stages:
     workflow: validation
 
   - role: auditor                           # own counter: audit findings allow 2 repair loops, each re-audited
-    offering: pi-gpt-6-sol
+    offering: pi-gpt-6-1-sol
     effort: high
     retries: 2
 

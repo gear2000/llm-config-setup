@@ -38,9 +38,9 @@ def test_every_offering_has_its_own_listed_and_snapshotted_addendum() -> None:
 
     # Same model, different harness: the shipped reminders remain consistent.
     assert (
-        roster.offerings["pi-gpt-6-sol"].prompt_addendum
-        == (roster.offerings["codex-gpt-6-sol"].prompt_addendum)
-        == roster.offerings["claudex-gpt-6-sol"].prompt_addendum
+        roster.offerings["pi-gpt-6-1-sol"].prompt_addendum
+        == (roster.offerings["codex-gpt-6-1-sol"].prompt_addendum)
+        == roster.offerings["claudex-gpt-6-1-sol"].prompt_addendum
     )
     assert roster.offerings["pi-gpt-6-astra"].prompt_addendum == (
         roster.offerings["codex-gpt-6-astra"].prompt_addendum
@@ -108,30 +108,36 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 14
+    assert len(roster.listing()) == 15
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
     assert "claude:::claude-sonnet-5-5" in rendered_identities
     assert all("5.4" not in identity for identity in rendered_identities)
     assert all("gpt-5.5" not in identity for identity in rendered_identities)
     assert "claude:::claude-opus-5-5" in rendered_identities
+    assert "claude:::claude-haiku-5-5" in rendered_identities
     assert "codex:::gpt-5.6-terra" in rendered_identities
     assert "codex:::gpt-5.6-luna" in rendered_identities
-    assert "codex:::gpt-6-sol" in rendered_identities
+    assert "codex:::gpt-6.1-sol" in rendered_identities
     assert "codex:::gpt-6-astra" in rendered_identities
     assert "cursor:::composer-2.5" in rendered_identities
     assert "cursor:::grok-4.7-high" in rendered_identities
-    assert "pi:::openai-codex/gpt-6-sol" in rendered_identities
+    assert "pi:::openai-codex/gpt-6.1-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
-    expected_candidates = [
+    checker_candidates = [
         {"offering": "claude-sonnet-5-5", "effort": "medium"},
         {"offering": "pi-gpt-5-6-luna", "effort": "high"},
     ]
-    assert roster.management["account_manager"]["candidates"] == expected_candidates
-    assert roster.management["checker"]["candidates"] == expected_candidates
+    assert roster.management["account_manager"]["candidates"] == [
+        {"offering": "cursor-composer-2-5", "effort": "default"},
+        {"offering": "pi-gpt-5-6-luna", "effort": "high"},
+        {"offering": "claude-sonnet-5-5", "effort": "medium"},
+    ]
+    assert roster.management["checker"]["candidates"] == checker_candidates
     assert roster.management["sentinel"]["candidates"] == [
         {"offering": "cursor-composer-2-5", "effort": "default"},
         {"offering": "pi-gpt-5-6-luna", "effort": "max"},
+        {"offering": "claude-sonnet-5-5", "effort": "medium"},
     ]
 
 
@@ -155,7 +161,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
             ],
         ),
         (
-            "codex-gpt-6-sol",
+            "codex-gpt-6-1-sol",
             "high",
             "backend",
             [
@@ -164,14 +170,14 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
                 "--model",
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "-c",
                 "model_reasoning_effort=high",
                 "Read /lease/instructions.md and do exactly that work.",
             ],
         ),
         (
-            "pi-gpt-6-sol",
+            "pi-gpt-6-1-sol",
             "xhigh",
             "backend",
             [
@@ -181,7 +187,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
                 "-e",
                 str(Path.home() / ".pi/agent/extensions/herdr-agent-state.ts"),
                 "--model",
-                "openai-codex/gpt-6-sol",
+                "openai-codex/gpt-6.1-sol",
                 "--thinking",
                 "xhigh",
                 "Read /lease/instructions.md and do exactly that work.",
@@ -223,7 +229,7 @@ def test_luna_offering_replaces_gpt55_with_max_effort() -> None:
     roster = offerings.load_selected_roster()
     luna = roster.offerings["pi-gpt-5-6-luna"]
 
-    assert luna.efforts == ("low", "medium", "high", "xhigh", "max")
+    assert luna.efforts == ("high", "xhigh", "max")
     snapshot = roster.resolve(luna.offering_id, "max")
     assert snapshot["model"] == "openai-codex/gpt-5.6-luna"
     assert snapshot["selected_effort"] == "max"
@@ -265,8 +271,8 @@ def test_effortful_offering_still_requires_effort() -> None:
 
     for offering_id in (
         "claude-sonnet-5-5",
-        "codex-gpt-6-sol",
-        "pi-gpt-6-sol",
+        "codex-gpt-6-1-sol",
+        "pi-gpt-6-1-sol",
     ):
         with pytest.raises(
             offerings.OfferingError, match="requires an explicit effort"
@@ -363,13 +369,14 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "claude-sonnet-5-5": "anthropic",
         "claude-sonnet-4-6": "anthropic",
         "claude-opus-5-5": "anthropic",
-        "codex-gpt-6-sol": "openai",
+        "claude-haiku-5-5": "anthropic",
+        "codex-gpt-6-1-sol": "openai",
         "codex-gpt-5-6-terra": "openai",
         "codex-gpt-5-6-luna": "openai",
         "codex-gpt-6-astra": "openai",
         "cursor-composer-2-5": "cursor",
         "cursor-grok-4-7": "xai",
-        "pi-gpt-6-sol": "openai",
+        "pi-gpt-6-1-sol": "openai",
         "pi-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-luna": "openai",
         "pi-gpt-6-astra": "openai",
@@ -398,10 +405,11 @@ def test_snapshot_validation_requires_the_exact_pinned_provider() -> None:
 @pytest.mark.parametrize(
     ("offering_id",),
     [
-        ("claude-opus-5-5",),
-        ("codex-gpt-6-sol",),
-        ("pi-gpt-6-sol",),
-        ("claudex-gpt-6-sol",),
+        ("claude-haiku-5-5",),
+        ("codex-gpt-5-6-terra",),
+        ("codex-gpt-5-6-luna",),
+        ("pi-gpt-5-6-terra",),
+        ("pi-gpt-5-6-luna",),
     ],
 )
 def test_high_plus_offerings_reject_efforts_below_high(offering_id: str) -> None:
@@ -409,6 +417,34 @@ def test_high_plus_offerings_reject_efforts_below_high(offering_id: str) -> None
     for effort in ("low", "medium"):
         with pytest.raises(offerings.OfferingError, match="does not allow effort"):
             roster.resolve(offering_id, effort)
+
+
+def test_opus_offering_allows_medium_but_rejects_low() -> None:
+    roster = offerings.load_selected_roster()
+    roster.resolve("claude-opus-5-5", "medium")
+    with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+        roster.resolve("claude-opus-5-5", "low")
+
+
+@pytest.mark.parametrize(
+    ("offering_id",),
+    [
+        ("codex-gpt-6-1-sol",),
+        ("pi-gpt-6-1-sol",),
+        ("claudex-gpt-6-1-sol",),
+    ],
+)
+def test_sol_offerings_reject_low_effort_only(offering_id: str) -> None:
+    roster = offerings.load_selected_roster(["standard", "claudex"])
+    with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+        roster.resolve(offering_id, "low")
+    roster.resolve(offering_id, "medium")
+
+
+def test_haiku_hub_offering_rejects_max_effort() -> None:
+    roster = offerings.load_selected_roster()
+    with pytest.raises(offerings.OfferingError, match="does not allow effort"):
+        roster.resolve("claude-haiku-5-5", "max")
 
 
 @pytest.mark.parametrize("role_name", ["account_manager", "checker", "sentinel"])
@@ -423,6 +459,7 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
         assert [candidate["offering_id"] for candidate in candidates] == [
             "cursor-composer-2-5",
             "pi-gpt-5-6-luna",
+            "claude-sonnet-5-5",
         ]
         assert candidates[0]["expected_agent"] == "cursor"
         assert candidates[0]["expected_process"] == "cursor-agent"
@@ -433,6 +470,23 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
         assert candidates[1]["expected_process"] == "pi"
         assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
         assert "--thinking max" in candidates[1]["command"]
+        assert candidates[2]["expected_agent"] == "claude"
+        assert "--model claude-sonnet-5-5" in candidates[2]["command"]
+        assert "--effort medium" in candidates[2]["command"]
+        assert role["command"] == candidates[0]["command"]
+        return
+
+    if role_name == "account_manager":
+        assert [candidate["offering_id"] for candidate in candidates] == [
+            "cursor-composer-2-5",
+            "pi-gpt-5-6-luna",
+            "claude-sonnet-5-5",
+        ]
+        assert candidates[0]["command"].startswith("cursor-agent --force --trust")
+        assert "--model composer-2.5" in candidates[0]["command"]
+        assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
+        assert "--thinking high" in candidates[1]["command"]
+        assert "--model claude-sonnet-5-5" in candidates[2]["command"]
         assert role["command"] == candidates[0]["command"]
         return
 
@@ -476,7 +530,7 @@ def test_public_management_candidate_schema_rejects_commands_and_unapproved_refe
         offerings.load_roster(path)
 
     source = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    source["management"]["account_manager"]["candidates"][0]["effort"] = "default"
+    source["management"]["account_manager"]["candidates"][1]["effort"] = "default"
     path = tmp_path / "effort.yaml"
     path.write_text(offerings.yaml.safe_dump(source))
     with pytest.raises(offerings.OfferingError, match="not allowed"):
@@ -499,7 +553,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy_and_adde
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "98ddadb48eff6e4c56b2c6c83b7e5bc45337f964161c27887a2e8f3839d8fc51"
+        "a45ac8d2dd834ef891440c3a3787014a4b16cf9fade306d7234366841c776830"
     )
 
 
@@ -508,7 +562,7 @@ def test_claudex_set_adds_exactly_one_offering_without_changing_management() -> 
     enabled = offerings.load_selected_roster(["standard", "claudex"])
 
     assert enabled.selected_sets == ("standard", "claudex")
-    assert list(enabled.offerings) == [*standard.offerings, "claudex-gpt-6-sol"]
+    assert list(enabled.offerings) == [*standard.offerings, "claudex-gpt-6-1-sol"]
     assert enabled.management == standard.management
 
 
@@ -532,12 +586,12 @@ def test_offering_set_selection_rejects_unknown_duplicates_and_partial_union(
 
 def test_claudex_renderer_is_interactive_and_keeps_claude_health_identity() -> None:
     snapshot = offerings.load_selected_roster(["standard", "claudex"]).resolve(
-        "claudex-gpt-6-sol", "xhigh"
+        "claudex-gpt-6-1-sol", "xhigh"
     )
 
     assert offerings.render_argv(snapshot, "backend", "/lease/instructions.md") == [
         "claudex",
-        "gpt-6-sol",
+        "gpt-6.1-sol",
         "--dangerously-skip-permissions",
         "--agent",
         "backend",
@@ -553,7 +607,7 @@ def test_claudex_preflight_uses_only_code_owned_doctor_and_exact_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = offerings.load_selected_roster(["standard", "claudex"]).resolve(
-        "claudex-gpt-6-sol", "high"
+        "claudex-gpt-6-1-sol", "high"
     )
     calls: list[list[str]] = []
 
@@ -573,8 +627,8 @@ def test_claudex_preflight_uses_only_code_owned_doctor_and_exact_model(
 
     result = offerings.preflight_snapshot(snapshot)
 
-    assert calls == [["/bin/claudex-doctor", "gpt-6-sol"]]
-    assert result["model"] == "gpt-6-sol"
+    assert calls == [["/bin/claudex-doctor", "gpt-6.1-sol"]]
+    assert result["model"] == "gpt-6.1-sol"
 
 
 def test_roster_resolution_prefers_repo_then_linked_main_then_home(
@@ -741,7 +795,7 @@ def test_claudex_preflight_failure_never_substitutes_native_claude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = offerings.load_selected_roster(["standard", "claudex"]).resolve(
-        "claudex-gpt-6-sol", "high"
+        "claudex-gpt-6-1-sol", "high"
     )
     monkeypatch.setattr(
         offerings.shutil,
@@ -757,12 +811,12 @@ def test_claudex_preflight_failure_never_substitutes_native_claude(
             [],
             1,
             stdout="",
-            stderr="proxy unavailable; model gpt-6-sol not advertised",
+            stderr="proxy unavailable; model gpt-6.1-sol not advertised",
         ),
     )
 
     with pytest.raises(
-        offerings.OfferingError, match="required model 'gpt-6-sol'.*proxy unavailable"
+        offerings.OfferingError, match="required model 'gpt-6.1-sol'.*proxy unavailable"
     ):
         offerings.preflight_snapshot(snapshot)
     assert offerings.render_argv(snapshot, "backend", "/lease.md")[0] == "claudex"

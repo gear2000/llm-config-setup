@@ -56,7 +56,7 @@ def _prompt(tmp_path: Path, text: str = "Do the bounded task.\n") -> Path:
 def _worker_argv(tmp_path: Path, **overrides: str) -> list[str]:
     values = {
         "request_id": REQUEST_ID,
-        "offering": "pi-gpt-6-sol",
+        "offering": "pi-gpt-6-1-sol",
         "effort": "high",
         "agent": "backend",
         "prompt_file": str(_prompt(tmp_path)),
@@ -417,7 +417,7 @@ def test_sentinel_must_be_boolean_and_respects_file_flag_exclusivity(
             {
                 "schema_version": 1,
                 "type": "worker",
-                "offering": "pi-gpt-6-sol",
+                "offering": "pi-gpt-6-1-sol",
                 "effort": "high",
                 "agent": "backend",
                 "prompt_file": str(_prompt(tmp_path)),
@@ -702,7 +702,7 @@ def test_flags_and_file_feed_the_same_canonical_parser(tmp_path: Path) -> None:
                 "schema_version": 1,
                 "request_id": REQUEST_ID,
                 "type": "worker",
-                "offering": "pi-gpt-6-sol",
+                "offering": "pi-gpt-6-1-sol",
                 "effort": "high",
                 "agent": "backend",
                 "prompt_file": str(prompt),
@@ -758,7 +758,7 @@ def test_invalid_file_requests_fail_before_store_or_launch(
         "schema_version": 1,
         "request_id": REQUEST_ID,
         "type": "worker",
-        "offering": "pi-gpt-6-sol",
+        "offering": "pi-gpt-6-1-sol",
         "effort": "high",
         "agent": "backend",
         "prompt_file": str(prompt),
@@ -913,7 +913,7 @@ def test_specialist_resolves_pinned_offering_and_rejects_public_override(
                 "--specialist",
                 "backend",
                 "--offering",
-                "pi-gpt-6-sol",
+                "pi-gpt-6-1-sol",
                 "--prompt-file",
                 str(prompt),
             ]
@@ -1989,7 +1989,7 @@ def test_plan_implementer_listing_keeps_only_controller_harnesses(
             return [
                 {"id": "claude-sonnet-5-5", "harness": "claude", "efforts": ["medium"]},
                 {
-                    "id": "claudex-gpt-6-sol",
+                    "id": "claudex-gpt-6-1-sol",
                     "harness": "claudex",
                     "efforts": ["high"],
                 },
@@ -2013,7 +2013,7 @@ def test_cursor_rejects_every_global_effort(tmp_path: Path) -> None:
 def test_effortful_offering_rejects_omitted_effort(tmp_path: Path) -> None:
     _persona(tmp_path)
     argv = _cursor_argv(tmp_path)
-    argv[argv.index("cursor-composer-2-5")] = "pi-gpt-6-sol"
+    argv[argv.index("cursor-composer-2-5")] = "pi-gpt-6-1-sol"
 
     with pytest.raises(public_api.PublicError, match="requires an explicit effort"):
         public_api.validate_request(_args(argv), tmp_path)

@@ -1,6 +1,6 @@
 type: agent
 name: upagent-checker
-model: haiku
+model: claude-haiku-5-5
 color: yellow
 description: .shared-llm/public/layers/agents/common/upagent-checker.description.md
 inputs:
