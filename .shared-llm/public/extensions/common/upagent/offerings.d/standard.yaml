@@ -108,16 +108,6 @@ offerings:
       - Do not bundle unrelated cleanup or features into the task.
       - If evidence is missing or wider scope or a design decision is needed, stop the affected work and report the exact blocker to your requester. Await explicit authorization.
       - Run the required checks and stop at the completion conditions.
-  cursor-grok-4-7:
-    harness: cursor
-    model: grok-4.7-high
-    efforts: [default]
-    completion_style: interactive
-    prompt_addendum: |
-      - Stay within the assigned role and scope. Ground changes and review findings in repository evidence and the brief's requirements.
-      - Do not add work based only on general practice or a preferred design.
-      - If evidence is missing or wider scope or a design decision is needed, stop the affected work and report the exact blocker to your requester. Await explicit authorization.
-      - Finish every required check and stop when the assignment is complete.
   pi-gpt-6-1-sol:
     harness: pi
     model: openai-codex/gpt-6.1-sol

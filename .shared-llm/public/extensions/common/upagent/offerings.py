@@ -84,12 +84,6 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         (DEFAULT_EFFORT,),
         "cursor",
     ),
-    "cursor-grok-4-7": (
-        "cursor",
-        "grok-4.7-high",
-        (DEFAULT_EFFORT,),
-        "xai",
-    ),
     "pi-gpt-6-1-sol": ("pi", "openai-codex/gpt-6.1-sol", EFFORTS_SOL, "openai"),
     "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS_HIGH_PLUS, "openai"),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS_HIGH_PLUS, "openai"),

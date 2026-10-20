@@ -68,7 +68,6 @@ demoted:
 # Offerings out of quota or credit. The picker skips them until the date passes and uses
 # the kind's alternate. Remove an entry when the window resets.
 unavailable_until:
-  cursor-grok-4-7: 2026-09-24
   claude-sonnet-5-5: 2026-09-24
   claude-sonnet-4-6: 2026-09-24
 

@@ -108,7 +108,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
 
     assert list(roster.offerings) == list(offerings.APPROVED_SETS["standard"])
     assert roster.selected_sets == ("standard",)
-    assert len(roster.listing()) == 15
+    assert len(roster.listing()) == 14
     rendered_identities = {item["rendered_identity"] for item in roster.listing()}
     assert "claude:::claude-sonnet-4-6" in rendered_identities
     assert "claude:::claude-sonnet-5-5" in rendered_identities
@@ -121,7 +121,7 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
     assert "codex:::gpt-6.1-sol" in rendered_identities
     assert "codex:::gpt-6-astra" in rendered_identities
     assert "cursor:::composer-2.5" in rendered_identities
-    assert "cursor:::grok-4.7-high" in rendered_identities
+    assert all("grok" not in identity for identity in rendered_identities)
     assert "pi:::openai-codex/gpt-6.1-sol" in rendered_identities
     assert "pi:::openrouter/z-ai/glm-5.3-flash" not in rendered_identities
     checker_candidates = [
@@ -243,7 +243,6 @@ def test_cursor_offerings_have_only_default_effort() -> None:
 
     assert {item.offering_id for item in cursor_offerings} == {
         "cursor-composer-2-5",
-        "cursor-grok-4-7",
     }
     for cursor in cursor_offerings:
         assert cursor.efforts == (offerings.DEFAULT_EFFORT,)
@@ -255,10 +254,7 @@ def test_cursor_offerings_have_only_default_effort() -> None:
 def test_cursor_omitted_and_explicit_default_are_canonical() -> None:
     roster = offerings.load_selected_roster()
 
-    for offering_id in (
-        "cursor-composer-2-5",
-        "cursor-grok-4-7",
-    ):
+    for offering_id in ("cursor-composer-2-5",):
         omitted = roster.resolve(offering_id, None)
         explicit = roster.resolve(offering_id, "default")
 
@@ -284,7 +280,6 @@ def test_effortful_offering_still_requires_effort() -> None:
     ("offering_id", "model"),
     [
         ("cursor-composer-2-5", "composer-2.5"),
-        ("cursor-grok-4-7", "grok-4.7-high"),
     ],
 )
 def test_cursor_renderer_is_interactive_trusted_and_has_no_effort_flag(
@@ -375,7 +370,6 @@ def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
         "codex-gpt-5-6-luna": "openai",
         "codex-gpt-6-astra": "openai",
         "cursor-composer-2-5": "cursor",
-        "cursor-grok-4-7": "xai",
         "pi-gpt-6-1-sol": "openai",
         "pi-gpt-5-6-terra": "openai",
         "pi-gpt-5-6-luna": "openai",
@@ -553,7 +547,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy_and_adde
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "a45ac8d2dd834ef891440c3a3787014a4b16cf9fade306d7234366841c776830"
+        "21d490f629e09389654721c61dcdf615ddb52a89994bc4e5beae3d715f7920cd"
     )
 
 
