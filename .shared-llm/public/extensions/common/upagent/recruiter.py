@@ -4892,6 +4892,9 @@ def _wait_for_agent_health(
                         f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}"
                     )
                 latest["healthy"] = True
+                latest["process_start_time"] = _process_start_time(
+                    latest["process_pid"]
+                )
                 return latest
         completed_during_startup = False
         if completion_order is not None:
@@ -6641,6 +6644,28 @@ class _NudgeDeliveryError(RecruiterError):
     """A reserved nudge could not be submitted; its rung remains spent."""
 
 
+def _live_descendant(pid: int) -> int | None:
+    """Return one live descendant from a bounded process snapshot."""
+    snapshot = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,stat="],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=2,
+    )
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in snapshot.stdout.splitlines():
+        child, parent, state = line.split()
+        children.setdefault(int(parent), []).append((int(child), state))
+    pending = list(children.get(pid, []))
+    while pending:
+        child, state = pending.pop()
+        if not state.startswith("Z") and _process_start_time(child) is not None:
+            return child
+        pending.extend(children.get(child, []))
+    return None
+
+
 class _SentinelWatch:
     """Poll one closeout file from inside the Recruiter's completion wait.
 
@@ -6682,6 +6707,7 @@ class _SentinelWatch:
         self._nudge_target: Any | None = None
         self._nudge_address: str | None = None
         self._authority = nudge_authority.NudgeAuthority(ledger.root)
+        self._stall_hold_evidence: dict[str, object] | None = None
 
     @property
     def supervising(self) -> bool:
@@ -7250,6 +7276,63 @@ class _SentinelWatch:
                 self.key, "sentinel-stall-nudge-resume-unavailable", reason=str(error)
             )
 
+    def _hold_stalled_worker(self) -> bool:
+        """A live exact worker with recent files or a live child keeps its wait.
+
+        Called only where STALLED would otherwise terminalize. The wait loop still
+        owns its original deadline, cancellation, and normal supervision cadence.
+        """
+        health_path = self.ledger.request_dir(self.key) / "worker-health.json"
+        try:
+            health = json.loads(health_path.read_text())
+        except FileNotFoundError:
+            return False
+        if (
+            health.get("attempt") != self.attempt
+            or health.get("generation") != self.generation
+            or health.get("pane_id") != self.sentinel_state.get("worker_pane")
+            or self.ledger.state(self.key).get("state") in self._NUDGE_REJECTED_STATES
+        ):
+            return False
+        pid, birth = health.get("process_pid"), health.get("process_start_time")
+        if not isinstance(birth, str) or _process_start_time(pid) != birth:
+            return False
+        cutoff = time.time() - 15 * 60
+        directories = {item.staging_path.parent for item in self.manifest.artifacts}
+        directories.add(self.manifest.artifact("result").public_path.parent)
+        recent_file = None
+        for directory in sorted(directories):
+            for path in directory.rglob("*"):
+                try:
+                    modified = path.stat().st_mtime if path.is_file() else 0
+                except FileNotFoundError:
+                    # A worker can atomically replace or remove a file while we inspect it.
+                    continue
+                if modified >= cutoff:
+                    recent_file = str(path)
+                    break
+            if recent_file is not None:
+                break
+        descendant = _live_descendant(cast(int, pid)) if recent_file is None else None
+        if recent_file is None and descendant is None:
+            return False
+        # A PID reused while reading the files/process snapshot cannot earn a hold.
+        if _process_start_time(pid) != birth:
+            return False
+        evidence = {
+            "worker_pid": pid,
+            "worker_start_time": birth,
+            "recent_file": recent_file,
+            "descendant_pid": descendant,
+            "freshness_seconds": 900,
+            "attempt": self.attempt,
+            "generation": self.generation,
+        }
+        if evidence != self._stall_hold_evidence:
+            self.ledger._event(self.key, "worker-stall-held", **evidence)
+            self._stall_hold_evidence = evidence
+        return True
+
     def poll(self) -> str | None:
         if not self.closeout_path.is_file():
             return None
@@ -7360,12 +7443,19 @@ class _SentinelWatch:
                             "sentinel-stall-recheck-unavailable",
                             reason=str(prompt_error),
                         )
+                        if self._hold_stalled_worker():
+                            # Keep the claim pending so loss of either life signal is
+                            # re-evaluated on subsequent polls, even if the Sentinel died.
+                            os.replace(archived, self.closeout_path)
+                            return None
                         raise SentinelStalledError(
                             f"sentinel closeout STALLED: {reason}",
                             closeout,
                         ) from prompt_error
                 return None
             if self._attempt_stall_nudge(reason):
+                return None
+            if self._hold_stalled_worker():
                 return None
             raise SentinelStalledError(
                 f"sentinel closeout STALLED: {reason}",
@@ -14030,6 +14120,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
+        evidence = {
+            **evidence,
+            "attempt": attempt_state["number"],
+            "generation": generation,
+        }
         # Health is the startup-marker clock zero: from here the worker has the clamped
         # first-action deadline (_first_action_deadline_ms) to show a first observable
         # action.

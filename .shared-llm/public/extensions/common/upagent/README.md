@@ -662,6 +662,15 @@ Durable files are the source of truth; terminal text is display-only.
   `SENTINEL_STALL_NUDGED` to an available Sentinel so it resumes its finalization duty.
   Exhaustion publishes `worker-stall-escalation` once per episode and marks that
   episode escalated after publication. A crash before the flag may repeat the notice.
+  Before a STALLED closeout ends the wait, Python checks the recorded worker PID and
+  process birth identity. A live matching worker is held while any file under its
+  staging or result directory was modified in the last 15 minutes, or while it has a
+  live descendant process. `worker-stall-held` records the identity and life signal.
+  Subsequent supervision polls recheck the hold. Worker death or loss of both life
+  signals permits the original STALLED closeout; the existing deadline and requester
+  cancellation still end the wait. This does not reset or extend the nudge ladder.
+  Herdr 0.9.5 can report Claude idle while background work continues, so a healthy
+  worker with a background command can still receive a stall nudge.
   Invalid state fails loudly; requester decisions, cancellation, and finalization
   forbid delivery. The target lock serializes nudges, while lifecycle mutations retain
   their own lock and the bounded final probe-to-submit race.
