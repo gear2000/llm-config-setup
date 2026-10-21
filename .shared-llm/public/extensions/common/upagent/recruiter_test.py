@@ -38,7 +38,13 @@ ContractError = recruiter.ContractError
 
 
 @pytest.fixture(autouse=True)
-def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The Recruiter's legacy state default is /tmp/.upagent, which exists only on a machine
+    # whose hub has run since boot. Intake needs that directory, so every test gets its own;
+    # tests that care about a specific state path still override this.
+    state_dir = tmp_path / ".upagent"
+    state_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(recruiter, "STATE_FILE", state_dir / "recruiter.json")
     monkeypatch.setattr(
         recruiter, "_herdr_owner_record", lambda: {"herdr_session": "llm-lab-test"}
     )

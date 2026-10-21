@@ -334,7 +334,7 @@ def test_verifier_request_ignores_unrelated_invalid_specialist_roster(
                 "--offering",
                 "pi-gpt-5-6-luna",
                 "--effort",
-                "low",
+                "high",
                 "--agent",
                 "reviewer",
             ]
@@ -1027,10 +1027,14 @@ def test_public_request_ignores_legacy_manager_command_and_uses_approved_rendere
     manager = public_roster["management"]["account_manager"]
     commands = [candidate["command"] for candidate in manager["candidates"]]
     assert all("legacy-manager" not in command for command in commands)
-    assert commands[0].startswith("claude --dangerously-skip-permissions")
-    assert "--model claude-sonnet-5-5" in commands[0]
-    assert "--effort medium" in commands[0]
+    # Candidate order is policy owned by offerings-management.yaml: Cursor Composer first,
+    # then Luna high, then Sonnet 5.5 medium.
+    assert commands[0].startswith("cursor-agent")
+    assert "--model composer-2.5" in commands[0]
     assert "--model openai-codex/gpt-5.6-luna --thinking high" in commands[1]
+    assert commands[2].startswith("claude --dangerously-skip-permissions")
+    assert "--model claude-sonnet-5-5" in commands[2]
+    assert "--effort medium" in commands[2]
 
 
 def test_same_id_same_hash_attaches_without_second_launch_and_changed_prompt_conflicts(
