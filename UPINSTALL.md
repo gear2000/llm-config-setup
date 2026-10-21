@@ -156,11 +156,13 @@ files, and kit runtime must change together; replacing a running server's binary
 ```bash
 herdr session list --json
 herdr --session default server stop
+cp -p ~/.codex/hooks.json ~/.codex/hooks.json.before-herdr-0.9.5
 just herdr-pin --force
 herdr integration install pi
 herdr integration install claude
 herdr integration install codex
 herdr integration install cursor
+# Remove the legacy Codex status reports with the command below before starting agents.
 just update
 herdr --version
 herdr integration status
@@ -170,9 +172,52 @@ herdr
 Stop any other sessions intentionally being migrated before replacing the binary. `just update`
 rebuilds every destination in the machine config (all four on the validated machine), including
 generated home runtimes. No destination needs a hand edit. Verify Herdr 0.9.5 and integration
-versions Pi v9, Claude v11, Codex v10, Cursor v2. The Codex integration uses SessionStart;
-the kit's former status-fix hook becomes a no-op compatibility file for existing hook references.
+versions Pi v9, Claude v11, Codex v10, Cursor v2. The Codex integration uses SessionStart.
+The official installer preserves the old kit `herdr-status-fix.sh` entries, and `just update`
+does not deploy the kit's no-op replacement into Codex's home. Remove only those two reports
+with this command after reinstalling integrations and before starting agents:
+
+```bash
+python3 - <<'PY'
+import json
+import shlex
+from pathlib import Path
+
+path = Path.home() / ".codex/hooks.json"
+data = json.loads(path.read_text())
+for event, action in (("SessionStart", "working"), ("Stop", "idle")):
+    groups = []
+    for group in data.get("hooks", {}).get(event, []):
+        keep = []
+        for hook in group.get("hooks", []):
+            argv = shlex.split(hook.get("command", ""))
+            if (len(argv) == 3 and Path(argv[0]).name == "bash"
+                    and Path(argv[1]).name == "herdr-status-fix.sh" and argv[2] == action):
+                print(f"Removed {event}: {hook['command']}")
+            else:
+                keep.append(hook)
+        if keep:
+            groups.append({**group, "hooks": keep})
+    if event in data.get("hooks", {}):
+        data["hooks"][event] = groups
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+```
+
+Keep the backup from before the swap; do not overwrite it when repeating these steps.
+The command preserves the official SessionStart hook and unrelated hooks. The copied-home
+rehearsal confirmed that the installer rewrites Claude's Herdr SessionStart matcher while
+preserving the kit's other hooks. The home runtime deployment preserves existing settings.
 Pi still loads `herdr-agent-state.ts` explicitly when worker extensions are otherwise disabled.
+
+Before the first hire, open each harness interactively and inspect its first-run screen.
+Accept Claude folder trust for each new workspace and bypass mode if requested. Existing
+acceptance can carry over from 0.7.1. If Codex shows "Hooks need review", review and trust the
+official SessionStart hook and the other hooks you intend to use. The copied-home probe
+showed this screen after its absolute hook paths changed; a real upgrade that retains paths
+may retain trust. Codex exec completed unattended before that interactive review, so the
+review screen is not an exec-worker readiness gate. Pi and Cursor needed no first-run
+acceptance in the authenticated copied-home rehearsal. A fresh account may still require login.
 
 For a binary-only rollback, the single command is
 `HERDR_PIN=0.7.1 bash tools/install-herdr.sh --force`. A complete rollback must also restore the
@@ -183,7 +228,8 @@ requests, this one compound command restores the validated baseline:
 herdr --session default server stop && git switch --detach 585b484 && \
   HERDR_PIN=0.7.1 bash tools/install-herdr.sh --force && \
   herdr integration install pi && herdr integration install claude && \
-  herdr integration install codex && herdr integration install cursor && just update
+  herdr integration install codex && herdr integration install cursor && \
+  cp -p ~/.codex/hooks.json.before-herdr-0.9.5 ~/.codex/hooks.json && just update
 ```
 
 Then start Herdr normally. This checkout is detached at the baseline until deliberately switched
