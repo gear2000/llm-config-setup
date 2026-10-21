@@ -328,30 +328,13 @@ class Runtime:
         return probe
 
     def deliver(self, target: Target, text: str) -> None:
-        if target.harness == "cursor":
-            self.herdr(
-                target.identity.herdr_session,
-                "pane",
-                "send-text",
-                target.identity.pane_id,
-                text,
-            )
-            time.sleep(recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS)
-            self.herdr(
-                target.identity.herdr_session,
-                "pane",
-                "send-keys",
-                target.identity.pane_id,
-                "Enter",
-            )
-        else:
-            self.herdr(
-                target.identity.herdr_session,
-                "pane",
-                "run",
-                target.identity.pane_id,
-                text,
-            )
+        self.herdr(
+            target.identity.herdr_session,
+            "agent",
+            "prompt",
+            target.identity.pane_id,
+            text,
+        )
 
     def publish(self, key: str, message: str) -> None:
         for event in awaiter.read_journal(self.ctx):
@@ -423,9 +406,6 @@ class Runtime:
         command = management.render_role_command(
             candidate.role, brief, target.order["cwd"], output
         )
-        pane = self.herdr(identity.herdr_session, "pane", "get", identity.pane_id)[
-            "result"
-        ]["pane"]
         name = "run-watch-check-" + uuid.uuid4().hex[:16]
         launch = {
             "name": name,
@@ -440,25 +420,36 @@ class Runtime:
             "harness": candidate.role.expected_agent,
         }
         write_json(directory / "launch.json", launch)
-        reply = self.herdr(
-            identity.herdr_session,
-            "agent",
-            "start",
+
+        def record_created(pane: dict) -> None:
+            launch.update(
+                pane_id=pane["pane_id"],
+                terminal_id=pane.get("terminal_id"),
+                state="created",
+            )
+            info = self.herdr(
+                identity.herdr_session,
+                "pane",
+                "process-info",
+                "--pane",
+                pane["pane_id"],
+            )["result"]["process_info"]
+            shell_pid = info.get("shell_pid")
+            launch.update(
+                shell_pid=shell_pid,
+                shell_birth=recruiter._process_start_time(shell_pid),
+            )
+            write_json(directory / "launch.json", launch)
+
+        pane_id, _, _ = recruiter._start_herdr_agent(
             name,
-            "--cwd",
-            target.order["cwd"],
-            "--tab",
-            pane["tab_id"],
-            "--split",
-            "down",
-            "--no-focus",
-            "--",
-            "bash",
-            "-lc",
+            {**target.order, "cockpit_pane": identity.pane_id},
             command,
+            split_direction="down",
+            herdr_session=identity.herdr_session,
+            on_pane_created=record_created,
         )
-        agent = reply.get("result", {}).get("agent", {})
-        launch.update(pane_id=agent.get("pane_id"), state="running")
+        launch.update(pane_id=pane_id, state="running")
         write_json(directory / "launch.json", launch)
         if not isinstance(launch["pane_id"], str) or not launch["pane_id"]:
             raise RunWatchError("Checker launch returned no pane identity")
@@ -488,7 +479,40 @@ class Runtime:
         if probe.pane_state == authority.PaneState.GONE:
             return
         if probe.target != identity or probe.pane_state != authority.PaneState.PRESENT:
-            raise RunWatchError("Checker cleanup identity unverified")
+            # Names clear on exit in 0.9.5. Only the exact terminal created for this
+            # Checker, with no replacement agent, can authorize cleanup in that case.
+            current = (
+                self.herdr(session, "pane", "get", pane)
+                .get("result", {})
+                .get("pane", {})
+            )
+            if (
+                not launch.get("terminal_id")
+                or current.get("terminal_id") != launch["terminal_id"]
+                or current.get("workspace_id") != launch["workspace_id"]
+                or current.get("agent")
+                or current.get("agent_name")
+            ):
+                raise RunWatchError("Checker cleanup identity unverified")
+            info = self.herdr(session, "pane", "process-info", "--pane", pane)[
+                "result"
+            ]["process_info"]
+            foreground = info.get("foreground_processes", [])
+            shell_pid = launch.get("shell_pid")
+            if foreground and (
+                not shell_pid
+                or not launch.get("shell_birth")
+                or recruiter._process_start_time(shell_pid) != launch["shell_birth"]
+                or any(item.get("pid") != shell_pid for item in foreground)
+            ):
+                raise RunWatchError("Checker cleanup identity unverified")
+            try:
+                self.herdr(session, "agent", "get", launch["name"])
+            except recruiter.RecruiterError as error:
+                if "agent_not_found" not in str(error):
+                    raise
+            else:
+                raise RunWatchError("Checker cleanup identity unverified")
         self.herdr(session, "pane", "close", pane)
         # Herdr pane close destroys the PTY and its process tree. Verify absence
         # immediately, even when the Checker has already exited on its own.

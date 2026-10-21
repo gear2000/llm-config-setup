@@ -262,28 +262,30 @@ def _start_gated(
     if not isinstance(tab_id, str) or not tab_id:
         raise ImplementerStartError(f"HIL pane {hil_pane} has no tab_id")
     response = recruiter._herdr_json(
-        "agent",
-        "start",
-        name,
+        "pane",
+        "split",
+        hil_pane,
+        "--direction",
+        "down",
         "--cwd",
         str(cwd),
-        "--tab",
-        tab_id,
-        "--split",
-        "down",
         "--no-focus",
-        "--",
-        "bash",
-        str(script_path),
         herdr_session=herdr_session,
     )
-    agent = response.get("result", {}).get("agent", {})
-    pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
+    created = response.get("result", {}).get("pane", {})
+    pane_id = created.get("pane_id") if isinstance(created, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
         raise ImplementerStartError(
-            "herdr agent start returned no plan-implementer pane_id"
+            "herdr pane split returned no plan-implementer pane_id"
         )
-    returned_workspace = agent.get("workspace_id") if isinstance(agent, dict) else None
+    recruiter._herdr(
+        "pane",
+        "run",
+        pane_id,
+        shlex.join(["exec", "bash", str(script_path)]),
+        herdr_session=herdr_session,
+    )
+    returned_workspace = created.get("workspace_id")
     if (
         isinstance(workspace_id, str)
         and isinstance(returned_workspace, str)
@@ -291,7 +293,7 @@ def _start_gated(
     ):
         try:
             panes = supervision.Panes(recruiter, {"herdr_session": herdr_session, "workspace_id": returned_workspace, "hil_pane": hil_pane})
-            owner = panes.capture(pane_id, name)
+            owner = panes.capture(pane_id, name, gate_script=script_path)
             cleanup = panes.close(owner, "implementer")
             if cleanup['status'] == 'cleanup-failed':
                 raise supervision.SupervisionError(str(cleanup))
@@ -390,11 +392,7 @@ def _health(
 
 
 def _safe_name(slug: str) -> str:
-    raw = f"plan-implementer-{slug}"
-    return "".join(
-        character if character.isalnum() or character in "-_" else "-"
-        for character in raw
-    )[:80]
+    return recruiter._safe_agent_name("implementer", slug, 1)
 
 
 def _plan_digest(path: Path) -> str:
@@ -633,12 +631,12 @@ def start_implementer(
                 _safe_name(slug), hil_pane, cwd, script_path, herdr_session
             )
             pane_receipt = {"herdr_session": herdr_session, "workspace_id": workspace_id, "hil_pane": hil_pane}
-            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug))
+            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug), gate_script=script_path)
             _verify_gated(implementer_pane, script_path, herdr_session)
             implementer_pane = _place_in_control_tab(
                 implementer_pane, workspace_id, herdr_session
             )
-            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug))
+            cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug), gate_script=script_path)
             ownership = {
                 "implementer": cleanup_owner,
                 "leader": {"pane_id": implementer_pane, "state": "created"},
@@ -675,6 +673,7 @@ def start_implementer(
             )
             _release_gate(gate_path, release_token)
             health = _health(implementer_pane, cwd, profile, roster, herdr_session)
+            recruiter._herdr("agent", "rename", implementer_pane, _safe_name(slug), herdr_session=herdr_session)
             cleanup_owner = supervision.Panes(recruiter, pane_receipt).capture(implementer_pane, _safe_name(slug))
             ownership['implementer'] = cleanup_owner
             receipt = {

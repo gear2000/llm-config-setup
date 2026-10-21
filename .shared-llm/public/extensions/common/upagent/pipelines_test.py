@@ -591,19 +591,21 @@ class FakeHerdr:
         self.calls.append(args)
         head = args[:2]
         if head == ("workspace", "list"):
-            return {"result": {"workspaces": self.workspaces}}
+            return {"result": {"type": "workspace_list", "workspaces": self.workspaces}}
         if head == ("pane", "list"):
-            return {"result": {"panes": [{"pane_id": "pane-anchor"}]}}
+            return {"result": {"type": "pane_list", "panes": [{"pane_id": "w1:p1", "terminal_id": "term_anchor", "workspace_id": "w1", "tab_id": "w1:t1"}]}}
         if head == ("pane", "split"):
-            return {"result": {"pane": {"pane_id": "pane-split"}}}
+            return {"result": {"type": "pane_info", "pane": {"pane_id": "w1:p2", "terminal_id": "term_split", "workspace_id": "w1", "tab_id": "w1:t1"}}}
         if head == ("workspace", "create"):
             return {
                 "result": {
+                    "type": "workspace_created",
                     "root_pane": {
-                        "pane_id": "pane-root",
-                        "tab_id": "tab-root",
-                        "workspace_id": "ws-created",
-                    }
+                        "pane_id": "w2:p1",
+                        "terminal_id": "term_root",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
                 }
             }
         raise AssertionError(f"unexpected herdr json call: {args}")
@@ -709,14 +711,14 @@ def test_launch_adopts_the_unified_workspace_and_runs_the_slash_command(
 
     assert result["workspace_state"] == "adopted"
     assert result["workspace_id"] == "ws-1"
-    assert result["pane_id"] == "pane-split"
+    assert result["pane_id"] == "w1:p2"
     assert result["prompt"] == "/upagent-pipeline rpi --skip-research"
-    assert result["health"] == {"healthy": True, "pane_id": "pane-split"}
+    assert result["health"] == {"healthy": True, "pane_id": "w1:p2"}
     assert fake_herdr.pane_command() == (
         f"cd {tmp_path} && claude --dangerously-skip-permissions "
         "'/upagent-pipeline rpi --skip-research'"
     )
-    assert ("pane", "rename", "pane-split", "pipeline-rpi") in fake_herdr.calls
+    assert ("pane", "rename", "w1:p2", "pipeline-rpi") in fake_herdr.calls
     assert not any(call[:2] == ("workspace", "create") for call in fake_herdr.calls)
 
 
@@ -739,11 +741,11 @@ def test_launch_creates_the_unified_workspace_when_none_exists(
     result = pipelines.launch("no-mistakes", [], repo=tmp_path)
 
     assert result["workspace_state"] == "created"
-    assert result["workspace_id"] == "ws-created"
-    assert result["pane_id"] == "pane-root"
+    assert result["workspace_id"] == "w2"
+    assert result["pane_id"] == "w2:p1"
     assert result["prompt"] == "/upagent-pipeline no-mistakes"
-    assert ("tab", "rename", "tab-root", "control") in fake_herdr.calls
-    assert ("pane", "rename", "pane-root", "pipeline-no-mistakes") in fake_herdr.calls
+    assert ("tab", "rename", "w2:t1", "control") in fake_herdr.calls
+    assert ("pane", "rename", "w2:p1", "pipeline-no-mistakes") in fake_herdr.calls
 
 
 def test_a_failed_startup_closes_the_workspace_this_launch_created(
@@ -759,7 +761,7 @@ def test_a_failed_startup_closes_the_workspace_this_launch_created(
     with pytest.raises(PipelineError, match="pipeline launch failed.*did not start"):
         pipelines.launch("rpi", [], repo=tmp_path)
 
-    assert ("workspace", "close", "ws-created") in fake_herdr.calls
+    assert ("workspace", "close", "w2") in fake_herdr.calls
 
 
 def test_a_failed_startup_closes_only_its_own_pane_in_an_adopted_workspace(
@@ -779,7 +781,7 @@ def test_a_failed_startup_closes_only_its_own_pane_in_an_adopted_workspace(
     with pytest.raises(PipelineError, match="pipeline launch failed"):
         pipelines.launch("rpi", [], repo=tmp_path)
 
-    assert ("pane", "close", "pane-split") in fake_herdr.calls
+    assert ("pane", "close", "w1:p2") in fake_herdr.calls
     assert not any(call[:2] == ("workspace", "close") for call in fake_herdr.calls)
 
 
@@ -799,10 +801,10 @@ def test_a_failed_tab_placement_closes_the_pane_the_split_created(
         ),
     )
 
-    with pytest.raises(PipelineError, match="could not place pipeline pane pane-split"):
+    with pytest.raises(PipelineError, match="could not place pipeline pane w1:p2"):
         pipelines.launch("rpi", [], repo=tmp_path)
 
-    assert ("pane", "close", "pane-split") in fake_herdr.calls
+    assert ("pane", "close", "w1:p2") in fake_herdr.calls
     assert not any(call[:2] == ("pane", "run") for call in fake_herdr.calls)
     assert not any(call[:2] == ("workspace", "close") for call in fake_herdr.calls)
 

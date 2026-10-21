@@ -335,26 +335,28 @@ def _start_gated_leader(
     if not isinstance(tab_id, str) or not tab_id:
         raise PhaseStartError(f"TUI pane {tui_pane} has no tab_id")
     response = recruiter._herdr_json(
-        "agent",
-        "start",
-        name,
+        "pane",
+        "split",
+        tui_pane,
+        "--direction",
+        "down",
         "--cwd",
         str(cwd),
-        "--tab",
-        tab_id,
-        "--split",
-        "down",
         "--no-focus",
-        "--",
-        "bash",
-        str(script_path),
         herdr_session=herdr_session,
     )
-    agent = response.get("result", {}).get("agent", {})
-    pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
+    created = response.get("result", {}).get("pane", {})
+    pane_id = created.get("pane_id") if isinstance(created, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
-        raise PhaseStartError("herdr agent start returned no phase leader pane_id")
-    returned_workspace = agent.get("workspace_id") if isinstance(agent, dict) else None
+        raise PhaseStartError("herdr pane split returned no phase leader pane_id")
+    recruiter._herdr(
+        "pane",
+        "run",
+        pane_id,
+        shlex.join(["exec", "bash", str(script_path)]),
+        herdr_session=herdr_session,
+    )
+    returned_workspace = created.get("workspace_id")
     if (
         isinstance(workspace_id, str)
         and isinstance(returned_workspace, str)
@@ -433,11 +435,7 @@ def _leader_expected_health(
 
 
 def _safe_name(slug: str, phase_id: str, pass_number: int) -> str:
-    raw = f"phase-leader-{slug}-{phase_id}-p{pass_number}"
-    return "".join(
-        character if character.isalnum() or character in "-_" else "-"
-        for character in raw
-    )[:80]
+    return recruiter._safe_agent_name("phase-leader", f"{slug}:{phase_id}", pass_number)
 
 
 def start_phase(
@@ -627,6 +625,7 @@ def start_phase(
             leader_health = _leader_health(
                 leader_pane, cwd, lead_profile, roster, herdr_session
             )
+            recruiter._herdr("agent", "rename", leader_pane, _safe_name(slug, phase_id, pass_number), herdr_session=herdr_session)
             _set_active_leader(
                 active_path,
                 phase_id,
