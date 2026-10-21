@@ -431,7 +431,7 @@ def wait_for_agent_health(
 @contextmanager
 def _layout_lock(workspace_id: str) -> Iterator[None]:
     key = hashlib.sha256(workspace_id.encode()).hexdigest()
-    path = Path("/tmp/.upagent/tui-controller-layout") / f"{key}.lock"
+    path = STATE_FILE.parent / "tui-controller-layout" / f"{key}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as stream:
         deadline = time.monotonic() + LAYOUT_LOCK_TIMEOUT_SECONDS
