@@ -250,11 +250,14 @@ A managed requester may opt one worker into `completion_policy: requester_releas
     classified as stalled (they carry no Sentinel), corrupt nudge state falls through
     to the pre-ladder blocked path, and exhausted nudges publish exactly
     one typed requester escalation (durable idempotency flag). A pending STALLED
-    closeout holds when the recorded worker PID and birth identity are still live
-    and either a staging/result-directory file changed within 15 minutes or a live
-    descendant process exists. Python records `worker-stall-held` and rechecks during
-    supervision. The hold cannot extend the hard deadline or requester cancellation;
-    death or loss of both life signals lets the pending closeout end the wait.
+    closeout holds when the recorded worker PID and birth identity are still live,
+    the pane status is working/idle/done (never blocked), and either a lease-private
+    staging file changed within 15 minutes or a descendant born after first action
+    consumed CPU since the previous 15 s probe; resident helpers and waiting-only jobs
+    earn no hold. Python records `worker-stall-held` once (plus one requester message)
+    and `worker-stall-released` with its reason. The hold cannot extend the hard
+    deadline or requester cancellation; death or loss of both life signals lets the
+    pending closeout end the wait.
     Cross-provider supervision is mandatory for every hire and
     retry: the Recruiter uses the worker's immutable offering provider (falling back
     to known harness/model identity only when no snapshot provider exists), filters the
