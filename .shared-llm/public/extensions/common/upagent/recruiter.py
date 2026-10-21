@@ -5311,6 +5311,7 @@ def _await_sentinel_closeout_after_worker_gone(
     alone always says why the supervised wait ended.
     """
     grace_deadline = min(deadline, time.monotonic() + SENTINEL_CLOSEOUT_GRACE_SECONDS)
+    sentinel_watch.wait_deadline = deadline
     next_sentinel_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while True:
         # Published at entry — the window starts with an awake Sentinel — and
@@ -5332,6 +5333,7 @@ def _await_sentinel_closeout_after_worker_gone(
         if remaining <= 0:
             # Typed lapse: a wake event alone proves only that Python touched a
             # file; this records WHY the supervised wait fell back mechanically.
+            sentinel_watch._release_stall_hold("hard wait deadline reached")
             sentinel_watch.note_window_lapsed("closeout")
             return False
         time.sleep(min(COMPLETION_MONITOR_POLL_SECONDS, remaining))
@@ -5365,6 +5367,8 @@ def _wait_for_interactive_completion(
         )
     deadline = time.monotonic() + timeout_ms / 1000
     next_liveness_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
+    if sentinel_watch is not None:
+        sentinel_watch.wait_deadline = deadline
     while True:
         # Supervision is recomputed every iteration, never snapshotted at wait entry: a
         # Sentinel that dies mid-wait hands the rest of the wait back to the mechanical
@@ -5402,6 +5406,8 @@ def _wait_for_interactive_completion(
             return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if sentinel_watch is not None:
+                sentinel_watch._release_stall_hold("hard wait deadline reached")
             # The timeout decision RE-OBSERVES the finalized event: a validation
             # that landed after this iteration's landing pass but before this line
             # must end the wait on the bundle, never as a timeout over finished
@@ -5598,6 +5604,8 @@ def _wait_for_exec_status(
         return monitor_finalized is not None and monitor_finalized.is_set()
 
     deadline = time.monotonic() + timeout_ms / 1000
+    if sentinel_watch is not None:
+        sentinel_watch.wait_deadline = deadline
     args = (
         "agent",
         "wait",
@@ -5654,6 +5662,8 @@ def _wait_for_exec_status(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate(process)
+            if sentinel_watch is not None:
+                sentinel_watch._release_stall_hold("hard wait deadline reached")
             # See the interactive wait: the timeout decision re-observes the
             # finalized event so a validation racing the deadline is never lost.
             if _bundle_already_valid():
@@ -6668,26 +6678,68 @@ class _NudgeDeliveryError(RecruiterError):
     """A reserved nudge could not be submitted; its rung remains spent."""
 
 
-def _live_descendant(pid: int) -> int | None:
-    """Return one live descendant from a bounded process snapshot."""
-    snapshot = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,stat="],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=2,
-    )
+def _live_descendant(
+    pid: int, first_action_ns: int, previous: dict[tuple[int, int], int] | None
+) -> tuple[int | None, dict[tuple[int, int], int] | None]:
+    """Find a post-action job whose subtree used CPU since the previous probe.
+
+    Resident helpers are not jobs. Linux birth ticks fence the first-action stamp,
+    and utime+stime deltas distinguish a running job from a sleeping helper. Other
+    platforms have no CPU signal here; file activity can still earn a hold.
+    """
+    if sys.platform != "linux":
+        return None, None
+    try:
+        snapshot = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,stat="],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # An unavailable snapshot supplies no life signal and no delta baseline.
+        return None, None
     children: dict[int, list[tuple[int, str]]] = {}
     for line in snapshot.stdout.splitlines():
         child, parent, state = line.split()
         children.setdefault(int(parent), []).append((int(child), state))
+    ticks_per_second = os.sysconf("SC_CLK_TCK")
+    boot_time = time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
+    current: dict[tuple[int, int], int] = {}
+    births: dict[int, int] = {}
     pending = list(children.get(pid, []))
     while pending:
         child, state = pending.pop()
-        if not state.startswith("Z") and _process_start_time(child) is not None:
-            return child
         pending.extend(children.get(child, []))
-    return None
+        if state.startswith("Z"):
+            continue
+        try:
+            stat = Path(f"/proc/{child}/stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            # A descendant exited during the snapshot; it cannot keep a hold.
+            continue
+        fields = stat[stat.rfind(")") + 2 :].split()
+        if fields[0] == "Z":
+            continue
+        birth = int(fields[19])
+        births[child] = birth
+        current[child, birth] = int(fields[11]) + int(fields[12])
+    if previous is not None:
+        for child, birth in births.items():
+            if (boot_time + birth / ticks_per_second) * 1e9 <= first_action_ns:
+                continue
+            subtree = [child]
+            total = prior = 0
+            while subtree:
+                member = subtree.pop()
+                identity = (member, births.get(member, -1))
+                total += current.get(identity, 0)
+                prior += previous.get(identity, 0)
+                subtree.extend(desc for desc, _state in children.get(member, []))
+            if total > prior:
+                return child, current
+    return None, current
 
 
 class _SentinelWatch:
@@ -6732,6 +6784,11 @@ class _SentinelWatch:
         self._nudge_address: str | None = None
         self._authority = nudge_authority.NudgeAuthority(ledger.root)
         self._stall_hold_evidence: dict[str, object] | None = None
+        self._stall_hold_signature: tuple[int, int, int] | None = None
+        self._next_stall_probe = 0.0
+        self._worker_job_cpu: dict[tuple[int, int], int] | None = None
+        self._active_descendant: int | None = None
+        self.wait_deadline: float | None = None
 
     @property
     def supervising(self) -> bool:
@@ -7163,14 +7220,15 @@ class _SentinelWatch:
             # A fresh authority probe interrupted the idle streak. The next status
             # observation must earn two confirmations again, including after recovery.
             self._idle_probes = 0
-        self.ledger._event(
-            self.key,
-            "nudge",
-            trigger=trigger,
-            episode=outcome.episode,
-            outcome=outcome.outcome,
-            reason=outcome.reason,
-        )
+        if outcome.outcome != "cap-exhausted" or self._stall_hold_evidence is None:
+            self.ledger._event(
+                self.key,
+                "nudge",
+                trigger=trigger,
+                episode=outcome.episode,
+                outcome=outcome.outcome,
+                reason=outcome.reason,
+            )
         if outcome.outcome == "cap-exhausted":
             episode = json.loads(state_path.read_text())["continue"]
             if episode["episode"] == outcome.episode and not episode["escalated"]:
@@ -7300,30 +7358,79 @@ class _SentinelWatch:
                 self.key, "sentinel-stall-nudge-resume-unavailable", reason=str(error)
             )
 
-    def _hold_stalled_worker(self) -> bool:
-        """A live exact worker with recent files or a live child keeps its wait.
-
-        Called only where STALLED would otherwise terminalize. The wait loop still
-        owns its original deadline, cancellation, and normal supervision cadence.
-        """
+    def _stall_worker_health(self) -> dict | None:
         health_path = self.ledger.request_dir(self.key) / "worker-health.json"
         try:
             health = json.loads(health_path.read_text())
         except FileNotFoundError:
-            return False
+            return None
         if (
             health.get("attempt") != self.attempt
             or health.get("generation") != self.generation
             or health.get("pane_id") != self.sentinel_state.get("worker_pane")
             or self.ledger.state(self.key).get("state") in self._NUDGE_REJECTED_STATES
         ):
-            return False
+            return None
         pid, birth = health.get("process_pid"), health.get("process_start_time")
         if not isinstance(birth, str) or _process_start_time(pid) != birth:
+            return None
+        return health
+
+    def _probe_stall_job(self) -> None:
+        """Sample before a closeout arrives so the first STALLED probe has a delta."""
+        health = self._stall_worker_health()
+        first_action = next(
+            (
+                event for event in self.ledger.events(self.key)
+                if event.get("event") == FIRST_ACTION_EVENT
+                and event.get("attempt") == self.attempt
+                and event.get("worker_pane") == self.sentinel_state.get("worker_pane")
+            ),
+            None,
+        ) if health is not None else None
+        if health is None or first_action is None:
+            self._active_descendant, self._worker_job_cpu = None, None
+            return
+        self._active_descendant, self._worker_job_cpu = _live_descendant(
+            health["process_pid"], first_action["at_ns"], self._worker_job_cpu
+        )
+
+    def _release_stall_hold(self, reason: str) -> None:
+        if self._stall_hold_evidence is not None:
+            self.ledger._event(
+                self.key, "worker-stall-released", reason=reason,
+                attempt=self.attempt, generation=self.generation,
+            )
+            self._stall_hold_evidence = None
+            self._stall_hold_signature = None
+
+    def _hold_stalled_worker(self) -> bool:
+        """Hold only a live, unblocked worker with recent staging or an active job."""
+        if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+            self._release_stall_hold("hard wait deadline reached")
+            return False
+        health = self._stall_worker_health()
+        if health is None:
+            self._release_stall_hold("worker identity is gone or request no longer permits a hold")
+            return False
+        pid, birth = health["process_pid"], health["process_start_time"]
+        try:
+            pane = _herdr_json(
+                "pane", "get", health["pane_id"],
+                herdr_session=self.herdr_session, timeout_seconds=2,
+            ).get("result", {}).get("pane", {})
+        except RecruiterError as error:
+            self._release_stall_hold(f"worker status unavailable: {error}")
+            return False
+        status = pane.get("agent_status")
+        if status not in ("working", "idle", "done"):
+            self._release_stall_hold(f"worker status is {status!r}")
             return False
         cutoff = time.time() - 15 * 60
+        # The result bundle lives in lease-private staging with the other artifacts.
+        # Its public parent also holds hub-written prompt/order/request files, so it
+        # must NEVER be used as worker activity evidence.
         directories = {item.staging_path.parent for item in self.manifest.artifacts}
-        directories.add(self.manifest.artifact("result").public_path.parent)
         recent_file = None
         for directory in sorted(directories):
             for path in directory.rglob("*"):
@@ -7337,11 +7444,13 @@ class _SentinelWatch:
                     break
             if recent_file is not None:
                 break
-        descendant = _live_descendant(cast(int, pid)) if recent_file is None else None
+        descendant = self._active_descendant if recent_file is None else None
         if recent_file is None and descendant is None:
+            self._release_stall_hold("no recent worker files or post-action job CPU progress")
             return False
         # A PID reused while reading the files/process snapshot cannot earn a hold.
         if _process_start_time(pid) != birth:
+            self._release_stall_hold("worker identity changed during probe")
             return False
         evidence = {
             "worker_pid": pid,
@@ -7352,14 +7461,47 @@ class _SentinelWatch:
             "attempt": self.attempt,
             "generation": self.generation,
         }
-        if evidence != self._stall_hold_evidence:
+        if self._stall_hold_evidence is None:
             self.ledger._event(self.key, "worker-stall-held", **evidence)
             self._stall_hold_evidence = evidence
+            reason = (
+                f"recent worker file {recent_file}"
+                if recent_file else f"post-action job {descendant} consumed CPU since the last probe"
+            )
+            _notify_requester(
+                self.ledger, self.key, self.order, self.generation,
+                "worker-stall-held", f"The stalled worker is held: {reason}.", evidence,
+            )
+        if self.closeout_path.exists():
+            stat = self.closeout_path.stat()
+            self._stall_hold_signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
         return True
 
     def poll(self) -> str | None:
-        if not self.closeout_path.is_file():
+        now = time.monotonic()
+        if (self._stall_hold_evidence is not None
+                and self.wait_deadline is not None and now >= self.wait_deadline):
+            self._release_stall_hold("hard wait deadline reached")
             return None
+        if self._stall_hold_evidence is not None:
+            state = self.ledger.state(self.key).get("state")
+            if state in self._NUDGE_REJECTED_STATES:
+                self._release_stall_hold(f"request state is {state}")
+                return None
+        probe_due = now >= self._next_stall_probe
+        if probe_due:
+            self._next_stall_probe = now + AGENT_WAIT_PANE_PROBE_SECONDS
+            self._probe_stall_job()
+        if not self.closeout_path.is_file():
+            self._release_stall_hold("STALLED closeout removed")
+            return None
+        if self._stall_hold_evidence is not None:
+            stat = self.closeout_path.stat()
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            if signature != self._stall_hold_signature:
+                self._release_stall_hold("Sentinel closeout changed")
+            elif not probe_due:
+                return None
         request_id = lifecycle.request_identity(self.order)
         try:
             closeout = contracts_sentinel.load_closeout(
@@ -7396,18 +7538,19 @@ class _SentinelWatch:
             scope_roots=scope_roots,
         )
         outcome = closeout["outcome"]
-        self.ledger._event(
-            self.key,
-            SENTINEL_CLOSEOUT_EVENT,
-            outcome=outcome,
-            interpretation=closeout["interpretation"],
-            corroborated_citations=corroborated,
-            uncorroborated_citations=uncorroborated,
-            blocking_question=closeout.get("blocking_question"),
-            exchanges=len(cast(list, closeout["exchanges"])),
-            first_action_recorded=_first_action_event(self.ledger, self.key)
-            is not None,
-        )
+        if self._stall_hold_evidence is None:
+            self.ledger._event(
+                self.key,
+                SENTINEL_CLOSEOUT_EVENT,
+                outcome=outcome,
+                interpretation=closeout["interpretation"],
+                corroborated_citations=corroborated,
+                uncorroborated_citations=uncorroborated,
+                blocking_question=closeout.get("blocking_question"),
+                exchanges=len(cast(list, closeout["exchanges"])),
+                first_action_recorded=_first_action_event(self.ledger, self.key)
+                is not None,
+            )
         reason = _closeout_published_reason(closeout, corroborated, uncorroborated)
         if outcome == "NEVER_STARTED":
             # Routes through the same triage as the mechanical deadline: the typed
@@ -7471,6 +7614,10 @@ class _SentinelWatch:
                             # Keep the claim pending so loss of either life signal is
                             # re-evaluated on subsequent polls, even if the Sentinel died.
                             os.replace(archived, self.closeout_path)
+                            stat = self.closeout_path.stat()
+                            self._stall_hold_signature = (
+                                stat.st_ino, stat.st_mtime_ns, stat.st_size
+                            )
                             return None
                         raise SentinelStalledError(
                             f"sentinel closeout STALLED: {reason}",
@@ -7478,6 +7625,7 @@ class _SentinelWatch:
                         ) from prompt_error
                 return None
             if self._attempt_stall_nudge(reason):
+                self._release_stall_hold("nudge ladder resumed")
                 return None
             if self._hold_stalled_worker():
                 return None
