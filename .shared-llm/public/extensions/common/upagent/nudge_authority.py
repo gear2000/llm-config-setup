@@ -53,6 +53,7 @@ INBOX_PAYLOAD = "read your inbox"
 Payload = Literal["continue", "inbox"]
 Outcome = Literal[
     "delivered",
+    "delivery-unconfirmed",
     "backoff",
     "cap-exhausted",
     "aborted",
@@ -64,6 +65,10 @@ Outcome = Literal[
 
 class NudgeAuthorityError(ValueError):
     """Corrupt authority state or invalid identity/input; never a quiet reset."""
+
+
+class NudgeDeliveryUnconfirmed(RuntimeError):
+    """Submission was attempted but no new turn confirmed delivery."""
 
 
 @dataclass(frozen=True)
@@ -191,7 +196,7 @@ def _verify(state: Any, target: TargetIdentity) -> None:
             and math.isfinite(item["at"])
             and item["at"] >= previous_at
             and type(item.get("delivered")) is bool
-            and item.get("state") in ("reserved", "delivered", "aborted")
+            and item.get("state") in ("reserved", "delivered", "aborted", "delivery-unconfirmed")
             and item["delivered"] == (item["state"] == "delivered")
             and isinstance(item.get("trigger"), str)
             and item["trigger"].strip()
@@ -209,7 +214,7 @@ def _verify(state: Any, target: TargetIdentity) -> None:
             raise NudgeAuthorityError("invalid inbox sequence")
         if not (
             isinstance(item, dict)
-            and item.get("state") in ("reserved", "delivered", "aborted")
+            and item.get("state") in ("reserved", "delivered", "aborted", "delivery-unconfirmed")
             and _integer(item.get("at_ns"))
             and _integer(item.get("attempts"), 1)
             and isinstance(item.get("trigger"), str)
@@ -455,7 +460,13 @@ class NudgeAuthority:
                 stall_nudge.record_verdict(episode, second_verdict)
             self._save(target, state)
             return NudgeOutcome("aborted", reason, episode["episode"], seqs)
-        deliver(text)
+        try:
+            deliver(text)
+        except NudgeDeliveryUnconfirmed as error:
+            for record in records:
+                record.update(state="delivery-unconfirmed", reason=str(error))
+            self._save(target, state)
+            return NudgeOutcome("delivery-unconfirmed", str(error), episode["episode"], seqs)
         for record in records:
             record["state"] = "delivered"
         if payload == "continue":

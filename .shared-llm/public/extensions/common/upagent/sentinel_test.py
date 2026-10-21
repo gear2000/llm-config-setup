@@ -3754,3 +3754,48 @@ def test_failed_process_snapshot_is_no_hold_signal(live_stalled_worker, monkeypa
     with pytest.raises(recruiter.SentinelStalledError):
         watch.poll()
     assert "worker-stall-held" not in _events(ledger, key)
+
+
+def test_unconfirmed_nudge_spends_rung_without_claiming_delivery(tmp_path, monkeypatch):
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    submit = recruiter._submit_agent_prompt
+    watch, _ = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", submit)
+    clock = [1000.0]
+    monkeypatch.setattr(recruiter.time, "time", lambda: clock[0])
+    monkeypatch.setattr(recruiter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(recruiter.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    sent = []
+
+    def herdr(*args, **kwargs):
+        if args[:2] == ("agent", "prompt"):
+            sent.append(args[2:4])
+            if args[2] == "worker-address":
+                raise recruiter.RecruiterError("agent_prompt_stalled: Enter lost")
+            return {"result": {"agent": {"agent_status": "working"}}}
+        if args[:2] == ("agent", "wait"):
+            return {"result": {"agent": {"agent_status": "idle", "completion_seq": 7}}}
+        reply = _nudge_herdr(*args, **kwargs)
+        if args[:2] == ("agent", "get"):
+            reply["result"]["agent"].update(agent_status="idle", completion_seq=7)
+        return reply
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr)
+    # Old scrollback and an unsent composer both show the exact one-word payload.
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *a, **kw: "continue")
+    for ordinal in range(1, 4):
+        watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+        assert watch.poll() is None
+        state = json.loads(_nudge_state_path(watch).read_text())["continue"]
+        assert len(state["nudges"]) == ordinal
+        assert all(n["state"] == "delivery-unconfirmed" and not n["delivered"] for n in state["nudges"])
+        assert _event(ledger, key, "nudge")["outcome"] == "delivery-unconfirmed"
+        clock[0] += 1000
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert _event(ledger, key, "nudge")["outcome"] == "cap-exhausted"
+    assert [text for target, text in sent if target == "worker-address"] == ["continue"] * 3
+    notices = [text for target, text in sent if target == "sentinel-address"]
+    assert len(notices) == 3 and all("delivery is unconfirmed" in text for text in notices)
+    assert "worker-nudge-delivered" not in _events(ledger, key)
