@@ -7619,6 +7619,9 @@ class _SentinelWatch:
                                 stat.st_ino, stat.st_mtime_ns, stat.st_size
                             )
                             return None
+                        if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+                            self._release_stall_hold("hard wait deadline reached")
+                            return None
                         raise SentinelStalledError(
                             f"sentinel closeout STALLED: {reason}",
                             closeout,
@@ -7628,6 +7631,11 @@ class _SentinelWatch:
                 self._release_stall_hold("nudge ladder resumed")
                 return None
             if self._hold_stalled_worker():
+                return None
+            # A probe can consume the remaining wait budget. Let the caller's hard
+            # deadline path decide completion/timeout instead of publishing STALLED.
+            if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+                self._release_stall_hold("hard wait deadline reached")
                 return None
             raise SentinelStalledError(
                 f"sentinel closeout STALLED: {reason}",

@@ -3580,11 +3580,22 @@ def test_stalled_exact_live_worker_with_descendant_is_held(live_stalled_worker):
     assert holds[-1]["descendant_pid"] == int(child_file.read_text())
 
 
-def test_stalled_hold_does_not_extend_hard_wait_deadline(live_stalled_worker):
+@pytest.mark.parametrize("probe_overruns,already_held", [(False, True), (True, True), (True, False)])
+def test_stalled_hold_does_not_extend_hard_wait_deadline(
+    live_stalled_worker, monkeypatch, probe_overruns, already_held
+):
     ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
     path = manifest.artifact("result").staging_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("partial")
+    if already_held:
+        assert watch.poll() is None
+    clock = [1000.0]
+    monkeypatch.setattr(recruiter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(recruiter.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    if probe_overruns:
+        watch._next_stall_probe = 0
+        monkeypatch.setattr(watch, "_probe_stall_job", lambda: clock.__setitem__(0, clock[0] + 0.031))
     with pytest.raises(recruiter.AgentWaitTimeout):
         recruiter._wait_for_interactive_completion(
             "worker-pane",
@@ -3594,8 +3605,10 @@ def test_stalled_hold_does_not_extend_hard_wait_deadline(live_stalled_worker):
             sentinel_watch=watch,
             herdr_session="default",
         )
-    assert any(e["event"] == "worker-stall-held" for e in ledger.events(key))
-    assert _event(ledger, key, "worker-stall-released")["reason"] == "hard wait deadline reached"
+    if already_held:
+        assert _event(ledger, key, "worker-stall-released")["reason"] == "hard wait deadline reached"
+    else:
+        assert "worker-stall-held" not in _events(ledger, key)
     assert worker.poll() is None
 
 
