@@ -663,12 +663,16 @@ Durable files are the source of truth; terminal text is display-only.
   Exhaustion publishes `worker-stall-escalation` once per episode and marks that
   episode escalated after publication. A crash before the flag may repeat the notice.
   Before a STALLED closeout ends the wait, Python checks the recorded worker PID and
-  process birth identity. A live matching worker is held while any file under its
-  staging or result directory was modified in the last 15 minutes, or while it has a
-  live descendant process. `worker-stall-held` records the identity and life signal.
-  Subsequent supervision polls recheck the hold. Worker death or loss of both life
-  signals permits the original STALLED closeout; the existing deadline and requester
-  cancellation still end the wait. This does not reset or extend the nudge ladder.
+  process birth identity. A live matching worker whose pane status is working, idle,
+  or done is held while either a file under its lease-private staging directory
+  changed in the last 15 minutes (the hub's own request files never count), or a
+  descendant process born after the worker's first action consumed CPU since the
+  previous 15 s probe. A resident helper (MCP server, Codex code-mode host, language
+  server) and a job that only waits (sleep, network, a remote run) earn no hold; a
+  worker blocked in a dialog is never held. `worker-stall-held` and one requester
+  message record the start of a hold, `worker-stall-released` its end and reason.
+  Worker death, loss of both signals, the hard deadline, or requester cancellation
+  ends the hold. This does not reset or extend the nudge ladder.
   Herdr 0.9.5 can report Claude idle while background work continues, so a healthy
   worker with a background command can still receive a stall nudge.
   Invalid state fails loudly; requester decisions, cancellation, and finalization

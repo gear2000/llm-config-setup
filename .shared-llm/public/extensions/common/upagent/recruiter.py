@@ -6702,13 +6702,19 @@ def _live_descendant(
             check=True,
             timeout=2,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        # An unavailable snapshot supplies no life signal and no delta baseline.
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # An unavailable snapshot (ps failing, timing out, or missing from the host)
+        # supplies no life signal and no delta baseline. This probe runs on every
+        # supervised poll, so it must never take the wait down with it.
         return None, None
     children: dict[int, list[tuple[int, str]]] = {}
-    for line in snapshot.stdout.splitlines():
-        child, parent, state = line.split()
-        children.setdefault(int(parent), []).append((int(child), state))
+    try:
+        for line in snapshot.stdout.splitlines():
+            child, parent, state = line.split()
+            children.setdefault(int(parent), []).append((int(child), state))
+    except ValueError:
+        # An unparseable snapshot line is treated like an unavailable snapshot.
+        return None, None
     ticks_per_second = os.sysconf("SC_CLK_TCK")
     boot_time = time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
     current: dict[tuple[int, int], int] = {}
@@ -6721,15 +6727,17 @@ def _live_descendant(
             continue
         try:
             stat = Path(f"/proc/{child}/stat").read_text()
-        except (FileNotFoundError, ProcessLookupError):
-            # A descendant exited during the snapshot; it cannot keep a hold.
+            fields = stat[stat.rfind(")") + 2 :].split()
+            if fields[0] == "Z":
+                continue
+            birth = int(fields[19])
+            cpu = int(fields[11]) + int(fields[12])
+        except (OSError, ValueError, IndexError):
+            # A descendant exited during the snapshot, or its stat line could not be
+            # read or parsed; either way it cannot keep a hold.
             continue
-        fields = stat[stat.rfind(")") + 2 :].split()
-        if fields[0] == "Z":
-            continue
-        birth = int(fields[19])
         births[child] = birth
-        current[child, birth] = int(fields[11]) + int(fields[12])
+        current[child, birth] = cpu
     if previous is not None:
         for child, birth in births.items():
             if (boot_time + birth / ticks_per_second) * 1e9 <= first_action_ns:
