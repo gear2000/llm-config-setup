@@ -36,11 +36,10 @@ class SpecialistError(RuntimeError):
 class LaunchUnresolved(SpecialistError):
     """The journaled launch has no recorded pane and Herdr has no agent under its name.
 
-    Herdr 0.7.1 never cancels a queued `agent start` (a killed or timed-out CLI does not
-    withdraw it), so absence proves nothing about a later launch. The generation's unique
-    `warm-<generation>` name is the only fence: Herdr refuses a second live agent with that
-    name. So this generation is never abandoned: it is resumed under the same name, or
-    probed again by name, never replaced by a new generation.
+    In 0.9.5 creation and agent startup are separate requests. A lost split reply
+    cannot be reconciled from an absent agent name: its anonymous shell may exist.
+    Keep the generation unresolved until ownership is proven; never split again
+    on that evidence alone. A late live agent can still be adopted by its bounded name.
     """
 
 
@@ -178,7 +177,7 @@ def _identity(state: dict, *, initial: bool = False) -> dict | None:
     if (
         not isinstance(generation, str)
         or re.fullmatch(r"[0-9a-f]{32}", generation) is None
-        or state.get("agent_name") != "warm-" + generation
+        or state.get("agent_name") != recruiter._safe_agent_name("warm", generation, 1)
     ):
         raise SpecialistError("invalid resident generation/name ownership record")
     try:
@@ -414,7 +413,7 @@ def _start(
         "cwd": str(Path(cwd).resolve()),
         "enabled": True,
         "generation": generation,
-        "agent_name": "warm-" + generation,
+        "agent_name": recruiter._safe_agent_name("warm", generation, 1),
         "harness": harness,
         "session": recruiter._resolve_current_herdr_session_name(),
         "pane": None,
@@ -460,10 +459,9 @@ def _launch(
 ) -> dict:
     """Launch the journaled generation, or resume its unresolved launch, then await readiness.
 
-    A resume re-sends `agent start` under the SAME `warm-<generation>` name. Herdr checks name
-    conflicts and names the new terminal inside one app handler, so at most one live agent can
-    hold that name. Either this call wins the name (any earlier queued start then fails with
-    `agent_name_taken`), or the earlier start already holds it and is adopted here.
+    A resume first resolves the same bounded generation name. A split whose reply was
+    lost stays uncertain until its named agent can be verified; never create a second
+    shell based only on an absent name. The pane callback records identity before startup.
     """
     generation = state["generation"]
     attempt = directory / generation
@@ -494,44 +492,44 @@ def _launch(
         # Probe by name first: an earlier start that did land is adopted, never duplicated.
         try:
             adopted = _identity(state, initial=True)
+            if adopted is None and state.get("pane"):
+                # Both name and the recorded pane are authoritatively absent. A failed
+                # split/start cleanup may now retry without leaving an anonymous shell.
+                state.update(pane=None, creation_inflight=False)
+                state.pop("terminal_id", None)
+                ack.unlink(missing_ok=True)
         except LaunchUnresolved:
             # No live agent holds the name, so any acknowledgement on disk came from a
             # process that no longer exists; it must not satisfy this launch's readiness.
             ack.unlink(missing_ok=True)
     if adopted is None:
+        if resume and state.get("creation_inflight"):
+            raise LaunchUnresolved(
+                "split pane creation is uncertain; refusing to create another pane"
+            )
+        state["creation_inflight"] = True
+        _save(directory, state)
+
+        def record_created(pane: dict) -> None:
+            state.update(pane=pane["pane_id"], terminal_id=pane.get("terminal_id"))
+            _save(directory, state)
+
         try:
-            result = _herdr(
-                state,
-                "agent",
-                "start",
+            pane_id, _, _ = recruiter._start_herdr_agent(
                 state["agent_name"],
-                "--cwd",
-                state["cwd"],
-                "--tab",
-                tab,
-                "--split",
-                "right",
-                "--no-focus",
-                "--",
-                "bash",
-                "-lc",
+                {"cwd": state["cwd"], "cockpit_pane": cockpit},
                 state["launch"],
-                timeout_seconds=START_SECONDS,
+                herdr_session=state["session"],
+                on_pane_created=record_created,
             )
         except recruiter.RecruiterError as error:
-            if "agent_name_taken" not in str(error):
+            if "agent_name_taken" not in str(error) and "already exists in Herdr" not in str(error):
                 raise
-            # An earlier start of this generation won the name between the probe and this
-            # start. Adopt it only once `_identity` proves its harness, cwd and process.
             adopted = _identity(state, initial=True)
         else:
-            agent = result.get("result", {}).get("agent", {})
-            if agent.get("name") != state["agent_name"] or not agent.get("pane_id"):
-                raise SpecialistError(
-                    "specialist launch returned no matching agent identity"
-                )
             state.update(
-                pane=agent["pane_id"],
+                pane=pane_id,
+                creation_inflight=False,
                 launched_at=time.time(),
                 launched_monotonic=time.monotonic(),
             )
@@ -746,36 +744,14 @@ def consult(
         # point delivery may have started, so a failure here is UNCERTAIN, not known
         # non-delivery: stay `busy` and let `_finish_busy`'s deadline/idle policy resolve it,
         # rather than risk ever delivering the same question twice.
-        if state["harness"] == "cursor":
-            recruiter._herdr(
-                "pane",
-                "send-text",
-                state["pane"],
-                message,
-                herdr_session=state["session"],
-                timeout_seconds=15,
-            )
-            time.sleep(recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS)
-            recruiter._herdr(
-                "pane",
-                "send-keys",
-                state["pane"],
-                "Enter",
-                herdr_session=state["session"],
-                timeout_seconds=15,
-            )
-        else:
-            # Herdr's pane run/send commands print nothing on success. Its read/query
-            # commands print JSON; treating a successful send as JSON leaves a real
-            # delivered turn stuck in busy even when the specialist has answered.
-            recruiter._herdr(
-                "pane",
-                "run",
-                state["pane"],
-                message,
-                herdr_session=state["session"],
-                timeout_seconds=15,
-            )
+        recruiter._herdr(
+            "agent",
+            "prompt",
+            state["pane"],
+            message,
+            herdr_session=state["session"],
+            timeout_seconds=15,
+        )
         reason = _finish_busy(directory, state)
         if reason is not None:
             raise SpecialistError(reason)

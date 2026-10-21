@@ -89,6 +89,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
     started: list[str] = []
     closed: list[str] = []
+    monkeypatch.setattr(phase_controller.recruiter, "_herdr", lambda *args, **kwargs: None)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "tui-pane")
     monkeypatch.setattr(
@@ -150,7 +151,7 @@ def test_phase_start_releases_verified_leader_without_a_watchdog(
     )
 
     control = run_root / "phases/phase-0/pass-1/control"
-    assert started == ["phase-leader-sample-run-phase-0-p1"]
+    assert started == [phase_controller._safe_name("sample-run", "phase-0", 1)]
     assert closed == []
     assert not (control / "watchdog-ready.fifo").exists()
     assert receipt["state"] == "ready"
@@ -479,7 +480,7 @@ def test_phase_start_cannot_claim_a_different_tui_pane(
         )
 
 
-def test_gated_leader_is_one_atomic_herdr_start_below_tui(
+def test_gated_leader_splits_then_runs_its_shell_gate_below_tui(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[str, ...]] = []
@@ -498,8 +499,8 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
             }
         return {
             "result": {
-                "agent": {
-                    "name": "phase-leader",
+                "pane": {
+                    "terminal_id": "terminal-leader",
                     "pane_id": "leader-pane",
                     "workspace_id": "ws-1",
                 }
@@ -507,6 +508,7 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
         }
 
     monkeypatch.setattr(phase_controller.recruiter, "_herdr_json", fake_herdr)
+    monkeypatch.setattr(phase_controller.recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
     script = tmp_path / "launch.sh"
     script.write_text("#!/bin/sh\n")
 
@@ -514,20 +516,16 @@ def test_gated_leader_is_one_atomic_herdr_start_below_tui(
         "phase-leader", "tui-pane", tmp_path, script, "llm-lab-test"
     ) == ("leader-pane", "ws-1")
     assert calls[1] == (
-        "agent",
-        "start",
-        "phase-leader",
+        "pane",
+        "split",
+        "tui-pane",
+        "--direction",
+        "down",
         "--cwd",
         str(tmp_path),
-        "--tab",
-        "tab-1",
-        "--split",
-        "down",
         "--no-focus",
-        "--",
-        "bash",
-        str(script),
     )
+    assert calls[2] == ("pane", "run", "leader-pane", "exec bash " + str(script))
 
 
 def test_public_roster_has_controller_template_for_every_worker_harness() -> None:
