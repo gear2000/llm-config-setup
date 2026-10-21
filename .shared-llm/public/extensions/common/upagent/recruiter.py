@@ -4175,11 +4175,14 @@ def _agent_launch_argv(launch: str) -> tuple[list[str], str | None, str | None]:
         # Shell wrappers own their quoting, redirects, and inline task delivery.
         return argv, None, None
     prompt = None
-    if kind != "codex" and len(argv) > 1 and any(ch.isspace() for ch in argv[-1]):
+    if len(argv) > 1 and any(ch.isspace() for ch in argv[-1]):
         prompt = argv.pop()
     # Legacy Pi templates contain a quoted $HOME extension path. Public renderers
     # already supply an absolute path. Never expand variables in the task sentence.
     argv = [os.path.expandvars(word) for word in argv]
+    if kind == "codex" and prompt is not None:
+        argv.append(prompt)
+        prompt = None
     return argv, kind, prompt
 
 
@@ -5156,6 +5159,7 @@ def _worker_pane_confirmed_gone(
     *,
     herdr_session: str | None = None,
     confirmations: int = 1,
+    timeout_seconds: float = 10,
 ) -> bool:
     """True only when herdr POSITIVELY answers that the pane does not exist.
 
@@ -5172,7 +5176,7 @@ def _worker_pane_confirmed_gone(
                 "pane",
                 "get",
                 worker_pane,
-                timeout_seconds=10,
+                timeout_seconds=timeout_seconds,
                 herdr_session=herdr_session,
             )
             return False
@@ -5511,7 +5515,18 @@ def _wait_for_agent_status(
         except HerdrWaitLost:
             # Live subscriptions have no replay cursor. Re-read authoritative state
             # before opening another wait, retaining the original request deadline.
-            if _worker_pane_confirmed_gone(worker_pane, herdr_session=herdr_session):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if monitor_finalized is not None and monitor_finalized.is_set():
+                    return False
+                raise AgentWaitTimeout(
+                    f"Herdr wait for {worker_pane} exceeded its deadline"
+                )
+            if _worker_pane_confirmed_gone(
+                worker_pane,
+                herdr_session=herdr_session,
+                timeout_seconds=min(2.0, remaining),
+            ):
                 if monitor_finalized is not None and monitor_finalized.is_set():
                     if sentinel_watch is not None and sentinel_watch.supervising:
                         sentinel_watch.note_bypassed_at_exit()
@@ -5523,13 +5538,22 @@ def _wait_for_agent_status(
                         sentinel_watch, deadline, reason="worker-gone"
                     )
                 )
-            _herdr_json("pane", "get", worker_pane, herdr_session=herdr_session)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                _herdr_json(
+                    "pane",
+                    "get",
+                    worker_pane,
+                    herdr_session=herdr_session,
+                    timeout_seconds=min(2.0, remaining),
+                )
             if time.monotonic() >= deadline:
                 if monitor_finalized is not None and monitor_finalized.is_set():
                     return False
                 raise AgentWaitTimeout(
                     f"Herdr wait for {worker_pane} exceeded its deadline after reconnection"
                 )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
 class HerdrWaitLost(RecruiterError):

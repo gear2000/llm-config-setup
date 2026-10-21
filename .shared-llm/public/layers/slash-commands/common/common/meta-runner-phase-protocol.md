@@ -169,7 +169,7 @@ The worker-order round-trip uses per-command UpAgent processes and Herdr's own I
 ```text
 leader:    write pass-<p>/stages/<stage>/try-<m>/order.json  +  instructions.md  (order.cockpit_pane = the leader's cockpit pane)
 leader:    just upagent-request <order.json path>  # return only after verified startup
-Recruiter: persist → start/verify manager → atomically `herdr agent start` the worker
+Recruiter: persist → start/verify manager → journal and split a pane → `herdr agent start` the worker → prompt after readiness
 Recruiter: verify expected process + detected harness + cwd; return manager/worker addresses
 leader:    just upagent-await <order.json path>    # Python waits; LLM does not poll
 Recruiter: write final lease-specific brief with literal order_id + one private result path
@@ -181,7 +181,7 @@ leader:    receive ORDER_RECEIPT → read + validate public result.json
 
 At a declared work cap, the Recruiter changes state to `awaiting-requester` and `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The recorded requester uses the per-generation control token from `REQUEST_ACCEPTED` to authorize `extend` or `cancel`. No response during the configured grace period permits the Recruiter's hard stop. A manager or checker may recommend an action, but cannot execute it.
 
-Validate the installed Herdr command surface before launch (the documented baseline is `herdr agent start/get/wait`, `herdr pane get/process-info/run/read/close`, and `herdr wait agent-status`). The Recruiter uses one `agent start` request with direct argv; it does not split a shell and inject a launch command afterward. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
+Validate the installed Herdr command surface before launch (the documented baseline is `herdr agent start/get/wait`, `herdr pane split/get/process-info/run/read/close/wait-output`, and `herdr agent wait --until`). The Recruiter journals ownership, splits a shell pane, records the returned identity, and starts the bare interactive harness there with `agent start`. It delivers the assignment after readiness through `agent prompt`; Codex exec retains its positional assignment. Shell wrappers use `pane run`, a process health check, and `agent rename`. If the local Herdr version exposes different syntax, adapt only after validating it. A malformed order or result is fail-loud: the Recruiter refuses to hire on a bad order; the leader treats a missing or malformed result as a `blocked` stage.
 
 **Notification follows ownership boundaries.** The worker has no Recruiter/leader/TUI addresses and sends no terminal text. Its one private result wakes the owning Recruiter job; the durable receipt wakes the phase leader through its blocking `upagent-await`/`upagent-await-any`; `phase-result.json` wakes the TUI through its blocking `upagent-phase-await`. Pane text and human toasts are observational only.
 

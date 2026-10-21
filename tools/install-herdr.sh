@@ -114,6 +114,30 @@ if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 "$url" -o "${tmp}/
 	echo "       Manual fallback: https://github.com/herdrdev/herdr/releases/tag/v${PINNED}" >&2
 	exit 1
 fi
+curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 \
+	"https://api.github.com/repos/herdrdev/herdr/releases/tags/v${PINNED}" \
+	-o "${tmp}/release.json"
+python3 - "$PINNED" "$asset" "${tmp}/release.json" "${tmp}/herdr" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+version, asset_name, metadata_path, binary_path = sys.argv[1:]
+release = json.loads(Path(metadata_path).read_text())
+asset = next(item for item in release["assets"] if item["name"] == asset_name)
+digest = asset.get("digest")
+if digest is None and version == "0.7.1":
+    print(f"Skipping SHA-256: Herdr {version} publishes no digest for {asset_name}.")
+else:
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise SystemExit(f"ERROR: release has no valid SHA-256 for {asset_name}; refusing install")
+    actual = "sha256:" + hashlib.sha256(Path(binary_path).read_bytes()).hexdigest()
+    if actual != digest:
+        raise SystemExit(f"ERROR: SHA-256 mismatch for {asset_name}: expected {digest}, got {actual}")
+    print(f"Verified {asset_name} {digest}")
+PY
 chmod +x "${tmp}/herdr"
 mv "${tmp}/herdr" "${INSTALL_DIR}/herdr"
 

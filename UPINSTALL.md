@@ -139,7 +139,7 @@ just herdr-pin
 just herdr-pin --check
 ```
 
-That script downloads the GitHub release `v0.9.5` into `~/.local/bin/herdr`. It does **not** call `https://herdr.dev/install.sh` (that URL always installs latest).
+That script downloads the GitHub release `v0.9.5` into `~/.local/bin/herdr` and verifies its published SHA-256 before replacing the installed binary. It refuses a missing or mismatched digest. The explicit 0.7.1 rollback reports that its release has no published digest and skips only that unavailable check. It does **not** call `https://herdr.dev/install.sh` (that URL always installs latest).
 
 - If a different version is already on `PATH`, the script exits non-zero unless you pass `--force`.
 - After install, `herdr --version` must print `herdr 0.9.5`.
