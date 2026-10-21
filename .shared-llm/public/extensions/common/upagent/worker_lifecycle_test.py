@@ -72,6 +72,8 @@ class Herdr095:
         self.uncertain_prompt = None
         self.delivery_observations = 0
         self.recent_text = ""
+        self.uncertain_at = None
+        self.delivery_delay = 0
 
     def pane(self, pane):
         return {
@@ -174,9 +176,9 @@ class Herdr095:
             argv = args[args.index("--") + 1 :]
             self.start_commands.append((kind, argv))
             self.start_timeouts.append(int(args[args.index("--timeout") + 1]))
+            self.start_process_timeouts.append(kwargs["timeout_seconds"])
             if kind != "codex" and any(word.startswith("Read ") for word in argv):
                 raise r.RecruiterError(
-            self.start_process_timeouts.append(kwargs["timeout_seconds"])
                     "timeout: interactive worker busy from its first turn"
                 )
             pane = self.panes[args[args.index("--pane") + 1]]
@@ -185,6 +187,7 @@ class Herdr095:
                 name=args[2],
                 agent_name=args[2],
                 agent_status="idle",
+                completion_seq=7,
                 interactive_ready=True,
                 instructions=argv[argv.index("--instructions") + 1],
             )
@@ -207,11 +210,18 @@ class Herdr095:
                 raise r.RecruiterError("agent_not_found")
             if head == ("agent", "get") and self.uncertain_prompt:
                 self.delivery_observations += 1
-                if self.delivery_observations == 2 and self.stall_mode != "never":
+                if self.stall_mode in ("echo", "old-done"):
+                    # Enter was lost: text remains in the composer, no task ran.
+                    self.recent_text = self.uncertain_prompt
+                    if self.stall_mode == "old-done":
+                        pane["agent_status"] = "done"
+                elif (self.delivery_observations >= 2 and self.stall_mode != "never"
+                      and time.monotonic() >= self.uncertain_at + self.delivery_delay):
+                    self.uncertain_prompt = None
                     self.begin_work(pane)
-                    if self.stall_mode == "echo":
-                        pane["agent_status"] = "idle"
-                        self.recent_text = self.uncertain_prompt
+                    if self.stall_mode == "new-done":
+                        pane["agent_status"] = "done"
+                        pane["completion_seq"] = 8
             if head == ("agent", "wait"):
                 assert "--until" in args and "--status" not in args
                 self.sequence.append("idle-gate")
@@ -220,6 +230,7 @@ class Herdr095:
                 if self.stall_mode:
                     self.prompt_count += 1
                     self.uncertain_prompt = args[3]
+                    self.uncertain_at = time.monotonic()
                     raise r.RecruiterError("agent_prompt_stalled: no observed activity")
                 if self.dialog == "accepted":
                     self.prompt_count += 1
@@ -702,12 +713,11 @@ def test_real_intake_clerk_wrapper_uses_shell_launch_and_health(runtime):
     assert runtime.panes[pane]["agent_status"] == "working"
 
 
-@pytest.mark.parametrize("delivery", ["working", "echo"])
+@pytest.mark.parametrize("delivery", ["working", "new-done"])
 def test_stalled_prompt_reconciles_late_delivery_without_resending(
     runtime, monkeypatch, delivery
 ):
     runtime.stall_mode = delivery
-    monkeypatch.setattr(r, "PROMPT_RECONCILE_SECONDS", 0.2)
     monkeypatch.setattr(r, "PROMPT_RECONCILE_POLL_SECONDS", 0.005)
     monkeypatch.setattr(r, "_pane_recent_output", lambda *a, **kw: runtime.recent_text)
     order, roster = request(runtime.root, "pi")
@@ -721,14 +731,17 @@ def test_stalled_prompt_reconciles_late_delivery_without_resending(
     )
 
 
+@pytest.mark.parametrize("delivery", ["never", "echo", "old-done"])
 def test_stalled_prompt_never_delivered_fails_and_closes_owned_pane(
-    runtime, monkeypatch
+    runtime, monkeypatch, delivery
 ):
-    runtime.stall_mode = "never"
-    monkeypatch.setattr(r, "PROMPT_RECONCILE_SECONDS", 0.03)
+    runtime.stall_mode = delivery
+    clock = [100.0]
+    monkeypatch.setattr(r.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(r, "PROMPT_RECONCILE_POLL_SECONDS", 0.005)
     monkeypatch.setattr(
-        r, "_pane_recent_output", lambda *a, **kw: "unrelated old output"
+        r, "_pane_recent_output", lambda *a, **kw: runtime.recent_text
     )
     order, roster = request(runtime.root, "pi")
     ledger = r.JobLedger()
@@ -736,7 +749,42 @@ def test_stalled_prompt_never_delivered_fails_and_closes_owned_pane(
     assert r.cmd_run_job(key, str(roster)) != 0
     assert ledger.completed_receipt(key, order)["verdict"] == "blocked"
     assert runtime.prompt_count == 1 and not runtime.staged.is_set()
+    if delivery in ("echo", "old-done"):
+        assert runtime.recent_text == runtime.uncertain_prompt
     assert list(runtime.panes) == ["w1:p1"]
+
+
+def test_sentinel_brief_echo_without_new_turn_fails_hire_and_closes_pane(runtime, monkeypatch):
+    runtime.stall_mode = "echo"
+    # Layout is independent of this launch failure. Let a wrongly accepted prompt
+    # finish the hire so the test fails on delivery, not on the fake's layout API.
+    monkeypatch.setattr(r, "_place_started_agent_in_role_tab", lambda pane, *a, **kw: pane)
+    monkeypatch.setattr(r, "_resize_started_pane", lambda *a, **kw: None)
+    clock = [100.0]
+    monkeypatch.setattr(r.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(r, "_pane_recent_output", lambda *a, **kw: runtime.recent_text)
+    order, _ = request(runtime.root, "pi")
+    ledger = r.JobLedger()
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 600_000)
+    config = r.llm_management.load_management_config({"management": {"startup_timeout_ms": 1000}})
+    role = r.llm_management.ManagementRole(
+        command='pi --instructions {brief_path} "Read {brief_path} and supervise the worker."',
+        expected_agent="pi", expected_process="pi", timeout_ms=1000,
+    )
+    closeout = r._sentinel_closeout_path(ledger, key, 1)
+    closeout.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(r.FencedLaunchError, match="delivery unconfirmed") as failure:
+        r._start_sentinel(
+            ledger, key, token, order, config, role, "w1:p1", closeout, 1,
+            herdr_session="llm-lab-test", liftoff_deadline_ms=60_000,
+        )
+    assert failure.value.cleanup["verified_absent"]
+    assert runtime.prompt_count == 1 and runtime.recent_text == runtime.uncertain_prompt
+    assert not runtime.staged.is_set() and not closeout.exists()
+    assert list(runtime.panes) == ["w1:p1"]
+    assert "sentinel-hired" not in [event["event"] for event in ledger.events(key)]
 
 
 @pytest.mark.parametrize(
@@ -755,6 +803,7 @@ def test_roster_start_budget_has_floor_cap_and_independent_prompt_budget(
     key, _ = ledger.submit(order)
     assert r.cmd_run_job(key, str(roster)) == 0
     assert budget - 2000 < runtime.start_timeouts[0] <= budget
+    assert runtime.start_process_timeouts[0] == runtime.start_timeouts[0] / 1000 + 5
     assert runtime.prompt_timeouts == [budget]
 
 
@@ -803,7 +852,6 @@ def test_lost_wait_probe_cannot_overrun_original_deadline(runtime, monkeypatch):
     monkeypatch.setattr(r, "_wait_for_exec_status", lost)
     monkeypatch.setattr(r, "_herdr_json", wedged)
     with pytest.raises(r.AgentWaitTimeout):
-    assert runtime.start_process_timeouts[0] == runtime.start_timeouts[0] / 1000 + 5
         r._wait_for_agent_status("w1:p2", 250, None, herdr_session="llm-lab-test")
     assert len(waits) == 1 and probes == [0.25] and clock[0] == 100.25
 
@@ -831,3 +879,27 @@ def test_repeated_lost_waits_back_off_before_reopening(runtime, monkeypatch):
     assert r._wait_for_agent_status("w1:p2", 1000, None, herdr_session="llm-lab-test")
     assert len(sleeps) == 3 and all(delay > 0 for delay in sleeps)
     assert all(a > b for a, b in zip(waits, waits[1:]))
+
+
+@pytest.mark.parametrize("prompt_budget,delay,confirmed", [(1000, 45, True), (1000, 61, False), (180000, 90, True)])
+def test_stalled_prompt_observation_uses_full_prompt_budget(runtime, monkeypatch, prompt_budget, delay, confirmed):
+    clock = [100.0]
+    monkeypatch.setattr(r.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    order, _ = request(runtime.root, "pi")
+    runtime.panes["w1:p2"] = {**runtime.pane("w1:p2"), "name": "slow-worker",
+        "agent": "pi", "agent_status": "idle", "completion_seq": 7,
+        "instructions": order["instructions_path"]}
+    # This direct prompt test proves state delivery; no result timer is needed.
+    monkeypatch.setattr(runtime, "begin_work", lambda pane: pane.update(agent_status="working"))
+    runtime.stall_mode = "working"
+    runtime.delivery_delay = delay
+    if confirmed:
+        r._submit_agent_prompt("slow-worker", "Do the task.", prompt_budget, herdr_session="llm-lab-test")
+        assert clock[0] >= 100 + delay
+    else:
+        with pytest.raises(r.PromptDeliveryUnconfirmed):
+            r._submit_agent_prompt("slow-worker", "Do the task.", prompt_budget, herdr_session="llm-lab-test")
+        assert clock[0] == 160
+    assert runtime.prompt_count == 1
+    assert runtime.prompt_timeouts == [max(60000, prompt_budget)]

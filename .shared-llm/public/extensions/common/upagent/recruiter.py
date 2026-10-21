@@ -4143,7 +4143,7 @@ def _place_started_agent_in_role_tab(
 
 AGENT_START_TIMEOUT_MS = 180_000
 HERDR_MAX_START_TIMEOUT_MS = 299_000
-PROMPT_RECONCILE_SECONDS = 20.0
+PROMPT_TIMEOUT_FLOOR_MS = 60_000
 PROMPT_RECONCILE_POLL_SECONDS = 0.25
 HERDR_AGENT_KINDS = {
     "claude": "claude",
@@ -6679,6 +6679,10 @@ class _NudgeDeliveryError(RecruiterError):
     """A reserved nudge could not be submitted; its rung remains spent."""
 
 
+class PromptDeliveryUnconfirmed(RecruiterError):
+    """Herdr accepted input but no new agent turn was observed in the prompt budget."""
+
+
 def _live_descendant(
     pid: int, first_action_ns: int, previous: dict[tuple[int, int], int] | None
 ) -> tuple[int | None, dict[tuple[int, int], int] | None]:
@@ -7190,6 +7194,8 @@ class _SentinelWatch:
                     ),
                     herdr_session=target.herdr_session,
                 )
+            except PromptDeliveryUnconfirmed as error:
+                raise nudge_authority.NudgeDeliveryUnconfirmed(str(error)) from error
             except (RecruiterError, OSError) as error:
                 raise _NudgeDeliveryError(str(error)) from error
 
@@ -7271,6 +7277,7 @@ class _SentinelWatch:
         ordinal = len(state["nudges"])
         label = {
             "delivered": "nudged",
+            "delivery-unconfirmed": "delivery-unconfirmed",
             "backoff": "held",
             "finished": "superseded",
             "aborted": "aborted",
@@ -7288,6 +7295,7 @@ class _SentinelWatch:
             os.replace(self.closeout_path, archived)
         event_name = {
             "delivered": "delivered",
+            "delivery-unconfirmed": "delivery-unconfirmed",
             "backoff": "held",
             "finished": "superseded",
             "aborted": "aborted",
@@ -7298,11 +7306,12 @@ class _SentinelWatch:
             episode=outcome.episode,
             archived=str(archived) if archived else None,
         )
-        if outcome.outcome == "delivered" or (
+        if outcome.outcome in ("delivered", "delivery-unconfirmed") or (
             trigger == "sentinel" and outcome.outcome in ("backoff", "aborted")
         ):
             self._prompt_sentinel_after_nudge(
-                {"delivered": "delivered", "backoff": "held", "aborted": "failed"}[
+                {"delivered": "delivered", "delivery-unconfirmed": "delivery-unconfirmed",
+                 "backoff": "held", "aborted": "failed"}[
                     outcome.outcome
                 ]
             )
@@ -7342,6 +7351,8 @@ class _SentinelWatch:
             "working": "the worker is working; no continue was sent",
             "held": "the stall is inside the hub's nudge backoff window",
             "delivered": "the hub sent a 'continue' nudge to the worker",
+            "delivery-unconfirmed": "the hub submitted 'continue', but observed no new "
+            "turn within the prompt budget; delivery is unconfirmed and this rung was spent",
             "failed": "the hub's 'continue' nudge delivery failed and this rung "
             "was spent",
         }[outcome]
@@ -8518,12 +8529,12 @@ _PROMPT_SUBMISSION_LOCK = threading.Lock()
 
 
 def _reconcile_stalled_prompt(
-    target: str, message: str, *, herdr_session: str | None
+    target: str, before: dict, *, timeout_ms: int, herdr_session: str | None
 ) -> None:
-    """Observe uncertain delivery once; never send a potentially duplicate task."""
-    deadline = time.monotonic() + PROMPT_RECONCILE_SECONDS
-    last_evidence = "no working state or prompt echo"
-    normalized_prompt = " ".join(message.split())
+    """Confirm only working or a newly completed turn; visible text proves nothing."""
+    budget_seconds = max(PROMPT_TIMEOUT_FLOOR_MS, timeout_ms) / 1000
+    deadline = time.monotonic() + budget_seconds
+    last_evidence = "no new working or completed turn"
     while time.monotonic() < deadline:
         try:
             response = _herdr_json(
@@ -8543,30 +8554,20 @@ def _reconcile_stalled_prompt(
                 )
             if agent.get("agent_status") == "working":
                 return
-            pane = agent.get("pane_id")
-            if isinstance(pane, str) and time.monotonic() < deadline:
-                try:
-                    output = _pane_recent_output(
-                        pane,
-                        lines=120,
-                        herdr_session=herdr_session,
-                        timeout_seconds=min(
-                            2.0, max(0.001, deadline - time.monotonic())
-                        ),
-                    )
-                except RecruiterError as error:
-                    last_evidence = str(error)
-                else:
-                    if normalized_prompt and normalized_prompt in " ".join(
-                        output.split()
-                    ):
-                        return
+            completed = agent.get("completion_seq")
+            prior_completed = before.get("completion_seq")
+            if (agent.get("agent_status") == "done"
+                    and "completion_seq" in before
+                    and isinstance(completed, int)
+                    and (prior_completed is None or completed > prior_completed)):
+                return
+            last_evidence = f"agent status {agent.get('agent_status')!r}; no new completed turn"
         time.sleep(
             min(PROMPT_RECONCILE_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
         )
-    raise RecruiterError(
+    raise PromptDeliveryUnconfirmed(
         f"agent_prompt_stalled: {target!r} delivery unconfirmed after "
-        f"{PROMPT_RECONCILE_SECONDS:g}s: {last_evidence}"
+        f"{budget_seconds:g}s: {last_evidence}"
     )
 
 
@@ -8584,7 +8585,7 @@ def _submit_agent_prompt(
     retry an uncertain submission: it may already have delivered the task.
     """
     with _PROMPT_SUBMISSION_LOCK:
-        _herdr(
+        ready = _herdr_json(
             "agent",
             "wait",
             target,
@@ -8599,6 +8600,7 @@ def _submit_agent_prompt(
             herdr_session=herdr_session,
             timeout_seconds=idle_timeout_ms / 1000,
         )
+        prompt_budget_ms = max(PROMPT_TIMEOUT_FLOOR_MS, idle_timeout_ms)
         try:
             response = _herdr_json(
                 "agent",
@@ -8611,14 +8613,17 @@ def _submit_agent_prompt(
                 "--until",
                 "blocked",
                 "--timeout",
-                str(idle_timeout_ms),
+                str(prompt_budget_ms),
                 herdr_session=herdr_session,
-                timeout_seconds=idle_timeout_ms / 1000,
+                timeout_seconds=prompt_budget_ms / 1000,
             )
         except RecruiterError as error:
             if "agent_prompt_stalled" not in str(error):
                 raise
-            _reconcile_stalled_prompt(target, message, herdr_session=herdr_session)
+            _reconcile_stalled_prompt(
+                target, ready.get("result", {}).get("agent", {}),
+                timeout_ms=prompt_budget_ms, herdr_session=herdr_session,
+            )
             return
         if response.get("result", {}).get("agent", {}).get("agent_status") == "blocked":
             raise RecruiterError(

@@ -2431,7 +2431,7 @@ def test_submit_agent_prompt_uses_server_prompt_after_readiness(monkeypatch) -> 
             "--until",
             "blocked",
             "--timeout",
-            "5000",
+            "60000",
         ),
     ]
 
@@ -2473,7 +2473,7 @@ def test_submit_agent_prompt_uses_server_cursor_input(monkeypatch) -> None:
             "--until",
             "blocked",
             "--timeout",
-            "5000",
+            "60000",
         ),
     ]
 
