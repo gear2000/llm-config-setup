@@ -1827,6 +1827,8 @@ class JobLedger:
         pane: str,
         workspace_id: str | None,
         address: str,
+        *,
+        terminal_id: str | None = None,
     ) -> None:
         """Persist Herdr's exact returned identity before attempting the lease commit."""
 
@@ -1853,6 +1855,7 @@ class JobLedger:
                     "pane": pane,
                     "state": "created",
                     "workspace_id": workspace_id,
+                    **({"terminal_id": terminal_id} if terminal_id else {}),
                 }
             )
             self._write_json(path, journal)
@@ -3943,12 +3946,15 @@ def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
     concurrent requests to share one agent name, letting the second launch adopt — and its
     failure reconciliation close — the first request's live worker pane.
     """
-    compact = "".join(
-        character if character.isalnum() or character in "-_" else "-"
-        for character in request_id
-    )
-    digest = hashlib.sha256(request_id.encode()).hexdigest()[:10]
-    return f"{prefix}-{compact[:28]}-{digest}-g{generation}"
+    # 0.9.5 accepts at most 32 ASCII characters, starting with a letter. Hash the
+    # complete identity, including the role and generation, before truncating display text.
+    digest = hashlib.sha256(
+        f"{prefix}\0{request_id}\0{generation}".encode()
+    ).hexdigest()[:16]
+    label = re.sub("[^a-z0-9_-]", "-", prefix.lower())[:15]
+    if not label or not label[0].isalpha():
+        label = "a" + label[:14]
+    return f"{label}-{digest}"
 
 
 @contextmanager
@@ -4135,6 +4141,68 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
+AGENT_START_TIMEOUT_MS = 60_000
+HERDR_AGENT_KINDS = {
+    "claude": "claude",
+    "pi": "pi",
+    "codex": "codex",
+    "cursor-agent": "cursor",
+}
+
+
+def _agent_launch_argv(launch: str) -> tuple[list[str], str, str | None]:
+    """Split the rendered command without running its task during interactive startup.
+
+    Kit renderers and roster templates put the assignment sentence last. Option values
+    remain on the bare command. Codex exec keeps its positional assignment by design.
+    ClaudeX is a wrapper, so it must still execute that wrapper rather than substitute Claude.
+    """
+    argv = shlex.split(launch)
+    executable = Path(argv[0]).name if argv else ""
+    kind = HERDR_AGENT_KINDS.get(executable)
+    if executable == "claudex":
+        kind = "claude"
+    if kind is None:
+        raise RecruiterError(
+            f"launch executable {executable!r} is not a supported Herdr agent"
+        )
+    prompt = None
+    if kind != "codex" and len(argv) > 1 and any(ch.isspace() for ch in argv[-1]):
+        prompt = argv.pop()
+    # Legacy Pi templates contain a quoted $HOME extension path. Public renderers
+    # already supply an absolute path. Never expand variables in the task sentence.
+    argv = [os.path.expandvars(word) for word in argv]
+    return argv, kind, prompt
+
+
+def _wait_for_cursor_session(
+    name: str, pane_id: str, deadline: float, session: str
+) -> None:
+    """0.9.5 detects Cursor before its TUI accepts Enter; wait for the official hook.
+
+    Headless probes reproduced agent_prompt_stalled immediately after agent_started,
+    including with the former half-second paste delay. The installed sessionStart hook
+    registered about one second later; input after that registration worked repeatedly.
+    """
+    while time.monotonic() < deadline:
+        agent = (
+            _herdr_json("agent", "get", name, herdr_session=session)
+            .get("result", {})
+            .get("agent", {})
+        )
+        if agent.get("pane_id") != pane_id or agent.get("name") != name:
+            raise RecruiterError(
+                "Cursor startup identity changed before session registration"
+            )
+        registration = agent.get("agent_session") or {}
+        if registration.get("source") == "herdr:cursor" and registration.get("value"):
+            return
+        time.sleep(0.1)
+    raise RecruiterError(
+        f"Cursor {name!r} did not register its official integration session before the startup deadline"
+    )
+
+
 def _start_herdr_agent(
     name: str,
     order: dict,
@@ -4143,18 +4211,20 @@ def _start_herdr_agent(
     split_direction: str = "right",
     tab_role: str | None = None,
     herdr_session: str | None = None,
+    on_pane_created: Callable[[dict], None] | None = None,
 ) -> tuple[str, str | None, str]:
-    """Atomically create a named Herdr pane and start its process.
+    """Create topology, record its identity, then start a bare interactive harness.
 
-    ``herdr agent start`` carries argv through the socket in one request; unlike ``pane run`` it
-    cannot interleave launch keystrokes with another command in a shared shell. Role-specific
-    directions form a balanced grid: workers default right; managers and checkers request down.
+    Herdr 0.9.5 starts agents only in existing panes. The create callback lets the owning
+    launch journal record the terminal before startup or prompt delivery can fail.
     """
     if split_direction not in ("right", "down"):
         raise RecruiterError(
             f"agent split direction must be right or down, got {split_direction!r}"
         )
     session = _recorded_herdr_session(herdr_session, "agent startup")
+    argv, kind, prompt = _agent_launch_argv(launch)
+    deadline = time.monotonic() + AGENT_START_TIMEOUT_MS / 1000
     # The name lock makes the duplicate check and the launch one atomic step: without it two
     # concurrent launches of the same name could both pass the check before either starts.
     with _exclusive_agent_name(name):
@@ -4186,21 +4256,76 @@ def _start_herdr_agent(
         if not isinstance(tab_id, str) or not tab_id:
             raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
         args = [
-            "agent",
-            "start",
-            name,
+            "pane",
+            "split",
+            order["cockpit_pane"],
+            "--direction",
+            split_direction,
             "--cwd",
             order["cwd"],
-            "--tab",
-            tab_id,
-            "--split",
-            split_direction,
             "--no-focus",
         ]
         for key, value in (order.get("env") or {}).items():
             args.extend(("--env", f"{key}={value}"))
-        args.extend(("--", "bash", "-lc", launch))
-        response = _herdr_json(*args, herdr_session=session)
+        created = (
+            _herdr_json(*args, herdr_session=session).get("result", {}).get("pane", {})
+        )
+        created_id = created.get("pane_id") if isinstance(created, dict) else None
+        if not isinstance(created_id, str) or not created_id:
+            raise RecruiterError(
+                "herdr pane split returned no pane identity; creation is uncertain"
+            )
+        try:
+            if on_pane_created is not None:
+                on_pane_created(created)
+            if Path(argv[0]).name == "claudex" or argv[0] != Path(argv[0]).name:
+                # Canonical `agent start --kind` cannot invoke a wrapper or an explicit
+                # executable path. Preserve that command in this newly owned shell.
+                _herdr(
+                    "pane", "run", created_id, shlex.join(argv), herdr_session=session
+                )
+                _wait_for_agent_health(
+                    created_id,
+                    expected_agent=kind,
+                    expected_process=kind,
+                    expected_cwd=order["cwd"],
+                    timeout_ms=AGENT_START_TIMEOUT_MS,
+                    herdr_session=session,
+                )
+                _herdr("agent", "rename", created_id, name, herdr_session=session)
+                response = _herdr_json("agent", "get", name, herdr_session=session)
+            else:
+                response = _herdr_json(
+                    "agent",
+                    "start",
+                    name,
+                    "--kind",
+                    kind,
+                    "--pane",
+                    created_id,
+                    "--timeout",
+                    str(AGENT_START_TIMEOUT_MS),
+                    "--",
+                    *argv[1:],
+                    timeout_seconds=AGENT_START_TIMEOUT_MS / 1000 + 5,
+                    herdr_session=session,
+                )
+            agent = response.get("result", {}).get("agent", {})
+            if agent.get("pane_id") != created_id or agent.get("name") != name:
+                raise RecruiterError(
+                    "herdr agent start returned a different pane or agent identity"
+                )
+            if kind == "cursor":
+                _wait_for_cursor_session(name, created_id, deadline, session)
+            if prompt is not None:
+                _submit_agent_prompt(
+                    name, prompt, AGENT_START_TIMEOUT_MS, herdr_session=session
+                )
+        except (RecruiterError, OSError, RuntimeError):
+            # This caller holds the returned create identity. Recovery after a caller crash
+            # instead verifies the recorded terminal; agent names clear on process exit.
+            _close_worker_pane(created_id, herdr_session=session)
+            raise
     agent = response.get("result", {}).get("agent", {})
     pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
@@ -4309,6 +4434,24 @@ def _reconcile_exact_launch(
             pane = resolved_pane
             agent_verified = True
         if pane is not None:
+            if not agent_verified and isinstance(journal.get("terminal_id"), str):
+                # A 0.9.5 agent name disappears when its occupant exits. The original
+                # terminal may still contain its shell. Close that shell only when its
+                # exact terminal identity matches and no replacement agent occupies it.
+                try:
+                    current = (
+                        _herdr_json("pane", "get", pane, herdr_session=herdr_session)
+                        .get("result", {})
+                        .get("pane", {})
+                    )
+                except RecruiterError as error:
+                    errors.append(str(error))
+                else:
+                    agent_verified = (
+                        current.get("terminal_id") == journal["terminal_id"]
+                        and current.get("workspace_id") == journal.get("workspace_id")
+                        and not current.get("agent")
+                    )
             if not agent_verified:
                 live_panes = _live_pane_ids(herdr_session=herdr_session)
                 if pane not in live_panes:
@@ -4344,7 +4487,12 @@ def _reconcile_exact_launch(
                     errors.append(
                         str(evidence.get("reason", "cleanup was not verified"))
                     )
-        elif allow_not_found_absent and not_found and attempt == attempts:
+        elif (
+            allow_not_found_absent
+            and not_found
+            and attempt == attempts
+            and journal.get("herdr_launch_style") != "split-then-start"
+        ):
             evidence = {
                 "agent_name": agent_name,
                 "launch_id": launch_id,
@@ -4430,9 +4578,25 @@ def _start_fenced_ledger_agent(
         name,
         herdr_session,
         order["cwd"],
-        metadata=metadata,
+        metadata={**(metadata or {}), "herdr_launch_style": "split-then-start"},
     )
     pane: str | None = None
+    created_recorded = False
+
+    def record_created(created: dict) -> None:
+        nonlocal pane, created_recorded
+        pane = created["pane_id"]
+        ledger.record_launch_created(
+            key,
+            token,
+            launch_id,
+            pane,
+            created.get("workspace_id"),
+            name,
+            terminal_id=created.get("terminal_id"),
+        )
+        created_recorded = True
+
     try:
         pane, workspace_id, address = _start_herdr_agent(
             name,
@@ -4441,8 +4605,10 @@ def _start_fenced_ledger_agent(
             split_direction=split_direction,
             tab_role=tab_role,
             herdr_session=herdr_session,
+            on_pane_created=record_created,
         )
-        ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
+        if not created_recorded:
+            ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
         if ledger.mark_launch_started(
             key, token, launch_id, pane, workspace_id, address
         ):
@@ -4483,7 +4649,7 @@ def _resize_started_pane(
 ) -> None:
     """Shrink a new 50/50 split without making presentation part of worker correctness.
 
-    Agent startup remains one atomic ``herdr agent start`` operation. Resizing happens afterward
+    Agent startup records a split pane before ``herdr agent start``. Resizing happens afterward
     by expanding the adjacent older pane toward the new pane. Herdr versions without layout
     controls produce a visible warning; an optional presentation failure never strands a healthy
     worker or changes lifecycle ownership.
@@ -5022,10 +5188,10 @@ def _worker_process_confirmed_gone(
     return True
 
 
-# How often completion waits independently probe the worker pane/process. Herdr 0.7.1's wait
-# subscription goes SILENT when the watched pane vanishes mid-wait (it reports nothing until
-# --timeout), so without this probe a dead worker holds the order for its entire remaining
-# budget — observed as ~2 h of discarded work.
+# Herdr 0.9.5's server-owned wait returns agent_not_running promptly on pane loss
+# (verified in the headless lab). Keep independent probes: interactive completion does
+# not use a turn waiter, and these probes also check the Sentinel and surviving shells.
+# A transport fault is never positive evidence that either process disappeared.
 AGENT_WAIT_PANE_PROBE_SECONDS = 15.0
 
 # How long a staged result.json may sit invalid before the completion monitor wakes the job
@@ -5252,9 +5418,61 @@ def _wait_for_agent_status(
             f"unsupported worker completion style {completion_style!r}"
         )
 
-    # Exec mode opens one Herdr subscription for the whole worker lifetime. When the durable
-    # file wins, terminate that waiter promptly; do not create a new socket subscription every
-    # second. A positively absent pane falls through to salvage-or-block.
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        remaining_ms = max(1, math.ceil((deadline - time.monotonic()) * 1000))
+        try:
+            return _wait_for_exec_status(
+                worker_pane,
+                remaining_ms,
+                monitor_finalized,
+                expected_process=expected_process,
+                never_started_abort=never_started_abort,
+                sentinel_watch=sentinel_watch,
+                herdr_session=herdr_session,
+            )
+        except HerdrWaitLost:
+            # Live subscriptions have no replay cursor. Re-read authoritative state
+            # before opening another wait, retaining the original request deadline.
+            if _worker_pane_confirmed_gone(worker_pane, herdr_session=herdr_session):
+                if monitor_finalized is not None and monitor_finalized.is_set():
+                    if sentinel_watch is not None and sentinel_watch.supervising:
+                        sentinel_watch.note_bypassed_at_exit()
+                    return False
+                return not (
+                    sentinel_watch is not None
+                    and sentinel_watch.supervising
+                    and _await_sentinel_closeout_after_worker_gone(
+                        sentinel_watch, deadline, reason="worker-gone"
+                    )
+                )
+            _herdr_json("pane", "get", worker_pane, herdr_session=herdr_session)
+            if time.monotonic() >= deadline:
+                if monitor_finalized is not None and monitor_finalized.is_set():
+                    return False
+                raise AgentWaitTimeout(
+                    f"Herdr wait for {worker_pane} exceeded its deadline after reconnection"
+                )
+
+
+class HerdrWaitLost(RecruiterError):
+    """A lost Herdr observation must be reconciled before waiting again."""
+
+
+def _wait_for_exec_status(
+    worker_pane: str,
+    timeout_ms: int,
+    monitor_finalized: threading.Event | None,
+    *,
+    expected_process: str | None,
+    never_started_abort: threading.Event | None,
+    sentinel_watch: Any | None,
+    herdr_session: str | None,
+) -> bool:
+
+    # One server-owned wait for the worker lifetime. No events.subscribe stream is held
+    # by the hub, so its slow-reader limit does not normally apply. Lost observation is
+    # still reconciled by the caller, never interpreted as completion or replayed input.
 
     def _terminate(process: subprocess.Popen) -> None:
         process.terminate()
@@ -5280,10 +5498,10 @@ def _wait_for_agent_status(
 
     deadline = time.monotonic() + timeout_ms / 1000
     args = (
+        "agent",
         "wait",
-        "agent-status",
         worker_pane,
-        "--status",
+        "--until",
         "done",
         "--timeout",
         str(timeout_ms),
@@ -5342,7 +5560,7 @@ def _wait_for_agent_status(
                     sentinel_watch.note_window_lapsed("landing")
                 return False
             raise AgentWaitTimeout(
-                f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms"
+                f"herdr agent wait {worker_pane} timed out after {timeout_ms} ms"
             )
         if time.monotonic() >= next_pane_probe:
             next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
@@ -5407,6 +5625,12 @@ def _wait_for_agent_status(
     # error. Confirm with two positive probes and fall through to the completion reactor.
     if _worker_pane_confirmed_gone(
         worker_pane, herdr_session=herdr_session, confirmations=2
+    ) or (
+        "agent_not_running" in (stderr or stdout)
+        and expected_process is not None
+        and _worker_process_confirmed_gone(
+            worker_pane, expected_process, herdr_session=herdr_session, confirmations=2
+        )
     ):
         if _supervised() and _bundle_already_valid():
             sentinel_watch.note_bypassed_at_exit()
@@ -5417,6 +5641,8 @@ def _wait_for_agent_status(
                 sentinel_watch, deadline, reason="worker-gone"
             )
         )
+    if "events_lost" in (stderr or stdout):
+        raise HerdrWaitLost((stderr or stdout).strip())
     raise RecruiterError(f"{' '.join(argv)} failed: {(stderr or stdout).strip()}")
 
 
@@ -7953,37 +8179,42 @@ def _submit_agent_prompt(
     paste_settle_seconds: float = 0.0,
     herdr_session: str | None = None,
 ) -> None:
-    """Submit one prompt only after Herdr proves the dedicated target is idle.
+    """Gate on input readiness, then let Herdr reject a blocked dialog atomically.
 
-    Most agents accept one serialized ``pane run`` action. Cursor's interactive
-    TUI needs text and Enter as separate actions with a short settle between
-    them; without it, the prompt remains visibly drafted but never runs.
+    The 0.9.5 prompt operation owns paste/Enter sequencing, including Cursor. Do not
+    retry an uncertain submission: it may already have delivered the task.
     """
     with _PROMPT_SUBMISSION_LOCK:
         _herdr(
             "agent",
             "wait",
             target,
-            "--status",
+            "--until",
             "idle",
+            "--until",
+            "done",
+            "--until",
+            "blocked",
             "--timeout",
             str(idle_timeout_ms),
             herdr_session=herdr_session,
         )
-        agent = (
-            _herdr_json("agent", "get", target, herdr_session=herdr_session)
-            .get("result", {})
-            .get("agent", {})
+        response = _herdr_json(
+            "agent",
+            "prompt",
+            target,
+            message,
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            str(idle_timeout_ms),
+            herdr_session=herdr_session,
         )
-        pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
-        if not isinstance(pane_id, str) or not pane_id:
-            raise RecruiterError(f"Herdr agent target {target!r} has no current pane")
-        if paste_settle_seconds > 0:
-            _herdr("pane", "send-text", pane_id, message, herdr_session=herdr_session)
-            time.sleep(paste_settle_seconds)
-            _herdr("pane", "send-keys", pane_id, "Enter", herdr_session=herdr_session)
-        else:
-            _herdr("pane", "run", pane_id, message, herdr_session=herdr_session)
+        if response.get("result", {}).get("agent", {}).get("agent_status") == "blocked":
+            raise RecruiterError(f"agent_blocked: {target!r} reached a dialog after prompt delivery")
 
 
 def _notify_requester(
@@ -9981,6 +10212,41 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
         )
     except RecruiterError as error:
         if "agent_not_found" in str(error):
+            recorded_pane = ownership.get("pane")
+            terminal_id = ownership.get("terminal_id")
+            if recorded_pane and terminal_id:
+                try:
+                    current = (
+                        _herdr_json(
+                            "pane", "get", recorded_pane, herdr_session=herdr_session
+                        )
+                        .get("result", {})
+                        .get("pane", {})
+                    )
+                except RecruiterError as lookup_error:
+                    if "pane_not_found" in str(lookup_error):
+                        return {"status": "absent", "agent_name": agent_name}
+                    return {"status": "blocked", "reason": str(lookup_error)}
+                if (
+                    current.get("terminal_id") == terminal_id
+                    and current.get("workspace_id") == ownership.get("workspace_id")
+                    and not current.get("agent")
+                    and not current.get("agent_name")
+                ):
+                    return {
+                        "status": "owned",
+                        "agent_name": agent_name,
+                        "pane": recorded_pane,
+                    }
+                return {
+                    "status": "blocked",
+                    "reason": "intake terminal has a different occupant or identity",
+                }
+            if (
+                ownership.get("herdr_launch_style") == "split-then-start"
+                and not recorded_pane
+            ):
+                return {"status": "blocked", "reason": "intake split outcome is uncertain; an absent agent name cannot prove pane absence"}
             return {"status": "absent", "agent_name": agent_name}
         return {"status": "blocked", "reason": f"agent lookup failed: {error}"}
     if not isinstance(agent, dict) or not agent:
@@ -10240,6 +10506,7 @@ def _run_order_intake_clerk(
         "schema_version": 1,
         "intake_key": intake_key,
         "attempt_name": attempt.name,
+        "herdr_launch_style": "split-then-start",
         "lease_token": lease_token,
         "agent_name": agent_name,
         "owner_pid": os.getpid(),
@@ -10256,8 +10523,8 @@ def _run_order_intake_clerk(
         "pane": None,
         "state": "launching",
     }
-    # This journal exists before Herdr is asked to create anything. A crash at any later point
-    # can resolve the unguessable agent name even when no pane id was written.
+    # Journal before creating topology. If a split reply is lost, name absence cannot
+    # prove its anonymous shell absent; keep cleanup unresolved until identity is known.
     _secure_write_json(ownership_path, ownership)
 
     clerk_order = {"cockpit_pane": recruiter_pane, "cwd": cwd}
@@ -10271,6 +10538,17 @@ def _run_order_intake_clerk(
     response: object | None = None
     failure: BaseException | None = None
     launch_attempted = False
+
+    def record_created(created: dict) -> None:
+        nonlocal pane
+        pane = created["pane_id"]
+        ownership.update(
+            pane=pane,
+            terminal_id=created.get("terminal_id"),
+            workspace_id=created.get("workspace_id"),
+        )
+        _secure_write_json(ownership_path, ownership)
+
     try:
         launch_attempted = True
         pane, workspace_id, address = _start_herdr_agent(
@@ -10280,6 +10558,7 @@ def _run_order_intake_clerk(
             split_direction="down",
             tab_role="oversight",
             herdr_session=herdr_session,
+            on_pane_created=record_created,
         )
         ownership["pane"] = (
             pane  # local cleanup remains possible if journal update fails
@@ -11845,6 +12124,10 @@ def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
     return 0
 
 
+RUNNER_REPARENT_ENV = "UPAGENT_RUNNER_REPARENT"
+RUNNER_REPARENT_CLAIM_SECONDS = 30.0
+
+
 def _spawn_job(key: str, roster_path: str) -> subprocess.Popen[bytes] | None:
     """Start one detached supervisor, or attach when the durable lease already has one."""
     ledger = JobLedger()
@@ -11863,6 +12146,7 @@ def _spawn_job(key: str, roster_path: str) -> subprocess.Popen[bytes] | None:
     environment = dict(command_runtime.current_environ())
     environment["UPAGENT_HUB_DIR"] = str(ledger.root.resolve())
     environment["UPAGENT_STATE"] = str(STATE_FILE.resolve())
+    environment[RUNNER_REPARENT_ENV] = "1"
     argv = [
         sys.executable,
         str((HERE / "recruiter.py").resolve()),
@@ -13192,8 +13476,37 @@ def cmd_message_worker(
     return 0
 
 
+def _reparent_runner(key: str) -> None:
+    """Complete the second fork before the caller's shell-tool timeout can kill its tree.
+
+    Popen creates the first child/session. This child forks the actual runner, whose
+    PID and birth stamp go into the lease. The intermediate parent exits after that
+    claim, so init adopts the runner. setsid alone cannot defeat a process-tree kill.
+    """
+    os.environ.pop(RUNNER_REPARENT_ENV, None)
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        return
+    ledger = JobLedger()
+    deadline = time.monotonic() + RUNNER_REPARENT_CLAIM_SECONDS
+    while True:
+        exited, status = os.waitpid(child, os.WNOHANG)
+        if exited:
+            os._exit(os.waitstatus_to_exitcode(status))
+        lease = _active_claim_for(ledger, key)
+        if lease is not None and lease.get("runner_pid") == child:
+            os._exit(0)
+        if time.monotonic() >= deadline:
+            # The live child may still claim; the existing lease reconciler owns it.
+            os._exit(0)
+        time.sleep(0.05)
+
+
 def cmd_run_job(key: str, roster_path: str) -> int:
     """Claim one persisted request, then run its existing exclusive worker lifecycle."""
+    if command_runtime.getenv(RUNNER_REPARENT_ENV) == "1":
+        _reparent_runner(key)
     ledger = JobLedger()
     order = ledger.order(key)
     roster = load_roster(roster_path)
