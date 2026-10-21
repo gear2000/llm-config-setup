@@ -5415,6 +5415,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         tab_role: str | None = None,
         herdr_session: str | None = None,
         on_pane_created=None,
+        startup_timeout_ms=None,
     ) -> tuple[str, str, str]:
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)

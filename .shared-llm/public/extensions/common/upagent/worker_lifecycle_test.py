@@ -65,6 +65,12 @@ class Herdr095:
         self.timer = None
         self.start_commands = []
         self.shell_commands = []
+        self.start_timeouts = []
+        self.prompt_timeouts = []
+        self.stall_mode = None
+        self.uncertain_prompt = None
+        self.delivery_observations = 0
+        self.recent_text = ""
 
     def pane(self, pane):
         return {
@@ -166,6 +172,7 @@ class Herdr095:
             kind = args[args.index("--kind") + 1]
             argv = args[args.index("--") + 1 :]
             self.start_commands.append((kind, argv))
+            self.start_timeouts.append(int(args[args.index("--timeout") + 1]))
             if kind != "codex" and any(word.startswith("Read ") for word in argv):
                 raise r.RecruiterError(
                     "timeout: interactive worker busy from its first turn"
@@ -196,10 +203,22 @@ class Herdr095:
             )
             if pane is None:
                 raise r.RecruiterError("agent_not_found")
+            if head == ("agent", "get") and self.uncertain_prompt:
+                self.delivery_observations += 1
+                if self.delivery_observations == 2 and self.stall_mode != "never":
+                    self.begin_work(pane)
+                    if self.stall_mode == "echo":
+                        pane["agent_status"] = "idle"
+                        self.recent_text = self.uncertain_prompt
             if head == ("agent", "wait"):
                 assert "--until" in args and "--status" not in args
                 self.sequence.append("idle-gate")
             if head == ("agent", "prompt"):
+                self.prompt_timeouts.append(int(args[args.index("--timeout") + 1]))
+                if self.stall_mode:
+                    self.prompt_count += 1
+                    self.uncertain_prompt = args[3]
+                    raise r.RecruiterError("agent_prompt_stalled: no observed activity")
                 if self.dialog:
                     raise r.RecruiterError("agent_blocked")
                 assert pane["agent_status"] == "idle"
@@ -671,3 +690,59 @@ def test_real_intake_clerk_wrapper_uses_shell_launch_and_health(runtime):
     assert runtime.shell_commands == [wrapper]
     assert not runtime.start_commands and runtime.prompt_count == 0
     assert runtime.panes[pane]["agent_status"] == "working"
+
+
+@pytest.mark.parametrize("delivery", ["working", "echo"])
+def test_stalled_prompt_reconciles_late_delivery_without_resending(
+    runtime, monkeypatch, delivery
+):
+    runtime.stall_mode = delivery
+    monkeypatch.setattr(r, "PROMPT_RECONCILE_SECONDS", 0.2)
+    monkeypatch.setattr(r, "PROMPT_RECONCILE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(r, "_pane_recent_output", lambda *a, **kw: runtime.recent_text)
+    order, roster = request(runtime.root, "pi")
+    ledger = r.JobLedger()
+    key, _ = ledger.submit(order)
+    assert r.cmd_run_job(key, str(roster)) == 0
+    assert ledger.completed_receipt(key, order)["verdict"] == "passed"
+    assert runtime.prompt_count == 1
+    assert runtime.sequence.index("bundle-staged") < runtime.sequence.index(
+        "pane-closed"
+    )
+
+
+def test_stalled_prompt_never_delivered_fails_and_closes_owned_pane(
+    runtime, monkeypatch
+):
+    runtime.stall_mode = "never"
+    monkeypatch.setattr(r, "PROMPT_RECONCILE_SECONDS", 0.03)
+    monkeypatch.setattr(r, "PROMPT_RECONCILE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(
+        r, "_pane_recent_output", lambda *a, **kw: "unrelated old output"
+    )
+    order, roster = request(runtime.root, "pi")
+    ledger = r.JobLedger()
+    key, _ = ledger.submit(order)
+    assert r.cmd_run_job(key, str(roster)) != 0
+    assert ledger.completed_receipt(key, order)["verdict"] == "blocked"
+    assert runtime.prompt_count == 1 and not runtime.staged.is_set()
+    assert list(runtime.panes) == ["w1:p1"]
+
+
+@pytest.mark.parametrize(
+    "configured,budget", [(1000, 180000), (240000, 240000), (600000, 299000)]
+)
+def test_roster_start_budget_has_floor_cap_and_independent_prompt_budget(
+    runtime, configured, budget
+):
+    order, roster = request(runtime.root, "pi")
+    roster.write_text(
+        roster.read_text().replace(
+            "startup_timeout_ms: 1000", f"startup_timeout_ms: {configured}"
+        )
+    )
+    ledger = r.JobLedger()
+    key, _ = ledger.submit(order)
+    assert r.cmd_run_job(key, str(roster)) == 0
+    assert budget - 2000 < runtime.start_timeouts[0] <= budget
+    assert runtime.prompt_timeouts == [budget]

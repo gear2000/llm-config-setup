@@ -4141,13 +4141,20 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
-AGENT_START_TIMEOUT_MS = 60_000
+AGENT_START_TIMEOUT_MS = 180_000
+HERDR_MAX_START_TIMEOUT_MS = 299_000
+PROMPT_RECONCILE_SECONDS = 20.0
+PROMPT_RECONCILE_POLL_SECONDS = 0.25
 HERDR_AGENT_KINDS = {
     "claude": "claude",
     "pi": "pi",
     "codex": "codex",
     "cursor-agent": "cursor",
 }
+
+
+def _agent_start_timeout_ms(configured: int | None) -> int:
+    return min(HERDR_MAX_START_TIMEOUT_MS, max(AGENT_START_TIMEOUT_MS, configured or 0))
 
 
 def _agent_launch_argv(launch: str) -> tuple[list[str], str | None, str | None]:
@@ -4187,7 +4194,13 @@ def _wait_for_cursor_session(
     """
     while time.monotonic() < deadline:
         agent = (
-            _herdr_json("agent", "get", name, herdr_session=session)
+            _herdr_json(
+                "agent",
+                "get",
+                name,
+                herdr_session=session,
+                timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+            )
             .get("result", {})
             .get("agent", {})
         )
@@ -4215,6 +4228,7 @@ def _start_herdr_agent(
     on_pane_created: Callable[[dict], None] | None = None,
     expected_agent: str | None = None,
     expected_process: str | None = None,
+    startup_timeout_ms: int | None = None,
 ) -> tuple[str, str | None, str]:
     """Create topology, record its identity, then start a bare interactive harness.
 
@@ -4232,7 +4246,18 @@ def _start_herdr_agent(
     kind = kind or expected_agent or HERDR_AGENT_KINDS.get(order.get("harness", ""))
     if kind is None:
         raise RecruiterError("shell launch requires an expected agent kind")
-    deadline = time.monotonic() + AGENT_START_TIMEOUT_MS / 1000
+    start_budget_ms = _agent_start_timeout_ms(startup_timeout_ms)
+    deadline = time.monotonic() + start_budget_ms / 1000
+
+    def remaining_seconds() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RecruiterError(f"agent {name!r} exhausted its startup budget")
+        return remaining
+
+    def remaining_ms() -> int:
+        return max(1, int(remaining_seconds() * 1000))
+
     # The name lock makes the duplicate check and the launch one atomic step: without it two
     # concurrent launches of the same name could both pass the check before either starts.
     with _exclusive_agent_name(name):
@@ -4241,7 +4266,13 @@ def _start_herdr_agent(
         # another live request's pane — which a later failure reconciliation would then close.
         try:
             existing = (
-                _herdr_json("agent", "get", name, herdr_session=session)
+                _herdr_json(
+                    "agent",
+                    "get",
+                    name,
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
                 .get("result", {})
                 .get("agent")
             )
@@ -4256,7 +4287,13 @@ def _start_herdr_agent(
                 "it would adopt another request's pane"
             )
         cockpit = (
-            _herdr_json("pane", "get", order["cockpit_pane"], herdr_session=session)
+            _herdr_json(
+                "pane",
+                "get",
+                order["cockpit_pane"],
+                herdr_session=session,
+                timeout_seconds=remaining_seconds(),
+            )
             .get("result", {})
             .get("pane", {})
         )
@@ -4276,7 +4313,11 @@ def _start_herdr_agent(
         for key, value in (order.get("env") or {}).items():
             args.extend(("--env", f"{key}={value}"))
         created = (
-            _herdr_json(*args, herdr_session=session).get("result", {}).get("pane", {})
+            _herdr_json(
+                *args, herdr_session=session, timeout_seconds=remaining_seconds()
+            )
+            .get("result", {})
+            .get("pane", {})
         )
         created_id = created.get("pane_id") if isinstance(created, dict) else None
         if not isinstance(created_id, str) or not created_id:
@@ -4290,20 +4331,36 @@ def _start_herdr_agent(
                 # Canonical `agent start --kind` cannot invoke a wrapper or an explicit
                 # executable path. Preserve that command in this newly owned shell.
                 _herdr(
-                    "pane", "run", created_id,
+                    "pane",
+                    "run",
+                    created_id,
                     launch if bare_kind is None else shlex.join(argv),
-                    herdr_session=session
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
                 )
                 _wait_for_agent_health(
                     created_id,
                     expected_agent=expected_agent or kind,
                     expected_process=expected_process or kind,
                     expected_cwd=order["cwd"],
-                    timeout_ms=AGENT_START_TIMEOUT_MS,
+                    timeout_ms=remaining_ms(),
                     herdr_session=session,
                 )
-                _herdr("agent", "rename", created_id, name, herdr_session=session)
-                response = _herdr_json("agent", "get", name, herdr_session=session)
+                _herdr(
+                    "agent",
+                    "rename",
+                    created_id,
+                    name,
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
+                response = _herdr_json(
+                    "agent",
+                    "get",
+                    name,
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
             else:
                 response = _herdr_json(
                     "agent",
@@ -4314,10 +4371,10 @@ def _start_herdr_agent(
                     "--pane",
                     created_id,
                     "--timeout",
-                    str(AGENT_START_TIMEOUT_MS),
+                    str(remaining_ms()),
                     "--",
                     *argv[1:],
-                    timeout_seconds=AGENT_START_TIMEOUT_MS / 1000 + 5,
+                    timeout_seconds=remaining_seconds(),
                     herdr_session=session,
                 )
             agent = response.get("result", {}).get("agent", {})
@@ -4329,7 +4386,7 @@ def _start_herdr_agent(
                 _wait_for_cursor_session(name, created_id, deadline, session)
             if prompt is not None:
                 _submit_agent_prompt(
-                    name, prompt, AGENT_START_TIMEOUT_MS, herdr_session=session
+                    name, prompt, start_budget_ms, herdr_session=session
                 )
         except (RecruiterError, OSError, RuntimeError):
             # This caller holds the returned create identity. Recovery after a caller crash
@@ -4573,6 +4630,7 @@ def _start_fenced_ledger_agent(
     tab_role: str | None = None,
     herdr_session: str,
     metadata: dict[str, object] | None = None,
+    startup_timeout_ms: int | None = None,
 ) -> tuple[str, str | None, str, str]:
     """Journal before create; failed commit returns only truthful cleanup evidence."""
 
@@ -4616,9 +4674,12 @@ def _start_fenced_ledger_agent(
             tab_role=tab_role,
             herdr_session=herdr_session,
             on_pane_created=record_created,
+            startup_timeout_ms=startup_timeout_ms,
         )
         if not created_recorded:
-            ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
+            ledger.record_launch_created(
+                key, token, launch_id, pane, workspace_id, address
+            )
         if ledger.mark_launch_started(
             key, token, launch_id, pane, workspace_id, address
         ):
@@ -6433,6 +6494,7 @@ def _start_sentinel(
         tab_role="oversight",
         herdr_session=herdr_session,
         metadata={"generation": generation, "worker_pane": worker_pane},
+        startup_timeout_ms=config.startup_timeout_ms,
     )
     try:
         _resize_started_pane(
@@ -8184,6 +8246,59 @@ def _wait_typed_file(path: Path, timeout_ms: int, parser: Callable[[str], Any]) 
 _PROMPT_SUBMISSION_LOCK = threading.Lock()
 
 
+def _reconcile_stalled_prompt(
+    target: str, message: str, *, herdr_session: str | None
+) -> None:
+    """Observe uncertain delivery once; never send a potentially duplicate task."""
+    deadline = time.monotonic() + PROMPT_RECONCILE_SECONDS
+    last_evidence = "no working state or prompt echo"
+    normalized_prompt = " ".join(message.split())
+    while time.monotonic() < deadline:
+        try:
+            response = _herdr_json(
+                "agent",
+                "get",
+                target,
+                herdr_session=herdr_session,
+                timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+            )
+        except RecruiterError as error:
+            last_evidence = str(error)
+        else:
+            agent = response.get("result", {}).get("agent", {})
+            if agent.get("agent_status") == "blocked":
+                raise RecruiterError(
+                    f"agent_blocked: {target!r} reached a dialog after prompt delivery"
+                )
+            if agent.get("agent_status") == "working":
+                return
+            pane = agent.get("pane_id")
+            if isinstance(pane, str) and time.monotonic() < deadline:
+                try:
+                    output = _pane_recent_output(
+                        pane,
+                        lines=120,
+                        herdr_session=herdr_session,
+                        timeout_seconds=min(
+                            2.0, max(0.001, deadline - time.monotonic())
+                        ),
+                    )
+                except RecruiterError as error:
+                    last_evidence = str(error)
+                else:
+                    if normalized_prompt and normalized_prompt in " ".join(
+                        output.split()
+                    ):
+                        return
+        time.sleep(
+            min(PROMPT_RECONCILE_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
+        )
+    raise RecruiterError(
+        f"agent_prompt_stalled: {target!r} delivery unconfirmed after "
+        f"{PROMPT_RECONCILE_SECONDS:g}s: {last_evidence}"
+    )
+
+
 def _submit_agent_prompt(
     target: str,
     message: str,
@@ -8211,23 +8326,33 @@ def _submit_agent_prompt(
             "--timeout",
             str(idle_timeout_ms),
             herdr_session=herdr_session,
+            timeout_seconds=idle_timeout_ms / 1000,
         )
-        response = _herdr_json(
-            "agent",
-            "prompt",
-            target,
-            message,
-            "--wait",
-            "--until",
-            "working",
-            "--until",
-            "blocked",
-            "--timeout",
-            str(idle_timeout_ms),
-            herdr_session=herdr_session,
-        )
+        try:
+            response = _herdr_json(
+                "agent",
+                "prompt",
+                target,
+                message,
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--timeout",
+                str(idle_timeout_ms),
+                herdr_session=herdr_session,
+                timeout_seconds=idle_timeout_ms / 1000,
+            )
+        except RecruiterError as error:
+            if "agent_prompt_stalled" not in str(error):
+                raise
+            _reconcile_stalled_prompt(target, message, herdr_session=herdr_session)
+            return
         if response.get("result", {}).get("agent", {}).get("agent_status") == "blocked":
-            raise RecruiterError(f"agent_blocked: {target!r} reached a dialog after prompt delivery")
+            raise RecruiterError(
+                f"agent_blocked: {target!r} reached a dialog after prompt delivery"
+            )
 
 
 def _notify_requester(
@@ -8435,6 +8560,7 @@ def _start_account_manager(
                         "offering_id": candidate.offering_id,
                         "provider": candidate.provider,
                     },
+                    startup_timeout_ms=config.startup_timeout_ms,
                 )
             )
             _resize_started_pane(
@@ -8697,6 +8823,7 @@ def _run_one_shot_checker(
                     "offering_id": candidate.offering_id,
                     "provider": candidate.provider,
                 },
+                startup_timeout_ms=config.startup_timeout_ms,
             )
         except (RecruiterError, OSError) as error:
             candidate_error = error
@@ -8988,6 +9115,7 @@ def _startup_rescue_advice(
             tab_role="oversight",
             herdr_session=herdr_session,
             metadata={"generation": generation},
+            startup_timeout_ms=config.startup_timeout_ms,
         )
         try:
             _wait_for_agent_health(
@@ -10259,7 +10387,10 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
                 ownership.get("herdr_launch_style") == "split-then-start"
                 and not recorded_pane
             ):
-                return {"status": "blocked", "reason": "intake split outcome is uncertain; an absent agent name cannot prove pane absence"}
+                return {
+                    "status": "blocked",
+                    "reason": "intake split outcome is uncertain; an absent agent name cannot prove pane absence",
+                }
             return {"status": "absent", "agent_name": agent_name}
         return {"status": "blocked", "reason": f"agent lookup failed: {error}"}
     if not isinstance(agent, dict) or not agent:
@@ -10531,7 +10662,12 @@ def _run_order_intake_clerk(
         "expires_at": int(time.time())
         + max(
             1,
-            (config.startup_timeout_ms + config.intake_clerk.timeout_ms) // 1000 + 30,
+            (
+                _agent_start_timeout_ms(config.startup_timeout_ms)
+                + config.intake_clerk.timeout_ms
+            )
+            // 1000
+            + 30,
         ),
         "pane": None,
         "state": "launching",
@@ -10574,6 +10710,7 @@ def _run_order_intake_clerk(
             on_pane_created=record_created,
             expected_agent=config.intake_clerk.expected_agent,
             expected_process=config.intake_clerk.expected_process,
+            startup_timeout_ms=config.startup_timeout_ms,
         )
         ownership["pane"] = (
             pane  # local cleanup remains possible if journal update fails
@@ -12438,7 +12575,11 @@ def _request_order(order: dict, roster_path: str) -> int:
         process = None
     deadline = (
         time.monotonic()
-        + (config.account_manager.timeout_ms + config.startup_timeout_ms * 2) / 1000
+        + (
+            config.account_manager.timeout_ms
+            + _agent_start_timeout_ms(config.startup_timeout_ms) * 2
+        )
+        / 1000
     )
     while time.monotonic() < deadline:
         state = ledger.state(key)
@@ -13544,7 +13685,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     lease_window_ms = (
         timeout_ms
         + management_config.account_manager.timeout_ms
-        + management_config.startup_timeout_ms * 2
+        + _agent_start_timeout_ms(management_config.startup_timeout_ms) * 2
         + management_config.requester_grace_ms
     )
     token = ledger.claim(key, order["order_id"], lease_window_ms, owner=owner)
@@ -13771,6 +13912,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             tab_role=cast(str | None, kwargs.get("tab_role")),
             herdr_session=herdr_session,
             metadata={"attempt": len(worker_launches) + 1, "generation": generation},
+            startup_timeout_ms=management_config.startup_timeout_ms,
         )
         worker_launches.append((launch_id, pane))
         return pane, workspace_id, address
