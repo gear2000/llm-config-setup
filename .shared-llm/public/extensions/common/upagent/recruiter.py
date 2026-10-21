@@ -4150,7 +4150,7 @@ HERDR_AGENT_KINDS = {
 }
 
 
-def _agent_launch_argv(launch: str) -> tuple[list[str], str, str | None]:
+def _agent_launch_argv(launch: str) -> tuple[list[str], str | None, str | None]:
     """Split the rendered command without running its task during interactive startup.
 
     Kit renderers and roster templates put the assignment sentence last. Option values
@@ -4162,10 +4162,11 @@ def _agent_launch_argv(launch: str) -> tuple[list[str], str, str | None]:
     kind = HERDR_AGENT_KINDS.get(executable)
     if executable == "claudex":
         kind = "claude"
+    if not argv:
+        raise RecruiterError("agent launch command is empty")
     if kind is None:
-        raise RecruiterError(
-            f"launch executable {executable!r} is not a supported Herdr agent"
-        )
+        # Shell wrappers own their quoting, redirects, and inline task delivery.
+        return argv, None, None
     prompt = None
     if kind != "codex" and len(argv) > 1 and any(ch.isspace() for ch in argv[-1]):
         prompt = argv.pop()
@@ -4212,6 +4213,8 @@ def _start_herdr_agent(
     tab_role: str | None = None,
     herdr_session: str | None = None,
     on_pane_created: Callable[[dict], None] | None = None,
+    expected_agent: str | None = None,
+    expected_process: str | None = None,
 ) -> tuple[str, str | None, str]:
     """Create topology, record its identity, then start a bare interactive harness.
 
@@ -4224,6 +4227,11 @@ def _start_herdr_agent(
         )
     session = _recorded_herdr_session(herdr_session, "agent startup")
     argv, kind, prompt = _agent_launch_argv(launch)
+    shell_wrapper = argv[0] not in HERDR_AGENT_KINDS
+    bare_kind = kind
+    kind = kind or expected_agent or HERDR_AGENT_KINDS.get(order.get("harness", ""))
+    if kind is None:
+        raise RecruiterError("shell launch requires an expected agent kind")
     deadline = time.monotonic() + AGENT_START_TIMEOUT_MS / 1000
     # The name lock makes the duplicate check and the launch one atomic step: without it two
     # concurrent launches of the same name could both pass the check before either starts.
@@ -4278,16 +4286,18 @@ def _start_herdr_agent(
         try:
             if on_pane_created is not None:
                 on_pane_created(created)
-            if Path(argv[0]).name == "claudex" or argv[0] != Path(argv[0]).name:
+            if shell_wrapper:
                 # Canonical `agent start --kind` cannot invoke a wrapper or an explicit
                 # executable path. Preserve that command in this newly owned shell.
                 _herdr(
-                    "pane", "run", created_id, shlex.join(argv), herdr_session=session
+                    "pane", "run", created_id,
+                    launch if bare_kind is None else shlex.join(argv),
+                    herdr_session=session
                 )
                 _wait_for_agent_health(
                     created_id,
-                    expected_agent=kind,
-                    expected_process=kind,
+                    expected_agent=expected_agent or kind,
+                    expected_process=expected_process or kind,
                     expected_cwd=order["cwd"],
                     timeout_ms=AGENT_START_TIMEOUT_MS,
                     herdr_session=session,
@@ -10562,6 +10572,8 @@ def _run_order_intake_clerk(
             tab_role="oversight",
             herdr_session=herdr_session,
             on_pane_created=record_created,
+            expected_agent=config.intake_clerk.expected_agent,
+            expected_process=config.intake_clerk.expected_process,
         )
         ownership["pane"] = (
             pane  # local cleanup remains possible if journal update fails

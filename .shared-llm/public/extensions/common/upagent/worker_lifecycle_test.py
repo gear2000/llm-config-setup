@@ -64,6 +64,7 @@ class Herdr095:
         self.dialog = False
         self.timer = None
         self.start_commands = []
+        self.shell_commands = []
 
     def pane(self, pane):
         return {
@@ -123,6 +124,14 @@ class Herdr095:
             return self.reply("pane_info", pane=self.panes[args[2]].copy())
         if head == ("pane", "list"):
             return self.reply("pane_list", panes=list(self.panes.values()))
+        if head == ("pane", "run"):
+            self.shell_commands.append(args[3])
+            pane = self.panes[args[2]]
+            pane.update(agent="claude", agent_status="working")
+            return self.reply("ok")
+        if head == ("agent", "rename"):
+            self.panes[args[2]].update(name=args[3], agent_name=args[3])
+            return self.reply("ok")
         if head == ("pane", "process-info"):
             pane = self.panes[args[-1]]
             kind = pane.get("agent", "bash")
@@ -641,3 +650,24 @@ def test_intake_lost_split_reply_cannot_claim_an_anonymous_pane_absent(runtime):
     }
     identity = r._resolve_intake_clerk_identity(ownership)
     assert identity["status"] == "blocked" and "uncertain" in identity["reason"]
+
+
+def test_real_intake_clerk_wrapper_uses_shell_launch_and_health(runtime):
+    config = r.llm_management.load_management_config({})
+    brief = runtime.root / "clerk brief.md"
+    brief.write_text("Classify this request.\n")
+    wrapper = r.llm_management.render_intake_clerk_command(
+        config.intake_clerk, brief, str(runtime.root), runtime.root / "response.json"
+    )
+    pane, workspace, address = r._start_herdr_agent(
+        "intake-clerk-test",
+        {"cwd": str(runtime.root), "cockpit_pane": "w1:p1"},
+        wrapper,
+        expected_agent=config.intake_clerk.expected_agent,
+        expected_process=config.intake_clerk.expected_process,
+        herdr_session="llm-lab-test",
+    )
+    assert (pane, workspace, address) == ("w1:p2", "w1", "intake-clerk-test")
+    assert runtime.shell_commands == [wrapper]
+    assert not runtime.start_commands and runtime.prompt_count == 0
+    assert runtime.panes[pane]["agent_status"] == "working"
