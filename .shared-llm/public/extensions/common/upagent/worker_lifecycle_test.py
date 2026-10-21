@@ -219,6 +219,14 @@ class Herdr095:
                     self.prompt_count += 1
                     self.uncertain_prompt = args[3]
                     raise r.RecruiterError("agent_prompt_stalled: no observed activity")
+                if self.dialog == "accepted":
+                    self.prompt_count += 1
+                    pane["agent_status"] = "blocked"
+                    # Captured 0.9.5 successful delivery that settles on permission UI.
+                    return {
+                        "id": "cli:agent:prompt",
+                        **self.reply("agent_prompted", agent=pane.copy()),
+                    }
                 if self.dialog:
                     raise r.RecruiterError("agent_blocked")
                 assert pane["agent_status"] == "idle"
@@ -746,3 +754,77 @@ def test_roster_start_budget_has_floor_cap_and_independent_prompt_budget(
     assert r.cmd_run_job(key, str(roster)) == 0
     assert budget - 2000 < runtime.start_timeouts[0] <= budget
     assert runtime.prompt_timeouts == [budget]
+
+
+def test_accepted_prompt_that_reaches_dialog_is_rejected_and_cleaned_up(runtime):
+    runtime.dialog = "accepted"
+    order, _ = request(runtime.root, "claude")
+    launch = f"claude --instructions {order['instructions_path']} 'Read the assigned instructions and work.'"
+    with pytest.raises(r.RecruiterError, match="agent_blocked.*after prompt delivery"):
+        r._start_herdr_agent(
+            "dialog-worker", order, launch, herdr_session="llm-lab-test"
+        )
+    assert runtime.prompt_count == 1
+    assert not runtime.staged.is_set() and list(runtime.panes) == ["w1:p1"]
+
+
+def test_codex_task_variables_are_literal_while_options_expand(monkeypatch):
+    import shlex
+
+    monkeypatch.setenv("TEST_LAUNCH_PATH", "/lab/option")
+    prompt = "Explain $TEST_LAUNCH_PATH and ${TEST_LAUNCH_PATH} literally."
+    argv, kind, delayed = r._agent_launch_argv(
+        shlex.join(["codex", "exec", "--config", "$TEST_LAUNCH_PATH", prompt])
+    )
+    assert kind == "codex" and delayed is None
+    assert argv[-1] == prompt and argv[-2] == "/lab/option"
+
+
+def test_lost_wait_probe_cannot_overrun_original_deadline(runtime, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(r.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        r.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    waits, probes = [], []
+
+    def lost(*args, **kwargs):
+        waits.append(args)
+        raise r.HerdrWaitLost("events_lost")
+
+    def wedged(*args, **kwargs):
+        assert args[:2] == ("pane", "get")
+        probes.append(kwargs["timeout_seconds"])
+        clock[0] += kwargs["timeout_seconds"]
+        raise r.RecruiterError("socket probe timed out")
+
+    monkeypatch.setattr(r, "_wait_for_exec_status", lost)
+    monkeypatch.setattr(r, "_herdr_json", wedged)
+    with pytest.raises(r.AgentWaitTimeout):
+        r._wait_for_agent_status("w1:p2", 250, None, herdr_session="llm-lab-test")
+    assert len(waits) == 1 and probes == [0.25] and clock[0] == 100.25
+
+
+def test_repeated_lost_waits_back_off_before_reopening(runtime, monkeypatch):
+    clock = [100.0]
+    sleeps = []
+    monkeypatch.setattr(r.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(r.time, "sleep", sleep)
+    runtime.panes["w1:p2"] = runtime.pane("w1:p2")
+    waits = []
+
+    def lost_then_done(*args, **kwargs):
+        waits.append(args[1])
+        if len(waits) < 4:
+            raise r.HerdrWaitLost("events_lost")
+        return True
+
+    monkeypatch.setattr(r, "_wait_for_exec_status", lost_then_done)
+    assert r._wait_for_agent_status("w1:p2", 1000, None, herdr_session="llm-lab-test")
+    assert len(sleeps) == 3 and all(delay > 0 for delay in sleeps)
+    assert all(a > b for a, b in zip(waits, waits[1:]))
