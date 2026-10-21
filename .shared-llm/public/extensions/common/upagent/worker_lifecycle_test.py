@@ -66,6 +66,7 @@ class Herdr095:
         self.start_commands = []
         self.shell_commands = []
         self.start_timeouts = []
+        self.start_process_timeouts = []
         self.prompt_timeouts = []
         self.stall_mode = None
         self.uncertain_prompt = None
@@ -175,6 +176,7 @@ class Herdr095:
             self.start_timeouts.append(int(args[args.index("--timeout") + 1]))
             if kind != "codex" and any(word.startswith("Read ") for word in argv):
                 raise r.RecruiterError(
+            self.start_process_timeouts.append(kwargs["timeout_seconds"])
                     "timeout: interactive worker busy from its first turn"
                 )
             pane = self.panes[args[args.index("--pane") + 1]]
@@ -801,6 +803,7 @@ def test_lost_wait_probe_cannot_overrun_original_deadline(runtime, monkeypatch):
     monkeypatch.setattr(r, "_wait_for_exec_status", lost)
     monkeypatch.setattr(r, "_herdr_json", wedged)
     with pytest.raises(r.AgentWaitTimeout):
+    assert runtime.start_process_timeouts[0] == runtime.start_timeouts[0] / 1000 + 5
         r._wait_for_agent_status("w1:p2", 250, None, herdr_session="llm-lab-test")
     assert len(waits) == 1 and probes == [0.25] and clock[0] == 100.25
 
