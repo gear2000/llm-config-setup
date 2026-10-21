@@ -47,7 +47,7 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 - `just update` always writes a full run log under `/tmp/.shared-llm/log/<timestamp>.log`; `-v` also prints the per-file detail to the terminal.
 - **Building blocks** (`just update` runs them in order; each is also callable on its own): `just copy`, `just compose`, `just link`, and `just global` for home roster/runtime reconciliation.
 - `just pi-extensions` installs the pinned third-party Pi extensions via the `pi` CLI (a network step; no-op if `pi` is absent).
-- `just herdr-pin` installs Herdr **0.7.1** from the GitHub release (`tools/install-herdr.sh`). Newer Herdr breaks the UpAgent hub; do not run `herdr update` or the unpinned `herdr.dev/install.sh`.
+- `just herdr-pin` installs Herdr **0.9.5** from the GitHub release (`tools/install-herdr.sh`). The port targets this exact version; do not run `herdr update` or the unpinned `herdr.dev/install.sh`.
 - `just misc` installs third-party skills this kit does not compose (Lavish, quota-axi, Impeccable, Plannotator). `unslop` is kit-composed by `just update`.
 - `just test` runs the composer/flow test suite.
 - The Pi launch group — `just hub`, `just builder`, `just pi-status`, `just pi-clean` — and the terraform workflow recipes (`just tf-implement`, `just tf-approve`, `just tf-auto`, `just tf-reviewer-cc` / `-pi`) are covered under "Pi harness runtime config" below.
@@ -186,7 +186,7 @@ The repo splits into the **source tree** (`.shared-llm/`) and the **engine + con
 tools/
   harness.py                      — the ONE engine: compose + config-driven copy/compose/link/global
   install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
-  install-herdr.sh                — pin Herdr 0.7.1 (UpAgent hub; do not `herdr update`)
+  install-herdr.sh                — pin Herdr 0.9.5 (UpAgent hub; do not `herdr update`)
   install-misc.sh                 — Lavish, quota-axi, Impeccable, Plannotator (not kit-composed)
 justfile                          — init / configure / update, the building blocks, tests, and the Pi launch group
 docs/
@@ -297,7 +297,7 @@ A destination composes the **consumer-relevant** recipe groups: public root `CLA
 2. **The generic agents** — composes the `agents/` recipes (roster and count in the Inventory section), syncs each persona into `~/.shared-llm/generated/agents/`, and symlinks it into the home agent dirs: `~/.claude/agents/` and `~/.pi/agent/agents/`. Codex has no user-agent directory, so agents skip it — the engine never invents one.
 3. **Pi runtime** — copies the bundled Pi extensions, agent personas, and themes into `~/.shared-llm/generated/` and symlinks them from there into `~/.pi/` (reconciling: create / re-point / prune), and scaffolds `~/.pi/agent/settings.json` from the template only if absent.
 4. **Claude runtime** — copies the generic hooks and the statusline into the generated tree and links them into `~/.claude/hooks/` and `~/.claude/statusline.sh`, and scaffolds `~/.claude/settings.json` from `settings.template.json` only if absent — settings stays a **real file** on purpose: Claude Code mutates it at runtime, and a rename-style save would silently replace a symlink.
-5. **Herdr config** — deploys `herdr-config.toml` the same way, as a generated copy linked at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning. That file does not install the `herdr` binary. Pin **0.7.1** with `just herdr-pin`; newer Herdr breaks the UpAgent hub.
+5. **Herdr config** — deploys `herdr-config.toml` the same way, as a generated copy linked at `~/.config/herdr/config.toml`: creates/repoints links managed by this kit and leaves a foreign real file or link untouched with a loud warning. That file does not install the `herdr` binary. Pin **0.9.5** with `just herdr-pin`; other versions are outside this port.
 6. **UpAgent offering roster** — always materializes the machine-selected, code-validated roster at `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml`, even when no global harness is selected, so repository-independent calls have the same explicit machine policy.
 
 Home links always point into `~/.shared-llm/generated/`, never into the kit checkout, so moving or deleting the repository never breaks a live runtime.

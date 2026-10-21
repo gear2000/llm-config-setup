@@ -1730,7 +1730,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         "init: all prerequisites present. Next: `just configure -s ~/.shared-llm`, `just configure -g cc,pi`, then `just update`."
     )
     print(
-        "init: pin Herdr 0.7.1 with `just herdr-pin` (do not `herdr update`; newer Herdr breaks UpAgent)."
+        "init: pin Herdr 0.9.5 with `just herdr-pin` (do not `herdr update`; other Herdr versions are untested)."
     )
     print(
         "init: for the Pi harness, `npm install -g @earendil-works/pi-coding-agent` then `just pi-extensions`."

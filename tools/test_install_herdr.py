@@ -1,4 +1,4 @@
-"""Black-box tests for the Herdr 0.7.1 pin installer."""
+"""Black-box tests for the Herdr 0.9.5 pin installer."""
 from __future__ import annotations
 
 import os
@@ -13,7 +13,7 @@ SCRIPT = ROOT / "tools/install-herdr.sh"
 def _run(
     tmp_path: Path,
     *args: str,
-    herdr_version: str | None = "0.7.1",
+    herdr_version: str | None = "0.9.5",
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
@@ -39,9 +39,9 @@ def _run(
     )
 
 
-def test_script_pins_0_7_1() -> None:
+def test_script_pins_0_9_5() -> None:
     text = SCRIPT.read_text()
-    assert 'PINNED="${HERDR_PIN:-0.7.1}"' in text
+    assert 'PINNED="${HERDR_PIN:-0.9.5}"' in text
     assert "herdr.dev/install.sh" in text
     assert "github.com/herdrdev/herdr/releases/download/v" in text
 
@@ -49,14 +49,14 @@ def test_script_pins_0_7_1() -> None:
 def test_check_passes_on_pinned_version(tmp_path: Path) -> None:
     result = _run(tmp_path, "--check")
     assert result.returncode == 0, result.stderr
-    assert "0.7.1" in result.stdout
+    assert "0.9.5" in result.stdout
 
 
 def test_check_fails_on_other_version(tmp_path: Path) -> None:
     result = _run(tmp_path, "--check", herdr_version="0.8.0")
     assert result.returncode != 0
     assert "0.8.0" in result.stderr
-    assert "0.7.1" in result.stderr
+    assert "0.9.5" in result.stderr
 
 
 def test_check_fails_when_herdr_missing(tmp_path: Path) -> None:

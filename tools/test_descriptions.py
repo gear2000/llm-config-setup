@@ -819,7 +819,7 @@ def test_upinstall_contains_required_guardrails() -> None:
         "third-party-extensions.txt",
         "just herdr-pin",
         "tools/install-herdr.sh",
-        "0.7.1",
+        "0.9.5",
         "https://herdr.dev/install.sh",
         "just misc",
         "tools/install-misc.sh",
@@ -850,7 +850,7 @@ def test_install_misc_script_installs_third_party_skills() -> None:
 def test_herdr_config_disables_version_nag() -> None:
     text = (REPO / "herdr-config.toml").read_text()
     assert "version_check = false" in text
-    assert "0.7.1" in text
+    assert "0.9.5" in text
 
 
 def test_setup_destination_contains_required_gates() -> None:
