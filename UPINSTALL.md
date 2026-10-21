@@ -162,22 +162,7 @@ herdr integration install pi
 herdr integration install claude
 herdr integration install codex
 herdr integration install cursor
-# Remove the legacy Codex status reports with the command below before starting agents.
-just update
-herdr --version
-herdr integration status
-herdr
-```
-
-Stop any other sessions intentionally being migrated before replacing the binary. `just update`
-rebuilds every destination in the machine config (all four on the validated machine), including
-generated home runtimes. No destination needs a hand edit. Verify Herdr 0.9.5 and integration
-versions Pi v9, Claude v11, Codex v10, Cursor v2. The Codex integration uses SessionStart.
-The official installer preserves the old kit `herdr-status-fix.sh` entries, and `just update`
-does not deploy the kit's no-op replacement into Codex's home. Remove only those two reports
-with this command after reinstalling integrations and before starting agents:
-
-```bash
+# Remove only the two legacy Codex status reports before deploying the runtime.
 python3 - <<'PY'
 import json
 import shlex
@@ -202,7 +187,19 @@ for event, action in (("SessionStart", "working"), ("Stop", "idle")):
         data["hooks"][event] = groups
 path.write_text(json.dumps(data, indent=2) + "\n")
 PY
+just update
+herdr --version
+herdr integration status
+herdr
 ```
+
+Stop any other sessions intentionally being migrated before replacing the binary. `just update`
+rebuilds every destination in the machine config (all four on the validated machine), including
+generated home runtimes. No destination needs a hand edit. Verify Herdr 0.9.5 and integration
+versions Pi v9, Claude v11, Codex v10, Cursor v2. The Codex integration uses SessionStart.
+The official installer preserves the old kit `herdr-status-fix.sh` entries, and `just update`
+does not deploy the kit's no-op replacement into Codex's home. The swap block removes only
+those two reports after reinstalling integrations and before `just update`.
 
 Keep the backup from before the swap; do not overwrite it when repeating these steps.
 The command preserves the official SessionStart hook and unrelated hooks. The copied-home
@@ -232,8 +229,17 @@ herdr --session default server stop && git switch --detach 585b484 && \
   cp -p ~/.codex/hooks.json.before-herdr-0.9.5 ~/.codex/hooks.json && just update
 ```
 
-Then start Herdr normally. This checkout is detached at the baseline until deliberately switched
-back. The isolated lab does not perform either machine swap.
+The rollback was rehearsed over the upgraded copied home. The 0.7.1 installers restored
+Pi v3, Claude v7, Codex v6 and Cursor v1. Claude's installer restored the Herdr SessionStart
+matcher to `*` and preserved the other settings. Its parsed JSON matched the pre-upgrade
+baseline; only formatting and key order differed. `~/.claude/settings.json` therefore needs
+no separate backup for this tested rollback. Keep one if byte-for-byte restoration matters.
+Restoring the Codex backup reproduced `hooks.json` byte for byte. Snapshots and per-file diffs
+are retained locally under `/var/tmp/herdr095-fix2-20261021/rollback/`.
+
+Then start Herdr normally and check `herdr --version` and `herdr integration status` against
+those versions. This checkout is detached at the baseline until deliberately switched back.
+The isolated lab does not perform either machine swap.
 
 ### Pi third-party extensions (when `global` includes `pi`)
 
