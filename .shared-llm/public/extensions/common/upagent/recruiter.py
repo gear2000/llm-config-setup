@@ -4365,6 +4365,7 @@ def _start_herdr_agent(
                     timeout_seconds=remaining_seconds(),
                 )
             else:
+                start_timeout_ms = remaining_ms()
                 response = _herdr_json(
                     "agent",
                     "start",
@@ -4374,10 +4375,10 @@ def _start_herdr_agent(
                     "--pane",
                     created_id,
                     "--timeout",
-                    str(remaining_ms()),
+                    str(start_timeout_ms),
                     "--",
                     *argv[1:],
-                    timeout_seconds=remaining_seconds(),
+                    timeout_seconds=start_timeout_ms / 1000 + 5,
                     herdr_session=session,
                 )
             agent = response.get("result", {}).get("agent", {})
