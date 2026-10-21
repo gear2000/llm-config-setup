@@ -8321,6 +8321,9 @@ def test_intake_persistence_failure_never_rewrites_original(
 def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8526,6 +8529,9 @@ def test_identical_bytes_reuse_one_clerk_but_different_bytes_launch_a_fresh_one(
     correction round — is a different request and launches a fresh clerk. This drives the real
     `_run_order_intake_clerk` reuse index, not a hand-built one, and counts actual launches.
     """
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8654,6 +8660,9 @@ def test_identical_intake_reuses_only_a_validated_indexed_attempt(
 def test_post_start_journal_failure_closes_the_just_created_named_pane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8661,6 +8670,18 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
     monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
     started = []
     cleaned = []
+    closed = []
+
+    def close(*args, **kwargs):
+        assert args == ("pane", "close", "clerk:pane")
+        closed.append(args[2])
+
+    def list_panes(*args, **kwargs):
+        assert args == ("pane", "list")
+        return {"result": {"panes": []}}
+
+    monkeypatch.setattr(recruiter, "_herdr", close)
+    monkeypatch.setattr(recruiter, "_herdr_json", list_panes)
 
     def start(name, order, launch, **kwargs):
         started.append((name, order))
@@ -8702,6 +8723,7 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
         )
 
     assert len(started) == 1 and len(cleaned) == 1
+    assert closed == ["clerk:pane"]
     assert cleaned[0]["pane"] == "clerk:pane"
     assert cleaned[0]["agent_name"] == started[0][0]
     attempt = Path(started[0][1]["cwd"])
