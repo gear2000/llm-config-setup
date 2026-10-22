@@ -1,8 +1,10 @@
 # UpAgent hub end-to-end validation
 
-Reusable brief for an agent running inside the live Herdr cockpit. Run it after every Herdr
-swap, every kit update that touches the hub, and before trusting the hub again after an
-incident. Hand the whole file to a Claude Code session inside Herdr as its task.
+Reusable brief for an agent running inside the live Herdr cockpit: Claude Code, Pi, or Codex,
+whichever you use as the cockpit. Run it after installing the kit on a new machine, after every
+Herdr version change, after every kit update that touches the hub, and before trusting the hub
+again after an incident. Hand the whole file to the cockpit agent as its task. It needs a
+machine where `just update` has run and at least one harness is authenticated.
 
 Time to allocate: about 45 minutes of agent time without the optional D9 hold drill, about
 70 minutes with it, plus about 10 minutes of your own time for first-run screens on a fresh
@@ -33,17 +35,21 @@ Run drills one at a time. Never run two hires at once.
 Run and record the output of each:
 
 ```bash
-herdr --version                      # expected: the version UPINSTALL.md names as required
+herdr --version                      # expected: the version `just herdr-pin --check` requires
 herdr integration status             # expected: pi, claude, codex, cursor present; note versions
 just herdr-pin --check               # expected: exit 0
-grep -c herdr-status-fix ~/.codex/hooks.json || true   # expected on 0.9.5: 0
+grep -c herdr-status-fix ~/.codex/hooks.json 2>/dev/null || true   # expected: 0 (legacy 0.7.1 hook, see UPINSTALL)
 herdr session list --json | python3 -c 'import json,sys; print([s["name"] for s in json.load(sys.stdin)["sessions"]])'
 just upagent lists --type offerings --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("offerings", d)), "offerings")'
 just upagent status --json | head -c 2000   # expected: runtime bound, no active requests before you begin
 ```
 
-The required Herdr version is in `UPINSTALL.md` under "Herdr ... (UpAgent hub — required)".
+The required Herdr version is the pin in `tools/install-herdr.sh`.
 If the version, the pin check, or the offerings list fail, report and stop.
+
+Then record which harness CLIs exist and are logged in (`command -v claude pi codex cursor-agent`,
+and each one's own auth status). Drills for a missing or unauthenticated harness are skipped, not
+failed; say so in the report.
 
 ## Step 2: kit suite on the real home (3 min)
 
@@ -106,8 +112,8 @@ Delete `SUM.txt` between drills.
 | D1 codex exec | `codex-gpt-5-6-luna` / high | exec launch, server-owned wait, typed closeout, Codex hooks state | verdict passed, 5050, panes gone, under 6 min |
 | D2 claude interactive | `claude-haiku-5-5` / high | bare start, prompt after ready, one continuous `working` turn through the 100 s computation, no nudge | verdict passed, 5050, no `nudge` event in the ledger, panes gone |
 | D3 pi interactive | `pi-gpt-5-6-luna` / high | insulated Pi launch, agent-state extension loaded | verdict passed, 5050, panes gone |
-| D4 cursor | `cursor-composer-2-5` / default | Cursor readiness wait, prompt delivery | verdict passed, 5050, panes gone (if Cursor is not authenticated, record blocked and continue) |
-| D5 claudex | `claudex-gpt-6-1-sol` / medium | proxy-backed Claude launch | verdict passed, 5050, panes gone (skip with a note if the proxy is not running) |
+| D4 cursor | `cursor-composer-2-5` / default | Cursor readiness wait, prompt delivery | verdict passed, 5050, panes gone (if Cursor is not installed or not authenticated, record skipped and continue) |
+| D5 claudex | `claudex-gpt-6-1-sol` / medium | proxy-backed Claude launch | verdict passed, 5050, panes gone (skip with a note if the `claudex` offering set is not selected or the proxy is not running) |
 | D6 nested request | `codex-gpt-5-6-luna` / high, task below | runner survives the submitting shell tool's tree kill | inner request terminalizes passed after the outer worker finishes; outer verdict passed |
 | D7 pane close | `pi-gpt-5-6-luna` / high | pane-loss detection and typed blocked closeout | within 30 s of your `herdr pane close`, ledger shows worker-gone; terminal verdict blocked, not a hang; panes gone |
 | D8 timeout | `claude-haiku-5-5` / high, `--duration-minutes 2` | deadline handling | await returns a timeout outcome that names extend/cancel; no orphan panes after you cancel with `just upagent cancel --request <id> --control-token-file <run-dir>/control-token` |
@@ -135,8 +141,9 @@ deliver a passed bundle." Expect three nudges over about 20 minutes, then a hold
 Produce one table, one row per drill: drill, offering, elapsed seconds, verdict, SUM.txt
 correct (y/n), Sentinel closeout present (y/n), panes gone (y/n), evidence path. Then:
 
-- Overall: PASS only if D1, D2, D3, D6, D7, D8 all passed and no nudge fired in D2. D4 and D5
-  may be "blocked: unauthenticated" without failing the overall. D9 is informational.
+- Overall: PASS only if every drill whose harness is installed and authenticated passed, with
+  D1, D2, D3, D6, D7, D8 required when their harness exists, and no nudge fired in D2. A harness
+  that is not installed or not authenticated is "skipped", never a failure. D9 is informational.
 - The `herdr --version`, integration versions, and `just test` count from steps 1 and 2.
 - Every drill that did not pass, with the terminal reason and the ledger tail.
 - Anything left behind: panes, active requests, files outside `$V`.

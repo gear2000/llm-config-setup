@@ -10,6 +10,9 @@ Pin it from the kit checkout with `just herdr-pin` (`tools/install-herdr.sh`). D
 `herdr update` or the unpinned `https://herdr.dev/install.sh` installer. Machine setup:
 [UPINSTALL.md](../../../../../UPINSTALL.md).
 
+To prove the hub works on a machine, hand [VALIDATE.md](VALIDATE.md) to an agent inside the Herdr
+cockpit. It drills every worker kind and the failure paths and reports PASS/FAIL per drill.
+
 ## Execution patterns
 
 The human talks to one **HIL agent**: a Claude Code (or Pi) pane they started themselves inside
