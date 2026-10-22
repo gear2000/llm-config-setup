@@ -93,8 +93,8 @@ pi-extensions:
     @command -v pi >/dev/null || { echo "pi not found — skipping"; exit 0; }
     bash tools/install-pi-extensions.sh
 
-# Pin Herdr to 0.7.1 (the version the UpAgent hub is tested against). Newer Herdr
-# breaks the hub. Do not run `herdr update`.
+# Pin Herdr to 0.9.5 (the version the UpAgent hub is tested against).
+# Other versions require a separate compatibility check. Do not run `herdr update`.
 #   just herdr-pin
 #   just herdr-pin --check
 herdr-pin *args:

@@ -59,7 +59,7 @@ def inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
                 "pane_id": "implementer", "workspace_id": "workspace",
                 "name": "controller",
             }}}
-        assert args == ("pane", "run", "implementer", "read your inbox")
+        assert args == ("agent", "prompt", "implementer", "read your inbox")
         records = authority_state(state)
         assert all(item["state"] == "reserved" for item in records["inbox"].values())
         if state.get("fail_send"):

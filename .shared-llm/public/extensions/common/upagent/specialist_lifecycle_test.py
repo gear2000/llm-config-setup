@@ -30,6 +30,7 @@ class BackendError(RuntimeError):
 
 class FakeRecruiter:
     RecruiterError = BackendError
+    _safe_agent_name = staticmethod(load("recruiter")._safe_agent_name)
     EXPECTED_HARNESS_AGENT = {"pi": "pi"}
     EXPECTED_HARNESS_PROCESS = {"pi": "pi"}
     CURSOR_PROMPT_PASTE_SETTLE_SECONDS = 0.5
@@ -55,9 +56,6 @@ class FakeRecruiter:
         self.fail_start = None
         self.pending_starts = []
         self.start_calls = 0
-        # Lands every queued start just before the next `agent start` is handled: the
-        # original wins the name between the resume's probe and its own start.
-        self.deliver_before_start = False
         self.contracts_consult = load("contracts_consult")
         self.entry = {
             "name": "advisor",
@@ -103,30 +101,37 @@ class FakeRecruiter:
             (p for p in info["foreground_processes"] if p["name"] == expected), None
         )
 
+    def _start_herdr_agent(
+        self, name, order, launch, *, herdr_session, on_pane_created
+    ):
+        assert herdr_session == "test-session"
+        self.start_calls += 1
+        args = (name, order["cwd"], launch)
+        if self.fail_start:
+            mode, self.fail_start = self.fail_start, None
+            if mode == "lost":
+                self.pending_starts.append(args)
+            else:
+                # The split identity was journaled, then startup failed and cleanup
+                # removed its shell. Recovery can prove that exact pane absent.
+                on_pane_created(
+                    {"pane_id": "rejected-pane", "terminal_id": "rejected-terminal"}
+                )
+            raise BackendError("agent start timed out after 60 seconds")
+        reply = self._register(args)
+        pane = reply["result"]["agent"]["pane_id"]
+        on_pane_created({"pane_id": pane, "terminal_id": "terminal-" + pane})
+        return pane, "w1", name
+
     def _herdr_json(self, *args, herdr_session, timeout_seconds):
         assert herdr_session == "test-session"
-        # Launch and delivery have finite bounds; observations use 15 seconds.
-        if args[:2] == ("agent", "start"):
-            assert 0 < timeout_seconds <= 180
-        else:
-            assert timeout_seconds == 15
+        assert timeout_seconds == 15
         if not self.available:
             raise BackendError("backend unavailable")
-        if args[:2] == ("agent", "start"):
-            self.start_calls += 1
-            if self.deliver_before_start:
-                self.deliver_before_start = False
-                self.deliver_pending_starts()
-            if self.fail_start:
-                mode, self.fail_start = self.fail_start, None
-                if mode == "lost":
-                    self.pending_starts.append(args)
-                raise BackendError("agent start timed out after 180 seconds")
-            return self._register(args)
         if args[:2] == ("agent", "get"):
             if args[2] not in self.agents:
                 raise BackendError("agent_not_found")
-            return {"result": {"agent": self.agents[args[2]]}}
+            return {"result": {"type": "agent_info", "agent": self.agents[args[2]]}}
         return self._pane_command(args)
 
     def deliver_pending_starts(self):
@@ -141,13 +146,12 @@ class FakeRecruiter:
         return outcomes
 
     def _register(self, args):
-        name = args[2]
-        # Herdr 0.7.1 `start_agent`: name conflict check and naming in one handler.
+        name, cwd, prompt_path = args
+        # The existing-pane start reserves one unique live agent name.
         if name in self.agents:
             raise BackendError("agent_name_taken")
         self.starts += 1
         pane = "pane-" + str(self.starts)
-        cwd = args[args.index("--cwd") + 1]
         self.agents[name] = {
             "name": name,
             "pane_id": pane,
@@ -155,10 +159,10 @@ class FakeRecruiter:
             "pid": 100 + self.starts,
             "status": "idle",
         }
-        prompt = Path(args[-1])
+        prompt = Path(prompt_path)
         if self.acknowledge:
             (prompt.parent / "ready.json").write_text(
-                json.dumps({"generation": name[5:], "ready": True})
+                json.dumps({"generation": prompt.parent.name, "ready": True})
             )
         return {"result": {"agent": self.agents[name]}}
 
@@ -192,7 +196,7 @@ class FakeRecruiter:
             self.closes.append(pane_id)
             del self.agents[agent["name"]]
             return {"result": {}}
-        if args[:2] == ("pane", "run"):
+        if args[:2] == ("agent", "prompt"):
             message = args[3]
             self.prompts.append(message)
             if self.fail_send:
@@ -239,8 +243,8 @@ class FakeRecruiter:
         raise AssertionError(args)
 
     def _herdr(self, *args, herdr_session, timeout_seconds):
-        # Herdr delivery commands succeed with empty stdout; the fake still models
-        # their side effects and failures through the same in-memory backend.
+        # The caller discards the acknowledgement; model delivery effects and errors
+        # through the same backend as the read/query surface.
         assert timeout_seconds == 15
         FakeRecruiter._herdr_json(
             self, *args, herdr_session=herdr_session, timeout_seconds=timeout_seconds
@@ -393,14 +397,14 @@ def test_two_questions_reuse_with_distinct_turns(runtime):
     assert module._read(directory / "state.json")["state"] == "ready"
 
 
-def test_delivery_uses_the_non_json_herdr_command(runtime, monkeypatch):
+def test_delivery_does_not_depend_on_the_acknowledgement_body(runtime, monkeypatch):
     module, backend, cwd = runtime
     start(runtime)
     original = backend._herdr_json
 
     def query_only(*args, **kwargs):
-        if args[:2] == ("pane", "run"):
-            raise AssertionError("pane run prints no JSON on success")
+        if args[:2] == ("agent", "prompt"):
+            raise AssertionError("prompt delivery need not decode the acknowledgement")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(backend, "_herdr_json", query_only)
@@ -875,26 +879,26 @@ def _failed_up(runtime, mode):
         module.main(["up", "advisor"])
     directory = module._directory("advisor", cwd)
     state = module._read(directory / "state.json")
-    assert (state["state"], state["pane"], state["enabled"]) == ("starting", None, True)
+    assert (state["state"], state["pane"], state["enabled"]) == ("starting", "rejected-pane" if mode == "error" else None, True)
     return directory, state
 
 
-def test_failed_start_down_then_up_resumes_same_generation(runtime, capsys):
+def test_failed_start_with_proven_absent_pane_can_stop_and_start_again(runtime, capsys):
     module, backend, cwd = runtime
     directory, failed = _failed_up(runtime, "error")
     capsys.readouterr()
-    # `down` never launches and never claims a stop it cannot prove: the generation stays
-    # `starting` (disabled) so its name is probed again later instead of being forgotten.
+    # The returned split identity is gone after failed startup cleanup. Down can prove
+    # this generation stopped; the next up creates one fresh generation.
     assert module.main(["down", "advisor"]) == 0
     assert json.loads(capsys.readouterr().out) == [
-        {"enabled": False, "name": "advisor", "state": "starting"}
+        {"enabled": False, "name": "advisor", "state": "stopped"}
     ]
     assert backend.start_calls == 1
     assert module.main(["up", "advisor"]) == 0
     state = module._read(directory / "state.json")
-    assert state["generation"] == failed["generation"]
+    assert state["generation"] != failed["generation"]
     assert (state["state"], state["enabled"]) == ("ready", True)
-    assert list(backend.agents) == [failed["agent_name"]]
+    assert list(backend.agents) == [state["agent_name"]]
     assert (backend.start_calls, backend.starts, backend.closes) == (2, 1, [])
 
 
@@ -904,16 +908,14 @@ def test_failed_start_preflight_retries_until_resumed(runtime):
     backend.fail_start = "error"
     with pytest.raises(BackendError, match="timed out"):
         module.preflight(cwd, "caller")
-    # A failed resume leaves the same generation resumable, not wedged or replaced.
+    # Verified absence permits one fresh attempt; another rejection remains recoverable.
     retry = module._read(directory / "state.json")
-    assert (retry["generation"], retry["state"], retry["pane"]) == (
-        failed["generation"],
-        "starting",
-        None,
-    )
+    assert retry["generation"] != failed["generation"]
+    assert (retry["state"], retry["pane"]) == ("starting", "rejected-pane")
     module.preflight(cwd, "caller")
     state = module._read(directory / "state.json")
-    assert (state["generation"], state["state"]) == (failed["generation"], "ready")
+    assert state["generation"] != failed["generation"]
+    assert state["state"] == "ready"
     assert (backend.start_calls, backend.starts) == (3, 1)
 
 
@@ -922,7 +924,8 @@ def test_failed_start_restart_launches_exactly_once(runtime):
     directory, failed = _failed_up(runtime, "error")
     assert module.main(["restart", "advisor"]) == 0
     state = module._read(directory / "state.json")
-    assert (state["generation"], state["state"]) == (failed["generation"], "ready")
+    assert state["generation"] != failed["generation"]
+    assert state["state"] == "ready"
     assert (backend.start_calls, backend.starts, backend.closes) == (2, 1, [])
 
 
@@ -941,32 +944,18 @@ def test_lost_reply_launch_landing_before_recovery_is_adopted(runtime):
     assert (backend.start_calls, backend.starts, backend.closes) == (1, 1, [])
 
 
-def test_lost_reply_delayed_launch_after_resume_is_refused_by_name(runtime):
+def test_uncertain_creation_never_retries_an_anonymous_split(runtime):
     module, backend, _ = runtime
     directory, failed = _failed_up(runtime, "lost")
+    with pytest.raises(
+        module.LaunchUnresolved, match="refusing to create another pane"
+    ):
+        module.main(["up", "advisor"])
+    assert backend.start_calls == 1 and backend.starts == 0
+    assert backend.deliver_pending_starts() == ["started"]
     assert module.main(["up", "advisor"]) == 0
-    # Herdr handles the original queued start only now; the live resumed agent holds the
-    # generation name, so Herdr refuses it and no second resident ever exists.
-    assert backend.deliver_pending_starts() == ["agent_name_taken"]
-    assert list(backend.agents) == [failed["agent_name"]]
-    state = module._read(directory / "state.json")
-    assert (state["state"], state["pane"]) == ("ready", "pane-1")
-    assert backend.starts == 1
-
-
-def test_lost_reply_landing_between_probe_and_resume_start_is_adopted(runtime):
-    module, backend, _ = runtime
-    directory, failed = _failed_up(runtime, "lost")
-    backend.deliver_before_start = True
-    assert module.main(["up", "advisor"]) == 0
-    state = module._read(directory / "state.json")
-    assert (state["generation"], state["state"], state["pane"]) == (
-        failed["generation"],
-        "ready",
-        "pane-1",
-    )
-    assert list(backend.agents) == [failed["agent_name"]]
-    assert (backend.start_calls, backend.starts, backend.closes) == (2, 1, [])
+    assert module._read(directory / "state.json")["generation"] == failed["generation"]
+    assert backend.start_calls == 1 and backend.starts == 1
 
 
 def test_down_reprobes_and_closes_a_late_launch(runtime, capsys):
@@ -992,8 +981,9 @@ def test_resume_ignores_acknowledgement_from_a_vanished_launch(runtime, monkeypa
     assert (directory / failed["generation"] / "ready.json").is_file()
     backend.acknowledge = False
     monkeypatch.setattr(module, "START_SECONDS", 0.3)
-    with pytest.raises(module.SpecialistError, match="did not load context"):
+    with pytest.raises(module.LaunchUnresolved, match="refusing to create another pane"):
         module.main(["up", "advisor"])
+    assert not (directory / failed["generation"] / "ready.json").exists()
     assert module._read(directory / "state.json")["state"] == "starting"
 
 

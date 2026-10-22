@@ -66,6 +66,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
     started: list[str] = []
     closed: list[str] = []
+    monkeypatch.setattr(implementer_controller.recruiter, "_herdr", lambda *args, **kwargs: None)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "hil-pane")
     monkeypatch.setattr(
@@ -127,7 +128,7 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str
         "_live_panes",
         lambda herdr_session=None: {"implementer-pane", "hil-pane"},
     )
-    def capture(self, pane, name):
+    def capture(self, pane, name, **kwargs):
         return {"pane_id": pane, "agent_name": name, "workspace_id": "workspace-1", "herdr_session": "llm-lab-test", "pid": 123, "process_start_time": "start-123", "argv": ["claude"], "argv_marker": "claude"}
 
     monkeypatch.setattr(implementer_controller.supervision.Panes, "capture", capture)
@@ -160,7 +161,7 @@ def test_implementer_start_releases_verified_controller_without_a_watchdog(
     assert receipt["watchdog"]["state"] == "not-configured"
     assert receipt["offering"] == "claude-sonnet-5-5"
     assert (run_root / "plan.md").read_text() == plan.read_text()
-    assert started == ["plan-implementer-sample-run"]
+    assert started == [implementer_controller._safe_name("sample-run")]
     assert closed == []
     script = (run_root / "control" / "start.sh").read_text()
     assert implementer_controller.IMPLEMENTER_START_RECEIPT_ENV in script
@@ -457,21 +458,22 @@ def test_start_gated_closes_a_mismatched_workspace_pane(
     def herdr_json(*args: object, **kwargs: object) -> dict[str, object]:
         if args[:2] == ("pane", "get"):
             return {"result": {"pane": {"tab_id": "tab-1", "workspace_id": "ws-hil"}}}
-        if args[:2] == ("agent", "start"):
+        if args[:2] == ("pane", "split"):
             return {
                 "result": {
-                    "agent": {"pane_id": "leaked-pane", "workspace_id": "ws-other"}
+                    "pane": {"pane_id": "leaked-pane", "workspace_id": "ws-other"}
                 }
             }
         raise AssertionError(args)
 
     monkeypatch.setattr(implementer_controller.recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(implementer_controller.recruiter, "_herdr", lambda *a, **kw: None)
     monkeypatch.setattr(
         implementer_controller.recruiter,
         "_close_worker_pane",
         lambda pane, **kwargs: closed.append(pane),
     )
-    monkeypatch.setattr(implementer_controller.supervision.Panes, "capture", lambda self, pane, name: {"pane_id": pane, "agent_name": name})
+    monkeypatch.setattr(implementer_controller.supervision.Panes, "capture", lambda self, pane, name, **kwargs: {"pane_id": pane, "agent_name": name})
     monkeypatch.setattr(implementer_controller.supervision.Panes, "close", lambda self, owner, target: {"target": target, "status": "closed", "pane_id": closed.append(owner['pane_id']) or owner['pane_id']})
     with pytest.raises(ImplementerStartError, match="workspace"):
         implementer_controller._start_gated(

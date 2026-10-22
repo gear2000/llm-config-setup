@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import multiprocessing
-import shlex
 from pathlib import Path
 
 import pytest
@@ -41,6 +40,7 @@ class LocalHerdr:
         self.argv[pid] = [agent, "--model", "sonnet", "--effort", "medium"]
         self.panes[pane] = {
             "pane_id": pane,
+            "terminal_id": "terminal-" + pane,
             "workspace_id": "workspace",
             "tab_id": "control",
             "agent_name": name,
@@ -59,7 +59,7 @@ class LocalHerdr:
             return {"result": {"pane": dict(self.panes[args[2]])}}
         if args[:2] == ("agent", "get"):
             p = next(
-                (p for p in self.panes.values() if p["agent_name"] == args[2]), None
+                (p for p in self.panes.values() if p["agent_name"] == args[2] or p["pane_id"] == args[2]), None
             )
             if not p:
                 raise recruiter.RecruiterError("agent_not_found")
@@ -92,13 +92,22 @@ class LocalHerdr:
             self.closed.append(args[2])
             del self.panes[args[2]]
             return {"result": {}}
-        if args[:2] == ("pane", "run"):
+        if args[:2] in (("pane", "run"), ("agent", "prompt")):
             self.sent.append((args[2], args[3]))
             return {"result": {}}
+        if args[:2] == ("pane", "split"):
+            pane = "w1:p" + str(len(self.births) + 1)
+            self.add(pane, None, "bash")
+            return {"result": {"type": "pane_info", "pane": self.panes[pane]}}
+        if args[:2] == ("agent", "rename"):
+            self.panes[args[2]]["agent_name"] = args[3]
+            return {"result": {"type": "agent_info"}}
         if args[:2] == ("agent", "start"):
             name = args[2]
-            words = shlex.split(args[-1])
-            pane = self.add(name, name, "codex")
+            words = list(args[args.index("--") + 1 :])
+            pane = args[args.index("--pane") + 1]
+            self.panes[pane].update(agent_name=name, agent="codex", agent_status="idle")
+            self.argv[self.panes[pane]["pid"]] = ["codex", *words]
             if "--output" in words:
                 output = Path(words[words.index("--output") + 1])
                 if output.name == "decision.json" and self.manager != "timeout":
@@ -114,11 +123,13 @@ class LocalHerdr:
                     )
             return {
                 "result": {
+                    "type": "agent_info",
                     "agent": {
                         "name": name,
                         "pane_id": pane,
                         "workspace_id": "workspace",
-                    }
+                        "status": "idle",
+                    },
                 }
             }
         raise AssertionError(args)
@@ -139,6 +150,7 @@ class LocalHerdr:
 def local(tmp_path, monkeypatch):
     fake = LocalHerdr(tmp_path)
     monkeypatch.setattr(recruiter, "_herdr_json", fake.rpc)
+    monkeypatch.setattr(recruiter, "_herdr", fake.rpc)
     monkeypatch.setattr(recruiter, "_wait_for_agent_health", fake.health)
     monkeypatch.setattr(
         f.process, "process_start_time", lambda pid: fake.births.get(pid)
@@ -146,12 +158,28 @@ def local(tmp_path, monkeypatch):
     monkeypatch.setattr(
         f.process, "process_cmdline", lambda pid: fake.argv.get(pid, [])
     )
-    monkeypatch.setattr(
-        controller, "_start_gated", lambda *args: ("implementer", "workspace")
-    )
+
+    def gated(name, hil, cwd, script, session):
+        fake.panes["implementer"].update(agent_name=None, agent=None)
+        fake.argv[fake.panes["implementer"]["pid"]] = ["bash", str(script)]
+        return "implementer", "workspace"
+
+    monkeypatch.setattr(controller, "_start_gated", gated)
     monkeypatch.setattr(controller, "_verify_gated", lambda *args: None)
     monkeypatch.setattr(controller, "_place_in_control_tab", lambda pane, *args: pane)
-    monkeypatch.setattr(controller, "_release_gate", lambda path, token: path.unlink())
+
+    def release(path, token):
+        path.unlink()
+        fake.panes["implementer"]["agent"] = "claude"
+        fake.argv[fake.panes["implementer"]["pid"]] = [
+            "claude",
+            "--model",
+            "sonnet",
+            "--effort",
+            "medium",
+        ]
+
+    monkeypatch.setattr(controller, "_release_gate", release)
     monkeypatch.setattr(
         controller,
         "_resolve_offering",
@@ -928,3 +956,25 @@ def test_manager_health_failure_after_exec_still_closes_owned_pane(local, monkey
     receipt = controller.start_implementer(**local.inputs)
     assert receipt["manager"]["cleanup"]["status"] == "closed"
     assert receipt["manager"]["pane_id"] in local.closed
+
+
+def test_exited_agent_name_clears_but_exact_terminal_allows_empty_pty_cleanup(local):
+    receipt = controller.start_implementer(**local.inputs)
+    owner = receipt["ownership"]["implementer"]
+    local.births.pop(owner["pid"])
+    local.panes["implementer"].update(agent_name=None, agent=None)
+    cleanup = f.Panes(recruiter, receipt).close(owner, "implementer")
+    assert cleanup["status"] == "closed"
+    assert "implementer" not in local.panes
+
+
+def test_cleared_agent_name_with_replaced_terminal_refuses_cleanup(local):
+    receipt = controller.start_implementer(**local.inputs)
+    owner = receipt["ownership"]["implementer"]
+    local.births.pop(owner["pid"])
+    local.panes["implementer"].update(
+        agent_name=None, agent=None, terminal_id="replacement"
+    )
+    cleanup = f.Panes(recruiter, receipt).close(owner, "implementer")
+    assert cleanup["status"] == "cleanup-failed"
+    assert "implementer" in local.panes

@@ -32,7 +32,7 @@ Read-only checks first:
 | `~/.shared-llm.yaml` | Machine roster exists |
 | `~/.shared-llm/manifest.json` | Home deployments recorded |
 | `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml` | UpAgent hub materialized |
-| `herdr --version` | Must be **0.7.1** for the UpAgent hub |
+| `herdr --version` | Must be **0.9.5** for the UpAgent hub |
 | `command -v pi` / `pi --version` | Pi CLI (need >= 0.74.0 when `global` includes `pi`) |
 | `command -v node` / `npx` | Needed for Pi, Lavish, Impeccable, `just misc` |
 | `command -v claude` | Claude Code CLI when `global` includes `cc` |
@@ -73,7 +73,7 @@ Prerequisites:
 
 Never edit generated outputs (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/*/SKILL.md`, `.claude/agents/*.md`) by hand; edit layers/recipes and recompose. Preserve foreign files and links.
 
-Fail loudly on unresolved placeholders, malformed config, missing prerequisites, conflicting non-owned files/links, missing credentials for optional features, or Herdr that is not **0.7.1**. Do not overwrite foreign files. Do not run `herdr update` or `curl -fsSL https://herdr.dev/install.sh | sh` (that installer always fetches **latest**, which breaks this kit's UpAgent hub).
+Fail loudly on unresolved placeholders, malformed config, missing prerequisites, conflicting non-owned files/links, missing credentials for optional features, or Herdr that is not **0.9.5**. Do not overwrite foreign files. Do not run `herdr update` or `curl -fsSL https://herdr.dev/install.sh | sh` (that installer always fetches **latest**, which may change this kit's required Herdr API).
 
 Destination writes (`just configure -d`, seeding `.shared-llm/this_repo/`) happen only from SETUP-DESTINATION.md, and only after the user accepts a file map.
 
@@ -84,7 +84,7 @@ Destination writes (`just configure -d`, seeding `.shared-llm/this_repo/`) happe
 - `just configure -g <harnesses>` for global home skills/agents/runtime.
 - `just configure -d <repo> -l <harnesses>` for each destination (from SETUP-DESTINATION.md after the user accepts the file map).
 - `just configure --offering-sets standard,claudex` only when the machine should opt into ClaudeX; use `just configure -d <repo> --offering-sets standard` when one destination should replace the machine choice with the standard roster.
-- `just herdr-pin` / `bash tools/install-herdr.sh` — Herdr **0.7.1** only. `just herdr-pin --check` verifies.
+- `just herdr-pin` / `bash tools/install-herdr.sh` — Herdr **0.9.5** only. `just herdr-pin --check` verifies.
 - `npm install -g @earendil-works/pi-coding-agent` then `just pi-extensions` (`tools/install-pi-extensions.sh`, manifest `.shared-llm/public/llm/pi/common/third-party-extensions.txt`) when `global` includes `pi`. If `just pi-extensions` prints `pi not found — skipping`, that is a failure: install Pi first and re-run.
 - `just misc` / `bash tools/install-misc.sh` — Lavish, quota-axi, Impeccable, Plannotator. Then re-apply [docs/SKILL-CUSTOMIZATIONS.md](docs/SKILL-CUSTOMIZATIONS.md) if Lavish was overwritten.
 - `just descriptions` before update.
@@ -96,10 +96,11 @@ Finish only after `just descriptions` passes, `just update` passes twice, the se
 
 Also verify the machine stack that this kit actually uses:
 
-- `bash tools/install-herdr.sh --check` (Herdr **0.7.1**)
+- `bash tools/install-herdr.sh --check` (Herdr **0.9.5**)
 - if `global` includes `pi`: `pi --version` (>= 0.74.0) and `pi list` shows the uncommented pins from `third-party-extensions.txt`
 - kit-composed `unslop` is linked under the home skill dir for each selected harness (`~/.claude/skills/unslop`, `~/.pi/agent/skills/unslop`, and/or `~/.agents/skills/unslop`)
 - third-party skills from `just misc` are present where those installers put them (Lavish, Impeccable)
+- the live UpAgent hub: run the end-to-end brief [`.shared-llm/public/extensions/common/upagent/VALIDATE.md`](.shared-llm/public/extensions/common/upagent/VALIDATE.md) from an agent inside the Herdr cockpit (about 45 minutes, 70 with the optional hold drill). `just test` alone never launches a worker.
 
 Summarize changed files, installed harnesses, registered repositories, selected offering sets, Herdr version, and optional next steps.
 
@@ -129,9 +130,9 @@ Summarize changed files, installed harnesses, registered repositories, selected 
 
 Kit **own** Pi extensions and themes (under `.shared-llm/public/llm/pi/common/{extensions,themes}/`) are **not** `pi install`. The global step of `just update` copies them into `~/.shared-llm/generated/` and links them into `~/.pi/`.
 
-### Herdr 0.7.1 (UpAgent hub — required)
+### Herdr 0.9.5 (UpAgent hub — required)
 
-The UpAgent recruiter is tested against **Herdr 0.7.1**. A newer binary breaks the hub.
+The UpAgent recruiter is tested against **Herdr 0.9.5**. Other versions require a separate compatibility check.
 
 ```bash
 just herdr-pin
@@ -139,12 +140,109 @@ just herdr-pin
 just herdr-pin --check
 ```
 
-That script downloads the GitHub release `v0.7.1` into `~/.local/bin/herdr`. It does **not** call `https://herdr.dev/install.sh` (that URL always installs latest).
+That script downloads the GitHub release `v0.9.5` into `~/.local/bin/herdr` and verifies its published SHA-256 before replacing the installed binary. It refuses a missing or mismatched digest. The explicit 0.7.1 rollback reports that its release has no published digest and skips only that unavailable check. It does **not** call `https://herdr.dev/install.sh` (that URL always installs latest).
 
 - If a different version is already on `PATH`, the script exits non-zero unless you pass `--force`.
-- After install, `herdr --version` must print `herdr 0.7.1`.
+- After install, `herdr --version` must print `herdr 0.9.5`.
 - Do **not** run `herdr update`, `brew upgrade herdr`, or `mise upgrade herdr`.
 - `just update` deploys this repo's `herdr-config.toml` to `~/.config/herdr/config.toml` (with `version_check = false`). It does not install the `herdr` binary.
+
+### Upgrading an existing 0.7.1 machine
+
+Run this from a normal terminal outside Herdr, after all UpAgent requests and Herdr agents have
+finished. Disable any warm residents with `just upagent-specialist-down NAME` from each
+repository where they were enabled, using the old kit before stopping Herdr. Record the previous kit commit and keep its working tree clean. The binary, integration
+files, and kit runtime must change together; replacing a running server's binary is insufficient.
+
+```bash
+herdr session list --json
+herdr --session default server stop
+cp -p ~/.codex/hooks.json ~/.codex/hooks.json.before-herdr-0.9.5
+just herdr-pin --force
+herdr integration install pi
+herdr integration install claude
+herdr integration install codex
+herdr integration install cursor
+# Remove only the two legacy Codex status reports before deploying the runtime.
+python3 - <<'PY'
+import json
+import shlex
+from pathlib import Path
+
+path = Path.home() / ".codex/hooks.json"
+data = json.loads(path.read_text())
+for event, action in (("SessionStart", "working"), ("Stop", "idle")):
+    groups = []
+    for group in data.get("hooks", {}).get(event, []):
+        keep = []
+        for hook in group.get("hooks", []):
+            argv = shlex.split(hook.get("command", ""))
+            if (len(argv) == 3 and Path(argv[0]).name == "bash"
+                    and Path(argv[1]).name == "herdr-status-fix.sh" and argv[2] == action):
+                print(f"Removed {event}: {hook['command']}")
+            else:
+                keep.append(hook)
+        if keep:
+            groups.append({**group, "hooks": keep})
+    if event in data.get("hooks", {}):
+        data["hooks"][event] = groups
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+just update
+herdr --version
+herdr integration status
+herdr
+```
+
+Stop any other sessions intentionally being migrated before replacing the binary. `just update`
+rebuilds every destination in the machine config (all four on the validated machine), including
+generated home runtimes. No destination needs a hand edit. Verify Herdr 0.9.5 and integration
+versions Pi v9, Claude v11, Codex v10, Cursor v2. The Codex integration uses SessionStart.
+The official installer preserves the old kit `herdr-status-fix.sh` entries, and `just update`
+does not deploy the kit's no-op replacement into Codex's home. The swap block removes only
+those two reports after reinstalling integrations and before `just update`.
+
+Keep the backup from before the swap; do not overwrite it when repeating these steps.
+The command preserves the official SessionStart hook and unrelated hooks. The copied-home
+rehearsal confirmed that the installer rewrites Claude's Herdr SessionStart matcher while
+preserving the kit's other hooks. The home runtime deployment preserves existing settings.
+Pi still loads `herdr-agent-state.ts` explicitly when worker extensions are otherwise disabled.
+
+Before the first hire, open each harness interactively and inspect its first-run screen.
+Accept Claude folder trust for each new workspace and bypass mode if requested. Existing
+acceptance can carry over from 0.7.1. If Codex shows "Hooks need review", review and trust the
+official SessionStart hook and the other hooks you intend to use. The copied-home probe
+showed this screen after its absolute hook paths changed; a real upgrade that retains paths
+may retain trust. Codex exec completed unattended before that interactive review, so the
+review screen is not an exec-worker readiness gate. Pi and Cursor needed no first-run
+acceptance in the authenticated copied-home rehearsal. A fresh account may still require login.
+
+For a binary-only rollback, the single command is
+`HERDR_PIN=0.7.1 bash tools/install-herdr.sh --force`. A complete rollback must also restore the
+0.7.1 kit runtime and integrations. From the clean kit checkout, outside Herdr, after draining
+requests, this one compound command restores the validated baseline:
+
+```bash
+herdr --session default server stop && git switch --detach 585b484 && \
+  HERDR_PIN=0.7.1 bash tools/install-herdr.sh --force && \
+  herdr integration install pi && herdr integration install claude && \
+  herdr integration install codex && herdr integration install cursor && \
+  cp -p ~/.codex/hooks.json.before-herdr-0.9.5 ~/.codex/hooks.json && just update
+```
+
+The rollback was rehearsed over the upgraded copied home. The 0.7.1 installers restored
+Pi v3, Claude v7, Codex v6 and Cursor v1. Claude's installer restored the Herdr SessionStart
+matcher to `*` and preserved the other settings. Its parsed JSON matched the pre-upgrade
+baseline; only formatting and key order differed. `~/.claude/settings.json` therefore needs
+no separate backup for this tested rollback. Keep one if byte-for-byte restoration matters.
+Restoring the Codex backup reproduced `hooks.json` byte for byte. Snapshots and per-file diffs
+are retained locally under `/var/tmp/herdr095-fix2-20261021/rollback/`.
+
+Then start Herdr normally and check `herdr --version` and `herdr integration status` against
+those versions. After any swap, and before the first real hire, run the end-to-end validation brief
+[`.shared-llm/public/extensions/common/upagent/VALIDATE.md`](.shared-llm/public/extensions/common/upagent/VALIDATE.md)
+from a Claude Code session inside the cockpit; allocate about 45 minutes, 70 with the hold drill. This checkout is detached at the baseline until deliberately switched back.
+The isolated lab does not perform either machine swap.
 
 ### Pi third-party extensions (when `global` includes `pi`)
 
@@ -194,7 +292,7 @@ Claude Code `settings.template.json` enables the official plugins `frontend-desi
 
 ## Install path (fresh machine)
 
-**0. Machine stack.** Follow [Machine stack](#machine-stack-new-user). Ask, then install engine prereqs, harness CLIs for the chosen `-g` list, Herdr 0.7.1, Pi extensions if `pi` is selected, and `just misc`.
+**0. Machine stack.** Follow [Machine stack](#machine-stack-new-user). Ask, then install engine prereqs, harness CLIs for the chosen `-g` list, Herdr 0.9.5, Pi extensions if `pi` is selected, and `just misc`.
 
 The engine lives **only** in the kit and is never copied into your repo. You drive everything with `just` from the kit checkout, against a config file it maintains, `~/.shared-llm.yaml`.
 
@@ -207,7 +305,7 @@ The engine lives **only** in the kit and is never copied into your repo. You dri
 
    The home skills/runtime part of the **global** step (enabled by `-g`) installs the general home skills (`python`/`nextjs`/`backend`/`golang`/`herdr`/`clickhouse`/`kafka`/`lucidchart`/`drawio`/`create-html`) plus routed slash-command skills (including **unslop**) into `~/.claude/skills`, `~/.pi/agent/skills`, and `~/.agents/skills`. Pi workflow-suite commands are `/do-research`, `/do-plan`, `/do-implement`, and `/do-convert`; Claude Code gets the matching `/cc-research`, `/cc-plan`, `/cc-implement`, `/cc-convert`, plus Claude-only `/hil`. `/cc-full` and `/do-full` are disabled. Legacy planish / plan-and-grill / meta names are one-release warning aliases. It also installs the generic agents (see the Inventory section in README) into `~/.claude/agents` and `~/.pi/agent/agents`, the Pi extensions and themes into `~/.pi`, and the Claude hooks/statusline/settings into `~/.claude`. Codex/`cursor` receive skills only; UpAgent is the routed path to the matching specialist persona. It is idempotent and non-clobbering.
 
-2. **UpAgent hub (new installs).** The safe default is the `standard` UpAgent roster (`offering_sets: [standard]`). The global step materializes the machine roster at `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml` on every `just update`, even when no global harness is selected. The hub **requires Herdr 0.7.1** from step 0.
+2. **UpAgent hub (new installs).** The safe default is the `standard` UpAgent roster (`offering_sets: [standard]`). The global step materializes the machine roster at `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml` on every `just update`, even when no global harness is selected. The hub **requires Herdr 0.9.5** from step 0.
 
    - Opt in to ClaudeX machine-wide: `just configure --offering-sets standard,claudex`
    - Remove ClaudeX from one destination: `just configure -d /path/to/your-repo --offering-sets standard`
@@ -224,7 +322,7 @@ Then run [Verification](#4--verification-both-paths).
 
 1. Summarize the existing `~/.shared-llm.yaml`: `source`, `global`, `upagent.offering_sets`, and every registered `destinations` entry (path, harnesses, placeholders, per-destination UpAgent overrides).
 2. Note whether `~/.shared-llm/manifest.json` exists and whether `~/.shared-llm/generated/extensions/common/upagent/offerings.yaml` is present.
-3. Run `bash tools/install-herdr.sh --check`. If it fails, stop and pin 0.7.1 (`just herdr-pin --force` only when replacing a wrong version the user agreed to replace). Do not `herdr update`.
+3. Run `bash tools/install-herdr.sh --check`. If it fails, stop and pin 0.9.5 (`just herdr-pin --force` only when replacing a wrong version the user agreed to replace). Do not `herdr update`.
 4. Ask: **Do you want to set up a destination repository, or just install or update the kit?** Then what they want to change:
 
    | Intent | Actions |

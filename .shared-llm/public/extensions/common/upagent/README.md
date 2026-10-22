@@ -5,10 +5,13 @@ The Python **Recruiter** persists each request, launches and verifies the worker
 result, closes owned panes, publishes a receipt, and releases the lease. See
 [FUNDAMENTALS.md](FUNDAMENTALS.md) for the authority model and use-case tree.
 
-The hub is tested against **Herdr 0.7.1**. A newer binary breaks wait/subscription behavior.
+The hub targets **Herdr 0.9.5**. Other server versions require a separate compatibility check.
 Pin it from the kit checkout with `just herdr-pin` (`tools/install-herdr.sh`). Do not run
 `herdr update` or the unpinned `https://herdr.dev/install.sh` installer. Machine setup:
 [UPINSTALL.md](../../../../../UPINSTALL.md).
+
+To prove the hub works on a machine, hand [VALIDATE.md](VALIDATE.md) to an agent inside the Herdr
+cockpit. It drills every worker kind and the failure paths and reports PASS/FAIL per drill.
 
 ## Execution patterns
 
@@ -146,14 +149,16 @@ owned services pane, and removes the state. Public requests recreate missing ser
 demand, so `up` is a convenience rather than a prerequisite.
 
 Every worker, manager, checker, and rescue helper persists a token-fenced
-`launching` journal before `herdr agent start`, records the exact returned pane as `created`, then
-compare-and-swaps it to `started`. Cancellation rotates the lease fence, then waits without holding
+`launching` journal before `herdr pane split`, records the returned pane and terminal as `created`,
+then starts the agent in that pane and compare-and-swaps the journal to `started`. Cancellation rotates the lease fence, then waits without holding
 `flock` while any live owner remains in `launching`; verified absence is forbidden until that owner
 commits the pane identity or dies. A lost fence routes through bounded exact-agent cleanup. If
 cleanup cannot be proved immediately, the detached supervisor publishes no terminal receipt. The
 next command reconciles the active lease, journaled unique agent name, and exact pane, and only then
 terminalizes with that cleanup evidence. A crash between pane creation and ledger
-publication therefore cannot leave an unowned agent or a false `verified_absent` receipt.
+publication remains unresolved when the split reply is lost: an absent agent name cannot
+prove an anonymous shell absent. Recovery refuses a second split and never publishes a false
+`verified_absent` receipt. A recorded terminal can still prove ownership after its agent name clears.
 
 ## Topology
 
@@ -300,9 +305,29 @@ The same parsed object drives text/JSON listing, request validation, specialist/
 
 `offerings.py` renders child tokens: Claude uses `--effort`, Codex uses `-c model_reasoning_effort=...`, and Pi uses a provider-qualified `--model` plus explicit `--thinking`. Cursor has no effort control: its only allowed selection is the canonical `default` effort. ClaudeX uses the `claudex` executable with the exact `gpt-6.1-sol` model and remains interactive; because the wrapper uses `exec`, Herdr health still requires the final `claude` process. Before any ClaudeX worker pane is created, UpAgent requires both `claudex` and `claudex-doctor`, runs `claudex-doctor gpt-6.1-sol`, and blocks on a missing executable, proxy/OAuth failure, or absent model. It never substitutes native Claude. Legacy and controller recipes use the same per-command dispatcher; their strict order files bypass no lifecycle validation, but ClaudeX is accepted only through public offering snapshots.
 
-A request's manager, worker, and short-lived checkers start beside `order.cockpit_pane` through
-atomic `herdr agent start` calls. Pane placement remains role-based and every pane is closed only by
-its fenced lease owner.
+A request's manager, worker, and short-lived checkers first split `order.cockpit_pane`, then use
+`herdr agent start NAME --kind KIND --pane PANE`. Interactive Claude, Pi, and Cursor start bare;
+UpAgent submits their task through an idle-gated `agent prompt --wait`. `codex exec` keeps its
+positional prompt. Names hash the complete request identity and generation into at most 32
+characters. Explicit executable paths and ClaudeX wrappers run through the owned shell, retain
+health checks, and receive their name after detection. Controller FIFO gates likewise remain
+unnamed shells until the harness starts. Pane placement remains role-based and cleanup stays fenced.
+
+Herdr 0.9.5 can report Cursor ready before its input UI accepts Enter. UpAgent waits for the
+official `herdr:cursor` SessionStart registration before submitting the first prompt. Lab probes
+reproduced `agent_prompt_stalled` without that gate, including with the old half-second delay.
+A timeout or stalled prompt is never retried blindly.
+
+Exec completion uses `agent wait PANE --until done`. Pane loss returns `agent_not_running`;
+UpAgent confirms pane/process absence before entering the existing Sentinel and salvage path.
+The 15-second probe remains for interactive workers, surviving shells, and Sentinel liveness.
+The hub holds no event subscription. If a wait nevertheless reports `events_lost`, it rereads
+current state and reopens a wait within the original deadline. Interactive turn completion alone
+still cannot replace a validated result bundle.
+
+The detached runner forks once more and records the final child's PID in its lease. Its parent
+becomes init, so a submitting agent's 120-second shell-tool tree kill cannot kill the worker runner.
+See [the isolated lab](../herdr/LAB095.md) for setup and [the machine swap procedure](../../../../../UPINSTALL.md#upgrading-an-existing-071-machine).
 
 Flow 1 implementer startup has its own deterministic front door. The HIL never splits a pane
 or types `/plan-implementer` itself:
@@ -638,6 +663,19 @@ Durable files are the source of truth; terminal text is display-only.
   `SENTINEL_STALL_NUDGED` to an available Sentinel so it resumes its finalization duty.
   Exhaustion publishes `worker-stall-escalation` once per episode and marks that
   episode escalated after publication. A crash before the flag may repeat the notice.
+  Before a STALLED closeout ends the wait, Python checks the recorded worker PID and
+  process birth identity. A live matching worker whose pane status is working, idle,
+  or done is held while either a file under its lease-private staging directory
+  changed in the last 15 minutes (the hub's own request files never count), or a
+  descendant process born after the worker's first action consumed CPU since the
+  previous 15 s probe. A resident helper (MCP server, Codex code-mode host, language
+  server) and a job that only waits (sleep, network, a remote run) earn no hold; a
+  worker blocked in a dialog is never held. `worker-stall-held` and one requester
+  message record the start of a hold, `worker-stall-released` its end and reason.
+  Worker death, loss of both signals, the hard deadline, or requester cancellation
+  ends the hold. This does not reset or extend the nudge ladder.
+  Herdr 0.9.5 can report Claude idle while background work continues, so a healthy
+  worker with a background command can still receive a stall nudge.
   Invalid state fails loudly; requester decisions, cancellation, and finalization
   forbid delivery. The target lock serializes nudges, while lifecycle mutations retain
   their own lock and the bounded final probe-to-submit race.

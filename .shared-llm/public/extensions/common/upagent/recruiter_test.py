@@ -618,13 +618,15 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
         recruiter._wait_for_worker_health("worker-pane", _order(), 100)
 
 
-def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> None:
+def test_start_worker_creates_pane_then_starts_agent(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
-        assert kwargs == {"herdr_session": "llm-lab-test"}
+        assert kwargs["herdr_session"] == "llm-lab-test"
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "worker-pane", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
@@ -653,10 +655,13 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> 
         "workspace-1",
         "upagent-req-abc-g1",
     )
-    start = calls[2]
-    assert start[:4] == ("agent", "start", "upagent-req-abc-g1", "--cwd")
+    split, start = calls[2:4]
+    assert split[:3] == ("pane", "split", "leader-pane")
+    assert start[:4] == ("agent", "start", "upagent-req-abc-g1", "--kind")
+    assert start[start.index("--pane") + 1] == pane
+    assert "--cwd" not in start and "--split" not in start
     assert "--" in start
-    assert start[-3:] == ("bash", "-lc", "claude --model some-model")
+    assert start[-2:] == ("--model", "some-model")
 
 
 def test_start_herdr_agent_honors_downward_role_placement(
@@ -667,7 +672,9 @@ def test_start_herdr_agent_honors_downward_role_placement(
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
-        assert kwargs == {"herdr_session": "llm-lab-test"}
+        assert kwargs["herdr_session"] == "llm-lab-test"
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "manager-pane", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
@@ -693,8 +700,9 @@ def test_start_herdr_agent_honors_downward_role_placement(
     )
 
     start = calls[2]
-    split_index = start.index("--split")
+    split_index = start.index("--direction")
     assert start[split_index + 1] == "down"
+
 
 
 def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
@@ -702,10 +710,13 @@ def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
     first = recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 1)
     second = recruiter._safe_agent_name("upagent", f"{shared}-try2-second", 1)
     assert first != second
-    assert first.startswith("upagent-") and first.endswith("-g1")
+    assert first.startswith("upagent-") and len(first) <= 32
+    assert first != recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 2)
+    assert first != recruiter._safe_agent_name("upagent-check", f"{shared}-try1-primary", 1)
     # Deterministic for the same id, and shell/Herdr-safe.
     assert first == recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 1)
     assert all(c.isalnum() or c in "-_" for c in first)
+
 
 
 def test_start_herdr_agent_refuses_duplicate_agent_name(monkeypatch, tmp_path) -> None:
@@ -735,6 +746,8 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
     start_calls: list[tuple[str, ...]] = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "pane-first", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             if state["started"]:
                 return {"result": {"agent": {"name": args[2], "pane_id": "pane-first"}}}
@@ -780,6 +793,7 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
     assert len(start_calls) == 1
     assert len(errors) == 1
     assert "already exists in Herdr" in str(errors[0])
+
 
 
 def test_start_herdr_agent_rejects_unknown_split_direction() -> None:
@@ -930,6 +944,8 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "worker-pane", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
@@ -974,6 +990,7 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(
     assert started == ("worker-pane", "workspace-1", "worker")
     assert closed == []
     assert "tab placement failed" in capsys.readouterr().err
+
 
 
 @pytest.mark.parametrize(
@@ -2377,47 +2394,88 @@ def test_run_order_blocks_result_when_startup_assessment_rejects_it(
     assert "startup rejected" in result["reason"]
 
 
-def test_submit_agent_prompt_uses_atomic_run_by_default(monkeypatch) -> None:
+def test_submit_agent_prompt_uses_server_prompt_after_readiness(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
-    monkeypatch.setattr(
-        recruiter,
-        "_herdr_json",
-        lambda *args, **kwargs: {"result": {"agent": {"pane_id": "manager-pane"}}},
-    )
 
-    recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000)
+    def prompt(*args, **kwargs):
+        calls.append(args)
+        return {
+            "result": {"type": "agent_prompted", "agent": {"agent_status": "working"}}
+        }
 
+    monkeypatch.setattr(recruiter, "_herdr_json", prompt)
+    recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000, paste_settle_seconds=0.0)
     assert calls == [
-        ("agent", "wait", "manager-name", "--status", "idle", "--timeout", "5000"),
-        ("pane", "run", "manager-pane", "Review evidence."),
+        (
+            "agent",
+            "wait",
+            "manager-name",
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--until",
+            "blocked",
+            "--timeout",
+            "5000",
+        ),
+        (
+            "agent",
+            "prompt",
+            "manager-name",
+            "Review evidence.",
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            "60000",
+        ),
     ]
 
 
-def test_submit_agent_prompt_splits_cursor_paste_and_enter(monkeypatch) -> None:
+def test_submit_agent_prompt_uses_server_cursor_input(monkeypatch) -> None:
     calls = []
-    sleeps = []
     monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
-    monkeypatch.setattr(
-        recruiter,
-        "_herdr_json",
-        lambda *args, **kwargs: {"result": {"agent": {"pane_id": "cursor-pane"}}},
-    )
-    monkeypatch.setattr(recruiter.time, "sleep", sleeps.append)
 
-    recruiter._submit_agent_prompt(
-        "cursor-name",
-        "Repair result.json.",
-        5_000,
-        paste_settle_seconds=recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS,
-    )
+    def prompt(*args, **kwargs):
+        calls.append(args)
+        return {
+            "result": {"type": "agent_prompted", "agent": {"agent_status": "working"}}
+        }
 
+    monkeypatch.setattr(recruiter, "_herdr_json", prompt)
+    recruiter._submit_agent_prompt("cursor-name", "Repair result.json.", 5_000, paste_settle_seconds=0.5)
     assert calls == [
-        ("agent", "wait", "cursor-name", "--status", "idle", "--timeout", "5000"),
-        ("pane", "send-text", "cursor-pane", "Repair result.json."),
-        ("pane", "send-keys", "cursor-pane", "Enter"),
+        (
+            "agent",
+            "wait",
+            "cursor-name",
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--until",
+            "blocked",
+            "--timeout",
+            "5000",
+        ),
+        (
+            "agent",
+            "prompt",
+            "cursor-name",
+            "Repair result.json.",
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            "60000",
+        ),
     ]
-    assert sleeps == [recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS]
 
 
 def test_timeout_waits_for_authenticated_requester_extension(
@@ -5356,6 +5414,8 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         split_direction: str = "right",
         tab_role: str | None = None,
         herdr_session: str | None = None,
+        on_pane_created=None,
+        startup_timeout_ms=None,
     ) -> tuple[str, str, str]:
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)
@@ -5399,6 +5459,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     assert launch_directions == ["down"]
     assert launch_tabs == ["oversight"]
     assert resize_calls == [("manager-pane", "down", 0.20, "account manager")]
+
 
 
 def test_account_manager_crash_degrades_supervision_but_worker_still_terminalizes(
@@ -5675,8 +5736,8 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
             return "", ""
 
     def never_done(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
-        assert command[4] == "agent-status"
+        assert command[:4] == ["herdr", "--session", "llm-lab-test", "agent"]
+        assert command[4] == "wait"
         status_wait_started.set()
         return NeverDoneProcess()
 
@@ -5724,6 +5785,7 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     assert len(degraded) == 1
     assert degraded[0]["reason"] == "assessment request_id mismatch"
     assert "worker-healthy-degraded" in notifications
+
 
 
 @pytest.mark.parametrize("verdict", ["passed", "blocked"])
@@ -6246,7 +6308,14 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
     ) -> tuple[str, str, str]:
         attempts.append(name)
         if len(attempts) == 1:
-            raise RecruiterError("pane split exploded")
+            kwargs["on_pane_created"](
+                {
+                    "pane_id": "failed-pane",
+                    "workspace_id": "cockpit",
+                    "terminal_id": "term_failed",
+                }
+            )
+            raise RecruiterError("agent start rejected")
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
@@ -6285,7 +6354,7 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
     assert len(attempts) == 2, "exactly one rescue relaunch"
-    assert advice_calls and "pane split exploded" in advice_calls[0]
+    assert advice_calls and "agent start rejected" in advice_calls[0]
     assert json.loads(result_path.read_text())["verdict"] == "passed"
     rescue = [
         payload
@@ -6293,6 +6362,7 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
         if payload.get("type") == "startup-rescue"
     ]
     assert rescue, "the requester must hear about the rescue relaunch"
+
 
 
 def test_failed_launch_is_not_retried_when_the_broker_declines(
@@ -6317,6 +6387,7 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
 
     def dead_start(*args: object, **kwargs: object) -> tuple[str, str, str]:
         attempts.append("try")
+        kwargs["on_pane_created"]({"pane_id": "failed-pane", "workspace_id": "cockpit", "terminal_id": "term_failed"})
         raise RecruiterError("model flag rejected by the harness")
 
     monkeypatch.setattr(recruiter, "_startup_rescue_advice", lambda *a: "ask-requester")
@@ -6344,6 +6415,7 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
         if payload.get("type") == "startup-rescue-declined"
     ]
     assert declined and declined[0]["detail"]["advice"] == "ask-requester"
+
 
 
 def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
@@ -8321,6 +8393,9 @@ def test_intake_persistence_failure_never_rewrites_original(
 def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8334,7 +8409,10 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
         assert ownership["state"] == "launching"
         assert ownership["pane"] is None
         assert ownership["agent_name"] == name
-        assert ownership["lease_token"][:16] in name
+        assert name == recruiter._intake_clerk_agent_name(
+            ownership["intake_key"], ownership["lease_token"]
+        )
+        assert len(name) <= 32
         assert ownership["owner_start_time"]
         started.append((name, order, launch, kwargs))
         return "clerk:pane", "workspace", name
@@ -8388,6 +8466,7 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     assert record["cleanup"]["verified_absent"] is True
     assert '--tools ""' in started[0][2]
     assert "--dangerously-skip-permissions" not in started[0][2]
+
 
 
 def test_intake_clerk_unavailable_becomes_refusal_without_target_launch(
@@ -8526,6 +8605,9 @@ def test_identical_bytes_reuse_one_clerk_but_different_bytes_launch_a_fresh_one(
     correction round — is a different request and launches a fresh clerk. This drives the real
     `_run_order_intake_clerk` reuse index, not a hand-built one, and counts actual launches.
     """
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8654,6 +8736,9 @@ def test_identical_intake_reuses_only_a_validated_indexed_attempt(
 def test_post_start_journal_failure_closes_the_just_created_named_pane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8661,6 +8746,18 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
     monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
     started = []
     cleaned = []
+    closed = []
+
+    def close(*args, **kwargs):
+        assert args == ("pane", "close", "clerk:pane")
+        closed.append(args[2])
+
+    def list_panes(*args, **kwargs):
+        assert args == ("pane", "list")
+        return {"result": {"panes": []}}
+
+    monkeypatch.setattr(recruiter, "_herdr", close)
+    monkeypatch.setattr(recruiter, "_herdr_json", list_panes)
 
     def start(name, order, launch, **kwargs):
         started.append((name, order))
@@ -8702,6 +8799,7 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
         )
 
     assert len(started) == 1 and len(cleaned) == 1
+    assert closed == ["clerk:pane"]
     assert cleaned[0]["pane"] == "clerk:pane"
     assert cleaned[0]["agent_name"] == started[0][0]
     attempt = Path(started[0][1]["cwd"])

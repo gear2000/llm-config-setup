@@ -410,6 +410,12 @@ def canonical_worker(tmp_path, monkeypatch):
     ctx = receipt(root)
     record = watcher.register_worker(root, data)
     runtime = watcher.Runtime(ctx, watcher.recruiter.load_roster(roster_path))
+    monkeypatch.setattr(
+        watcher.recruiter,
+        "_herdr_json",
+        lambda *args, herdr_session=None, **kw: runtime.herdr(herdr_session, *args),
+    )
+    monkeypatch.setattr(watcher.recruiter, "_herdr", lambda *args, herdr_session=None, **kw: runtime.herdr(herdr_session, *args))
     return runtime, record, ledger, key, journal_path
 
 
@@ -503,17 +509,34 @@ class FakeHerdr:
                 raise watcher.recruiter.RecruiterError("pane_not_found")
             return {"result": {"pane": self.panes[args[2]]}}
         if args[:2] == ("agent", "get"):
-            return {"result": {"agent": self.agents[args[2]]}}
+            if args[2] not in self.agents:
+                raise watcher.recruiter.RecruiterError("agent_not_found")
+            return {"result": {"type": "agent_info", "agent": self.agents[args[2]]}}
+        if args[:2] == ("pane", "split"):
+            self.panes["checker-pane"] = {
+                "pane_id": "checker-pane",
+                "workspace_id": "workspace",
+                "tab_id": "tab",
+                "terminal_id": "terminal-checker",
+            }
+            return {"result": {"type": "pane_info", "pane": self.panes["checker-pane"]}}
+        if args[:2] == ("agent", "wait"):
+            return {"result": {"type": "agent_info", "agent": {"status": "idle"}}}
+        if args[:2] == ("agent", "prompt"):
+            return {"result": {"type": "agent_info", "agent": {"status": "working"}}}
         if args[:2] == ("agent", "start"):
             name = args[2]
             pane = "checker-pane"
             self.panes[pane] = {
                 "pane_id": pane,
                 "workspace_id": "workspace",
+                "terminal_id": "terminal-checker",
+                "agent_name": name,
                 "agent_status": "working",
             }
             self.agents[name] = {
                 "name": name,
+                "agent_session": {"source": "herdr:cursor", "value": "session-test"},
                 "pane_id": pane,
                 "workspace_id": "workspace",
             }
@@ -549,7 +572,7 @@ def test_checker_real_selection_render_parse_and_cleanup(
     assert launch["provider"] != watcher.recruiter._worker_provider(target.order)
     assert len([c for c in herdr.commands if c[:2] == ("agent", "start")]) == 1
     assert (
-        "then exit" in [c[-1] for c in herdr.commands if c[:2] == ("agent", "start")][0]
+        "then exit" in [c[3] for c in herdr.commands if c[:2] == ("agent", "prompt")][0]
     )
     assert "one evidence snapshot" in (directory / "brief.md").read_text()
     now = 1001
@@ -933,3 +956,37 @@ def test_busy_shared_authority_cannot_block_checker_deadline(tmp_path):
     assert not runtime.nudges.state_path(target.identity).exists()
     watch.sweep()
     assert runtime.sent == [("worker", "continue")]
+
+
+def test_checker_exit_clears_name_but_owned_terminal_is_cleaned(
+    canonical_worker, monkeypatch
+):
+    runtime, record, *_ = canonical_worker
+    herdr = FakeHerdr()
+    monkeypatch.setattr(runtime, "herdr", herdr)
+    monkeypatch.setattr(runtime, "recent_output", lambda _: "snapshot")
+    launch = runtime.checker_start(
+        runtime.resolve(record), runtime.ctx.control_dir / "checks/exit", 1000
+    )
+    del herdr.agents[launch["name"]]
+    herdr.panes["checker-pane"].update(agent_name=None, agent=None)
+    herdr.process_exit = True
+    runtime.checker_close(launch)
+    assert "checker-pane" not in herdr.panes
+
+
+def test_checker_cleared_name_cannot_close_a_replacement_process(
+    canonical_worker, monkeypatch
+):
+    runtime, record, *_ = canonical_worker
+    herdr = FakeHerdr()
+    monkeypatch.setattr(runtime, "herdr", herdr)
+    monkeypatch.setattr(runtime, "recent_output", lambda _: "snapshot")
+    launch = runtime.checker_start(
+        runtime.resolve(record), runtime.ctx.control_dir / "checks/replaced", 1000
+    )
+    del herdr.agents[launch["name"]]
+    herdr.panes["checker-pane"].update(agent_name=None, agent=None)
+    with pytest.raises(watcher.RunWatchError, match="identity unverified"):
+        runtime.checker_close(launch)
+    assert "checker-pane" in herdr.panes
