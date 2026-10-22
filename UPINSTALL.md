@@ -238,7 +238,9 @@ Restoring the Codex backup reproduced `hooks.json` byte for byte. Snapshots and 
 are retained locally under `/var/tmp/herdr095-fix2-20261021/rollback/`.
 
 Then start Herdr normally and check `herdr --version` and `herdr integration status` against
-those versions. This checkout is detached at the baseline until deliberately switched back.
+those versions. After any swap, and before the first real hire, run the end-to-end validation brief
+[`.shared-llm/public/extensions/common/upagent/VALIDATE.md`](.shared-llm/public/extensions/common/upagent/VALIDATE.md)
+from a Claude Code session inside the cockpit; allocate about 45 minutes, 70 with the hold drill. This checkout is detached at the baseline until deliberately switched back.
 The isolated lab does not perform either machine swap.
 
 ### Pi third-party extensions (when `global` includes `pi`)
