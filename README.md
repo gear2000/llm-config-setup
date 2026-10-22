@@ -50,6 +50,7 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 - `just herdr-pin` installs Herdr **0.9.5** from the GitHub release (`tools/install-herdr.sh`). The port targets this exact version; do not run `herdr update` or the unpinned `herdr.dev/install.sh`.
 - `just misc` installs third-party skills this kit does not compose (Lavish, quota-axi, Impeccable, Plannotator). `unslop` is kit-composed by `just update`.
 - `just test` runs the composer/flow test suite.
+- `just test` proves the composer and the hub's Python logic offline; it never launches a worker. The live hub is proven by the end-to-end validation brief [`.shared-llm/public/extensions/common/upagent/VALIDATE.md`](.shared-llm/public/extensions/common/upagent/VALIDATE.md): hand the whole file to an agent running inside the Herdr cockpit after installing the kit, after any Herdr version change, and after any change under `extensions/common/upagent/`. Allocate about 45 minutes (70 with the optional hold drill).
 - The Pi launch group — `just hub`, `just builder`, `just pi-status`, `just pi-clean` — and the terraform workflow recipes (`just tf-implement`, `just tf-approve`, `just tf-auto`, `just tf-reviewer-cc` / `-pi`) are covered under "Pi harness runtime config" below.
 
 ## The config file — `~/.shared-llm.yaml`

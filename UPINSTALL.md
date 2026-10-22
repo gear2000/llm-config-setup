@@ -100,6 +100,7 @@ Also verify the machine stack that this kit actually uses:
 - if `global` includes `pi`: `pi --version` (>= 0.74.0) and `pi list` shows the uncommented pins from `third-party-extensions.txt`
 - kit-composed `unslop` is linked under the home skill dir for each selected harness (`~/.claude/skills/unslop`, `~/.pi/agent/skills/unslop`, and/or `~/.agents/skills/unslop`)
 - third-party skills from `just misc` are present where those installers put them (Lavish, Impeccable)
+- the live UpAgent hub: run the end-to-end brief [`.shared-llm/public/extensions/common/upagent/VALIDATE.md`](.shared-llm/public/extensions/common/upagent/VALIDATE.md) from an agent inside the Herdr cockpit (about 45 minutes, 70 with the optional hold drill). `just test` alone never launches a worker.
 
 Summarize changed files, installed harnesses, registered repositories, selected offering sets, Herdr version, and optional next steps.
 
