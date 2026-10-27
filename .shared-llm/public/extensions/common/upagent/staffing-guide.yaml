@@ -54,19 +54,17 @@ kinds:
   adversarial:
     matches: "adversarial evaluation, finalize audit, hunting for what the coder missed"
     offering: claude-fable-5-1
-    effort: low
-    alternate: {offering: pi-gpt-6-astra, effort: medium}
+    effort: high
+    alternate: {offering: pi-gpt-6-astra, effort: xhigh}
 
 # Seats the hiring agent must ask the human about before using. Not enforced: if the
 # agent hires anyway the work still runs, it just costs more. Ask, record the answer.
 requires_approval:
   - {offering: pi-gpt-6-astra, effort: high}
-  - {offering: pi-gpt-6-astra, effort: xhigh}
   - {offering: pi-gpt-6-astra, effort: max}
   - {offering: codex-gpt-6-astra, effort: high}
   - {offering: codex-gpt-6-astra, effort: xhigh}
   - {offering: codex-gpt-6-astra, effort: max}
-  - {offering: claude-fable-5-1, effort: high}
   - {offering: claude-fable-5-1, effort: xhigh}
   - {offering: claude-fable-5-1, effort: max}
 
