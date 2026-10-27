@@ -13,19 +13,19 @@ schema_version: 1
 kinds:
   ci-run:
     matches: "run a CI job, trigger a pipeline, watch logs, report pass/fail from output"
-    offering: pi-gpt-5-6-luna
-    effort: high
-    alternate: {offering: claude-sonnet-5-5, effort: medium}
+    offering: claude-sonnet-5-5
+    effort: medium
+    alternate: {offering: pi-gpt-6-1-sol, effort: high}
   user-story:
     matches: "run or verify a user story, acceptance check, QA pass, regression run"
     offering: claude-sonnet-5-5
     effort: medium
-    alternate: {offering: pi-gpt-5-6-luna, effort: high}
+    alternate: {offering: pi-gpt-6-1-sol, effort: high}
   small-edit:
     matches: "a bounded edit in one module, a doc change, a config tweak, a rename"
     offering: claude-opus-5-5
     effort: high
-    alternate: {offering: pi-gpt-5-6-luna, effort: high}
+    alternate: {offering: pi-gpt-6-1-sol, effort: high}
   medium-implementation:
     matches: "a feature slice touching a few files in one area, with tests"
     offering: pi-gpt-6-1-sol
@@ -67,9 +67,7 @@ demoted:
 
 # Offerings out of quota or credit. The picker skips them until the date passes and uses
 # the kind's alternate. Remove an entry when the window resets.
-unavailable_until:
-  claude-sonnet-5-5: 2026-09-24
-  claude-sonnet-4-6: 2026-09-24
+unavailable_until: {}
 
 # Which seats the reserved frontier models are for. Outside these kinds the picker names a
 # cheaper seat and says why.
