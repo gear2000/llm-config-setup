@@ -22,8 +22,11 @@ return exists. If either read fails, return `error` with the exact message; neve
 ## Procedure
 
 1. Classify the work into exactly ONE `kinds` entry using its `matches` line. Roles map
-   first: `checks` is `ci-run` unless the brief is clearly a user-story run; `reviewer` is
-   `review`; `auditor` is `adversarial`. For `coder`, pick by scope: one file or one doc is
+   first: `checks` is `ci-run-short` for one CI target or one check command and
+   `ci-run-long` for a root CI run, a full rebuild, or a run that waits on a deploy chain,
+   unless the brief is clearly a user-story run, which is `user-story-short` for one story
+   and `user-story-long` for a wave or campaign; `reviewer` is `review`; `auditor` is
+   `adversarial`. For `coder`, pick by scope: one file or one doc is
    `small-edit`; a few files in one area is `medium-implementation`; cross-module, unclear
    design, or long-horizon debugging is `hard-implementation`.
 2. Take that kind's `offering` and `effort`. Fall through to `alternate` when the primary is

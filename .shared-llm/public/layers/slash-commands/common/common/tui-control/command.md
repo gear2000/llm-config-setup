@@ -1,6 +1,6 @@
 # /tui-control
 
-Run a checked `plan.md + route.yaml` pair end to end through the TUI controller. This is the kickoff command — the **TUI agent** — the one pane you talk to. It sets up the run cockpit, loops the plan's phases, creates one phase leader per phase, and applies phase-level backtracking and escalation. It stays small: it decides only whether a phase re-runs or the run continues, and delegates every hard evaluation to an advisor worker (when configured) rather than doing the work itself.
+Run a checked `plan.md + route.yaml` pair end to end through the TUI controller. This is the kickoff command — the **controller pane** you talk to in Pattern 3. It is not the HIL agent: `just run-start` creates this pane, while the HIL agent is the pane the human started themselves. It sets up the run cockpit, loops the plan's phases, creates one phase leader per phase, and applies phase-level backtracking and escalation. It stays small: it decides only whether a phase re-runs or the run continues, and delegates every hard evaluation to an advisor worker (when configured) rather than doing the work itself.
 
 ## Invocation
 

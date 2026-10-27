@@ -11,21 +11,31 @@ schema_version: 1
 
 # One seat per kind. `alternate` is the fallback when the primary seat is unavailable.
 kinds:
-  ci-run:
-    matches: "run a CI job, trigger a pipeline, watch logs, report pass/fail from output"
-    offering: pi-gpt-5-6-luna
-    effort: high
+  ci-run-short:
+    matches: "run one CI target or one check command, watch its log, report pass/fail"
+    offering: cursor-composer-2-5
+    effort: default
     alternate: {offering: claude-sonnet-5-5, effort: medium}
-  user-story:
-    matches: "run or verify a user story, acceptance check, QA pass, regression run"
+  ci-run-long:
+    matches: "a root CI run, a full rebuild, or a CI run that waits on a deploy chain; watch, report pass/fail"
     offering: claude-sonnet-5-5
     effort: medium
-    alternate: {offering: pi-gpt-5-6-luna, effort: high}
+    alternate: {offering: pi-gpt-6-1-sol, effort: medium}
+  user-story-short:
+    matches: "run or verify one user story, one acceptance check, one QA pass"
+    offering: cursor-composer-2-5
+    effort: default
+    alternate: {offering: claude-sonnet-5-5, effort: medium}
+  user-story-long:
+    matches: "run a wave or campaign of user stories, a multi-story regression run"
+    offering: claude-sonnet-5-5
+    effort: high
+    alternate: {offering: pi-gpt-6-1-sol, effort: medium}
   small-edit:
     matches: "a bounded edit in one module, a doc change, a config tweak, a rename"
     offering: claude-opus-5-5
     effort: high
-    alternate: {offering: pi-gpt-5-6-luna, effort: high}
+    alternate: {offering: pi-gpt-6-1-sol, effort: high}
   medium-implementation:
     matches: "a feature slice touching a few files in one area, with tests"
     offering: pi-gpt-6-1-sol
@@ -44,19 +54,17 @@ kinds:
   adversarial:
     matches: "adversarial evaluation, finalize audit, hunting for what the coder missed"
     offering: claude-fable-5-1
-    effort: low
-    alternate: {offering: pi-gpt-6-astra, effort: medium}
+    effort: high
+    alternate: {offering: pi-gpt-6-astra, effort: xhigh}
 
 # Seats the hiring agent must ask the human about before using. Not enforced: if the
 # agent hires anyway the work still runs, it just costs more. Ask, record the answer.
 requires_approval:
   - {offering: pi-gpt-6-astra, effort: high}
-  - {offering: pi-gpt-6-astra, effort: xhigh}
   - {offering: pi-gpt-6-astra, effort: max}
   - {offering: codex-gpt-6-astra, effort: high}
   - {offering: codex-gpt-6-astra, effort: xhigh}
   - {offering: codex-gpt-6-astra, effort: max}
-  - {offering: claude-fable-5-1, effort: high}
   - {offering: claude-fable-5-1, effort: xhigh}
   - {offering: claude-fable-5-1, effort: max}
 
@@ -67,9 +75,7 @@ demoted:
 
 # Offerings out of quota or credit. The picker skips them until the date passes and uses
 # the kind's alternate. Remove an entry when the window resets.
-unavailable_until:
-  claude-sonnet-5-5: 2026-09-24
-  claude-sonnet-4-6: 2026-09-24
+unavailable_until: {}
 
 # Which seats the reserved frontier models are for. Outside these kinds the picker names a
 # cheaper seat and says why.
@@ -85,6 +91,6 @@ fit:
   one_area: "one module or package; a cross-module change is hard-implementation"
   done_when: "completion conditions a command can check"
   why: |
-    Sonnet, Opus and Luna write good code but lose the long horizon: given a wide brief they
+    Sonnet and Opus write good code but lose the long horizon: given a wide brief they
     try to do too much and invent structure. Keep the picture small and these seats produce
     clean work. Reserve Fable and Astra for the slices that truly need the horizon.
