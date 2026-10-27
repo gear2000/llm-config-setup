@@ -1,8 +1,7 @@
 # /upagent-pipeline
 
-Run one issue-sized change end to end through a named pipeline. **This session is the durable TUI
-agent for the run**: it places every worker order, keeps the run log, holds the human review gate,
-and does the implementation itself.
+Run one issue-sized change end to end through a named pipeline. **This session places every worker order, keeps the run log, holds the human review gate,
+and does the implementation itself.** In Pattern 2, this is the human-started HIL agent.
 
 Route by size. `/cc-plan` is the front door for a big plan that deserves research, design
 resolution, and adversarial grilling. `/upagent-pipeline rpi` is the small loop for one issue —
