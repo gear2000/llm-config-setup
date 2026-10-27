@@ -11,16 +11,26 @@ schema_version: 1
 
 # One seat per kind. `alternate` is the fallback when the primary seat is unavailable.
 kinds:
-  ci-run:
-    matches: "run a CI job, trigger a pipeline, watch logs, report pass/fail from output"
+  ci-run-short:
+    matches: "run one CI target or one check command, watch its log, report pass/fail"
+    offering: cursor-composer-2-5
+    effort: default
+    alternate: {offering: claude-sonnet-5-5, effort: medium}
+  ci-run-long:
+    matches: "a root CI run, a full rebuild, or a CI run that waits on a deploy chain; watch, report pass/fail"
     offering: claude-sonnet-5-5
     effort: medium
-    alternate: {offering: pi-gpt-6-1-sol, effort: high}
-  user-story:
-    matches: "run or verify a user story, acceptance check, QA pass, regression run"
+    alternate: {offering: pi-gpt-6-1-sol, effort: medium}
+  user-story-short:
+    matches: "run or verify one user story, one acceptance check, one QA pass"
+    offering: cursor-composer-2-5
+    effort: default
+    alternate: {offering: claude-sonnet-5-5, effort: medium}
+  user-story-long:
+    matches: "run a wave or campaign of user stories, a multi-story regression run"
     offering: claude-sonnet-5-5
-    effort: medium
-    alternate: {offering: pi-gpt-6-1-sol, effort: high}
+    effort: high
+    alternate: {offering: pi-gpt-6-1-sol, effort: medium}
   small-edit:
     matches: "a bounded edit in one module, a doc change, a config tweak, a rename"
     offering: claude-opus-5-5
@@ -83,6 +93,6 @@ fit:
   one_area: "one module or package; a cross-module change is hard-implementation"
   done_when: "completion conditions a command can check"
   why: |
-    Sonnet, Opus and Luna write good code but lose the long horizon: given a wide brief they
+    Sonnet and Opus write good code but lose the long horizon: given a wide brief they
     try to do too much and invent structure. Keep the picture small and these seats produce
     clean work. Reserve Fable and Astra for the slices that truly need the horizon.
