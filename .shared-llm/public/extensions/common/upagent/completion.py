@@ -427,14 +427,23 @@ def skip_optional(artifact: Artifact, path: Path) -> bool:
         return True
 
 
-# The one mechanically parseable findings marker in this runtime's artifact vocabulary.
+# The two mechanically parseable verdict markers in this runtime's artifact vocabulary.
 # KEEP IN SYNC with contracts.REVIEW_VERDICT_TAILS (this module stays pure and callback-fed,
 # so it does not import contracts).
 CONTRADICTORY_ARTIFACT_TAIL = "VERDICT: VEERED"
+CLEARED_ARTIFACT_TAIL = "VERDICT: CLEARED"
 
 # Search instead of enumerating Markdown decorations: any final-line occurrence is a
 # fail-safe contradiction, regardless of what punctuation or quoting surrounds it.
 _CONTRADICTORY_TAIL_RE = re.compile(r"verdict\s*:\s*veered", re.IGNORECASE)
+
+# The clean counterpart is matched the other way round — anchored, not searched. Markdown
+# decoration (`# `, closing ` #`, `**`, `> `, backticks) is stripped from both ends; what
+# remains must be the WHOLE verdict marker, so `# CLEARED #`, `**VERDICT: CLEARED.**` and `VERDICT: CLEARED`
+# count while `Not cleared`, `Cleared 2 of 9 findings; 7 remain.`, `#CLEARED-ish` and
+# `CLEARED: 0; BLOCKERS: 3` never do — those are prose about findings, not a verdict.
+_CLEARED_STATEMENT_RE = re.compile(r"^(?:verdict\s*:\s*)?cleared$", re.IGNORECASE)
+_MARKDOWN_DECORATION_RE = re.compile(r"^[\s#*_>`]+|[\s#*_`.!]+$")
 
 
 def artifact_ends_with_contradictory_tail(text: str) -> bool:
@@ -451,6 +460,24 @@ def artifact_ends_with_contradictory_tail(text: str) -> bool:
     return _CONTRADICTORY_TAIL_RE.search(lines[-1]) is not None
 
 
+def artifact_states_cleared_outcome(text: str) -> bool:
+    """True when the artifact's FIRST or LAST non-blank line IS a cleared verdict marker.
+
+    Those two lines are where a report states its verdict — the title (`# CLEARED`) or
+    the persona's closing block (`VERDICT: CLEARED`). The line must be the marker and
+    nothing else (markdown emphasis and trailing punctuation aside): a sentence that merely
+    starts with the word, or a mid-document `cleared`, is prose about findings and does
+    not count, mirroring the veered tail check above.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    for line in (lines[0], lines[-1]):
+        if _CLEARED_STATEMENT_RE.match(_MARKDOWN_DECORATION_RE.sub("", line)):
+            return True
+    return False
+
+
 def verdict_artifact_consistency_error(
     result: dict[str, Any], report_texts: dict[str, str]
 ) -> str | None:
@@ -461,9 +488,15 @@ def verdict_artifact_consistency_error(
     findings while the worker's own artifact files held a full findings report):
 
     - the result EXPLICITLY claims empty findings (`findings: []` or blank) while artifact
-      files are non-empty — the evaluator never parsed what it wrote. No amount of
-      `reason`/`summary`/`verdict_document` prose excuses that claim: prose beside an
-      explicitly-empty findings record is exactly the F3 shape this gate exists to catch.
+      files are non-empty and NONE of them states a cleared outcome where a report states
+      its verdict (first or last non-blank line) — the evaluator never parsed what it
+      wrote. No amount of `reason`/`summary`/`verdict_document` prose excuses that claim:
+      prose beside an explicitly-empty findings record is exactly the F3 shape this gate
+      exists to catch. The hub asks every worker to write compacted.md and handoff.md, so
+      a clean review legitimately arrives as `findings: []` beside non-empty files; what
+      tells it apart from F3 is the report's own stated outcome (`# CLEARED` or a
+      `VERDICT: CLEARED` tail on compacted.md itself — a handoff only speaks when no
+      report exists), never the mere presence of text (field case 2026-10-27).
       A result with NO `findings` key at all stays valid — ordinary non-evaluator workers
       never carry the field, and their `reason` is their account;
     - a non-empty artifact ends with the veered findings tail while the result says passed —
@@ -487,14 +520,22 @@ def verdict_artifact_consistency_error(
     explicitly_empty = (isinstance(findings, list) and not findings) or (
         isinstance(findings, str) and not findings.strip()
     )
-    if explicitly_empty:
-        return (
-            "verdict/artifact consistency: result.json claims `passed` with explicitly "
-            "empty `findings` while non-empty artifact files exist ("
-            + ", ".join(sorted(report_texts))
-            + "); parse those artifacts and restate the verdict with its findings"
-        )
-    return None
+    if not explicitly_empty:
+        return None
+    # The report (compacted.md) is the artifact that states the outcome. Only when the
+    # worker wrote no report does the handoff speak for it — a clean handoff beside a
+    # findings report corroborates nothing (the report is what F3 got wrong).
+    verdict_kind = "compacted" if "compacted" in report_texts else min(report_texts)
+    if artifact_states_cleared_outcome(report_texts[verdict_kind]):
+        return None
+    return (
+        "verdict/artifact consistency: result.json claims `passed` with explicitly "
+        "empty `findings` while non-empty artifact files exist ("
+        + ", ".join(sorted(report_texts))
+        + f") and the {verdict_kind} artifact does not state a cleared outcome; parse "
+        "those artifacts and restate the verdict with its findings, or — if there truly "
+        f"are none — end the report with `{CLEARED_ARTIFACT_TAIL}` on its last line"
+    )
 
 
 def validate_bundle(

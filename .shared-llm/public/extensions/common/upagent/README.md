@@ -557,9 +557,11 @@ Durable files are the source of truth; terminal text is display-only.
   files touched, and the staged artifact files the worker actually wrote — so a worker that
   did work but skipped its bundle can no longer produce an empty result. And before any
   `passed` publishes, the bundle validator parses the worker's non-empty artifact files: an
-  explicitly empty `findings` beside a non-empty report, or a report whose last non-blank
-  line states `VERDICT: VEERED` (markdown emphasis, trailing punctuation, and case are
-  normalized away), invalidates the verdict and forces the one same-worker re-evaluation
+  explicitly empty `findings` beside a non-empty compacted.md that does not itself state a
+  cleared outcome (`# CLEARED` as its first line or `VERDICT: CLEARED` as its last, the
+  line being nothing but that marker; handoff.md only speaks when no report exists), or a report
+  whose last non-blank line states `VERDICT: VEERED` (markdown emphasis, trailing
+  punctuation, and case are normalized away), invalidates the verdict and forces the one same-worker re-evaluation
   instead of a silent accept; an unrepaired inconsistent result blocks and is never salvaged
   as "a valid staged result".
 - On top of those gates, every ordinary request is Sentinel-supervised by default
