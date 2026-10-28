@@ -120,7 +120,10 @@ def _claimed_request(
     )
     assert isinstance(token, str)
     manifest = completion.build_manifest(
-        order, ledger.request_dir(key), token, recruiter.lifecycle.request_identity(order)
+        order,
+        ledger.request_dir(key),
+        token,
+        recruiter.lifecycle.request_identity(order),
     )
     completion.write_manifest(
         ledger.request_dir(key) / "artifact-manifest.json", manifest
@@ -248,7 +251,9 @@ def test_the_watcher_honors_the_clamped_deadline(
     # The module deadline stayed at 5 minutes; only the clamped per-order value applied.
     assert time.monotonic() - started < 5
     assert abort.is_set()
-    events = [item for item in ledger.events(key) if item["event"] == "worker-never-started"]
+    events = [
+        item for item in ledger.events(key) if item["event"] == "worker-never-started"
+    ]
     assert events and events[0]["deadline_ms"] == 100
 
 
@@ -343,9 +348,7 @@ def test_a_recorded_first_action_keeps_an_empty_miss_in_the_blocked_bucket(
     """The marker is the discriminator: with it, the same empty evidence stays blocked."""
     ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
     ledger._event(key, "worker-first-action", signal="agent-status")
-    triaged = recruiter._salvage_or_blocked(
-        ledger, key, order, manifest, "wait fault"
-    )
+    triaged = recruiter._salvage_or_blocked(ledger, key, order, manifest, "wait fault")
     assert triaged["result"]["verdict"] == "blocked"
     assert "never-started-classified" not in _events(ledger, key)
 
@@ -376,9 +379,7 @@ def test_dirty_worktree_evidence_vetoes_the_never_started_terminal(
             "GIT_COMMITTER_DATE": "2000-01-01T00:00:00 +0000",
         },
     )
-    ledger, order, key, manifest = _claimed_request(
-        tmp_path, monkeypatch, cwd=worktree
-    )
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch, cwd=worktree)
     (worktree / "worker-change.txt").write_text("uncommitted side effect\n")
     ledger._event(
         key, "worker-never-started", deadline_ms=300_000, worker_pane="worker-pane"
@@ -421,9 +422,9 @@ def test_any_staged_artifact_file_vetoes_the_never_started_terminal(
     assert "never-started-classified" not in _events(ledger, key)
     evidence = triaged["finalize_kwargs"]["salvage_evidence"]
     assert [item["kind"] for item in evidence["staged_artifact_files"]] == [kind]
-    assert [item["kind"] for item in triaged["result"]["epilogue"]["staged_artifacts"]] == [
-        kind
-    ]
+    assert [
+        item["kind"] for item in triaged["result"]["epilogue"]["staged_artifacts"]
+    ] == [kind]
 
 
 def test_a_prior_attempts_deadline_proof_cannot_authorize_a_later_attempt(
@@ -584,9 +585,7 @@ def test_fixture_f2_work_without_bundle_can_no_longer_produce_an_empty_result(
     worktree = tmp_path / "wt"
     worktree.mkdir()
     _git_repo(worktree)
-    ledger, order, key, manifest = _claimed_request(
-        tmp_path, monkeypatch, cwd=worktree
-    )
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch, cwd=worktree)
     sha = _commit(worktree, "fix-one.txt")
     (worktree / "abandoned-fix-two.txt").write_text("half done\n")
     handoff = manifest.artifact("handoff").staging_path
@@ -688,6 +687,324 @@ def test_explicitly_empty_findings_stay_invalid_despite_a_reason(
             manifest,
             load_result=contracts.result_loader(order),
             load_answer=recruiter.contracts_consult.load_answer,
+        )
+
+
+# The SHAPE of a clean reviewer's artifact files from a 2026-10-27 field run: the worker
+# recorded `findings: []` and wrote both markdown files because the hub asked for them.
+# The report's title states the outcome and its last line is prose; the handoff's first
+# line is a plain title and its clean statement sits mid-document. The text is invented.
+CLEARED_REPORT = (
+    "# CLEARED\n\n"
+    "The change under review does what the phase asked. No blocker, major, or minor "
+    "findings remain in the assigned scope.\n\n"
+    "Reviewed the feature branch at its head. Repository files, the branch, and commits "
+    "were not edited. Git status was clean before and after the review.\n\n"
+    "## Findings\n\nNone in the assigned scope. No repairs are requested.\n\n"
+    "## Evidence\n\n"
+    "- The unit tests cover the happy path and the two failure paths the plan names.\n"
+    "- The documented command reproduces the fix end to end.\n\n"
+    "## Required checks\n\n"
+    "- test runner: exit 0, all tests passed, none skipped.\n"
+    "- linter: exit 0.\n\n"
+    "## Limitations\n\nNo live external calls were made.\n\n"
+    "The review is complete. The Recruiter owns publication and session closure.\n"
+)
+
+CLEARED_HANDOFF = (
+    "# Re-review handoff\n\n"
+    "CLEARED. The review passed. No findings require repair.\n\n"
+    "The reviewed worktree remains on the feature branch with clean git status. The test "
+    "runner and the linter both passed.\n\n"
+    "`compacted.md` contains the review evidence and limitations. All three required "
+    "artifacts are in the lease-private directory named by the Recruiter. The Recruiter "
+    "owns publication and pane closure.\n"
+)
+
+
+def test_field_run_2026_10_27_a_cleared_report_beside_empty_findings_is_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-10-27 field run replayed in shape: `passed`, `findings: []`, and a
+    compacted.md and handoff.md that both SAY there are no findings. The worker followed
+    the hub's instructions and must come back `passed`, not blocked."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    _staged_bundle(
+        manifest,
+        {
+            "order_id": order["order_id"],
+            "verdict": "passed",
+            "review_verdict": "CLEARED",
+            "findings": [],
+            "full_log": "worker-session",
+        },
+        compacted=CLEARED_REPORT,
+        handoff=CLEARED_HANDOFF,
+    )
+    result = completion.validate_bundle(
+        manifest,
+        load_result=contracts.result_loader(order),
+        load_answer=recruiter.contracts_consult.load_answer,
+    )
+    assert result["verdict"] == "passed"
+
+
+def test_field_run_2026_10_27_completes_without_a_repair_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the typed-bundle completion: no repair prompt is ever sent, the
+    staged files keep the worker's bytes, and nothing is marked blocked."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    _staged_bundle(
+        manifest,
+        {
+            "order_id": order["order_id"],
+            "verdict": "passed",
+            "findings": [],
+            "full_log": "worker-session",
+        },
+        compacted=CLEARED_REPORT,
+        handoff=CLEARED_HANDOFF,
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: pytest.fail(
+            "a clean review must not be sent for repair"
+        ),
+    )
+    python_blocked, salvage = recruiter._complete_typed_bundle(
+        ledger,
+        key,
+        order,
+        manifest,
+        "worker-address",
+        herdr_session="default",
+    )
+    assert python_blocked is False
+    assert salvage is None
+    assert manifest.artifact("compacted").staging_path.read_text() == CLEARED_REPORT
+    assert manifest.artifact("handoff").staging_path.read_text() == CLEARED_HANDOFF
+
+
+def test_the_rescuer_classifies_the_field_run_staged_result_as_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The salvage classifier runs the same gate: the 2026-10-27 shape is `valid`, so a
+    vanished-worker rescue never recommends a rerun of a review that passed."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    _staged_bundle(
+        manifest,
+        {
+            "order_id": order["order_id"],
+            "verdict": "passed",
+            "findings": [],
+            "full_log": "worker-session",
+        },
+        compacted=CLEARED_REPORT,
+        handoff=CLEARED_HANDOFF,
+    )
+    state = recruiter._salvage_staged_result_state(
+        manifest.artifact("result").staging_path, order, manifest
+    )
+    assert state == "valid"
+
+
+def test_a_cleared_statement_must_sit_where_the_report_states_its_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the report's first or last non-blank line is its stated outcome. A findings
+    report that merely mentions `cleared` mid-document, or that is `not cleared`, keeps the
+    explicitly-empty findings claim invalid — the F3 shape does not get a new escape hatch."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "passed",
+        "findings": [],
+        "full_log": "worker-session",
+    }
+    for report in (
+        "# Findings report\n\nTwo of the nine findings were cleared; seven remain.\n\n"
+        "Blockers: 3.\n",
+        "# Not cleared\n\n9 findings, 3 of them blockers.\n",
+        "# Findings report\n\n9 findings, 3 of them blockers.\n\nVERDICT: VEERED\n",
+        # The marker must be the whole line: partial-clearing prose on either boundary
+        # line, a qualified title, or a count beside the word is not a verdict.
+        "Cleared 2 of 9 findings; 7 remain.\n\n9 findings, 3 of them blockers.\n",
+        "# Findings report\n\n9 findings, 3 of them blockers.\n\n"
+        "Cleared 2 of 9 findings; 7 remain.\n",
+        "#CLEARED-ish\n\n9 findings, 3 of them blockers.\n",
+        "# CLEARED except the blockers\n\n9 findings, 3 of them blockers.\n",
+        "# Findings report\n\n9 findings.\n\nCLEARED: 0; BLOCKERS: 3\n",
+        "# Findings report\n\n9 findings.\n\nVERDICT: CLEARED for 2 of 9\n",
+    ):
+        _staged_bundle(manifest, result, compacted=report)
+        with pytest.raises(CompletionError, match="verdict/artifact consistency"):
+            completion.validate_bundle(
+                manifest,
+                load_result=contracts.result_loader(order),
+                load_answer=recruiter.contracts_consult.load_answer,
+            )
+        assert (
+            recruiter._salvage_staged_result_state(
+                manifest.artifact("result").staging_path, order, manifest
+            )
+            == "inconsistent"
+        )
+
+
+def test_a_clean_handoff_never_speaks_for_a_findings_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3 with the second file the hub asks for: the findings report beside a handoff that
+    opens `# CLEARED` stays invalid on every path — bundle validation, the salvage
+    classifier, and the typed-bundle completion. compacted.md is the artifact that states
+    the outcome; the handoff corroborates nothing."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    _staged_bundle(
+        manifest,
+        {
+            "order_id": order["order_id"],
+            "verdict": "passed",
+            "findings": [],
+            "full_log": "worker-session",
+        },
+        compacted=FINDINGS_REPORT,
+        handoff="# CLEARED\n\nSee compacted.md for the findings.\n",
+    )
+    with pytest.raises(CompletionError, match="compacted artifact does not state"):
+        completion.validate_bundle(
+            manifest,
+            load_result=contracts.result_loader(order),
+            load_answer=recruiter.contracts_consult.load_answer,
+        )
+    assert (
+        recruiter._salvage_staged_result_state(
+            manifest.artifact("result").staging_path, order, manifest
+        )
+        == "inconsistent"
+    )
+    # The one repair reaches nobody (an exec-style worker has exited), exactly the
+    # field shape; the identity passthrough keeps the mechanical salvage outcome.
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            recruiter.RecruiterError("agent_not_found")
+        ),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_rescue_ambiguous_salvage",
+        lambda ledger_arg, key_arg, order_arg, evidence: evidence,
+    )
+    python_blocked, salvage = recruiter._complete_typed_bundle(
+        ledger,
+        key,
+        order,
+        manifest,
+        "worker-address",
+        herdr_session="default",
+    )
+    assert python_blocked is True
+    assert salvage is not None and salvage["result"]["verdict"] == "blocked"
+    assert (
+        salvage["finalize_kwargs"]["salvage_evidence"]["staged_result_state"]
+        == "inconsistent"
+    )
+
+
+def test_a_clean_report_beside_a_neutral_handoff_is_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary clean shape: compacted.md states the outcome, handoff.md is plain
+    next-worker notes with no verdict word at all. Valid on both the validator and the
+    salvage classifier."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    _staged_bundle(
+        manifest,
+        {
+            "order_id": order["order_id"],
+            "verdict": "passed",
+            "findings": [],
+            "full_log": "worker-session",
+        },
+        compacted="# Review\n\nNothing veers from the plan.\n\nVERDICT: CLEARED\n",
+        handoff="# Next steps\n\nNothing to repair. Merge when the human is ready.\n",
+    )
+    validated = completion.validate_bundle(
+        manifest,
+        load_result=contracts.result_loader(order),
+        load_answer=recruiter.contracts_consult.load_answer,
+    )
+    assert validated["verdict"] == "passed"
+    assert (
+        recruiter._salvage_staged_result_state(
+            manifest.artifact("result").staging_path, order, manifest
+        )
+        == "valid"
+    )
+
+
+def test_a_handoff_speaks_only_when_no_report_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker that wrote only handoff.md: its stated outcome counts, because it is the
+    sole artifact. The same handoff beside a silent compacted.md does not."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "passed",
+        "findings": [],
+        "full_log": "worker-session",
+    }
+    _staged_bundle(manifest, result, handoff="# CLEARED\n\nNothing to repair.\n")
+    validated = completion.validate_bundle(
+        manifest,
+        load_result=contracts.result_loader(order),
+        load_answer=recruiter.contracts_consult.load_answer,
+    )
+    assert validated["verdict"] == "passed"
+    _staged_bundle(manifest, result, compacted="# Notes\n\nSee handoff.\n")
+    with pytest.raises(CompletionError, match="compacted artifact does not state"):
+        completion.validate_bundle(
+            manifest,
+            load_result=contracts.result_loader(order),
+            load_answer=recruiter.contracts_consult.load_answer,
+        )
+
+
+def test_a_verdict_cleared_tail_corroborates_empty_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persona's own closing block — `VERDICT: CLEARED` on the last line, with or
+    without markdown emphasis — is the stated clean outcome the hub prompt asks for."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    result = {
+        "order_id": order["order_id"],
+        "verdict": "passed",
+        "findings": [],
+        "full_log": "worker-session",
+    }
+    for report in (
+        "# Review\n\nNothing veers from the plan.\n\nVERDICT: CLEARED\n",
+        "# Review\n\nNothing veers from the plan.\n\n**VERDICT: CLEARED.**\n",
+        # ATX headings may close with hashes; the heading text is still just CLEARED.
+        "# CLEARED #\n\nNothing veers from the plan.\n",
+        "## CLEARED ##\n\nNothing veers from the plan.\n",
+    ):
+        _staged_bundle(manifest, result, compacted=report)
+        validated = completion.validate_bundle(
+            manifest,
+            load_result=contracts.result_loader(order),
+            load_answer=recruiter.contracts_consult.load_answer,
+        )
+        assert validated["verdict"] == "passed"
+        assert (
+            recruiter._salvage_staged_result_state(
+                manifest.artifact("result").staging_path, order, manifest
+            )
+            == "valid"
         )
 
 

@@ -4826,6 +4826,9 @@ def _write_worker_instructions(
             else ""
         )
         + "Do not invent workflow stage names; omit `revisit` unless the assignment names one.\n"
+        + "If you record `findings` as an empty list, compacted.md must state that clean "
+        "outcome itself: end it with `VERDICT: CLEARED` on its last line. A report that "
+        "lists problems ends with `VERDICT: VEERED` and its findings go in `findings`.\n"
         + (
             "Write answer.json as either a cited success object "
             f'`{{"consult_id":"{artifact_manifest.consult_id}","answer":"...",'
