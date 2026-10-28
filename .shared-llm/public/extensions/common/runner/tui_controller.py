@@ -232,6 +232,7 @@ def _create_tui(
     harness: str,
     owner_token: str,
     separate_workspaces: bool = False,
+    remote_control: bool = False,
 ) -> dict[str, object]:
     if harness not in TUI_LAUNCHES:
         raise PlanStartError(
@@ -239,10 +240,10 @@ def _create_tui(
             + ", ".join(TUI_LAUNCHES)
         )
     launch, expected_agent, expected_process = TUI_LAUNCHES[harness]
-    if harness == "claude":
-        # The cockpit must always be drivable from the phone: give the Claude Code TUI a
-        # Remote Control session named after the run (= form keeps the trailing prompt
-        # argument from being read as the session name).
+    if harness == "claude" and remote_control:
+        # Opt-in only: `--remote-control` on run-start gives the Claude Code TUI a Remote
+        # Control session named after the run (= form keeps the trailing prompt argument
+        # from being read as the session name). Never enabled by default.
         launch += (
             f" --remote-control={shlex.quote(_safe_name(slug) or 'tui-control')}"
         )
@@ -508,6 +509,7 @@ def start_plan(
     repo: Path,
     roster_path: str,
     separate_workspaces: bool = False,
+    remote_control: bool = False,
 ) -> dict[str, object]:
     if not run_dir.is_absolute() or not run_dir.is_dir():
         raise PlanStartError(
@@ -525,6 +527,7 @@ def start_plan(
             repo=repo,
             roster_path=roster_path,
             separate_workspaces=separate_workspaces,
+            remote_control=remote_control,
         )
 
 
@@ -536,6 +539,7 @@ def _start_plan_locked(
     repo: Path,
     roster_path: str,
     separate_workspaces: bool = False,
+    remote_control: bool = False,
 ) -> dict[str, object]:
     plan_path = run_dir / "plan.md"
     route_path = run_dir / "route.yaml"
@@ -602,6 +606,7 @@ def _start_plan_locked(
             harness=tui_harness,
             owner_token=owner_receipt["token"],
             separate_workspaces=separate_workspaces,
+            remote_control=remote_control,
         )
     except (
         OSError,
@@ -705,6 +710,12 @@ def main(argv: list[str] | None = None) -> int:
         help="create a per-run <slug> workspace instead of joining the unified `upagent` "
         "workspace (the mode chosen at `just upagent-up` is inherited by default)",
     )
+    parser.add_argument(
+        "--remote-control",
+        action="store_true",
+        help="also start a Claude Code Remote Control session named after the run "
+        "(Claude TUI only; off unless asked for)",
+    )
     args = parser.parse_args(argv)
     repo = args.repo.expanduser().resolve()
     run_dir = args.run_dir.expanduser()
@@ -738,6 +749,7 @@ def main(argv: list[str] | None = None) -> int:
             roster_path=args.roster,
             separate_workspaces=args.separate_workspaces
             or _services_separate_workspaces(),
+            remote_control=args.remote_control,
         )
     except (
         OSError,

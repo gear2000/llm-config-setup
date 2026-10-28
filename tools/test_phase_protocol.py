@@ -395,9 +395,10 @@ def test_workspace_mode_defaults_to_single_and_flag_restores_separate() -> None:
     assert "UNIFIED_WORKSPACE_LABEL" in controller
 
 
-def test_claude_tui_always_launches_with_remote_control() -> None:
+def test_claude_tui_remote_control_is_opt_in() -> None:
     controller = PLAN_CONTROLLER.read_text()
     launcher = RUNNER_JUSTFILE.read_text()
 
-    assert "--remote-control=" in controller
-    assert "--remote-control=<slug>" in launcher
+    assert 'if harness == "claude" and remote_control:' in controller
+    assert '"--remote-control",' in controller
+    assert "never started by default" in launcher

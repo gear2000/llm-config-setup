@@ -151,7 +151,7 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     assert ("tab", "rename", "control-tab", "control") in calls
     run_call = next(call for call in calls if call[:2] == ("pane", "run"))
     assert f"--run-tree {run_dir}" in run_call[3]
-    assert "--remote-control=sample-run" in run_call[3]
+    assert "--remote-control" not in run_call[3]
     assert "/tui-control --plan" in run_call[3]
     assert "RUNNER_OWNER_TOKEN_FILE=" in run_call[3]
     assert "tok-test" not in run_call[3]
@@ -161,13 +161,13 @@ def test_tui_launch_names_exact_run_tree_and_verifies_health(
     assert oct(token_file.stat().st_mode & 0o777) == "0o600"
 
 
-def test_claude_tui_always_gets_remote_control_and_pi_does_not(
+def test_claude_tui_remote_control_only_when_requested_and_never_for_pi(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir, _ = _inputs(tmp_path)
     commands: dict[str, str] = {}
 
-    def run_for(harness: str) -> str:
+    def run_for(harness: str, remote_control: bool = False) -> str:
         calls: list[tuple[str, ...]] = []
         monkeypatch.setattr(
             tui_controller.control,
@@ -200,14 +200,19 @@ def test_claude_tui_always_gets_remote_control_and_pi_does_not(
             slug="sample-run",
             harness=harness,
             owner_token="tok-test",
+            remote_control=remote_control,
         )
         return next(call for call in calls if call[:2] == ("pane", "run"))[3]
 
     commands["claude"] = run_for("claude")
+    commands["claude-remote"] = run_for("claude", remote_control=True)
     commands["pi"] = run_for("pi")
+    commands["pi-remote"] = run_for("pi", remote_control=True)
 
-    assert "--remote-control=sample-run" in commands["claude"]
+    assert "--remote-control" not in commands["claude"]
+    assert "--remote-control=sample-run" in commands["claude-remote"]
     assert "--remote-control" not in commands["pi"]
+    assert "--remote-control" not in commands["pi-remote"]
 
 
 def test_unified_mode_joins_the_existing_upagent_workspace(
