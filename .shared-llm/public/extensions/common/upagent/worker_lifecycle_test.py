@@ -91,6 +91,8 @@ class Herdr095:
 
     def stage(self, instructions):
         text = Path(instructions).read_text()
+        assert "end it with `VERDICT: CLEARED` on its last line" in text
+        assert "lists problems ends with `VERDICT: VEERED`" in text
         for label in ("result.json", "compacted.md", "handoff.md"):
             found = re.search(
                 r"^- " + re.escape(label) + r": (.+)$", text, re.MULTILINE
@@ -106,11 +108,12 @@ class Herdr095:
                             "order_id": order_id,
                             "verdict": "passed",
                             "full_log": "fake-worker-session",
+                            "findings": [],
                         }
                     )
                 )
             else:
-                path.write_text("Worker completed the verified task.\n")
+                path.write_text("Worker completed the verified task.\n\nVERDICT: CLEARED\n")
         self.sequence.append("bundle-staged")
         self.staged.set()
 
@@ -226,6 +229,8 @@ class Herdr095:
                 assert "--until" in args and "--status" not in args
                 self.sequence.append("idle-gate")
             if head == ("agent", "prompt"):
+                if args[3].endswith("and perform the assigned work."):
+                    assert pane["instructions"] in args[3]
                 self.prompt_timeouts.append(int(args[args.index("--timeout") + 1]))
                 if self.stall_mode:
                     self.prompt_count += 1

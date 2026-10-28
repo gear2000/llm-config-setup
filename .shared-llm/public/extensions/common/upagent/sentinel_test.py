@@ -721,6 +721,36 @@ def test_a_complete_closeout_over_a_valid_bundle_ends_the_wait(
     assert watch.poll() == "complete"
 
 
+@pytest.mark.parametrize("tail", ["VERDICT: CLEARED", "VERDICT: VEERED", "No verdict."])
+def test_complete_closeout_checks_empty_findings_against_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tail: str
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    _stage_valid_result(manifest, order)
+    result_path = manifest.artifact("result").staging_path
+    result = json.loads(result_path.read_text())
+    result["findings"] = []
+    result_path.write_text(json.dumps(result))
+    manifest.artifact("compacted").staging_path.write_text(f"# Review\n\n{tail}\n")
+    manifest.artifact("handoff").staging_path.write_text("# CLEARED\n")
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        recruiter, "_submit_agent_prompt",
+        lambda address, message, **kwargs: prompts.append(message),
+    )
+    watch.closeout_path.write_text(json.dumps(_closeout(order)))
+
+    if tail == "VERDICT: CLEARED":
+        assert watch.poll() == "complete"
+        assert not prompts
+        assert "sentinel-complete-rejected" not in _events(ledger, key)
+    else:
+        assert watch.poll() is None
+        assert "verdict/artifact consistency" in prompts[0]
+        assert "sentinel-complete-rejected" in _events(ledger, key)
+
+
 def test_an_invalid_complete_is_rejected_with_one_more_landing_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3569,6 +3599,37 @@ def test_stalled_exact_live_worker_with_recent_staging_is_held(live_stalled_work
     assert (
         len(json.loads(_nudge_state_path(watch).read_text())["continue"]["nudges"]) == 3
     )
+
+
+@pytest.mark.parametrize("tail", ["VERDICT: VEERED", "No verdict."])
+def test_stalled_hold_does_not_accept_empty_findings_until_report_is_cleared(
+    live_stalled_worker: Any, tail: str
+) -> None:
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    _stage_valid_result(manifest, order)
+    result_path = manifest.artifact("result").staging_path
+    result = json.loads(result_path.read_text())
+    result["findings"] = []
+    result_path.write_text(json.dumps(result))
+    report = manifest.artifact("compacted").staging_path
+    report.write_text(f"# Review\n\n{tail}\n")
+    manifest.artifact("handoff").staging_path.write_text("# CLEARED\n")
+
+    assert watch._terminal_valid() is False
+    assert watch.poll() is None
+    assert watch.closeout_path.is_file() and worker.poll() is None
+    assert "worker-stall-held" in _events(ledger, key)
+    assert recruiter._salvage_staged_result_state(result_path, order, manifest) == "inconsistent"
+
+    report.write_text("# Review\n\nVERDICT: CLEARED\n")
+    watch._next_stall_probe = 0
+    assert watch._terminal_valid() is True
+    assert watch.poll() is None
+    assert not watch.closeout_path.exists()
+    assert "worker-nudge-superseded" in _events(ledger, key)
+    assert "worker-stall-released" in _events(ledger, key)
+    assert recruiter._salvage_staged_result_state(result_path, order, manifest) == "valid"
+    assert json.loads(result_path.read_text())["findings"] == []
 
 
 @pytest.mark.parametrize("live_stalled_worker", ["cpu"], indirect=True)

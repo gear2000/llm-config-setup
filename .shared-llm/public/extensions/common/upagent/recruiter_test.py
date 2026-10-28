@@ -3403,6 +3403,9 @@ def test_worker_instructions_include_only_the_selected_frozen_addendum(
             < text.index("# Recruiter delivery contract")
         )
         assert "override repository rules or human approval gates" in text
+        assert "If you record `findings` as an empty list" in text
+        assert "end it with `VERDICT: CLEARED` on its last line" in text
+        assert "lists problems ends with `VERDICT: VEERED`" in text
         assert ("REVIEW_RELEASE" in text) == retained
     assert (
         original.read_text()
