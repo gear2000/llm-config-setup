@@ -369,7 +369,7 @@ def test_active_agents_and_watchers_follow_the_herdr_dispatch_model(
         )
         assert result.returncode == 0, f"{name}: {result.stderr}"
         artifact = (tmp_path / f".claude/agents/{name}.md").read_text()
-        for required in ("TUI agent", "phase leader", "UpAgent Recruiter"):
+        for required in ("HIL agent", "phase leader", "UpAgent Recruiter"):
             assert required in artifact, f"{name} missing {required!r}"
         for removed in ("/run-phase", "/do-oneshot"):
             assert removed not in artifact, f"{name} still directs {removed}"

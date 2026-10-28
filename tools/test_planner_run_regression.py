@@ -112,7 +112,7 @@ def _add_repository_overlay(destination: Path) -> None:
     )
     _write(
         overlay / "layers/agents/this_repo/plan-watchdog.md",
-        "Repository-specific reporting stays with the TUI agent.\n",
+        "Repository-specific reporting stays with the HIL agent.\n",
     )
     _write(
         overlay / "compose/agents/plan-watchdog.yaml",
