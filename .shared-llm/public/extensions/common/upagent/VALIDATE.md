@@ -107,20 +107,27 @@ Hire with: `just upagent request --type worker --request-id "$id" --offering <of
 redact the token, then `just upagent await --request "$id" --json > "$run_dir/terminal.json"`.
 Delete `SUM.txt` between drills.
 
+Use the cheapest guide-backed seat for each harness: `staffing-guide.yaml` names
+Sonnet 5.5 / medium as the short-check fallback, Sol 6.1 / medium as the next fallback,
+and Composer 2.5 / default as the short-check primary. Use Sol's matching Codex and
+ClaudeX offerings from `offerings.d/` for those harnesses. Luna remains in the offering
+roster for compatibility but is retired from staffing seats. These are static selections;
+step 1 still checks authentication and optional-offering availability on the machine.
+
 | Drill | Offering / effort | What it proves | Pass condition |
 | --- | --- | --- | --- |
-| D1 codex exec | `codex-gpt-5-6-luna` / high | exec launch, server-owned wait, typed closeout, Codex hooks state | verdict passed, 5050, panes gone, under 6 min |
-| D2 claude interactive | `claude-haiku-5-5` / high | bare start, prompt after ready, one continuous `working` turn through the 100 s computation, no nudge | verdict passed, 5050, no `nudge` event in the ledger, panes gone |
-| D3 pi interactive | `pi-gpt-5-6-luna` / high | insulated Pi launch, agent-state extension loaded | verdict passed, 5050, panes gone |
+| D1 codex exec | `codex-gpt-6-1-sol` / medium | exec launch, server-owned wait, typed closeout, Codex hooks state | verdict passed, 5050, panes gone, under 6 min |
+| D2 claude interactive | `claude-sonnet-5-5` / medium | bare start, prompt after ready, one continuous `working` turn through the 100 s computation, no nudge | verdict passed, 5050, no `nudge` event in the ledger, panes gone |
+| D3 pi interactive | `pi-gpt-6-1-sol` / medium | insulated Pi launch, agent-state extension loaded | verdict passed, 5050, panes gone |
 | D4 cursor | `cursor-composer-2-5` / default | Cursor readiness wait, prompt delivery | verdict passed, 5050, panes gone (if Cursor is not installed or not authenticated, record skipped and continue) |
 | D5 claudex | `claudex-gpt-6-1-sol` / medium | proxy-backed Claude launch | verdict passed, 5050, panes gone (skip with a note if the `claudex` offering set is not selected or the proxy is not running) |
-| D6 nested request | `codex-gpt-5-6-luna` / high, task below | runner survives the submitting shell tool's tree kill | inner request terminalizes passed after the outer worker finishes; outer verdict passed |
-| D7 pane close | `pi-gpt-5-6-luna` / high | pane-loss detection and typed blocked closeout | within 30 s of your `herdr pane close`, ledger shows worker-gone; terminal verdict blocked, not a hang; panes gone |
-| D8 timeout | `claude-haiku-5-5` / high, `--duration-minutes 2` | deadline handling | await returns a timeout outcome that names extend/cancel; no orphan panes after you cancel with `just upagent cancel --request <id> --control-token-file <run-dir>/control-token` |
-| D9 (optional, 20 min) stall hold | `claude-haiku-5-5` / high, task below | idle-with-background-job worker is held, not killed | ledger shows `worker-stall-held` and the worker completes; no STALLED termination of a live worker |
+| D6 nested request | `codex-gpt-6-1-sol` / medium, task below | runner survives the submitting shell tool's tree kill | inner request terminalizes passed after the outer worker finishes; outer verdict passed |
+| D7 pane close | `pi-gpt-6-1-sol` / medium | pane-loss detection and typed blocked closeout | within 30 s of your `herdr pane close`, ledger shows worker-gone; terminal verdict blocked, not a hang; panes gone |
+| D8 timeout | `claude-sonnet-5-5` / medium, `--duration-minutes 2` | deadline handling | await returns a timeout outcome that names extend/cancel; no orphan panes after you cancel with `just upagent cancel --request <id> --control-token-file <run-dir>/control-token` |
+| D9 (optional, 20 min) stall hold | `claude-sonnet-5-5` / medium, task below | idle-with-background-job worker is held, not killed | ledger shows `worker-stall-held` and the worker completes; no STALLED termination of a live worker |
 
 D6 task text: replace step 1 of the standard task with "Place one UpAgent request yourself
-from your shell using the upagent-run skill, offering codex-gpt-5-6-luna effort high, with the
+from your shell using the upagent-run skill, offering codex-gpt-6-1-sol effort medium, with the
 standard validation task, duration 10 minutes, and await it. Report its request id and verdict."
 
 D7 procedure: hire with the standard task, wait until `just upagent get` shows `running` and the
