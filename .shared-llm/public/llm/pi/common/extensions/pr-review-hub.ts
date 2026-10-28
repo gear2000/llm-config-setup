@@ -43,8 +43,8 @@ import {
 const DEFAULT_SOCKET = path.join(os.homedir(), ".pi", "pr-reviewer.sock");
 const DEFAULT_TIMEOUT_SECONDS = 1200;
 const DEFAULT_MODEL =
-	process.env.PR_REVIEW_MODEL || "openai-codex/gpt-5.6-luna:max";
-const AGENT = "reviewer";
+	process.env.PR_REVIEW_MODEL || "openai-codex/gpt-6-astra:max";
+const AGENT = "pr-reviewer";
 const LOG = "pr-review-hub-log";
 const COMPLETION_POLL_MS = 15_000;
 const MODES = ["new", "status", "replace", "cancel"];
