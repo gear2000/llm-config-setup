@@ -1912,6 +1912,27 @@ def test_cleanup_refuses_active_cleanup_failed_and_batch_skips_malformed(
     assert by_id[malformed]["status"] == "skipped"
 
 
+def test_services_are_not_ready_when_the_recorded_pane_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Herdr restart leaves services.json naming a pane that no longer exists."""
+    state = tmp_path / "services.json"
+    state.write_text(json.dumps({"recruiter_pane": "w2M:p1", "herdr_session": "s1"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+    live: set[str] = set()
+    sessions: list[object] = []
+
+    def live_panes(*, herdr_session: object = None) -> set[str]:
+        sessions.append(herdr_session)
+        return set(live)
+
+    monkeypatch.setattr(recruiter, "_live_pane_ids", live_panes)
+    assert public_api._identity()["services_ready"] is False
+    live.add("w2M:p1")
+    assert public_api._identity()["services_ready"] is True
+    assert sessions == ["s1", "s1"]
+
+
 def test_missing_service_state_self_heals_without_prior_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

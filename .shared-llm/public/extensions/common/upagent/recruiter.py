@@ -9016,7 +9016,7 @@ def _manager_anchor_pane(order: dict, *, herdr_session: str | None = None) -> st
     if mode == "requester":
         return placement.get("anchor_pane") or order["cockpit_pane"]
     if mode == "shared":
-        recruiter_pane = _recruiter_pane_from_state()
+        recruiter_pane = _live_recruiter_pane_from_state()
         if recruiter_pane is None:
             raise RecruiterError(
                 "shared manager placement requires a live Recruiter pane"
@@ -11235,10 +11235,10 @@ def _run_order_intake_clerk(
 ) -> tuple[Any, dict]:
     """Launch one journaled support clerk, or reuse a clean prior attempt's validated response for a
     byte-identical resubmission (same `intake_key`); malformed caller data never controls its launch."""
-    recruiter_pane = _recruiter_pane_from_state()
+    recruiter_pane = _live_recruiter_pane_from_state()
     if recruiter_pane is None:
         cmd_up(roster_path)
-        recruiter_pane = _recruiter_pane_from_state()
+        recruiter_pane = _live_recruiter_pane_from_state()
     if recruiter_pane is None:
         raise RecruiterError(
             f"could not create Recruiter service state at {STATE_FILE}"
@@ -11774,6 +11774,24 @@ def _recruiter_pane_from_state() -> str | None:
         return None
     pane = state.get("recruiter_pane") if isinstance(state, dict) else None
     return pane if isinstance(pane, str) and pane else None
+
+
+def _live_recruiter_pane_from_state() -> str | None:
+    """The recorded services pane, only while its recorded Herdr session still lists it.
+
+    A Herdr restart leaves the state file naming a pane that no longer exists; launching
+    from it fails far from the cause. Unreachable Herdr counts as not live.
+    """
+    pane = _recruiter_pane_from_state()
+    if pane is None:
+        return None
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        session = state.get("herdr_session") if isinstance(state, dict) else None
+        live = _live_pane_ids(herdr_session=session if isinstance(session, str) else None)
+    except (OSError, json.JSONDecodeError, RecruiterError):
+        return None
+    return pane if pane in live else None
 
 
 def _process_cmdline(pid: int) -> list[str]:
@@ -16121,10 +16139,14 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
             receipt["resolution_note"] = note
         entry = index[resolved]
 
-        cockpit_pane = _recruiter_pane_from_state()
+        cockpit_pane = _live_recruiter_pane_from_state()
         if not cockpit_pane:
+            recorded = _recruiter_pane_from_state()
             raise RecruiterError(
-                f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
+                f"the Recruiter services pane {recorded} recorded in {STATE_FILE} is not "
+                "live in its Herdr session (was Herdr restarted?); run `just upagent-up` first"
+                if recorded
+                else f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
                 "run `just upagent-up` first"
             )
         cwd = _resolve_consult_cwd(entry, consult, consult_id)

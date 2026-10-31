@@ -1238,7 +1238,7 @@ def _identity() -> dict[str, object]:
 
 
 def _cockpit_pane_or_none() -> str | None:
-    return recruiter._recruiter_pane_from_state()
+    return recruiter._live_recruiter_pane_from_state()
 
 
 def _list_workers(status_filter: str) -> list[dict[str, object]]:

@@ -54,11 +54,19 @@ def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     # ids and must not depend on whether a herdr server happens to be running on the machine,
     # so the probe is neutralized here. `salvage_test.py` exercises the real check.
     monkeypatch.setattr(recruiter, "verify_cockpit_pane", lambda *a, **k: None)
+    # The services-pane liveness probe lists Herdr panes too; the same fictional ids are
+    # trusted here. The dead-services-pane tests restore the real check.
+    monkeypatch.setattr(
+        recruiter,
+        "_live_recruiter_pane_from_state",
+        lambda: recruiter._recruiter_pane_from_state(),
+    )
 
 
 # Every submission door now hires a fresh intake clerk, so the real launcher is captured here for
 # the tests that prove its own behavior. Everything else gets the deterministic double below.
 _live_intake_clerk = recruiter._run_order_intake_clerk
+_live_services_pane = recruiter._live_recruiter_pane_from_state
 
 
 def _fake_intake_clerk(raw_text, raw_path, roster_path, intake_key, **kwargs):
@@ -10049,6 +10057,77 @@ def test_a_consult_given_a_relative_path_writes_an_order_with_absolute_artifacts
     )
     assert all(path.is_absolute() for path in recruiter.consult_artifact_paths("c.json").values())
     assert _receipt(consult)["answer_verdict"] == "cited"
+
+
+def _dead_services_pane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """services.json names pane w2M:p1, which the recorded Herdr session no longer lists."""
+    state = tmp_path / "services.json"
+    state.write_text(json.dumps({"recruiter_pane": "w2M:p1", "herdr_session": "s1"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+
+    def live_panes(*, herdr_session: object = None) -> set[str]:
+        assert herdr_session == "s1"
+        return {"w9:p3"}
+
+    monkeypatch.setattr(recruiter, "_live_pane_ids", live_panes)
+    monkeypatch.setattr(
+        recruiter, "_live_recruiter_pane_from_state", _live_services_pane
+    )
+    return state
+
+
+def test_consult_fails_before_launch_when_the_services_pane_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _specialist_world(tmp_path, monkeypatch)
+    _dead_services_pane(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
+
+    assert recruiter.cmd_consult(str(consult), "roster.yaml") == 0
+
+    assert seen == []
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "w2M:p1" in receipt["reason"]
+    assert "just upagent-up" in receipt["reason"]
+
+
+def test_shared_manager_placement_refuses_a_dead_services_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _dead_services_pane(tmp_path, monkeypatch)
+    with pytest.raises(RecruiterError, match="live Recruiter pane"):
+        recruiter._manager_anchor_pane(
+            {"manager_placement": {"mode": "shared"}, "cockpit_pane": "caller"},
+            herdr_session="s1",
+        )
+
+
+def test_intake_clerk_brings_services_up_when_the_recorded_pane_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _dead_services_pane(tmp_path, monkeypatch)
+    ups: list[str] = []
+
+    def cmd_up(roster: str) -> int:
+        ups.append(roster)
+        state.write_text(json.dumps({"recruiter_pane": "w9:p3", "herdr_session": "s1"}))
+        return 0
+
+    def stop_after_the_pane_check(_roster: str) -> None:
+        raise RecruiterError("stop: the pane check passed")
+
+    monkeypatch.setattr(recruiter, "cmd_up", cmd_up)
+    monkeypatch.setattr(recruiter, "load_roster", stop_after_the_pane_check)
+    with pytest.raises(RecruiterError, match="stop: the pane check passed"):
+        _live_intake_clerk(  # the autouse fixture fakes the module attribute
+            "{}", tmp_path / "raw.json", "roster.yaml", "intake-key"
+        )
+    assert ups == ["roster.yaml"]
 
 
 def test_consult_rejects_receipt_directory_before_dispatch(
