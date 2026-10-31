@@ -15713,8 +15713,11 @@ def consult_request_id(consult_id: str) -> str:
 
 
 def consult_artifact_paths(consult_path: str | Path) -> dict[str, Path]:
-    """Every artifact a consult produces, beside the consult.json that asked for it."""
-    path = Path(consult_path)
+    """Every artifact a consult produces, beside the consult.json that asked for it.
+
+    Absolute even for a relative consult path: the order contract requires it.
+    """
+    path = Path(consult_path).absolute()
     return {
         "brief": path.with_name(path.name + ".brief.md"),
         "order": path.with_name(path.name + ".order.json"),
@@ -16051,6 +16054,8 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
     resolves the caller instead of raising past it. A receipt path that is already a directory
     is rejected before any specialist dispatch because no regular receipt can be published there.
     """
+    # One absolute path for the read, the logs and the artifacts beside it.
+    consult_path = str(Path(consult_path).absolute())
     artifacts = consult_artifact_paths(consult_path)
     _require_consult_receipt_destination(artifacts["receipt"])
     try:

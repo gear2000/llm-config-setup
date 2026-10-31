@@ -10029,6 +10029,28 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     assert _receipt(consult)["answer_verdict"] == "cited"
 
 
+def test_a_consult_given_a_relative_path_writes_an_order_with_absolute_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`just upagent-consult consults/x.json` passes a path relative to the caller's cwd;
+    the order it writes must still pass the ordinary contract's absolute-path checks."""
+    repo = _specialist_world(tmp_path, monkeypatch)  # cwd is the repo
+    consult = _consult_file(repo)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
+
+    assert recruiter.cmd_consult("consults/c1.json", "roster.yaml") == 0
+
+    recruiter.contracts.parse_order(json.dumps(seen[0]))
+    assert recruiter.consult_artifact_paths("consults/c1.json") == (
+        recruiter.consult_artifact_paths(consult)
+    )
+    assert all(path.is_absolute() for path in recruiter.consult_artifact_paths("c.json").values())
+    assert _receipt(consult)["answer_verdict"] == "cited"
+
+
 def test_consult_rejects_receipt_directory_before_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
