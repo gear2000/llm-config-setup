@@ -32,6 +32,11 @@ Run drills one at a time. Never run two hires at once.
 
 ## Step 1: static checks (2 min)
 
+If this checkout is not on `main` (you are validating a branch before merge), no checked-out
+`main` holds the UpAgent source, and every `just upagent` call fails with "no checked-out main
+branch UpAgent source found". Then run every `just upagent` call in this brief with
+`UPAGENT_CANONICAL_REPO=<this checkout's absolute path>` set. The hub passes it on to workers.
+
 Run and record the output of each:
 
 ```bash
@@ -68,7 +73,7 @@ mkdir -p "$V/evidence"
 ```
 
 Use `$V/repo` as `--cwd` for every hire. Keep every run directory; copy each drill's
-`request.json` (redacted), `terminal.json`, result bundle, and a `herdr pane list --json`
+`request.json` (redacted), `terminal.json`, result bundle, and a `herdr pane list` (it prints JSON)
 snapshot taken right after terminalization into `$V/evidence/<drill>/`.
 
 ## Step 4: the standard worker task
@@ -89,7 +94,8 @@ You are a validation worker. Do exactly this, in order, then finish.
 
 Record for each drill: request id, offering, effort, persona, wall-clock from `just upagent
 request` returning to `just upagent await` returning, the terminal verdict, whether
-`SUM.txt` exists with 5050, whether a Sentinel closeout exists, and whether every pane the
+`SUM.txt` exists with 5050, whether a Sentinel closeout exists (or the ledger shows `sentinel-bypassed-at-exit`, which
+skips the closeout when a valid bundle landed at worker exit), and whether every pane the
 hub created is gone afterwards.
 
 For every drill, before awaiting, confirm the brief landed:
@@ -97,7 +103,8 @@ For every drill, before awaiting, confirm the brief landed:
 - `<run-dir>/request.json` is redacted (no `requester_control_token` key) and
   `<run-dir>/control-token` exists with mode 0600.
 - The public request dir under the hub state (`just upagent get --request <id> --json`) shows
-  the prompt and instructions files, and the worker's `cwd` is `$V/repo`.
+  `prompt.md` and `order.json` (the instructions are the offering's `prompt_addendum` inside
+  `order.json`), and the worker's `cwd` is `$V/repo`.
 
 ## Step 5: drills
 
@@ -123,25 +130,35 @@ step 1 still checks authentication and optional-offering availability on the mac
 | D5 claudex | `claudex-gpt-6-1-sol` / medium | proxy-backed Claude launch | verdict passed, 5050, panes gone (skip with a note if the `claudex` offering set is not selected or the proxy is not running) |
 | D6 nested request | `codex-gpt-6-1-sol` / medium, task below | runner survives the submitting shell tool's tree kill | inner request terminalizes passed after the outer worker finishes; outer verdict passed |
 | D7 pane close | `pi-gpt-6-1-sol` / medium | pane-loss detection and typed blocked closeout | within 30 s of your `herdr pane close`, ledger shows worker-gone; terminal verdict blocked, not a hang; panes gone |
-| D8 timeout | `claude-sonnet-5-5` / medium, `--duration-minutes 2` | deadline handling | await returns a timeout outcome that names extend/cancel; no orphan panes after you cancel with `just upagent cancel --request <id> --control-token-file <run-dir>/control-token` |
-| D9 (optional, 20 min) stall hold | `claude-sonnet-5-5` / medium, task below | idle-with-background-job worker is held, not killed | ledger shows `worker-stall-held` and the worker completes; no STALLED termination of a live worker |
+| D8 timeout | `claude-sonnet-5-5` / medium, `--duration-minutes 2`, 300 s task | deadline handling | ledger shows `timeout-warning` while the computation still runs; await returns `awaiting-requester` and the requester message names extend/cancel; after you cancel with `just upagent cancel --request <id> --control-token-file <run-dir>/control-token`, no hub pane and no worker process remain |
+| D9 (optional, 25 min) waiting worker | `claude-sonnet-5-5` / medium, `--duration-minutes 35`, task below | idle-with-background-job worker is nudged and escalated, not killed | ledger shows nudges and `worker-stall-escalation`; no STALLED termination; the worker completes passed |
 
 D6 task text: replace step 1 of the standard task with "Place one UpAgent request yourself
 from your shell using the upagent-run skill, offering codex-gpt-6-1-sol effort medium, with the
 standard validation task, duration 10 minutes, and await it. Report its request id and verdict."
+Append the standard task text below the D6 task, labelled "The standard validation task:", so
+the worker can use it as the inner prompt.
 
 D7 procedure: hire with the standard task, wait until `just upagent get` shows `running` and the
 worker pane shows `working`, then run `herdr pane close <worker-pane-id>` from the cockpit.
 Time from the close to the first worker-gone ledger event.
 
-D8 procedure: standard task with `--duration-minutes 2`. Expect the hub to raise the timeout
-decision at about 2 minutes while the computation is still running. Cancel it. Record that
-cancellation cleaned up.
+D8 procedure: standard task with step 1 changed to about 300 seconds (both numbers), and
+`--duration-minutes 2`. The 2-minute clock starts when the worker is healthy, not when the
+request returns, so a 100 s task would finish before it. Expect `timeout-warning` in the ledger
+at about 2 minutes after `worker-healthy`, while the computation still runs. `await` then
+returns exit 2 with state `awaiting-requester` and a `decision_nonce`. The extend/cancel choice
+is in the requester `timeout-warning` message, not in the await JSON; that message holds a
+control token, so read only its wording, never print it. Cancel. Record that the panes closed
+and that no process of the worker (for example its computation in `$V/repo`) is still running.
 
 D9 task text: "Start a background job that sleeps 25 minutes, then return to your prompt and
 wait for it without doing anything else. When it finishes, write SUM.txt containing 5050 and
-deliver a passed bundle." Expect three nudges over about 20 minutes, then a hold with a
-`worker-stall-held` event, then completion. This is the only drill allowed to take 25 minutes.
+deliver a passed bundle." Use `--duration-minutes 35` so the deadline does not end it. Expect
+up to three nudges, a `worker-stall-escalation` once the nudge cap is spent, and then completion.
+A `sleep` job uses no CPU, so it earns no `worker-stall-held` hold (FUNDAMENTALS.md: the hold
+needs a pending STALLED closeout and real progress); no event of that name is expected. This is
+the only drill allowed to take 25 minutes.
 
 ## Step 6: report
 
