@@ -1933,13 +1933,35 @@ def test_services_are_not_ready_when_the_recorded_pane_is_dead(
     assert sessions == ["s1", "s1"]
 
 
+def test_a_dead_service_pane_is_brought_back_up_before_a_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a Herdr restart the recorded pane is gone; a request must not launch from it."""
+    state = tmp_path / "services.json"
+    state.write_text(json.dumps({"recruiter_pane": "w2M:p1", "herdr_session": "s1"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+    live: set[str] = set()
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: set(live))
+    starts: list[str] = []
+
+    def cmd_up(roster: str) -> int:
+        starts.append(roster)
+        state.write_text(json.dumps({"recruiter_pane": "w9:p3", "herdr_session": "s1"}))
+        live.add("w9:p3")
+        return 0
+
+    monkeypatch.setattr(public_api.recruiter, "cmd_up", cmd_up)
+    assert public_api._cockpit_pane() == "w9:p3"
+    assert len(starts) == 1
+
+
 def test_missing_service_state_self_heals_without_prior_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     panes = iter((None, "created-service-pane"))
     starts: list[str] = []
     monkeypatch.setattr(
-        public_api.recruiter, "_recruiter_pane_from_state", lambda: next(panes)
+        public_api.recruiter, "_live_recruiter_pane_from_state", lambda: next(panes)
     )
     monkeypatch.setattr(
         public_api.recruiter,

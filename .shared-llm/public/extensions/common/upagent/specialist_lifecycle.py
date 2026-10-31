@@ -664,7 +664,7 @@ def preflight(cwd: str | Path, cockpit: str | None = None) -> None:
                         path.parent,
                         state["name"],
                         cwd,
-                        cockpit or recruiter._recruiter_pane_from_state(),
+                        cockpit or recruiter._live_recruiter_pane_from_state(),
                     )
             except SpecialistBusy:
                 continue
@@ -699,7 +699,10 @@ def consult(
         return None
     with _lock(directory / "lock"):
         state = _ensure(
-            directory, name, cwd, cockpit or recruiter._recruiter_pane_from_state()
+            directory,
+            name,
+            cwd,
+            cockpit or recruiter._live_recruiter_pane_from_state(),
         )
         if state is None:
             return None
@@ -921,7 +924,7 @@ def main(argv: list[str] | None = None) -> int:
                     name,
                     cwd,
                     os.environ.get("HERDR_PANE_ID")
-                    or recruiter._recruiter_pane_from_state(),
+                    or recruiter._live_recruiter_pane_from_state(),
                     enable=True,
                     restart=args.action == "restart",
                 )

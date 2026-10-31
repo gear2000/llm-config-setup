@@ -105,6 +105,10 @@ class FakeRecruiter:
     def _recruiter_pane_from_state(self):
         return "caller"
 
+    def _live_recruiter_pane_from_state(self):
+        # The recorded services pane, unless a test says Herdr no longer lists it.
+        return "caller" if getattr(self, "services_pane_live", True) else None
+
     def _process_start_time(self, pid):
         return "birth-" + str(pid) if isinstance(pid, int) else None
 
@@ -351,6 +355,16 @@ def test_a_failed_folder_trust_never_wedges_the_resident_launch(runtime):
     state = module._read(module._directory("advisor", cwd) / "state.json")
     assert state["state"] == "ready"
     assert backend.start_calls == 1
+
+
+def test_up_never_launches_from_a_dead_services_pane(runtime):
+    """With no caller pane, `up` falls back to the services pane; a dead one (Herdr was
+    restarted) must refuse before any agent start, not launch from it."""
+    module, backend, _ = runtime
+    backend.services_pane_live = False
+    with pytest.raises(module.SpecialistError, match="live caller pane"):
+        module.main(["up", "advisor"])
+    assert backend.start_calls == 0
 
 
 def test_refresh_before_worker_and_disabled_stays_down(runtime):
