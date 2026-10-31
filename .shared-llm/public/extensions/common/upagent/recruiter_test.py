@@ -4607,6 +4607,67 @@ def test_expired_lease_with_recorded_worker_requires_runtime_reconciliation(
     assert json.loads(lease_path.read_text())["worker_pane"] == "owned-worker"
 
 
+def test_opportunistic_reconcile_prunes_stale_expiry_index_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Every client command runs cmd_reconcile(force=False, emit=False); it must drop the
+    index entries of finished claims (no reclaim, no requeue) and keep a live claim's."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    lease = json.loads((ledger.active / "requests" / key / "lease.json").read_text())
+    finished_dir = ledger.active / "by-expiry" / str(lease["expires_at"])
+    finished_index = finished_dir / f"{key}-{token}.json"
+    assert _finalize(
+        ledger, key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    live = _order(request_id="request-live", order_id="order-live")
+    live_key, _ = ledger.submit(live)
+    live_token = ledger.claim(live_key, live["order_id"], 3_600_000)
+    assert live_token is not None
+    live_lease = ledger._lease(ledger.active / "requests" / live_key / "lease.json")
+    live_index = (
+        ledger.active
+        / "by-expiry"
+        / str(live_lease["expires_at"])
+        / f"{live_key}-{live_token}.json"
+    )
+    monkeypatch.setattr(
+        recruiter, "_runner_alive", lambda pid, candidate_key: candidate_key == live_key
+    )
+    events_before = sorted((ledger.request_dir(live_key) / "events").iterdir())
+
+    assert recruiter.cmd_reconcile(force=False, emit=False) == 0
+
+    assert not finished_index.exists()
+    assert live_index.is_file()
+    if finished_dir != live_index.parent:
+        assert not finished_dir.exists()
+    assert ledger._lease(ledger.active / "requests" / live_key / "lease.json") == live_lease
+    assert sorted((ledger.request_dir(live_key) / "events").iterdir()) == events_before
+
+
+def test_a_malformed_expiry_index_entry_never_breaks_the_reconcile(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Every client command runs this reconcile; one odd index file must warn, not fail."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    ledger = recruiter.JobLedger()
+    bad = ledger.active / "by-expiry" / "1700000000" / "key-token.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("{not json")
+
+    assert recruiter.cmd_reconcile(force=False, emit=False) == 0
+
+    assert "expiry index pruning unavailable" in capsys.readouterr().err
+    assert bad.is_file()
+
+
 def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
     tmp_path: Path, monkeypatch
 ) -> None:
