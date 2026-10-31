@@ -839,6 +839,62 @@ def test_an_invalid_complete_is_rejected_with_one_more_landing_round(
     assert watch.poll() == "complete"
 
 
+def _never_idle_sentinel(monkeypatch: pytest.MonkeyPatch) -> tuple[list[float], list[str]]:
+    """A watching Sentinel sits in its wake-wait, so Herdr never reports it idle. Fake
+    clock: an idle wait burns its whole timeout, then fails."""
+    blocked_seconds = [0.0]
+    notes: list[str] = []
+
+    def herdr(*args: str, **kwargs: object) -> dict:
+        assert len(args) > 2 and args[2] == "sentinel-address", args
+        if args[:2] == ("agent", "wait"):
+            blocked_seconds[0] += float(kwargs["timeout_seconds"])  # type: ignore[arg-type]
+            raise recruiter.RecruiterError(
+                "herdr agent wait sentinel-address failed: timeout"
+            )
+        if args[:2] == ("agent", "get"):
+            return {"result": {"agent": {"agent_status": "working"}}}
+        if args[:2] == ("agent", "prompt"):
+            notes.append(args[3])
+            return {"result": {"agent": {"agent_status": "working"}}}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr)
+    return blocked_seconds, notes
+
+
+@pytest.mark.parametrize("prompt", ["SENTINEL_STALL_RECHECK", "SENTINEL_LANDING_RETRY"])
+def test_a_rejected_closeout_reaches_a_never_idle_sentinel_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
+) -> None:
+    """The brief says a Recruiter prompt overrides the Sentinel's wait, so it must be
+    delivered while the Sentinel is busy, not after a 120 s idle wait that times out."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    blocked_seconds, notes = _never_idle_sentinel(monkeypatch)
+    if prompt == "SENTINEL_STALL_RECHECK":
+        monkeypatch.setattr(
+            recruiter, "_worker_pane_confirmed_present", lambda *args, **kwargs: True
+        )
+        watch = _stalled_watch_with_worker_pane(ledger, order, key, manifest)
+        closeout = _closeout(
+            order,
+            outcome="STALLED",
+            bundle=None,
+            progress_so_far="claims with no evidence",
+            last_alive="unknown",
+        )
+        unavailable = "sentinel-stall-recheck-unavailable"
+    else:
+        watch = _watch(ledger, order, key, manifest)
+        closeout = _closeout(order)
+        unavailable = "sentinel-landing-retry-unavailable"
+    watch.closeout_path.write_text(json.dumps(closeout))
+    assert watch.poll() is None
+    assert unavailable not in _events(ledger, key)
+    assert blocked_seconds[0] < 10
+    assert len(notes) == 1 and notes[0].startswith(prompt)
+
+
 def test_a_fooled_sentinel_complete_can_never_mint_passed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

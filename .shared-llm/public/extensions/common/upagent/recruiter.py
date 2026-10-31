@@ -7954,8 +7954,11 @@ class _SentinelWatch:
                             "git/fs deltas), nudge it once more, and either resume "
                             "PULSE or write a fresh closeout with real citations to "
                             f"{self.closeout_path}.",
-                            idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                            idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
                             herdr_session=self.herdr_session,
+                            # The Sentinel is in its wake-wait, never idle; the brief has
+                            # this prompt override that wait.
+                            wait_for_idle=False,
                         )
                     except (RecruiterError, OSError) as prompt_error:
                         # An unreachable Sentinel gets no recheck; accept the
@@ -8038,8 +8041,10 @@ class _SentinelWatch:
                         "landing round with the worker, verify the bundle files on "
                         "disk yourself, and write a fresh closeout to "
                         f"{self.closeout_path}.",
-                        idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                        idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
                         herdr_session=self.herdr_session,
+                        # As for SENTINEL_STALL_RECHECK: no idle gate on a Sentinel.
+                        wait_for_idle=False,
                     )
                 except (RecruiterError, OSError) as prompt_error:
                     # An unreachable Sentinel cannot run another landing round. Recorded,
