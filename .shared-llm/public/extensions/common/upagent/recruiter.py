@@ -7631,8 +7631,11 @@ class _SentinelWatch:
                 f"SENTINEL_STALL_NUDGED: {detail}. "
                 "Resume PULSE; if the worker stalls again, write a fresh STALLED "
                 f"closeout with real citations to {self.closeout_path}.",
-                idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
                 herdr_session=self.herdr_session,
+                # A watching Sentinel sits in its wake-wait, so Herdr never reports it
+                # idle; an idle gate here only timed out and blocked the hub.
+                wait_for_idle=False,
             )
         except (RecruiterError, OSError) as error:
             self.ledger._event(
@@ -8852,28 +8855,37 @@ def _submit_agent_prompt(
     *,
     paste_settle_seconds: float = 0.0,
     herdr_session: str | None = None,
+    wait_for_idle: bool = True,
 ) -> None:
     """Gate on input readiness, then let Herdr reject a blocked dialog atomically.
 
     The 0.9.5 prompt operation owns paste/Enter sequencing, including Cursor. Do not
     retry an uncertain submission: it may already have delivered the task.
+    `wait_for_idle=False` skips the idle gate for an agent that is never idle (Herdr
+    queues the prompt behind the running turn); a status snapshot stands in as the
+    baseline for reconciling a stalled submission.
     """
     with _PROMPT_SUBMISSION_LOCK:
-        ready = _herdr_json(
-            "agent",
-            "wait",
-            target,
-            "--until",
-            "idle",
-            "--until",
-            "done",
-            "--until",
-            "blocked",
-            "--timeout",
-            str(idle_timeout_ms),
-            herdr_session=herdr_session,
-            timeout_seconds=idle_timeout_ms / 1000,
-        )
+        if not wait_for_idle:
+            ready = _herdr_json(
+                "agent", "get", target, herdr_session=herdr_session, timeout_seconds=2.0
+            )
+        else:
+            ready = _herdr_json(
+                "agent",
+                "wait",
+                target,
+                "--until",
+                "idle",
+                "--until",
+                "done",
+                "--until",
+                "blocked",
+                "--timeout",
+                str(idle_timeout_ms),
+                herdr_session=herdr_session,
+                timeout_seconds=idle_timeout_ms / 1000,
+            )
         prompt_budget_ms = max(PROMPT_TIMEOUT_FLOOR_MS, idle_timeout_ms)
         try:
             response = _herdr_json(
