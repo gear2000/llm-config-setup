@@ -11125,6 +11125,17 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
                     "reason": "intake terminal has a different occupant or identity",
                 }
             if (
+                not recorded_pane
+                and ownership.get("split_attempted") is False
+                and (
+                    ownership.get("owner_pid") == os.getpid()
+                    or not _same_owner_process(ownership)
+                )
+            ):
+                # The journal proves `pane split` was never sent, and its owner will not
+                # send one: it is this failed launch, or it is gone. Nothing exists.
+                return {"status": "never-split", "agent_name": agent_name}
+            if (
                 ownership.get("herdr_launch_style") == "split-then-start"
                 and not recorded_pane
             ):
@@ -11237,6 +11248,14 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
 
 def _cleanup_intake_clerk(ownership: dict) -> dict[str, object]:
     identity = _resolve_intake_clerk_identity(ownership)
+    if identity.get("status") == "never-split":
+        return {
+            "status": "never-split",
+            "worker_pane": None,
+            "verified_absent": True,
+            "agent_name": ownership.get("agent_name"),
+            "reason": "the clerk launch failed before any pane split was sent",
+        }
     if identity.get("status") == "absent":
         recorded_pane = ownership.get("pane")
         if ownership.get("state") != "closed" and not (
@@ -11411,6 +11430,8 @@ def _run_order_intake_clerk(
             + 30,
         ),
         "pane": None,
+        # Set true right before `pane split` is sent; until then no pane can exist.
+        "split_attempted": False,
         "state": "launching",
     }
     # Journal before creating topology. If a split reply is lost, name absence cannot
@@ -11439,6 +11460,10 @@ def _run_order_intake_clerk(
         )
         _secure_write_json(ownership_path, ownership)
 
+    def record_split_attempt() -> None:
+        ownership["split_attempted"] = True
+        _secure_write_json(ownership_path, ownership)
+
     try:
         launch_attempted = True
         pane, workspace_id, address = _start_herdr_agent(
@@ -11449,6 +11474,7 @@ def _run_order_intake_clerk(
             tab_role="oversight",
             herdr_session=herdr_session,
             on_pane_created=record_created,
+            on_split_attempt=record_split_attempt,
             expected_agent=config.intake_clerk.expected_agent,
             expected_process=config.intake_clerk.expected_process,
             startup_timeout_ms=config.startup_timeout_ms,

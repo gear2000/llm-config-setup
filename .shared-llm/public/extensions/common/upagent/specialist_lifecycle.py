@@ -514,12 +514,22 @@ def _launch(
             # process that no longer exists; it must not satisfy this launch's readiness.
             ack.unlink(missing_ok=True)
     if adopted is None:
-        if resume and state.get("creation_inflight"):
+        if (
+            resume
+            and state.get("creation_inflight")
+            # A start that failed before `pane split` was sent (split_attempted false)
+            # created nothing, so it may simply start again.
+            and state.get("split_attempted") is not False
+        ):
             raise LaunchUnresolved(
                 "split pane creation is uncertain; refusing to create another pane"
             )
-        state["creation_inflight"] = True
+        state.update(creation_inflight=True, split_attempted=False)
         _save(directory, state)
+
+        def record_split_attempt() -> None:
+            state["split_attempted"] = True
+            _save(directory, state)
 
         def record_created(pane: dict) -> None:
             state.update(pane=pane["pane_id"], terminal_id=pane.get("terminal_id"))
@@ -532,6 +542,7 @@ def _launch(
                 state["launch"],
                 herdr_session=state["session"],
                 on_pane_created=record_created,
+                on_split_attempt=record_split_attempt,
             )
         except recruiter.RecruiterError as error:
             if "agent_name_taken" not in str(error) and "already exists in Herdr" not in str(error):
