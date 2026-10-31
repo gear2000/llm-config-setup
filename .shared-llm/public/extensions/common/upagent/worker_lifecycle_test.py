@@ -145,6 +145,8 @@ class Herdr095:
             self.panes[args[2]].update(name=args[3], agent_name=args[3])
             return self.reply("ok")
         if head == ("pane", "process-info"):
+            if args[-1] not in self.panes:
+                raise r.RecruiterError("pane_not_found")
             pane = self.panes[args[-1]]
             kind = pane.get("agent", "bash")
             return self.reply(

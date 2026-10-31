@@ -160,6 +160,15 @@ publication remains unresolved when the split reply is lost: an absent agent nam
 prove an anonymous shell absent. Recovery refuses a second split and never publishes a false
 `verified_absent` receipt. A recorded terminal can still prove ownership after its agent name clears.
 
+Closing a hub-owned pane also ends the processes that ran in it. Before the close, the hub
+records the pane shell and every descendant by pid plus birth stamp (Linux `/proc/<pid>/stat`
+field 22); after a close they re-parent to init and cannot be traced. After the close it sends
+SIGTERM to each recorded process that is still the same process, waits a short grace, then sends
+SIGKILL to survivors. An UpAgent runner (`recruiter.py ... run-job`, from any checkout) and its
+descendants are never signalled, so a nested request survives its submitting worker. A process that
+already exited is not an error; one that outlives SIGKILL fails the cleanup like a leaked pane. The
+cleanup record carries `process_tree: {snapshot, terminated, killed}`.
+
 ## Topology
 
 ```

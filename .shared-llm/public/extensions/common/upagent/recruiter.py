@@ -52,6 +52,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -5003,6 +5004,211 @@ def _live_pane_ids(*, herdr_session: str | None = None) -> set[str]:
     }
 
 
+PANE_TREE_TERM_GRACE_SECONDS = 1.5
+PANE_TREE_KILL_GRACE_SECONDS = 1.0
+
+
+def _is_upagent_runner(argv: list[str]) -> bool:
+    """True for a `recruiter.py ... run-job` process, from any checkout.
+
+    A nested request's runner starts inside the submitting worker's tool tree and then
+    re-parents to init so it survives that tree's kill. Pane teardown must never signal
+    it, or its intermediate fork, or anything it started.
+    """
+    for index, item in enumerate(argv):
+        if Path(item).name == "recruiter.py" and "run-job" in argv[index + 1 :]:
+            return True
+    return False
+
+
+def _process_ancestors(pid: int, parents: dict[int, int]) -> set[int]:
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        pid = parents.get(pid, 0)
+    return seen
+
+
+def _process_parent_table(pane: str) -> dict[int, int]:
+    """Map every live pid to its parent pid.
+
+    Linux reads /proc directly (no subprocess, like process_identity). Other platforms
+    use ps(1). A listing that cannot be read fails loud: a silent empty table would
+    leak the pane's processes.
+    """
+    parents: dict[int, int] = {}
+    if sys.platform == "linux":
+        try:
+            entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
+        except OSError as error:
+            raise RecruiterError(
+                f"could not list /proc to snapshot pane {pane}: {error}"
+            ) from error
+        for entry in entries:
+            try:
+                text = Path(f"/proc/{entry}/stat").read_text()
+            except OSError:
+                continue  # exited during the scan
+            fields = text[text.rfind(")") + 2 :].split()
+            if len(fields) > 1 and fields[1].isdigit():
+                parents[int(entry)] = int(fields[1])
+        return parents
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout
+        for line in listing.splitlines():
+            if line.strip():
+                child, parent = line.split()
+                parents[int(child)] = int(parent)
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise RecruiterError(
+            f"could not list processes to snapshot pane {pane}: {error}"
+        ) from error
+    return parents
+
+
+def _snapshot_pane_process_tree(
+    pane: str, *, herdr_session: str | None
+) -> list[tuple[int, str]]:
+    """Record (pid, birth stamp) for the pane's shell and every descendant.
+
+    UpAgent runner subtrees, this process, and its ancestors are excluded. A pane that is
+    already gone has nothing left to trace; any other probe fault propagates, like a
+    failed close.
+    """
+    try:
+        info = (
+            _herdr_json(
+                "pane", "process-info", "--pane", pane, herdr_session=herdr_session
+            )
+            .get("result", {})
+            .get("process_info", {})
+        )
+    except RecruiterError:
+        if pane in _live_pane_ids(herdr_session=herdr_session):
+            raise
+        return []
+    if not isinstance(info, dict):
+        info = {}
+    roots = {
+        candidate
+        for candidate in (
+            info.get("shell_pid"),
+            *(
+                process.get("pid")
+                for process in info.get("foreground_processes", []) or []
+                if isinstance(process, dict)
+            ),
+        )
+        if isinstance(candidate, int)
+        and not isinstance(candidate, bool)
+        and candidate > 1
+    }
+    if not roots:
+        return []
+    parents = _process_parent_table(pane)
+    children: dict[int, list[int]] = {}
+    for child, parent in parents.items():
+        children.setdefault(parent, []).append(child)
+    protected = _process_ancestors(os.getpid(), parents)
+    snapshot: list[tuple[int, str]] = []
+    pending = sorted(roots)
+    visited: set[int] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in visited or pid <= 1 or pid in protected:
+            continue
+        visited.add(pid)
+        if _is_upagent_runner(_process_cmdline(pid)):
+            continue
+        start = _process_start_time(pid)
+        if start is not None:
+            snapshot.append((pid, start))
+        pending.extend(children.get(pid, []))
+    return snapshot
+
+
+def _signal_process_identity(pid: int, start: str, signal_number: int) -> bool:
+    """Signal pid only while its birth stamp still matches; False when it is gone.
+
+    On Linux a pidfd pins the process between the identity check and the signal, so a
+    reused pid can never be signalled.
+    """
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send = getattr(signal, "pidfd_send_signal", None)
+    try:
+        if pidfd_open is not None and pidfd_send is not None:
+            descriptor = pidfd_open(pid)
+            try:
+                if _process_start_time(pid) != start:
+                    return False
+                pidfd_send(descriptor, signal_number)
+            finally:
+                os.close(descriptor)
+        else:
+            if _process_start_time(pid) != start:
+                return False
+            os.kill(pid, signal_number)
+    except ProcessLookupError:
+        return False
+    except OSError as error:
+        raise RecruiterError(
+            f"cannot signal pane process {pid} with {signal_number}: {error}"
+        ) from error
+    return True
+
+
+def _terminate_process_snapshot(
+    snapshot: list[tuple[int, str]],
+) -> dict[str, object]:
+    """SIGTERM every snapshot process still alive, then SIGKILL the survivors.
+
+    A process that already exited is not an error. One that outlives SIGKILL is.
+    """
+
+    def alive(items: list[tuple[int, str]]) -> list[tuple[int, str]]:
+        return [(pid, start) for pid, start in items if _process_start_time(pid) == start]
+
+    terminated = [
+        (pid, start)
+        for pid, start in snapshot
+        if _signal_process_identity(pid, start, signal.SIGTERM)
+    ]
+    survivors = terminated
+    if terminated:
+        deadline = time.monotonic() + PANE_TREE_TERM_GRACE_SECONDS
+        survivors = alive(terminated)
+        while survivors and time.monotonic() < deadline:
+            time.sleep(0.05)
+            survivors = alive(survivors)
+    killed = [
+        (pid, start)
+        for pid, start in survivors
+        if _signal_process_identity(pid, start, signal.SIGKILL)
+    ]
+    if killed:
+        deadline = time.monotonic() + PANE_TREE_KILL_GRACE_SECONDS
+        remaining = alive(killed)
+        while remaining and time.monotonic() < deadline:
+            time.sleep(0.05)
+            remaining = alive(remaining)
+        if remaining:
+            raise RecruiterError(
+                "pane processes survived SIGKILL: "
+                + ", ".join(str(pid) for pid, _start in remaining)
+            )
+    return {
+        "snapshot": len(snapshot),
+        "terminated": [pid for pid, _start in terminated],
+        "killed": [pid for pid, _start in killed],
+    }
+
+
 def _close_worker_pane(
     worker_pane: str, *, herdr_session: str | None = None
 ) -> dict[str, object]:
@@ -5012,6 +5218,9 @@ def _close_worker_pane(
     absent. Other close/list faults propagate; terminal publication must not hide leaked panes.
     """
     session = _recorded_herdr_session(herdr_session, "pane cleanup")
+    # Snapshot BEFORE the close: afterwards the pane's surviving descendants are
+    # re-parented to init and can no longer be traced back to this pane.
+    process_tree = _snapshot_pane_process_tree(worker_pane, herdr_session=session)
     close_status = "closed"
     try:
         _herdr("pane", "close", worker_pane, herdr_session=session)
@@ -5026,6 +5235,7 @@ def _close_worker_pane(
         "status": close_status,
         "worker_pane": worker_pane,
         "verified_absent": True,
+        "process_tree": _terminate_process_snapshot(process_tree),
     }
 
 

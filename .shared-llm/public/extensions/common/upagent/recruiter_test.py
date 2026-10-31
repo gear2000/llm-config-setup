@@ -1368,6 +1368,222 @@ def test_current_herdr_session_refuses_ambiguous_socket_matches(
         recruiter._resolve_current_herdr_session_name()
 
 
+# --- Pane process-tree teardown (D8b: orphaned worker process after cancel) -------
+
+
+def _children_of(pid: int) -> list[int]:
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            text = Path(f"/proc/{entry}/stat").read_text()
+        except OSError:
+            continue
+        fields = text[text.rfind(")") + 2 :].split()
+        if fields[1] == str(pid) and fields[0] != "Z":
+            found.append(int(entry))
+    return found
+
+
+def _wait_for_children(pid: int, count: int) -> list[int]:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        children = _children_of(pid)
+        if len(children) >= count:
+            return children
+        time.sleep(0.02)
+    raise AssertionError(f"process {pid} never started {count} children")
+
+
+def _alive(pid: int) -> bool:
+    return recruiter._process_start_time(pid) is not None
+
+
+def _wait_dead(pid: int, seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.02)
+    return not _alive(pid)
+
+
+def _fake_pane(monkeypatch: pytest.MonkeyPatch, shell: Any) -> list[tuple[str, ...]]:
+    """Herdr stand-in: process-info names `shell`; close hangs it up like a real
+    pane close, so its surviving children re-parent to init."""
+    calls: list[tuple[str, ...]] = []
+    live = {"pane-1"}
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("pane", "process-info"):
+            return {
+                "result": {
+                    "process_info": {
+                        "pane_id": "pane-1",
+                        "shell_pid": shell.pid,
+                        "foreground_processes": [],
+                    }
+                }
+            }
+        if args == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": pane} for pane in live]}}
+        raise AssertionError(args)
+
+    def fake_herdr(*args: str, **kwargs: object) -> None:
+        calls.append(args)
+        assert args == ("pane", "close", "pane-1")
+        live.discard("pane-1")
+        shell.kill()
+        shell.wait()
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    return calls
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_close_worker_pane_terminates_the_pane_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot is taken before the close, so a child that the pane close
+    re-parents to init is still found and terminated."""
+    import subprocess
+
+    shell = subprocess.Popen(["sh", "-c", "sleep 300 & sleep 300 & wait"])
+    try:
+        children = _wait_for_children(shell.pid, 2)
+        calls = _fake_pane(monkeypatch, shell)
+        cleanup = recruiter._close_worker_pane("pane-1", herdr_session="s")
+        assert calls[0][:2] == ("pane", "process-info")
+        assert calls.index(("pane", "close", "pane-1")) > 0
+        assert cleanup["verified_absent"] is True
+        tree = cast(dict, cleanup["process_tree"])
+        assert tree["snapshot"] == 3
+        assert sorted(cast(list, tree["terminated"])) == sorted(children)
+        assert all(_wait_dead(pid) for pid in children)
+    finally:
+        for pid in _children_of(shell.pid):
+            os.kill(pid, 9)
+        shell.kill()
+        shell.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_close_worker_pane_spares_an_upagent_runner_and_its_descendants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D6: a nested request's runner (`recruiter.py ... run-job`) started from the
+    worker's tool tree must survive the worker pane teardown, with its children."""
+    import subprocess
+
+    fake_recruiter = tmp_path / "other-checkout" / "recruiter.py"
+    runner_code = (
+        "import subprocess, time; subprocess.Popen(['sleep', '300']); time.sleep(300)"
+    )
+    shell = subprocess.Popen(
+        [
+            "sh",
+            "-c",
+            f'sleep 300 & {sys.executable} -c "{runner_code}" '
+            f"{fake_recruiter} --roster r run-job somekey & wait",
+        ]
+    )
+    runner = grandchild = worker_child = None
+    try:
+        children = _wait_for_children(shell.pid, 2)
+        for pid in children:
+            if "run-job" in recruiter._process_cmdline(pid):
+                runner = pid
+            else:
+                worker_child = pid
+        assert runner is not None and worker_child is not None
+        grandchild = _wait_for_children(runner, 1)[0]
+        _fake_pane(monkeypatch, shell)
+        cleanup = recruiter._close_worker_pane("pane-1", herdr_session="s")
+        tree = cast(dict, cleanup["process_tree"])
+        assert tree["terminated"] == [worker_child]
+        assert _wait_dead(worker_child)
+        assert _alive(runner) and _alive(grandchild)
+    finally:
+        for pid in (runner, grandchild, worker_child):
+            if pid is not None and _alive(pid):
+                os.kill(pid, 9)
+        shell.kill()
+        shell.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_process_snapshot_kills_a_sigterm_ignorer_and_never_signals_a_reused_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(recruiter, "PANE_TREE_TERM_GRACE_SECONDS", 0.2)
+    stubborn = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(300)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    bystander = subprocess.Popen(["sleep", "300"])
+    try:
+        assert stubborn.stdout is not None and stubborn.stdout.readline() == b"ready\n"
+        start = recruiter._process_start_time(stubborn.pid)
+        assert isinstance(start, str)
+        result = recruiter._terminate_process_snapshot(
+            [
+                (stubborn.pid, start),
+                # Same pid number, different birth stamp: a reused pid is never touched.
+                (bystander.pid, "not-its-birth-stamp"),
+            ]
+        )
+        assert result["terminated"] == [stubborn.pid]
+        assert result["killed"] == [stubborn.pid]
+        stubborn.wait(timeout=5)
+        assert bystander.poll() is None
+        # A process that already exited is not an error.
+        gone = recruiter._terminate_process_snapshot([(stubborn.pid, start)])
+        assert gone == {"snapshot": 1, "terminated": [], "killed": []}
+    finally:
+        for process in (stubborn, bystander):
+            process.kill()
+            process.wait()
+
+
+def test_pane_process_snapshot_is_empty_for_an_absent_pane_and_loud_for_a_live_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live: set[str] = set()
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("pane", "process-info"):
+            raise RecruiterError("pane_not_found")
+        if args == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": pane} for pane in live]}}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    assert recruiter._snapshot_pane_process_tree("pane-1", herdr_session="s") == []
+    live.add("pane-1")
+    with pytest.raises(RecruiterError, match="pane_not_found"):
+        recruiter._snapshot_pane_process_tree("pane-1", herdr_session="s")
+
+
+def test_upagent_runner_is_recognised_from_any_checkout() -> None:
+    assert recruiter._is_upagent_runner(
+        ["/usr/bin/python3", "/elsewhere/upagent/recruiter.py", "--roster", "r", "run-job", "k"]
+    )
+    assert not recruiter._is_upagent_runner(
+        ["/usr/bin/python3", "/elsewhere/recruiter.py", "status"]
+    )
+    assert not recruiter._is_upagent_runner(["run-job", "recruiter.py"])
+
+
 def test_close_worker_pane_requires_recorded_session() -> None:
     with pytest.raises(RecruiterError, match="recorded Herdr session"):
         recruiter._close_worker_pane("pane-1")
@@ -1381,6 +1597,10 @@ def test_close_worker_pane_uses_global_session_option(
     def fake_run(args, **kwargs):
         calls.append(args)
         if args[:4] == ["herdr", "--session", "llm-lab-test", "pane"]:
+            if args[4] == "process-info":
+                return recruiter.subprocess.CompletedProcess(
+                    args, 0, '{"result":{"process_info":{"pane_id":"pane-1"}}}\n', ""
+                )
             if args[4] == "close":
                 return recruiter.subprocess.CompletedProcess(args, 0, "", "")
             if args[4] == "list":
@@ -1394,8 +1614,11 @@ def test_close_worker_pane_uses_global_session_option(
     cleanup = recruiter._close_worker_pane("pane-1", herdr_session="llm-lab-test")
 
     assert cleanup["verified_absent"] is True
-    assert calls[0] == ["herdr", "--session", "llm-lab-test", "pane", "close", "pane-1"]
-    assert calls[1] == ["herdr", "--session", "llm-lab-test", "pane", "list"]
+    assert calls[0] == [
+        "herdr", "--session", "llm-lab-test", "pane", "process-info", "--pane", "pane-1"
+    ]
+    assert calls[1] == ["herdr", "--session", "llm-lab-test", "pane", "close", "pane-1"]
+    assert calls[2] == ["herdr", "--session", "llm-lab-test", "pane", "list"]
 
 
 def test_checker_cleanup_guards_layout_adjustment(tmp_path: Path, monkeypatch) -> None:
@@ -8821,6 +9044,8 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
         closed.append(args[2])
 
     def list_panes(*args, **kwargs):
+        if args == ("pane", "process-info", "--pane", "clerk:pane"):
+            return {"result": {"process_info": {"pane_id": "clerk:pane"}}}
         assert args == ("pane", "list")
         return {"result": {"panes": []}}
 
