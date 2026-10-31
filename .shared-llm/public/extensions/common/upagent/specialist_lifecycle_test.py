@@ -118,12 +118,19 @@ class FakeRecruiter:
         )
 
     def _start_herdr_agent(
-        self, name, order, launch, *, herdr_session, on_pane_created
+        self, name, order, launch, *, herdr_session, on_pane_created,
+        on_split_attempt=None,
     ):
         assert herdr_session == "test-session"
         self.start_calls += 1
         self.launch_log.append(("start", name))
         args = (name, order["cwd"], launch)
+        if self.fail_start == "before-split":
+            # The anchor probe failed: no `pane split` was ever sent.
+            self.fail_start = None
+            raise BackendError("herdr pane get caller failed: pane_not_found")
+        if on_split_attempt is not None:
+            on_split_attempt()
         if self.fail_start:
             mode, self.fail_start = self.fail_start, None
             if mode == "lost":
@@ -365,6 +372,17 @@ def test_up_never_launches_from_a_dead_services_pane(runtime):
     with pytest.raises(module.SpecialistError, match="live caller pane"):
         module.main(["up", "advisor"])
     assert backend.start_calls == 0
+
+
+def test_a_start_that_failed_before_the_split_never_blocks_the_next_up(runtime):
+    module, backend, cwd = runtime
+    backend.fail_start = "before-split"
+    with pytest.raises(BackendError, match="pane_not_found"):
+        module.main(["up", "advisor"])
+    module.main(["up", "advisor"])
+    state = module._read(module._directory("advisor", cwd) / "state.json")
+    assert state["state"] == "ready"
+    assert backend.start_calls == 2 and backend.starts == 1
 
 
 def test_refresh_before_worker_and_disabled_stays_down(runtime):

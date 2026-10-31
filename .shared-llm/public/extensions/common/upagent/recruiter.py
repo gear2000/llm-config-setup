@@ -1039,60 +1039,95 @@ class JobLedger:
         self._snapshot(key, "queued", order_id=lease["order_id"])
         return True
 
-    def reap_expired(self, now: int | None = None) -> int:
-        """Reclaim expired indexed leases only when the indexed token remains active."""
-        current_time = int(time.time()) if now is None else now
+    def _expiry_index_dirs(self) -> list[tuple[int, Path]]:
         expiry_root = self.active / "by-expiry"
         if not expiry_root.is_dir():
-            return 0
-        reclaimed = 0
+            return []
+        dirs = []
         for expiry_dir in expiry_root.iterdir():
             try:
-                expiry = int(expiry_dir.name)
+                dirs.append((int(expiry_dir.name), expiry_dir))
             except ValueError as e:
                 raise RecruiterError(
                     f"invalid lease expiry index directory: {expiry_dir}"
                 ) from e
+        return dirs
+
+    def _index_entry_locked(self, index_path: Path) -> tuple[str, dict] | None:
+        """(key, indexed lease), or None when another pruner already removed it."""
+        if not index_path.exists():
+            return None
+        lease = self._lease(index_path)
+        suffix = f"-{lease['token']}.json"
+        if not index_path.name.endswith(suffix):
+            raise RecruiterError(f"lease index {index_path} does not match its token")
+        return index_path.name.removesuffix(suffix), lease
+
+    def _prune_index_entry_locked(
+        self, index_path: Path, key: str, token: str, expiry: int
+    ) -> bool:
+        """Claim writes its index entry under this same lock, so an entry whose claim is
+        gone or now carries another token/expiry is stale. Deletes only the index file."""
+        claim_dir = self.active / "requests" / key
+        current = self._lease(claim_dir / "lease.json") if claim_dir.is_dir() else None
+        if current is not None and (current["token"], current["expires_at"]) == (
+            token,
+            expiry,
+        ):
+            return False
+        index_path.unlink(missing_ok=True)
+        return True
+
+    @staticmethod
+    def _remove_empty_expiry_dir(expiry_dir: Path) -> None:
+        try:
+            expiry_dir.rmdir()
+        except OSError as error:
+            # Not empty yet, or another pruner removed it first.
+            if error.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT):
+                raise
+
+    def reap_expired(self, now: int | None = None) -> int:
+        """Reclaim expired indexed leases only when the indexed token remains active."""
+        current_time = int(time.time()) if now is None else now
+        reclaimed = 0
+        for expiry, expiry_dir in self._expiry_index_dirs():
             if expiry > current_time:
                 continue
             for index_path in expiry_dir.glob("*.json"):
                 # One machine-wide lock (the key is unused); take it before the read,
                 # since another reaper may prune this entry after the listing.
                 with self._claim_lock(index_path.name):
-                    if not index_path.exists():
+                    entry = self._index_entry_locked(index_path)
+                    if entry is None:
                         continue
-                    lease = self._lease(index_path)
-                    suffix = f"-{lease['token']}.json"
-                    if not index_path.name.endswith(suffix):
-                        raise RecruiterError(
-                            f"lease index {index_path} does not match its token"
-                        )
-                    key = index_path.name.removesuffix(suffix)
+                    key, lease = entry
                     if self._reclaim_expired_locked(
                         key, current_time, lease["token"], expiry
                     ):
                         reclaimed += 1
-                    # Claim writes its index entry under this same lock, so an entry
-                    # whose claim is gone or now carries another token/expiry is stale.
-                    claim_dir = self.active / "requests" / key
-                    current = (
-                        self._lease(claim_dir / "lease.json")
-                        if claim_dir.is_dir()
-                        else None
-                    )
-                    if current is None or (current["token"], current["expires_at"]) != (
-                        lease["token"],
-                        expiry,
-                    ):
-                        index_path.unlink(missing_ok=True)
+                    self._prune_index_entry_locked(index_path, key, lease["token"], expiry)
             with self._claim_lock(expiry_dir.name):
-                try:
-                    expiry_dir.rmdir()
-                except OSError as error:
-                    # Not empty yet, or another reaper removed it first.
-                    if error.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT):
-                        raise
+                self._remove_empty_expiry_dir(expiry_dir)
         return reclaimed
+
+    def prune_expiry_index(self) -> int:
+        """Delete stale expiry-index entries of any epoch, and epoch dirs left empty.
+
+        Unlike `reap_expired` this never reclaims or requeues a claim: it touches only
+        index files, so it is safe on every opportunistic reconcile.
+        """
+        pruned = 0
+        for expiry, expiry_dir in self._expiry_index_dirs():
+            with self._claim_lock(expiry_dir.name):
+                for index_path in expiry_dir.glob("*.json"):
+                    entry = self._index_entry_locked(index_path)
+                    if entry is not None and self._prune_index_entry_locked(
+                        index_path, entry[0], entry[1]["token"], expiry
+                    ):
+                        pruned += 1
+                self._remove_empty_expiry_dir(expiry_dir)
+        return pruned
 
     def active_claims(self) -> list[tuple[str, dict]]:
         """Return validated active leases. The lease token is the ownership proof."""
@@ -1904,6 +1939,31 @@ class JobLedger:
                 pane=pane,
                 agent_name=journal.get("agent_name"),
             )
+
+    def mark_launch_split_attempted(self, key: str, token: str, launch_id: str) -> None:
+        """Persist, before `pane split` is sent, that a pane may now exist.
+
+        Until this mark a split-then-start journal proves no pane was created."""
+        path = self.launch_journal_path(key, launch_id)
+        with self._claim_lock(key):
+            try:
+                journal = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"launch journal {path} is unreadable: {error}"
+                ) from error
+            if (
+                not isinstance(journal, dict)
+                or journal.get("state") != "launching"
+                or journal.get("lease_token") != token
+            ):
+                raise RecruiterError(
+                    f"launch journal {launch_id} changed before the pane split"
+                )
+            journal.update(
+                {"split_attempted": True, "split_attempted_at_ns": time.time_ns()}
+            )
+            self._write_json(path, journal)
 
     def mark_launch_started(
         self,
@@ -4290,6 +4350,7 @@ def _start_herdr_agent(
     tab_role: str | None = None,
     herdr_session: str | None = None,
     on_pane_created: Callable[[dict], None] | None = None,
+    on_split_attempt: Callable[[], None] | None = None,
     expected_agent: str | None = None,
     expected_process: str | None = None,
     startup_timeout_ms: int | None = None,
@@ -4376,6 +4437,8 @@ def _start_herdr_agent(
         ]
         for key, value in _pane_environment(order).items():
             args.extend(("--env", f"{key}={value}"))
+        if on_split_attempt is not None:
+            on_split_attempt()
         created = (
             _herdr_json(
                 *args, herdr_session=session, timeout_seconds=remaining_seconds()
@@ -4557,6 +4620,23 @@ def _reconcile_exact_launch(
                 "verified_absent": False,
                 "worker_pane": pane,
             }
+        if (
+            journal.get("herdr_launch_style") == "split-then-start"
+            and journal.get("split_attempted") is False
+        ):
+            # The owner is gone and its journal proves `pane split` was never sent, so no
+            # pane exists. A journal without the mark predates it and proves nothing.
+            evidence = {
+                "agent_name": agent_name,
+                "launch_id": launch_id,
+                "reason": "the launch owner exited before any pane split was sent",
+                "reconciliation_attempt": attempt,
+                "status": "never-split",
+                "verified_absent": True,
+                "worker_pane": None,
+            }
+            ledger.mark_launch_closed(key, launch_id, None, evidence)
+            return evidence
         recorded_pane = journal.get("pane")
         if isinstance(recorded_pane, str) and recorded_pane:
             if pane is not None and pane != recorded_pane:
@@ -4744,10 +4824,20 @@ def _start_fenced_ledger_agent(
         name,
         herdr_session,
         order["cwd"],
-        metadata={**(metadata or {}), "herdr_launch_style": "split-then-start"},
+        metadata={
+            **(metadata or {}),
+            "herdr_launch_style": "split-then-start",
+            "split_attempted": False,
+        },
     )
     pane: str | None = None
     created_recorded = False
+    split_attempted = False
+
+    def record_split_attempt() -> None:
+        nonlocal split_attempted
+        ledger.mark_launch_split_attempted(key, token, launch_id)
+        split_attempted = True
 
     def record_created(created: dict) -> None:
         nonlocal pane, created_recorded
@@ -4772,6 +4862,7 @@ def _start_fenced_ledger_agent(
             tab_role=tab_role,
             herdr_session=herdr_session,
             on_pane_created=record_created,
+            on_split_attempt=record_split_attempt,
             startup_timeout_ms=startup_timeout_ms,
         )
         if not created_recorded:
@@ -4787,15 +4878,28 @@ def _start_fenced_ledger_agent(
         )
     except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
         failure = error
-    cleanup = _reconcile_exact_launch(
-        ledger,
-        key,
-        launch_id,
-        known_pane=pane,
-        herdr_session=herdr_session,
-        allow_not_found_absent=pane is None,
-        trusted_created_identity=pane is not None,
-    )
+    if not split_attempted and pane is None and not created_recorded:
+        # This process owned the only attempt and never sent `pane split`, so no pane
+        # exists. (Reconcile alone would see a live owner and call it in flight.)
+        cleanup = {
+            "agent_name": name,
+            "launch_id": launch_id,
+            "reason": f"launch failed before any pane split was sent: {failure}",
+            "status": "never-split",
+            "verified_absent": True,
+            "worker_pane": None,
+        }
+        ledger.mark_launch_closed(key, launch_id, None, cleanup)
+    else:
+        cleanup = _reconcile_exact_launch(
+            ledger,
+            key,
+            launch_id,
+            known_pane=pane,
+            herdr_session=herdr_session,
+            allow_not_found_absent=pane is None,
+            trusted_created_identity=pane is not None,
+        )
     raise FencedLaunchError(
         f"{role} fenced launch {launch_id} failed: {failure}", cleanup
     ) from failure
@@ -11021,6 +11125,17 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
                     "reason": "intake terminal has a different occupant or identity",
                 }
             if (
+                not recorded_pane
+                and ownership.get("split_attempted") is False
+                and (
+                    ownership.get("owner_pid") == os.getpid()
+                    or not _same_owner_process(ownership)
+                )
+            ):
+                # The journal proves `pane split` was never sent, and its owner will not
+                # send one: it is this failed launch, or it is gone. Nothing exists.
+                return {"status": "never-split", "agent_name": agent_name}
+            if (
                 ownership.get("herdr_launch_style") == "split-then-start"
                 and not recorded_pane
             ):
@@ -11133,6 +11248,14 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
 
 def _cleanup_intake_clerk(ownership: dict) -> dict[str, object]:
     identity = _resolve_intake_clerk_identity(ownership)
+    if identity.get("status") == "never-split":
+        return {
+            "status": "never-split",
+            "worker_pane": None,
+            "verified_absent": True,
+            "agent_name": ownership.get("agent_name"),
+            "reason": "the clerk launch failed before any pane split was sent",
+        }
     if identity.get("status") == "absent":
         recorded_pane = ownership.get("pane")
         if ownership.get("state") != "closed" and not (
@@ -11307,6 +11430,8 @@ def _run_order_intake_clerk(
             + 30,
         ),
         "pane": None,
+        # Set true right before `pane split` is sent; until then no pane can exist.
+        "split_attempted": False,
         "state": "launching",
     }
     # Journal before creating topology. If a split reply is lost, name absence cannot
@@ -11335,6 +11460,10 @@ def _run_order_intake_clerk(
         )
         _secure_write_json(ownership_path, ownership)
 
+    def record_split_attempt() -> None:
+        ownership["split_attempted"] = True
+        _secure_write_json(ownership_path, ownership)
+
     try:
         launch_attempted = True
         pane, workspace_id, address = _start_herdr_agent(
@@ -11345,6 +11474,7 @@ def _run_order_intake_clerk(
             tab_role="oversight",
             herdr_session=herdr_session,
             on_pane_created=record_created,
+            on_split_attempt=record_split_attempt,
             expected_agent=config.intake_clerk.expected_agent,
             expected_process=config.intake_clerk.expected_process,
             startup_timeout_ms=config.startup_timeout_ms,
@@ -12939,6 +13069,14 @@ def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
         ):
             break
     terminal_runners_reconciled = _reconcile_terminal_runners(ledger)
+    # The only production path that shrinks the expiry index; it deletes index files only.
+    # Every client command runs this reconcile, so one odd index file warns, not fails.
+    try:
+        ledger.prune_expiry_index()
+    except RecruiterError as error:
+        command_runtime.write_stderr(
+            f"recruiter: expiry index pruning unavailable: {error}\n"
+        )
     intake_reconciled = _reconcile_intake_clerks(force=force)
     if emit:
         print(

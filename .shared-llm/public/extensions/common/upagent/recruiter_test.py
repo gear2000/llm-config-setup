@@ -4607,6 +4607,67 @@ def test_expired_lease_with_recorded_worker_requires_runtime_reconciliation(
     assert json.loads(lease_path.read_text())["worker_pane"] == "owned-worker"
 
 
+def test_opportunistic_reconcile_prunes_stale_expiry_index_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Every client command runs cmd_reconcile(force=False, emit=False); it must drop the
+    index entries of finished claims (no reclaim, no requeue) and keep a live claim's."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    lease = json.loads((ledger.active / "requests" / key / "lease.json").read_text())
+    finished_dir = ledger.active / "by-expiry" / str(lease["expires_at"])
+    finished_index = finished_dir / f"{key}-{token}.json"
+    assert _finalize(
+        ledger, key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    live = _order(request_id="request-live", order_id="order-live")
+    live_key, _ = ledger.submit(live)
+    live_token = ledger.claim(live_key, live["order_id"], 3_600_000)
+    assert live_token is not None
+    live_lease = ledger._lease(ledger.active / "requests" / live_key / "lease.json")
+    live_index = (
+        ledger.active
+        / "by-expiry"
+        / str(live_lease["expires_at"])
+        / f"{live_key}-{live_token}.json"
+    )
+    monkeypatch.setattr(
+        recruiter, "_runner_alive", lambda pid, candidate_key: candidate_key == live_key
+    )
+    events_before = sorted((ledger.request_dir(live_key) / "events").iterdir())
+
+    assert recruiter.cmd_reconcile(force=False, emit=False) == 0
+
+    assert not finished_index.exists()
+    assert live_index.is_file()
+    if finished_dir != live_index.parent:
+        assert not finished_dir.exists()
+    assert ledger._lease(ledger.active / "requests" / live_key / "lease.json") == live_lease
+    assert sorted((ledger.request_dir(live_key) / "events").iterdir()) == events_before
+
+
+def test_a_malformed_expiry_index_entry_never_breaks_the_reconcile(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Every client command runs this reconcile; one odd index file must warn, not fail."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    ledger = recruiter.JobLedger()
+    bad = ledger.active / "by-expiry" / "1700000000" / "key-token.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("{not json")
+
+    assert recruiter.cmd_reconcile(force=False, emit=False) == 0
+
+    assert "expiry index pruning unavailable" in capsys.readouterr().err
+    assert bad.is_file()
+
+
 def test_reconciler_closes_only_recorded_worker_and_publishes_receipt(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -5848,8 +5909,11 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         tab_role: str | None = None,
         herdr_session: str | None = None,
         on_pane_created=None,
+        on_split_attempt=None,
         startup_timeout_ms=None,
     ) -> tuple[str, str, str]:
+        if on_split_attempt is not None:
+            on_split_attempt()
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)
         launch_tabs.append(tab_role)
@@ -8900,6 +8964,40 @@ def test_intake_persistence_failure_never_rewrites_original(
     assert path.read_text() == raw
 
 
+def test_an_intake_clerk_launch_that_fails_before_the_split_closes_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead anchor fails the clerk launch before `pane split` is sent. That must close
+    the attempt as verified absent, not leave it 'intake split outcome is uncertain'."""
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
+    state = tmp_path / "state/recruiter.json"
+    state.parent.mkdir()
+    state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+    monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
+
+    def start(name, order, launch, **kwargs):
+        raise RecruiterError("herdr pane get trusted:pane failed: pane_not_found")
+
+    def herdr_json(*args: str, **_kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("herdr agent get failed: agent_not_found")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_start_herdr_agent", start)
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr_json)
+    with pytest.raises(RecruiterError, match="intake clerk failed"):
+        _live_intake_clerk(
+            "malformed", tmp_path / "order.json.raw-submitted", "roster.yaml", "abc123"
+        )
+    [ownership_path] = list((state.parent / "intake/attempts").glob("*/ownership.json"))
+    ownership = recruiter._secure_json(ownership_path)
+    assert ownership["cleanup"]["verified_absent"] is True
+    assert ownership["state"] == "closed"
+
+
 def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11342,6 +11440,77 @@ def test_cross_process_cancel_waits_for_live_launch_owner(
         json.loads(ledger.launch_journal_path(key, launch_id).read_text())["state"]
         == "closed"
     )
+
+
+def _claimed_for_launch(tmp_path: Path, request_id: str) -> tuple[Any, str, str, dict]:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id=request_id, cockpit_pane="dead:anchor")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": request_id,
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    return ledger, key, token, order
+
+
+def _herdr_with_dead_anchor(*args: str, **_kwargs: object) -> dict:
+    """The anchor pane is gone, so the launch fails before any `pane split` is sent."""
+    if args[:2] == ("agent", "get"):
+        raise RecruiterError("herdr agent get failed: agent_not_found")
+    if args[:2] == ("pane", "get"):
+        raise RecruiterError(f"herdr pane get {args[2]} failed: pane_not_found")
+    if args == ("pane", "list"):
+        return {"result": {"panes": []}}
+    raise AssertionError(f"no pane may be created: {args}")
+
+
+def test_a_launch_that_fails_before_the_split_closes_as_verified_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, key, token, order = _claimed_for_launch(tmp_path, "request-dead-anchor")
+    monkeypatch.setattr(recruiter, "_herdr_json", _herdr_with_dead_anchor)
+    with pytest.raises(recruiter.FencedLaunchError) as raised:
+        recruiter._start_fenced_ledger_agent(
+            ledger, key, token, "worker", "owned-agent", order, "pi",
+            herdr_session="test-session",
+        )
+    assert raised.value.cleanup["verified_absent"] is True
+    [(journal_key, journal)] = list(ledger.launch_journals())
+    assert journal_key == key
+    assert journal["state"] == "closed"
+    assert journal["split_attempted"] is False
+
+
+@pytest.mark.parametrize("split_attempted", [False, True, None])
+def test_reconcile_trusts_only_a_recorded_never_split_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, split_attempted: bool | None
+) -> None:
+    """A dead owner whose journal says the split was never sent left no pane. A split that
+    was sent (True) or a journal from before the mark (None) keeps today's caution."""
+    ledger, key, token, order = _claimed_for_launch(tmp_path, "request-dead-owner")
+    metadata: dict[str, object] = {"herdr_launch_style": "split-then-start"}
+    if split_attempted is not None:
+        metadata["split_attempted"] = split_attempted
+    launch_id = ledger.begin_launch(
+        key, token, "worker", "owned-agent", "test-session", order["cwd"],
+        metadata=metadata,
+    )
+    monkeypatch.setattr(recruiter, "_same_owner_process", lambda _journal: False)
+    monkeypatch.setattr(recruiter, "_herdr_json", _herdr_with_dead_anchor)
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: set())
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger, key, launch_id, known_pane=None, herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert cleanup["verified_absent"] is (split_attempted is False)
 
 
 def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(
