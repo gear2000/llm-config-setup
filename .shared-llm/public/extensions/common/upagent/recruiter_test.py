@@ -5909,8 +5909,11 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         tab_role: str | None = None,
         herdr_session: str | None = None,
         on_pane_created=None,
+        on_split_attempt=None,
         startup_timeout_ms=None,
     ) -> tuple[str, str, str]:
+        if on_split_attempt is not None:
+            on_split_attempt()
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)
         launch_tabs.append(tab_role)
@@ -11403,6 +11406,77 @@ def test_cross_process_cancel_waits_for_live_launch_owner(
         json.loads(ledger.launch_journal_path(key, launch_id).read_text())["state"]
         == "closed"
     )
+
+
+def _claimed_for_launch(tmp_path: Path, request_id: str) -> tuple[Any, str, str, dict]:
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id=request_id, cockpit_pane="dead:anchor")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": request_id,
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    return ledger, key, token, order
+
+
+def _herdr_with_dead_anchor(*args: str, **_kwargs: object) -> dict:
+    """The anchor pane is gone, so the launch fails before any `pane split` is sent."""
+    if args[:2] == ("agent", "get"):
+        raise RecruiterError("herdr agent get failed: agent_not_found")
+    if args[:2] == ("pane", "get"):
+        raise RecruiterError(f"herdr pane get {args[2]} failed: pane_not_found")
+    if args == ("pane", "list"):
+        return {"result": {"panes": []}}
+    raise AssertionError(f"no pane may be created: {args}")
+
+
+def test_a_launch_that_fails_before_the_split_closes_as_verified_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, key, token, order = _claimed_for_launch(tmp_path, "request-dead-anchor")
+    monkeypatch.setattr(recruiter, "_herdr_json", _herdr_with_dead_anchor)
+    with pytest.raises(recruiter.FencedLaunchError) as raised:
+        recruiter._start_fenced_ledger_agent(
+            ledger, key, token, "worker", "owned-agent", order, "pi",
+            herdr_session="test-session",
+        )
+    assert raised.value.cleanup["verified_absent"] is True
+    [(journal_key, journal)] = list(ledger.launch_journals())
+    assert journal_key == key
+    assert journal["state"] == "closed"
+    assert journal["split_attempted"] is False
+
+
+@pytest.mark.parametrize("split_attempted", [False, True, None])
+def test_reconcile_trusts_only_a_recorded_never_split_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, split_attempted: bool | None
+) -> None:
+    """A dead owner whose journal says the split was never sent left no pane. A split that
+    was sent (True) or a journal from before the mark (None) keeps today's caution."""
+    ledger, key, token, order = _claimed_for_launch(tmp_path, "request-dead-owner")
+    metadata: dict[str, object] = {"herdr_launch_style": "split-then-start"}
+    if split_attempted is not None:
+        metadata["split_attempted"] = split_attempted
+    launch_id = ledger.begin_launch(
+        key, token, "worker", "owned-agent", "test-session", order["cwd"],
+        metadata=metadata,
+    )
+    monkeypatch.setattr(recruiter, "_same_owner_process", lambda _journal: False)
+    monkeypatch.setattr(recruiter, "_herdr_json", _herdr_with_dead_anchor)
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: set())
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger, key, launch_id, known_pane=None, herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert cleanup["verified_absent"] is (split_attempted is False)
 
 
 def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(

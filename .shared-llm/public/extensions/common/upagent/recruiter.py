@@ -1940,6 +1940,31 @@ class JobLedger:
                 agent_name=journal.get("agent_name"),
             )
 
+    def mark_launch_split_attempted(self, key: str, token: str, launch_id: str) -> None:
+        """Persist, before `pane split` is sent, that a pane may now exist.
+
+        Until this mark a split-then-start journal proves no pane was created."""
+        path = self.launch_journal_path(key, launch_id)
+        with self._claim_lock(key):
+            try:
+                journal = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RecruiterError(
+                    f"launch journal {path} is unreadable: {error}"
+                ) from error
+            if (
+                not isinstance(journal, dict)
+                or journal.get("state") != "launching"
+                or journal.get("lease_token") != token
+            ):
+                raise RecruiterError(
+                    f"launch journal {launch_id} changed before the pane split"
+                )
+            journal.update(
+                {"split_attempted": True, "split_attempted_at_ns": time.time_ns()}
+            )
+            self._write_json(path, journal)
+
     def mark_launch_started(
         self,
         key: str,
@@ -4325,6 +4350,7 @@ def _start_herdr_agent(
     tab_role: str | None = None,
     herdr_session: str | None = None,
     on_pane_created: Callable[[dict], None] | None = None,
+    on_split_attempt: Callable[[], None] | None = None,
     expected_agent: str | None = None,
     expected_process: str | None = None,
     startup_timeout_ms: int | None = None,
@@ -4411,6 +4437,8 @@ def _start_herdr_agent(
         ]
         for key, value in _pane_environment(order).items():
             args.extend(("--env", f"{key}={value}"))
+        if on_split_attempt is not None:
+            on_split_attempt()
         created = (
             _herdr_json(
                 *args, herdr_session=session, timeout_seconds=remaining_seconds()
@@ -4592,6 +4620,23 @@ def _reconcile_exact_launch(
                 "verified_absent": False,
                 "worker_pane": pane,
             }
+        if (
+            journal.get("herdr_launch_style") == "split-then-start"
+            and journal.get("split_attempted") is False
+        ):
+            # The owner is gone and its journal proves `pane split` was never sent, so no
+            # pane exists. A journal without the mark predates it and proves nothing.
+            evidence = {
+                "agent_name": agent_name,
+                "launch_id": launch_id,
+                "reason": "the launch owner exited before any pane split was sent",
+                "reconciliation_attempt": attempt,
+                "status": "never-split",
+                "verified_absent": True,
+                "worker_pane": None,
+            }
+            ledger.mark_launch_closed(key, launch_id, None, evidence)
+            return evidence
         recorded_pane = journal.get("pane")
         if isinstance(recorded_pane, str) and recorded_pane:
             if pane is not None and pane != recorded_pane:
@@ -4779,10 +4824,20 @@ def _start_fenced_ledger_agent(
         name,
         herdr_session,
         order["cwd"],
-        metadata={**(metadata or {}), "herdr_launch_style": "split-then-start"},
+        metadata={
+            **(metadata or {}),
+            "herdr_launch_style": "split-then-start",
+            "split_attempted": False,
+        },
     )
     pane: str | None = None
     created_recorded = False
+    split_attempted = False
+
+    def record_split_attempt() -> None:
+        nonlocal split_attempted
+        ledger.mark_launch_split_attempted(key, token, launch_id)
+        split_attempted = True
 
     def record_created(created: dict) -> None:
         nonlocal pane, created_recorded
@@ -4807,6 +4862,7 @@ def _start_fenced_ledger_agent(
             tab_role=tab_role,
             herdr_session=herdr_session,
             on_pane_created=record_created,
+            on_split_attempt=record_split_attempt,
             startup_timeout_ms=startup_timeout_ms,
         )
         if not created_recorded:
@@ -4822,15 +4878,28 @@ def _start_fenced_ledger_agent(
         )
     except (RecruiterError, OSError, RuntimeError, KeyError, TypeError) as error:
         failure = error
-    cleanup = _reconcile_exact_launch(
-        ledger,
-        key,
-        launch_id,
-        known_pane=pane,
-        herdr_session=herdr_session,
-        allow_not_found_absent=pane is None,
-        trusted_created_identity=pane is not None,
-    )
+    if not split_attempted and pane is None and not created_recorded:
+        # This process owned the only attempt and never sent `pane split`, so no pane
+        # exists. (Reconcile alone would see a live owner and call it in flight.)
+        cleanup = {
+            "agent_name": name,
+            "launch_id": launch_id,
+            "reason": f"launch failed before any pane split was sent: {failure}",
+            "status": "never-split",
+            "verified_absent": True,
+            "worker_pane": None,
+        }
+        ledger.mark_launch_closed(key, launch_id, None, cleanup)
+    else:
+        cleanup = _reconcile_exact_launch(
+            ledger,
+            key,
+            launch_id,
+            known_pane=pane,
+            herdr_session=herdr_session,
+            allow_not_found_absent=pane is None,
+            trusted_created_identity=pane is not None,
+        )
     raise FencedLaunchError(
         f"{role} fenced launch {launch_id} failed: {failure}", cleanup
     ) from failure
