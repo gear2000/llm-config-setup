@@ -16,6 +16,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import signal
 import stat
 import sys
 import threading
@@ -11224,6 +11225,130 @@ def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(
     assert cleanup["verified_absent"] is False
     assert "identity-verified" in cleanup["reason"]
     assert closed == []
+
+
+def _launch_with_sigkill_survivor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, str, str, dict]:
+    """One verified worker launch whose pane holds a process that outlives SIGKILL
+    (a fake pid stuck in the kernel) until the test lets it die."""
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id="request-3")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": "request-3",
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    launch_id = ledger.begin_launch(
+        key, token, "worker", "owned-agent", "test-session", order["cwd"]
+    )
+    ledger.record_launch_created(
+        key, token, launch_id, "owned-pane", "workspace", "address"
+    )
+    stuck: dict[str, Any] = {
+        "pid": 4_000_001, "start": "stuck-birth", "alive": True, "agent_gets": 0,
+        "dies_at_agent_get": None, "signals": [],
+    }
+    live = {"owned-pane"}
+
+    def herdr_json(*args: str, **_kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            stuck["agent_gets"] += 1
+            if stuck["agent_gets"] == stuck["dies_at_agent_get"]:
+                stuck["alive"] = False
+            if "owned-pane" in live:
+                return {"result": {"agent": {"name": "owned-agent", "pane_id": "owned-pane"}}}
+            raise RecruiterError("agent_not_found")
+        raise RecruiterError("pane_not_found")
+
+    def herdr(*args: str, **_kwargs: object) -> None:
+        assert args == ("pane", "close", "owned-pane")
+        live.discard("owned-pane")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(recruiter, "_herdr", herdr)
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: set(live))
+    monkeypatch.setattr(
+        recruiter,
+        "_snapshot_pane_process_tree",
+        lambda pane, **_kwargs: [(stuck["pid"], stuck["start"])] if pane in live else [],
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_process_start_time",
+        lambda pid: stuck["start"] if pid == stuck["pid"] and stuck["alive"] else None,
+    )
+    def signal_identity(pid: int, start: str, signal_number: int) -> bool:
+        stuck["signals"].append(signal_number)
+        return pid == stuck["pid"] and stuck["alive"]
+
+    monkeypatch.setattr(recruiter, "_signal_process_identity", signal_identity)
+    monkeypatch.setattr(recruiter, "PANE_TREE_TERM_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(recruiter, "PANE_TREE_KILL_GRACE_SECONDS", 0.01)
+    return ledger, key, launch_id, stuck
+
+
+def test_launch_reconciliation_never_reports_clean_while_a_sigkill_survivor_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attempt 1 closes the pane, then a process survives SIGKILL. The retry finds the
+    pane already absent; it must still not report clean while that process lives."""
+    ledger, key, launch_id, stuck = _launch_with_sigkill_survivor(tmp_path, monkeypatch)
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="owned-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert cleanup["verified_absent"] is False
+    assert cleanup["status"] == "cleanup-failed"
+    assert str(stuck["pid"]) in str(cleanup["reason"])
+    # SIGKILL is already pending; the retries only re-check liveness, never re-signal
+    # (each re-signal would wait out both grace periods again).
+    assert stuck["signals"] == [signal.SIGTERM, signal.SIGKILL]
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] != "closed"
+    # A later reconciliation pass still knows the survivor and still refuses clean.
+    again = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="owned-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert again["verified_absent"] is False
+    assert str(stuck["pid"]) in str(again["reason"])
+
+
+def test_launch_reconciliation_is_clean_once_the_sigkill_survivor_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, key, launch_id, stuck = _launch_with_sigkill_survivor(tmp_path, monkeypatch)
+    # Attempt 1 raises over the survivor; it exits before attempt 2's agent lookup.
+    stuck["dies_at_agent_get"] = 2
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="owned-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert stuck["agent_gets"] >= 2 and not stuck["alive"]
+    assert cleanup["verified_absent"] is True
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] == "closed"
 
 
 # --- pane-gone classification in the agent-status wait --------------------

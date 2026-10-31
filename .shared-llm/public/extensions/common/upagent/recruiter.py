@@ -401,6 +401,17 @@ class FencedLaunchError(RecruiterError):
         self.cleanup = cleanup
 
 
+class PaneProcessesSurvived(RecruiterError):
+    """Pane processes outlived SIGKILL; carries their (pid, birth stamp) identities."""
+
+    def __init__(self, survivors: list[tuple[int, str]]):
+        super().__init__(
+            "pane processes survived SIGKILL: "
+            + ", ".join(str(pid) for pid, _start in survivors)
+        )
+        self.survivors = survivors
+
+
 class AgentWaitTimeout(RecruiterError):
     """The worker reached its declared work cap without terminal evidence."""
 
@@ -4469,6 +4480,21 @@ def _reconcile_exact_launch(
     errors: list[str] = []
     pane = known_pane
     agent_name: str | None = None
+    # Processes that outlived SIGKILL in an earlier attempt (or an earlier pass, from the
+    # journal). The pane is gone by the retry, so only these identities can still prove
+    # the cleanup unclean.
+    survivors: list[tuple[int, str]] = []
+
+    def survivors_gone() -> bool:
+        # A liveness check only: SIGKILL is already pending on each survivor.
+        nonlocal survivors
+        survivors = [
+            (pid, start) for pid, start in survivors if _process_start_time(pid) == start
+        ]
+        if survivors:
+            errors.append(str(PaneProcessesSurvived(survivors)))
+        return not survivors
+
     for attempt in range(1, attempts + 1):
         agent_verified = trusted_created_identity and pane is not None
         try:
@@ -4483,6 +4509,16 @@ def _reconcile_exact_launch(
         if not isinstance(journal_agent, str) or not journal_agent:
             raise RecruiterError(f"launch journal {launch_id} has no exact agent name")
         agent_name = journal_agent
+        prior = journal.get("cleanup")
+        if attempt == 1 and isinstance(prior, dict):
+            survivors = [
+                (item[0], item[1])
+                for item in prior.get("process_survivors", [])
+                if isinstance(item, list)
+                and len(item) == 2
+                and isinstance(item[0], int)
+                and isinstance(item[1], str)
+            ]
         if journal.get("state") == "launching" and _same_owner_process(journal):
             # A live owner may be inside `herdr agent start` after journaling but before the
             # returned pane identity is durable. Absence cannot be proved until it commits the
@@ -4549,7 +4585,12 @@ def _reconcile_exact_launch(
                     )
             if not agent_verified:
                 live_panes = _live_pane_ids(herdr_session=herdr_session)
-                if pane not in live_panes:
+                if pane in live_panes:
+                    errors.append(
+                        f"pane {pane} is live but agent {agent_name!r} could not be "
+                        "identity-verified"
+                    )
+                elif survivors_gone():
                     evidence = {
                         "agent_name": agent_name,
                         "launch_id": launch_id,
@@ -4560,12 +4601,12 @@ def _reconcile_exact_launch(
                     }
                     ledger.mark_launch_closed(key, launch_id, pane, evidence)
                     return evidence
-                errors.append(
-                    f"pane {pane} is live but agent {agent_name!r} could not be identity-verified"
-                )
             else:
                 try:
                     cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
+                except PaneProcessesSurvived as error:
+                    survivors = error.survivors
+                    errors.append(str(error))
                 except RecruiterError as error:
                     errors.append(str(error))
                 else:
@@ -4576,17 +4617,19 @@ def _reconcile_exact_launch(
                         "reconciliation_attempt": attempt,
                         "worker_pane": pane,
                     }
-                    ledger.mark_launch_closed(key, launch_id, pane, evidence)
-                    if evidence.get("verified_absent") is True:
-                        return evidence
-                    errors.append(
-                        str(evidence.get("reason", "cleanup was not verified"))
-                    )
+                    if survivors_gone():
+                        ledger.mark_launch_closed(key, launch_id, pane, evidence)
+                        if evidence.get("verified_absent") is True:
+                            return evidence
+                        errors.append(
+                            str(evidence.get("reason", "cleanup was not verified"))
+                        )
         elif (
             allow_not_found_absent
             and not_found
             and attempt == attempts
             and journal.get("herdr_launch_style") != "split-then-start"
+            and survivors_gone()
         ):
             evidence = {
                 "agent_name": agent_name,
@@ -4606,9 +4649,10 @@ def _reconcile_exact_launch(
         "reason": "; ".join(errors)
         if errors
         else "exact agent launch remains uncertain",
-        "status": "cleanup-pending",
+        "status": "cleanup-failed" if survivors else "cleanup-pending",
         "verified_absent": False,
         "worker_pane": pane,
+        **({"process_survivors": survivors} if survivors else {}),
     }
     ledger.mark_launch_closed(key, launch_id, pane, pending)
     return pending
@@ -5198,10 +5242,7 @@ def _terminate_process_snapshot(
             time.sleep(0.05)
             remaining = alive(remaining)
         if remaining:
-            raise RecruiterError(
-                "pane processes survived SIGKILL: "
-                + ", ".join(str(pid) for pid, _start in remaining)
-            )
+            raise PaneProcessesSurvived(remaining)
     return {
         "snapshot": len(snapshot),
         "terminated": [pid for pid, _start in terminated],
