@@ -14504,6 +14504,21 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             ledger.mark_launch_closed(
                 key, launch_id, pane, sentinel_cleanup, expected_lease_token=token
             )
+        # A closeout the Sentinel wrote after the watch's last read (the bypass-at-exit
+        # path skips the read entirely) is still at the Sentinel's umask. Nothing can
+        # write the attempt directory once its Sentinel is closed: make every claim 0600.
+        closeout_path = sentinel_state.get("closeout_path")
+        if isinstance(closeout_path, Path):
+            for claim in sorted(closeout_path.parent.glob("closeout*.json")):
+                try:
+                    _tighten_private_file(claim)
+                except OSError as error:
+                    ledger._event(
+                        key,
+                        "sentinel-closeout-mode-unfixed",
+                        path=str(claim),
+                        reason=str(error),
+                    )
         sentinel_state.clear()
         return sentinel_cleanup
 

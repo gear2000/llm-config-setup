@@ -2298,6 +2298,30 @@ def test_drill_dead_sentinel_falls_to_the_hard_timeout_backstop(
     }
 
 
+def test_closing_the_sentinel_tightens_a_closeout_the_watch_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """A closeout written after the watch's last read (bypass-at-exit skips the read)
+    still ends up 0600 once its Sentinel pane is closed."""
+    ledger, order, key, roster_path, drill = _drill_job(
+        tmp_path, monkeypatch, timeout_ms=400, grace_ms=50
+    )
+    late = recruiter._sentinel_closeout_path(ledger, key, 1)
+    close = recruiter._close_worker_pane
+
+    def close_after_a_late_write(pane: str, **kwargs: object) -> dict:
+        if pane == "sentinel-pane":
+            late.parent.mkdir(parents=True, exist_ok=True)
+            late.write_text(json.dumps(_closeout(order)))
+            late.chmod(0o664)
+        return close(pane, **kwargs)
+
+    monkeypatch.setattr(recruiter, "_close_worker_pane", close_after_a_late_write)
+    recruiter.cmd_run_job(key, str(roster_path))
+    assert "sentinel-pane" in drill.closed
+    assert _mode(late) == 0o600
+
+
 def test_sentinel_receipt_cleanup_reports_the_real_close_not_the_defensive_one() -> None:
     closed = {"status": "closed", "worker_pane": "s1", "verified_absent": True}
     absent = {"status": "not-created", "worker_pane": None, "verified_absent": True}
