@@ -382,6 +382,11 @@ def _stop(directory: Path, state: dict) -> None:
             raise SpecialistError("resident is not idle; refusing to interrupt it")
         if _identity(state) != identity:
             raise SpecialistError("resident changed before cleanup")
+        # The same teardown as recruiter._close_worker_pane: snapshot BEFORE the close,
+        # since a background job the resident left running is re-parented to init by it.
+        process_tree = recruiter._snapshot_pane_process_tree(
+            identity["pane"], herdr_session=state["session"]
+        )
         _herdr(state, "pane", "close", identity["pane"])
         try:
             _herdr(state, "pane", "get", identity["pane"])
@@ -390,6 +395,7 @@ def _stop(directory: Path, state: dict) -> None:
                 raise
         else:
             raise SpecialistError("resident cleanup not verified")
+        recruiter._terminate_process_snapshot(process_tree)
     state["state"] = "stopped"
     _save(directory, state)
 
