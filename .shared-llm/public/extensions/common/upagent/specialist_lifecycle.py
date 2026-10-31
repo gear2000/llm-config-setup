@@ -382,6 +382,11 @@ def _stop(directory: Path, state: dict) -> None:
             raise SpecialistError("resident is not idle; refusing to interrupt it")
         if _identity(state) != identity:
             raise SpecialistError("resident changed before cleanup")
+        # The same teardown as recruiter._close_worker_pane: snapshot BEFORE the close,
+        # since a background job the resident left running is re-parented to init by it.
+        process_tree = recruiter._snapshot_pane_process_tree(
+            identity["pane"], herdr_session=state["session"]
+        )
         _herdr(state, "pane", "close", identity["pane"])
         try:
             _herdr(state, "pane", "get", identity["pane"])
@@ -390,6 +395,7 @@ def _stop(directory: Path, state: dict) -> None:
                 raise
         else:
             raise SpecialistError("resident cleanup not verified")
+        recruiter._terminate_process_snapshot(process_tree)
     state["state"] = "stopped"
     _save(directory, state)
 
@@ -478,6 +484,11 @@ def _launch(
     tab = _herdr(state, "pane", "get", cockpit)["result"]["pane"].get("tab_id")
     if not tab:
         raise SpecialistError("caller pane has no tab")
+    if state["harness"] in ("claude", "claudex"):
+        # As for hub panes: an untrusted cwd stops the resident at Claude's "do you trust
+        # this folder?" dialog. Done before any journal write, so a failure here (an
+        # unreadable ~/.claude.json) leaves nothing in flight to block the next start.
+        recruiter._ensure_claude_folder_trust(state["cwd"])
     # Journal BEFORE launching. A lost response must block, never cause an orphan duplicate.
     _save(directory, state)
     # Start the bound before IPC: a hung launch must not bypass readiness.
@@ -653,7 +664,7 @@ def preflight(cwd: str | Path, cockpit: str | None = None) -> None:
                         path.parent,
                         state["name"],
                         cwd,
-                        cockpit or recruiter._recruiter_pane_from_state(),
+                        cockpit or recruiter._live_recruiter_pane_from_state(),
                     )
             except SpecialistBusy:
                 continue
@@ -688,7 +699,10 @@ def consult(
         return None
     with _lock(directory / "lock"):
         state = _ensure(
-            directory, name, cwd, cockpit or recruiter._recruiter_pane_from_state()
+            directory,
+            name,
+            cwd,
+            cockpit or recruiter._live_recruiter_pane_from_state(),
         )
         if state is None:
             return None
@@ -910,7 +924,7 @@ def main(argv: list[str] | None = None) -> int:
                     name,
                     cwd,
                     os.environ.get("HERDR_PANE_ID")
-                    or recruiter._recruiter_pane_from_state(),
+                    or recruiter._live_recruiter_pane_from_state(),
                     enable=True,
                     restart=args.action == "restart",
                 )

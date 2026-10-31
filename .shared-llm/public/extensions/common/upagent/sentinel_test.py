@@ -839,6 +839,62 @@ def test_an_invalid_complete_is_rejected_with_one_more_landing_round(
     assert watch.poll() == "complete"
 
 
+def _never_idle_sentinel(monkeypatch: pytest.MonkeyPatch) -> tuple[list[float], list[str]]:
+    """A watching Sentinel sits in its wake-wait, so Herdr never reports it idle. Fake
+    clock: an idle wait burns its whole timeout, then fails."""
+    blocked_seconds = [0.0]
+    notes: list[str] = []
+
+    def herdr(*args: str, **kwargs: object) -> dict:
+        assert len(args) > 2 and args[2] == "sentinel-address", args
+        if args[:2] == ("agent", "wait"):
+            blocked_seconds[0] += float(kwargs["timeout_seconds"])  # type: ignore[arg-type]
+            raise recruiter.RecruiterError(
+                "herdr agent wait sentinel-address failed: timeout"
+            )
+        if args[:2] == ("agent", "get"):
+            return {"result": {"agent": {"agent_status": "working"}}}
+        if args[:2] == ("agent", "prompt"):
+            notes.append(args[3])
+            return {"result": {"agent": {"agent_status": "working"}}}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr)
+    return blocked_seconds, notes
+
+
+@pytest.mark.parametrize("prompt", ["SENTINEL_STALL_RECHECK", "SENTINEL_LANDING_RETRY"])
+def test_a_rejected_closeout_reaches_a_never_idle_sentinel_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
+) -> None:
+    """The brief says a Recruiter prompt overrides the Sentinel's wait, so it must be
+    delivered while the Sentinel is busy, not after a 120 s idle wait that times out."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    blocked_seconds, notes = _never_idle_sentinel(monkeypatch)
+    if prompt == "SENTINEL_STALL_RECHECK":
+        monkeypatch.setattr(
+            recruiter, "_worker_pane_confirmed_present", lambda *args, **kwargs: True
+        )
+        watch = _stalled_watch_with_worker_pane(ledger, order, key, manifest)
+        closeout = _closeout(
+            order,
+            outcome="STALLED",
+            bundle=None,
+            progress_so_far="claims with no evidence",
+            last_alive="unknown",
+        )
+        unavailable = "sentinel-stall-recheck-unavailable"
+    else:
+        watch = _watch(ledger, order, key, manifest)
+        closeout = _closeout(order)
+        unavailable = "sentinel-landing-retry-unavailable"
+    watch.closeout_path.write_text(json.dumps(closeout))
+    assert watch.poll() is None
+    assert unavailable not in _events(ledger, key)
+    assert blocked_seconds[0] < 10
+    assert len(notes) == 1 and notes[0].startswith(prompt)
+
+
 def test_a_fooled_sentinel_complete_can_never_mint_passed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2580,6 +2636,48 @@ def test_a_confirmed_stall_over_a_live_worker_nudges_continue_instead_of_raising
     assert intent["nudge_index"] == 1
     assert intent["generation"] == 1
     assert intent["attempt"] == 1
+
+
+def test_the_stall_nudged_note_reaches_a_sentinel_that_is_never_idle_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watching Sentinel sits in its wake-wait, so Herdr never reports it idle. The
+    hub's SENTINEL_STALL_NUDGED note must still be submitted, and the nudge step must
+    not spend the 120 s idle window waiting for an idle state that never comes."""
+    real_submit = recruiter._submit_agent_prompt
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    blocked_seconds = [0.0]
+    sentinel_notes: list[str] = []
+
+    def herdr(*args: str, **kwargs: object) -> dict:
+        if len(args) > 2 and args[2] == "sentinel-address":
+            if args[:2] == ("agent", "wait"):
+                # Fake clock: a never-idle agent burns the whole wait, then times out.
+                blocked_seconds[0] += float(kwargs["timeout_seconds"])  # type: ignore[arg-type]
+                raise recruiter.RecruiterError(
+                    "herdr agent wait sentinel-address failed: timeout"
+                )
+            if args[:2] == ("agent", "prompt"):
+                sentinel_notes.append(args[3])
+                return {"result": {"agent": {"agent_status": "working"}}}
+        return _nudge_herdr(*args, **kwargs)
+
+    def submit(address: str, message: str, **kwargs: Any) -> None:
+        if address == "sentinel-address":
+            real_submit(address, message, **kwargs)
+            return
+        prompts.append((address, message))
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr)
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", submit)
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    assert watch.poll() is None
+    assert prompts[0] == ("worker-address", "continue")
+    assert "sentinel-stall-nudge-resume-unavailable" not in _events(ledger, key)
+    assert blocked_seconds[0] < 10
+    assert len(sentinel_notes) == 1
+    assert sentinel_notes[0].startswith("SENTINEL_STALL_NUDGED")
 
 
 def test_a_second_stall_inside_the_backoff_window_holds_without_delivery(

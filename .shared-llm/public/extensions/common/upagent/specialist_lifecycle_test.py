@@ -8,6 +8,8 @@ import json
 import multiprocessing
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,9 +30,15 @@ class BackendError(RuntimeError):
     pass
 
 
+REAL_RECRUITER = load("recruiter")
+
+
 class FakeRecruiter:
     RecruiterError = BackendError
-    _safe_agent_name = staticmethod(load("recruiter")._safe_agent_name)
+    _safe_agent_name = staticmethod(REAL_RECRUITER._safe_agent_name)
+    _terminate_process_snapshot = staticmethod(
+        REAL_RECRUITER._terminate_process_snapshot
+    )
     EXPECTED_HARNESS_AGENT = {"pi": "pi"}
     EXPECTED_HARNESS_PROCESS = {"pi": "pi"}
     CURSOR_PROMPT_PASTE_SETTLE_SECONDS = 0.5
@@ -40,6 +48,10 @@ class FakeRecruiter:
         self.agents = {}
         self.starts = 0
         self.closes = []
+        # pane id -> callable run when that pane closes (a real close ends its agent).
+        self.close_hooks = {}
+        # Ordered ("trust", cwd) / ("start", name) records of launch-side effects.
+        self.launch_log = []
         self.prompts = []
         self.acknowledge = True
         self.answer = True
@@ -93,6 +105,10 @@ class FakeRecruiter:
     def _recruiter_pane_from_state(self):
         return "caller"
 
+    def _live_recruiter_pane_from_state(self):
+        # The recorded services pane, unless a test says Herdr no longer lists it.
+        return "caller" if getattr(self, "services_pane_live", True) else None
+
     def _process_start_time(self, pid):
         return "birth-" + str(pid) if isinstance(pid, int) else None
 
@@ -106,6 +122,7 @@ class FakeRecruiter:
     ):
         assert herdr_session == "test-session"
         self.start_calls += 1
+        self.launch_log.append(("start", name))
         args = (name, order["cwd"], launch)
         if self.fail_start:
             mode, self.fail_start = self.fail_start, None
@@ -194,6 +211,9 @@ class FakeRecruiter:
             }
         if args[:2] == ("pane", "close"):
             self.closes.append(pane_id)
+            hook = self.close_hooks.pop(pane_id, None)
+            if hook:
+                hook()
             del self.agents[agent["name"]]
             return {"result": {}}
         if args[:2] == ("agent", "prompt"):
@@ -241,6 +261,17 @@ class FakeRecruiter:
                 path.write_text(json.dumps(shape))
             return {"result": {}}
         raise AssertionError(args)
+
+    def _ensure_claude_folder_trust(self, cwd):
+        if getattr(self, "fail_trust", False):
+            self.fail_trust = False
+            raise BackendError("cannot read ~/.claude.json to pre-trust " + cwd)
+        self.launch_log.append(("trust", cwd))
+
+    def _snapshot_pane_process_tree(self, pane, *, herdr_session):
+        # No real processes behind fake panes; a test swaps in the real snapshot.
+        assert herdr_session == "test-session"
+        return []
 
     def _herdr(self, *args, herdr_session, timeout_seconds):
         # The caller discards the acknowledgement; model delivery effects and errors
@@ -290,6 +321,50 @@ def test_fixed_two_hour_boundary(runtime, monkeypatch, age, expired):
         module._expired({"launched_at": 10000 - age, "launched_monotonic": 10000 - age})
         is expired
     )
+
+
+@pytest.mark.parametrize(
+    "harness,trusted", [("claude", True), ("claudex", True), ("pi", False)]
+)
+def test_claude_resident_pre_trusts_its_folder_before_agent_start(
+    runtime, harness, trusted
+):
+    """Claude and ClaudeX stop at "do you trust this folder?" in a new folder, so the
+    resident's cwd must be pre-trusted before `agent start`, as hub panes are."""
+    module, backend, _ = runtime
+    backend.entry["offering_snapshot"] = {"harness": harness}
+    backend.EXPECTED_HARNESS_AGENT = {harness: "pi"}
+    backend.EXPECTED_HARNESS_PROCESS = {harness: "pi"}
+    _, state = start(runtime)
+    assert state["state"] == "ready"
+    expected = [("trust", state["cwd"])] if trusted else []
+    assert backend.launch_log == expected + [("start", state["agent_name"])]
+
+
+def test_a_failed_folder_trust_never_wedges_the_resident_launch(runtime):
+    """Pre-trust fails before anything is created, so the next `up` starts cleanly."""
+    module, backend, cwd = runtime
+    backend.entry["offering_snapshot"] = {"harness": "claude"}
+    backend.EXPECTED_HARNESS_AGENT = {"claude": "pi"}
+    backend.EXPECTED_HARNESS_PROCESS = {"claude": "pi"}
+    backend.fail_trust = True
+    with pytest.raises(BackendError, match="pre-trust"):
+        module.main(["up", "advisor"])
+    assert backend.start_calls == 0
+    module.main(["up", "advisor"])
+    state = module._read(module._directory("advisor", cwd) / "state.json")
+    assert state["state"] == "ready"
+    assert backend.start_calls == 1
+
+
+def test_up_never_launches_from_a_dead_services_pane(runtime):
+    """With no caller pane, `up` falls back to the services pane; a dead one (Herdr was
+    restarted) must refuse before any agent start, not launch from it."""
+    module, backend, _ = runtime
+    backend.services_pane_live = False
+    with pytest.raises(module.SpecialistError, match="live caller pane"):
+        module.main(["up", "advisor"])
+    assert backend.start_calls == 0
 
 
 def test_refresh_before_worker_and_disabled_stays_down(runtime):
@@ -702,6 +777,61 @@ def test_abandoned_idle_turn_self_heals_and_down_closes_in_one_call(runtime):
     saved = module._read(directory / "state.json")
     assert saved["state"] == "stopped" and not saved["enabled"]
     assert saved["turn"]["outcome"] == "abandoned"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_down_ends_a_background_job_the_resident_left_running(runtime, monkeypatch):
+    """A job the resident runs in the background (Claude's background Bash) stays a child
+    of the agent process. Closing the pane ends the agent; the job is re-parented to init
+    and survives. `down` must snapshot the pane's process tree first and end the job."""
+    module, backend, _ = runtime
+    directory, state = start(runtime)
+    agent = subprocess.Popen(["sh", "-c", "sleep 600 & wait"])
+    job = None
+    try:
+        deadline = time.monotonic() + 10
+        while job is None and time.monotonic() < deadline:
+            parents = REAL_RECRUITER._process_parent_table("resident")
+            job = next((pid for pid, parent in parents.items() if parent == agent.pid), None)
+            time.sleep(0.02)
+        assert job is not None
+        birth = REAL_RECRUITER._process_start_time(job)
+
+        def process_info(*args, **_kwargs):
+            assert args == ("pane", "process-info", "--pane", state["pane"])
+            return {
+                "result": {
+                    "process_info": {
+                        "pane_id": state["pane"],
+                        "shell_pid": agent.pid,
+                        "foreground_processes": [],
+                    }
+                }
+            }
+
+        def hang_up():
+            # A real pane close ends the agent process, not its background job.
+            agent.kill()
+            agent.wait()
+
+        monkeypatch.setattr(REAL_RECRUITER, "_herdr_json", process_info)
+        backend._snapshot_pane_process_tree = REAL_RECRUITER._snapshot_pane_process_tree
+        backend.close_hooks[state["pane"]] = hang_up
+        module.main(["down", "advisor"])
+        assert backend.closes == [state["pane"]]
+        deadline = time.monotonic() + 5
+        while (
+            REAL_RECRUITER._process_start_time(job) == birth
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        assert REAL_RECRUITER._process_start_time(job) != birth
+        assert module._read(directory / "state.json")["state"] == "stopped"
+    finally:
+        if job is not None and REAL_RECRUITER._process_start_time(job) is not None:
+            os.kill(job, 9)
+        agent.kill()
+        agent.wait()
 
 
 def test_active_unresolved_turn_still_blocks_and_is_never_interrupted(

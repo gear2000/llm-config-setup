@@ -900,12 +900,13 @@ def _public_lifecycle_roster_path() -> str:
 
 
 def _cockpit_pane() -> str:
-    """Return the service pane, creating it on demand when state is absent."""
-    pane = recruiter._recruiter_pane_from_state()
+    """Return the live service pane, creating it on demand when state is absent or names
+    a pane Herdr no longer lists (a Herdr restart)."""
+    pane = recruiter._live_recruiter_pane_from_state()
     if pane:
         return pane
     _capture(recruiter.cmd_up, _public_lifecycle_roster_path(), forward_stderr=False)
-    pane = recruiter._recruiter_pane_from_state()
+    pane = recruiter._live_recruiter_pane_from_state()
     if not pane:
         raise PublicError("UpAgent could not create its services pane")
     return pane
@@ -1238,7 +1239,7 @@ def _identity() -> dict[str, object]:
 
 
 def _cockpit_pane_or_none() -> str | None:
-    return recruiter._recruiter_pane_from_state()
+    return recruiter._live_recruiter_pane_from_state()
 
 
 def _list_workers(status_filter: str) -> list[dict[str, object]]:

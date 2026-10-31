@@ -401,6 +401,17 @@ class FencedLaunchError(RecruiterError):
         self.cleanup = cleanup
 
 
+class PaneProcessesSurvived(RecruiterError):
+    """Pane processes outlived SIGKILL; carries their (pid, birth stamp) identities."""
+
+    def __init__(self, survivors: list[tuple[int, str]]):
+        super().__init__(
+            "pane processes survived SIGKILL: "
+            + ", ".join(str(pid) for pid, _start in survivors)
+        )
+        self.survivors = survivors
+
+
 class AgentWaitTimeout(RecruiterError):
     """The worker reached its declared work cap without terminal evidence."""
 
@@ -535,7 +546,9 @@ class JobLedger:
     def _write_json(path: Path, value: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        with temporary.open("w", encoding="utf-8") as f:
+        # 0600 whatever the umask: lease files and their index hold control tokens.
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
             json.dump(value, f, indent=2, sort_keys=True)
             f.write("\n")
             f.flush()
@@ -1043,18 +1056,42 @@ class JobLedger:
             if expiry > current_time:
                 continue
             for index_path in expiry_dir.glob("*.json"):
-                lease = self._lease(index_path)
-                suffix = f"-{lease['token']}.json"
-                if not index_path.name.endswith(suffix):
-                    raise RecruiterError(
-                        f"lease index {index_path} does not match its token"
-                    )
-                key = index_path.name.removesuffix(suffix)
-                with self._claim_lock(key):
+                # One machine-wide lock (the key is unused); take it before the read,
+                # since another reaper may prune this entry after the listing.
+                with self._claim_lock(index_path.name):
+                    if not index_path.exists():
+                        continue
+                    lease = self._lease(index_path)
+                    suffix = f"-{lease['token']}.json"
+                    if not index_path.name.endswith(suffix):
+                        raise RecruiterError(
+                            f"lease index {index_path} does not match its token"
+                        )
+                    key = index_path.name.removesuffix(suffix)
                     if self._reclaim_expired_locked(
                         key, current_time, lease["token"], expiry
                     ):
                         reclaimed += 1
+                    # Claim writes its index entry under this same lock, so an entry
+                    # whose claim is gone or now carries another token/expiry is stale.
+                    claim_dir = self.active / "requests" / key
+                    current = (
+                        self._lease(claim_dir / "lease.json")
+                        if claim_dir.is_dir()
+                        else None
+                    )
+                    if current is None or (current["token"], current["expires_at"]) != (
+                        lease["token"],
+                        expiry,
+                    ):
+                        index_path.unlink(missing_ok=True)
+            with self._claim_lock(expiry_dir.name):
+                try:
+                    expiry_dir.rmdir()
+                except OSError as error:
+                    # Not empty yet, or another reaper removed it first.
+                    if error.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT):
+                        raise
         return reclaimed
 
     def active_claims(self) -> list[tuple[str, dict]]:
@@ -4469,6 +4506,21 @@ def _reconcile_exact_launch(
     errors: list[str] = []
     pane = known_pane
     agent_name: str | None = None
+    # Processes that outlived SIGKILL in an earlier attempt (or an earlier pass, from the
+    # journal). The pane is gone by the retry, so only these identities can still prove
+    # the cleanup unclean.
+    survivors: list[tuple[int, str]] = []
+
+    def survivors_gone() -> bool:
+        # A liveness check only: SIGKILL is already pending on each survivor.
+        nonlocal survivors
+        survivors = [
+            (pid, start) for pid, start in survivors if _process_start_time(pid) == start
+        ]
+        if survivors:
+            errors.append(str(PaneProcessesSurvived(survivors)))
+        return not survivors
+
     for attempt in range(1, attempts + 1):
         agent_verified = trusted_created_identity and pane is not None
         try:
@@ -4483,6 +4535,16 @@ def _reconcile_exact_launch(
         if not isinstance(journal_agent, str) or not journal_agent:
             raise RecruiterError(f"launch journal {launch_id} has no exact agent name")
         agent_name = journal_agent
+        prior = journal.get("cleanup")
+        if attempt == 1 and isinstance(prior, dict):
+            survivors = [
+                (item[0], item[1])
+                for item in prior.get("process_survivors", [])
+                if isinstance(item, list)
+                and len(item) == 2
+                and isinstance(item[0], int)
+                and isinstance(item[1], str)
+            ]
         if journal.get("state") == "launching" and _same_owner_process(journal):
             # A live owner may be inside `herdr agent start` after journaling but before the
             # returned pane identity is durable. Absence cannot be proved until it commits the
@@ -4549,7 +4611,12 @@ def _reconcile_exact_launch(
                     )
             if not agent_verified:
                 live_panes = _live_pane_ids(herdr_session=herdr_session)
-                if pane not in live_panes:
+                if pane in live_panes:
+                    errors.append(
+                        f"pane {pane} is live but agent {agent_name!r} could not be "
+                        "identity-verified"
+                    )
+                elif survivors_gone():
                     evidence = {
                         "agent_name": agent_name,
                         "launch_id": launch_id,
@@ -4560,12 +4627,12 @@ def _reconcile_exact_launch(
                     }
                     ledger.mark_launch_closed(key, launch_id, pane, evidence)
                     return evidence
-                errors.append(
-                    f"pane {pane} is live but agent {agent_name!r} could not be identity-verified"
-                )
             else:
                 try:
                     cleanup = _close_worker_pane(pane, herdr_session=herdr_session)
+                except PaneProcessesSurvived as error:
+                    survivors = error.survivors
+                    errors.append(str(error))
                 except RecruiterError as error:
                     errors.append(str(error))
                 else:
@@ -4576,17 +4643,19 @@ def _reconcile_exact_launch(
                         "reconciliation_attempt": attempt,
                         "worker_pane": pane,
                     }
-                    ledger.mark_launch_closed(key, launch_id, pane, evidence)
-                    if evidence.get("verified_absent") is True:
-                        return evidence
-                    errors.append(
-                        str(evidence.get("reason", "cleanup was not verified"))
-                    )
+                    if survivors_gone():
+                        ledger.mark_launch_closed(key, launch_id, pane, evidence)
+                        if evidence.get("verified_absent") is True:
+                            return evidence
+                        errors.append(
+                            str(evidence.get("reason", "cleanup was not verified"))
+                        )
         elif (
             allow_not_found_absent
             and not_found
             and attempt == attempts
             and journal.get("herdr_launch_style") != "split-then-start"
+            and survivors_gone()
         ):
             evidence = {
                 "agent_name": agent_name,
@@ -4606,9 +4675,10 @@ def _reconcile_exact_launch(
         "reason": "; ".join(errors)
         if errors
         else "exact agent launch remains uncertain",
-        "status": "cleanup-pending",
+        "status": "cleanup-failed" if survivors else "cleanup-pending",
         "verified_absent": False,
         "worker_pane": pane,
+        **({"process_survivors": survivors} if survivors else {}),
     }
     ledger.mark_launch_closed(key, launch_id, pane, pending)
     return pending
@@ -5198,10 +5268,7 @@ def _terminate_process_snapshot(
             time.sleep(0.05)
             remaining = alive(remaining)
         if remaining:
-            raise RecruiterError(
-                "pane processes survived SIGKILL: "
-                + ", ".join(str(pid) for pid, _start in remaining)
-            )
+            raise PaneProcessesSurvived(remaining)
     return {
         "snapshot": len(snapshot),
         "terminated": [pid for pid, _start in terminated],
@@ -7631,8 +7698,11 @@ class _SentinelWatch:
                 f"SENTINEL_STALL_NUDGED: {detail}. "
                 "Resume PULSE; if the worker stalls again, write a fresh STALLED "
                 f"closeout with real citations to {self.closeout_path}.",
-                idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
                 herdr_session=self.herdr_session,
+                # A watching Sentinel sits in its wake-wait, so Herdr never reports it
+                # idle; an idle gate here only timed out and blocked the hub.
+                wait_for_idle=False,
             )
         except (RecruiterError, OSError) as error:
             self.ledger._event(
@@ -7884,8 +7954,11 @@ class _SentinelWatch:
                             "git/fs deltas), nudge it once more, and either resume "
                             "PULSE or write a fresh closeout with real citations to "
                             f"{self.closeout_path}.",
-                            idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                            idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
                             herdr_session=self.herdr_session,
+                            # The Sentinel is in its wake-wait, never idle; the brief has
+                            # this prompt override that wait.
+                            wait_for_idle=False,
                         )
                     except (RecruiterError, OSError) as prompt_error:
                         # An unreachable Sentinel gets no recheck; accept the
@@ -7968,8 +8041,10 @@ class _SentinelWatch:
                         "landing round with the worker, verify the bundle files on "
                         "disk yourself, and write a fresh closeout to "
                         f"{self.closeout_path}.",
-                        idle_timeout_ms=SENTINEL_PROMPT_IDLE_TIMEOUT_MS,
+                        idle_timeout_ms=NUDGE_PROMPT_IDLE_TIMEOUT_MS,
                         herdr_session=self.herdr_session,
+                        # As for SENTINEL_STALL_RECHECK: no idle gate on a Sentinel.
+                        wait_for_idle=False,
                     )
                 except (RecruiterError, OSError) as prompt_error:
                     # An unreachable Sentinel cannot run another landing round. Recorded,
@@ -8852,28 +8927,37 @@ def _submit_agent_prompt(
     *,
     paste_settle_seconds: float = 0.0,
     herdr_session: str | None = None,
+    wait_for_idle: bool = True,
 ) -> None:
     """Gate on input readiness, then let Herdr reject a blocked dialog atomically.
 
     The 0.9.5 prompt operation owns paste/Enter sequencing, including Cursor. Do not
     retry an uncertain submission: it may already have delivered the task.
+    `wait_for_idle=False` skips the idle gate for an agent that is never idle (Herdr
+    queues the prompt behind the running turn); a status snapshot stands in as the
+    baseline for reconciling a stalled submission.
     """
     with _PROMPT_SUBMISSION_LOCK:
-        ready = _herdr_json(
-            "agent",
-            "wait",
-            target,
-            "--until",
-            "idle",
-            "--until",
-            "done",
-            "--until",
-            "blocked",
-            "--timeout",
-            str(idle_timeout_ms),
-            herdr_session=herdr_session,
-            timeout_seconds=idle_timeout_ms / 1000,
-        )
+        if not wait_for_idle:
+            ready = _herdr_json(
+                "agent", "get", target, herdr_session=herdr_session, timeout_seconds=2.0
+            )
+        else:
+            ready = _herdr_json(
+                "agent",
+                "wait",
+                target,
+                "--until",
+                "idle",
+                "--until",
+                "done",
+                "--until",
+                "blocked",
+                "--timeout",
+                str(idle_timeout_ms),
+                herdr_session=herdr_session,
+                timeout_seconds=idle_timeout_ms / 1000,
+            )
         prompt_budget_ms = max(PROMPT_TIMEOUT_FLOOR_MS, idle_timeout_ms)
         try:
             response = _herdr_json(
@@ -8937,7 +9021,7 @@ def _manager_anchor_pane(order: dict, *, herdr_session: str | None = None) -> st
     if mode == "requester":
         return placement.get("anchor_pane") or order["cockpit_pane"]
     if mode == "shared":
-        recruiter_pane = _recruiter_pane_from_state()
+        recruiter_pane = _live_recruiter_pane_from_state()
         if recruiter_pane is None:
             raise RecruiterError(
                 "shared manager placement requires a live Recruiter pane"
@@ -11156,10 +11240,10 @@ def _run_order_intake_clerk(
 ) -> tuple[Any, dict]:
     """Launch one journaled support clerk, or reuse a clean prior attempt's validated response for a
     byte-identical resubmission (same `intake_key`); malformed caller data never controls its launch."""
-    recruiter_pane = _recruiter_pane_from_state()
+    recruiter_pane = _live_recruiter_pane_from_state()
     if recruiter_pane is None:
         cmd_up(roster_path)
-        recruiter_pane = _recruiter_pane_from_state()
+        recruiter_pane = _live_recruiter_pane_from_state()
     if recruiter_pane is None:
         raise RecruiterError(
             f"could not create Recruiter service state at {STATE_FILE}"
@@ -11695,6 +11779,24 @@ def _recruiter_pane_from_state() -> str | None:
         return None
     pane = state.get("recruiter_pane") if isinstance(state, dict) else None
     return pane if isinstance(pane, str) and pane else None
+
+
+def _live_recruiter_pane_from_state() -> str | None:
+    """The recorded services pane, only while its recorded Herdr session still lists it.
+
+    A Herdr restart leaves the state file naming a pane that no longer exists; launching
+    from it fails far from the cause. Unreachable Herdr counts as not live.
+    """
+    pane = _recruiter_pane_from_state()
+    if pane is None:
+        return None
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        session = state.get("herdr_session") if isinstance(state, dict) else None
+        live = _live_pane_ids(herdr_session=session if isinstance(session, str) else None)
+    except (OSError, json.JSONDecodeError, RecruiterError):
+        return None
+    return pane if pane in live else None
 
 
 def _process_cmdline(pid: int) -> list[str]:
@@ -15634,8 +15736,11 @@ def consult_request_id(consult_id: str) -> str:
 
 
 def consult_artifact_paths(consult_path: str | Path) -> dict[str, Path]:
-    """Every artifact a consult produces, beside the consult.json that asked for it."""
-    path = Path(consult_path)
+    """Every artifact a consult produces, beside the consult.json that asked for it.
+
+    Absolute even for a relative consult path: the order contract requires it.
+    """
+    path = Path(consult_path).absolute()
     return {
         "brief": path.with_name(path.name + ".brief.md"),
         "order": path.with_name(path.name + ".order.json"),
@@ -15972,6 +16077,8 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
     resolves the caller instead of raising past it. A receipt path that is already a directory
     is rejected before any specialist dispatch because no regular receipt can be published there.
     """
+    # One absolute path for the read, the logs and the artifacts beside it.
+    consult_path = str(Path(consult_path).absolute())
     artifacts = consult_artifact_paths(consult_path)
     _require_consult_receipt_destination(artifacts["receipt"])
     try:
@@ -16037,10 +16144,14 @@ def cmd_consult(consult_path: str, roster_path: str) -> int:
             receipt["resolution_note"] = note
         entry = index[resolved]
 
-        cockpit_pane = _recruiter_pane_from_state()
+        cockpit_pane = _live_recruiter_pane_from_state()
         if not cockpit_pane:
+            recorded = _recruiter_pane_from_state()
             raise RecruiterError(
-                f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
+                f"the Recruiter services pane {recorded} recorded in {STATE_FILE} is not "
+                "live in its Herdr session (was Herdr restarted?); run `just upagent-up` first"
+                if recorded
+                else f"the Recruiter is not up (no recruiter pane in {STATE_FILE}); "
                 "run `just upagent-up` first"
             )
         cwd = _resolve_consult_cwd(entry, consult, consult_id)

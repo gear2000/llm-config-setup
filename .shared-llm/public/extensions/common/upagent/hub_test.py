@@ -107,7 +107,7 @@ def test_public_self_healing_up_is_silent(
         recruiter.command_runtime.write_stderr("layout warning\n")
         return 0
 
-    monkeypatch.setattr(public.recruiter, "_recruiter_pane_from_state", state)
+    monkeypatch.setattr(public.recruiter, "_live_recruiter_pane_from_state", state)
     monkeypatch.setattr(public.recruiter, "cmd_up", up)
     home = tmp_path / "home"
     roster_path = (

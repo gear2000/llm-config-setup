@@ -16,6 +16,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import signal
 import stat
 import sys
 import threading
@@ -53,11 +54,19 @@ def _herdr_owner_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     # ids and must not depend on whether a herdr server happens to be running on the machine,
     # so the probe is neutralized here. `salvage_test.py` exercises the real check.
     monkeypatch.setattr(recruiter, "verify_cockpit_pane", lambda *a, **k: None)
+    # The services-pane liveness probe lists Herdr panes too; the same fictional ids are
+    # trusted here. The dead-services-pane tests restore the real check.
+    monkeypatch.setattr(
+        recruiter,
+        "_live_recruiter_pane_from_state",
+        lambda: recruiter._recruiter_pane_from_state(),
+    )
 
 
 # Every submission door now hires a fresh intake clerk, so the real launcher is captured here for
 # the tests that prove its own behavior. Everything else gets the deterministic double below.
 _live_intake_clerk = recruiter._run_order_intake_clerk
+_live_services_pane = recruiter._live_recruiter_pane_from_state
 
 
 def _fake_intake_clerk(raw_text, raw_path, roster_path, intake_key, **kwargs):
@@ -6450,6 +6459,83 @@ def test_expired_lease_is_reclaimed_and_stale_index_cannot_remove_new_lease(
     assert (ledger.active / "requests" / key).is_dir()
 
 
+def test_ledger_json_files_are_private_whatever_the_umask(tmp_path: Path) -> None:
+    """A lease index holds the requester control token; the umask must not widen it."""
+    previous = os.umask(0o002)
+    try:
+        path = tmp_path / "hub" / "active" / "by-expiry" / "1" / "key-token.json"
+        recruiter.JobLedger._write_json(path, {"token": "t"})
+    finally:
+        os.umask(previous)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_reap_removes_expiry_index_entries_of_finished_or_replaced_claims(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "upagent-hub"
+    ledger = recruiter.JobLedger(root)
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    lease = json.loads((root / "active/requests" / key / "lease.json").read_text())
+    expiry_dir = root / "active/by-expiry" / str(lease["expires_at"])
+    index = expiry_dir / f"{key}-{token}.json"
+    assert _finalize(
+        ledger, key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    # An expired lease whose pane is still recorded is not reaped; its entry stays.
+    held = _order(request_id="request-held", order_id="order-held")
+    held_key, _ = ledger.submit(held)
+    held_token = ledger.claim(held_key, held["order_id"], 1_000)
+    assert held_token is not None
+    held_lease = {
+        **ledger._lease(root / "active/requests" / held_key / "lease.json"),
+        "expires_at": lease["expires_at"],
+        "worker_pane": "pane-held",
+    }
+    ledger._write_json(root / "active/requests" / held_key / "lease.json", held_lease)
+    held_index = expiry_dir / f"{held_key}-{held_token}.json"
+    ledger._write_json(held_index, held_lease)
+    assert index.is_file()
+    assert ledger.reap_expired(now=lease["expires_at"]) == 0
+    assert not index.exists()
+    assert held_index.is_file()
+    held_index.unlink()
+    (root / "active/requests" / held_key / "lease.json").unlink()
+    (root / "active/requests" / held_key).rmdir()
+    assert ledger.reap_expired(now=lease["expires_at"]) == 0
+    assert not expiry_dir.exists()
+
+
+def test_reap_skips_an_index_entry_another_reaper_pruned_after_the_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "upagent-hub"
+    ledger = recruiter.JobLedger(root)
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    lease = json.loads((root / "active/requests" / key / "lease.json").read_text())
+    assert _finalize(
+        ledger, key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    real_glob = Path.glob
+
+    def racing_glob(self: Path, pattern: str, *args: Any, **kwargs: Any) -> Any:
+        found = list(real_glob(self, pattern, *args, **kwargs))
+        if self.parent.name == "by-expiry":
+            for path in found:
+                path.unlink()  # a concurrent reaper pruned it after this listing
+        return iter(found)
+
+    monkeypatch.setattr(Path, "glob", racing_glob)
+    assert ledger.reap_expired(now=lease["expires_at"]) == 0
+    assert not (root / "active/by-expiry" / str(lease["expires_at"])).exists()
+
+
 def test_stage_timeout_defaults_and_explicit_override() -> None:
     assert recruiter._default_timeout_ms("stage-1-implementation") == 10_800_000
     assert recruiter._default_timeout_ms("stage-2-adversarial-audit") == 10_800_000
@@ -9951,6 +10037,99 @@ def test_a_consult_becomes_an_entirely_ordinary_upagent_order(
     assert _receipt(consult)["answer_verdict"] == "cited"
 
 
+def test_a_consult_given_a_relative_path_writes_an_order_with_absolute_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`just upagent-consult consults/x.json` passes a path relative to the caller's cwd;
+    the order it writes must still pass the ordinary contract's absolute-path checks."""
+    repo = _specialist_world(tmp_path, monkeypatch)  # cwd is the repo
+    consult = _consult_file(repo)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
+
+    assert recruiter.cmd_consult("consults/c1.json", "roster.yaml") == 0
+
+    recruiter.contracts.parse_order(json.dumps(seen[0]))
+    assert recruiter.consult_artifact_paths("consults/c1.json") == (
+        recruiter.consult_artifact_paths(consult)
+    )
+    assert all(path.is_absolute() for path in recruiter.consult_artifact_paths("c.json").values())
+    assert _receipt(consult)["answer_verdict"] == "cited"
+
+
+def _dead_services_pane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """services.json names pane w2M:p1, which the recorded Herdr session no longer lists."""
+    state = tmp_path / "services.json"
+    state.write_text(json.dumps({"recruiter_pane": "w2M:p1", "herdr_session": "s1"}))
+    monkeypatch.setattr(recruiter, "STATE_FILE", state)
+
+    def live_panes(*, herdr_session: object = None) -> set[str]:
+        assert herdr_session == "s1"
+        return {"w9:p3"}
+
+    monkeypatch.setattr(recruiter, "_live_pane_ids", live_panes)
+    monkeypatch.setattr(
+        recruiter, "_live_recruiter_pane_from_state", _live_services_pane
+    )
+    return state
+
+
+def test_consult_fails_before_launch_when_the_services_pane_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _specialist_world(tmp_path, monkeypatch)
+    _dead_services_pane(tmp_path, monkeypatch)
+    consult = _consult_file(tmp_path)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        recruiter, "cmd_dispatch", _answering_dispatch(_cited_answer(), seen)
+    )
+
+    assert recruiter.cmd_consult(str(consult), "roster.yaml") == 0
+
+    assert seen == []
+    receipt = _receipt(consult)
+    assert receipt["answer_verdict"] == "rejected"
+    assert "w2M:p1" in receipt["reason"]
+    assert "just upagent-up" in receipt["reason"]
+
+
+def test_shared_manager_placement_refuses_a_dead_services_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _dead_services_pane(tmp_path, monkeypatch)
+    with pytest.raises(RecruiterError, match="live Recruiter pane"):
+        recruiter._manager_anchor_pane(
+            {"manager_placement": {"mode": "shared"}, "cockpit_pane": "caller"},
+            herdr_session="s1",
+        )
+
+
+def test_intake_clerk_brings_services_up_when_the_recorded_pane_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _dead_services_pane(tmp_path, monkeypatch)
+    ups: list[str] = []
+
+    def cmd_up(roster: str) -> int:
+        ups.append(roster)
+        state.write_text(json.dumps({"recruiter_pane": "w9:p3", "herdr_session": "s1"}))
+        return 0
+
+    def stop_after_the_pane_check(_roster: str) -> None:
+        raise RecruiterError("stop: the pane check passed")
+
+    monkeypatch.setattr(recruiter, "cmd_up", cmd_up)
+    monkeypatch.setattr(recruiter, "load_roster", stop_after_the_pane_check)
+    with pytest.raises(RecruiterError, match="stop: the pane check passed"):
+        _live_intake_clerk(  # the autouse fixture fakes the module attribute
+            "{}", tmp_path / "raw.json", "roster.yaml", "intake-key"
+        )
+    assert ups == ["roster.yaml"]
+
+
 def test_consult_rejects_receipt_directory_before_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11224,6 +11403,130 @@ def test_exact_launch_reconciliation_never_closes_an_unverified_live_pane(
     assert cleanup["verified_absent"] is False
     assert "identity-verified" in cleanup["reason"]
     assert closed == []
+
+
+def _launch_with_sigkill_survivor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, str, str, dict]:
+    """One verified worker launch whose pane holds a process that outlives SIGKILL
+    (a fake pid stuck in the kernel) until the test lets it die."""
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(request_id="request-3")
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key,
+        order["order_id"],
+        60_000,
+        owner={
+            "generation": 1,
+            "herdr_session": "test-session",
+            "request_id": "request-3",
+            "runner_pid": -1,
+        },
+    )
+    assert isinstance(token, str)
+    launch_id = ledger.begin_launch(
+        key, token, "worker", "owned-agent", "test-session", order["cwd"]
+    )
+    ledger.record_launch_created(
+        key, token, launch_id, "owned-pane", "workspace", "address"
+    )
+    stuck: dict[str, Any] = {
+        "pid": 4_000_001, "start": "stuck-birth", "alive": True, "agent_gets": 0,
+        "dies_at_agent_get": None, "signals": [],
+    }
+    live = {"owned-pane"}
+
+    def herdr_json(*args: str, **_kwargs: object) -> dict:
+        if args[:2] == ("agent", "get"):
+            stuck["agent_gets"] += 1
+            if stuck["agent_gets"] == stuck["dies_at_agent_get"]:
+                stuck["alive"] = False
+            if "owned-pane" in live:
+                return {"result": {"agent": {"name": "owned-agent", "pane_id": "owned-pane"}}}
+            raise RecruiterError("agent_not_found")
+        raise RecruiterError("pane_not_found")
+
+    def herdr(*args: str, **_kwargs: object) -> None:
+        assert args == ("pane", "close", "owned-pane")
+        live.discard("owned-pane")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr_json)
+    monkeypatch.setattr(recruiter, "_herdr", herdr)
+    monkeypatch.setattr(recruiter, "_live_pane_ids", lambda **_kwargs: set(live))
+    monkeypatch.setattr(
+        recruiter,
+        "_snapshot_pane_process_tree",
+        lambda pane, **_kwargs: [(stuck["pid"], stuck["start"])] if pane in live else [],
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_process_start_time",
+        lambda pid: stuck["start"] if pid == stuck["pid"] and stuck["alive"] else None,
+    )
+    def signal_identity(pid: int, start: str, signal_number: int) -> bool:
+        stuck["signals"].append(signal_number)
+        return pid == stuck["pid"] and stuck["alive"]
+
+    monkeypatch.setattr(recruiter, "_signal_process_identity", signal_identity)
+    monkeypatch.setattr(recruiter, "PANE_TREE_TERM_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(recruiter, "PANE_TREE_KILL_GRACE_SECONDS", 0.01)
+    return ledger, key, launch_id, stuck
+
+
+def test_launch_reconciliation_never_reports_clean_while_a_sigkill_survivor_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attempt 1 closes the pane, then a process survives SIGKILL. The retry finds the
+    pane already absent; it must still not report clean while that process lives."""
+    ledger, key, launch_id, stuck = _launch_with_sigkill_survivor(tmp_path, monkeypatch)
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="owned-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert cleanup["verified_absent"] is False
+    assert cleanup["status"] == "cleanup-failed"
+    assert str(stuck["pid"]) in str(cleanup["reason"])
+    # SIGKILL is already pending; the retries only re-check liveness, never re-signal
+    # (each re-signal would wait out both grace periods again).
+    assert stuck["signals"] == [signal.SIGTERM, signal.SIGKILL]
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] != "closed"
+    # A later reconciliation pass still knows the survivor and still refuses clean.
+    again = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="owned-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert again["verified_absent"] is False
+    assert str(stuck["pid"]) in str(again["reason"])
+
+
+def test_launch_reconciliation_is_clean_once_the_sigkill_survivor_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, key, launch_id, stuck = _launch_with_sigkill_survivor(tmp_path, monkeypatch)
+    # Attempt 1 raises over the survivor; it exits before attempt 2's agent lookup.
+    stuck["dies_at_agent_get"] = 2
+    cleanup = recruiter._reconcile_exact_launch(
+        ledger,
+        key,
+        launch_id,
+        known_pane="owned-pane",
+        herdr_session="test-session",
+        allow_not_found_absent=True,
+    )
+    assert stuck["agent_gets"] >= 2 and not stuck["alive"]
+    assert cleanup["verified_absent"] is True
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] == "closed"
 
 
 # --- pane-gone classification in the agent-status wait --------------------
