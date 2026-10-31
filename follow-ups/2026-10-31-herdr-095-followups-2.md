@@ -50,7 +50,7 @@ all pass on the branch. `just test` on the branch: 2174 passed, all Node checks 
 
 | Item | Commit | Repro test (red on main) | Live |
 | --- | --- | --- | --- |
-| 6c | 1669b5b | `recruiter_test::test_opportunistic_reconcile_prunes_stale_expiry_index_entries`, `::test_a_malformed_expiry_index_entry_never_breaks_the_reconcile` | checked on the main ledger after merge |
+| 6c | 1669b5b | `recruiter_test::test_opportunistic_reconcile_prunes_stale_expiry_index_entries`, `::test_a_malformed_expiry_index_entry_never_breaks_the_reconcile` | PASS on `main` 8a51951: one `just upagent-reconcile` pruned the live index from 266 entries (243 epoch dirs) to 0. Note: the automatic reconcile runs on mutating hub commands while a request is active (`client._reconciliation_needed`), not on every command, so an idle machine keeps stale entries until its next busy period |
 | 10 | 2da31c2 | `recruiter_test::test_a_launch_that_fails_before_the_split_closes_as_verified_absent`, `::test_reconcile_trusts_only_a_recorded_never_split_mark[False]` (`[True]`/`[None]` guard the kept caution) | the stuck consult predates the mark, so it was cleared by the operator procedure below |
 | 10b | 0b7930b | `recruiter_test::test_an_intake_clerk_launch_that_fails_before_the_split_closes_as_absent`, `specialist_lifecycle_test::test_a_start_that_failed_before_the_split_never_blocks_the_next_up` (same bug in the intake clerk and the resident launch) | test only |
 
