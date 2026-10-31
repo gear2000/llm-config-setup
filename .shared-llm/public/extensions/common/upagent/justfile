@@ -149,7 +149,8 @@ upagent-verify order *args:
 upagent-await-any timeout_ms cursor +orders:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter await-any --timeout-ms "{{timeout_ms}}" --cursor "{{cursor}}" {{orders}}
 
-# Answer the current timeout decision. Use extension_ms=0 with cancel.
+# Answer the current timeout decision. Use extension_ms=0 with cancel. In place of the raw
+# control_token you may pass --control-token-file=/absolute/private-token-file.
 [no-cd]
 upagent-respond order control_token nonce action extension_ms:
     ${PYTHON_BIN:-python3} "{{_UPAGENT_CLIENT}}" --target recruiter respond "{{order}}" "{{control_token}}" "{{nonce}}" "{{action}}" "{{extension_ms}}"

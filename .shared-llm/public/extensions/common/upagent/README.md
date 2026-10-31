@@ -205,8 +205,8 @@ just upagent request --file /absolute/request.json [--cockpit-pane LIVE_PANE] [-
 just upagent await --request ID [--notify-after-ms MS] [--json]
 just upagent await-any --request ID [--request ID ...] [--cursor JSON] [--timeout-ms MS] [--json]
 just upagent verify --request ID --offering ID --effort LEVEL --agent PERSONA [--wait] [--json]
-just upagent respond --request ID --control-token TOKEN --nonce NONCE \
-  --action extend|cancel --extension-ms MS [--json]
+just upagent respond --request ID (--control-token TOKEN | --control-token-file /absolute/private-token) \
+  --nonce NONCE --action extend|cancel --extension-ms MS [--json]
 just upagent review-await --request ID [--after N] [--timeout-ms MS] [--json]
 just upagent review-continue --request ID --checkpoint N --checkpoint-sha256 SHA256 \
   --prompt-file /absolute/feedback.md --control-token-file /absolute/private-token [--json]
@@ -559,6 +559,9 @@ Durable files are the source of truth; terminal text is display-only.
   and process snapshot, reports to the manager/requester, and exits.
 - At a work cap, `upagent-await` returns `REQUESTER_DECISION_REQUIRED`. The requester may run
   `just upagent-respond <order> <control-token> <nonce> extend <milliseconds>` or `... cancel 0`.
+  `--control-token-file=<absolute-private-file>` may replace `<control-token>`; the timeout message
+  shows that form with a placeholder, so the raw token never enters the requester message log,
+  the await JSON, or the account-manager pane.
   Without an answer during `management.requester_grace_ms`, the Recruiter performs the declared hard
   stop. Managers/checkers can recommend actions but cannot execute them.
 - The deterministic completion reactor validates the staged bundle and permits exactly one repair

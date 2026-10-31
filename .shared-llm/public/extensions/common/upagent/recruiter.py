@@ -9495,17 +9495,20 @@ def _await_requester_timeout_decision(
         # Release or feedback delivery won the state race. Permit one bounded finalization
         # grace; a second timeout hard-stops instead of extending forever.
         return ledger.consume_review_transition_grace(key, token)
-    control_token = cast(str, lease["requester_control_token"])
     response_path = ledger.request_dir(key) / "responses" / f"{nonce}.json"
+    # The token never rides in this message: it reaches the requester message log, the
+    # await JSON, and the account-manager pane, and the manager may only recommend. The
+    # requester names its private token file (or passes its token positionally).
     command = (
         f"just upagent-respond {shlex.quote(str(ledger.request_dir(key) / 'request.json'))} "
-        f"{shlex.quote(control_token)} {shlex.quote(nonce)} "
+        f"--control-token-file=<control-token-file> {shlex.quote(nonce)} "
         "<extend|cancel> <extension-ms-or-0>"
     )
     message = (
         f"Worker {worker_pane} reached work cap {timeout_number}. Inspect it if useful, then "
         f"authorize an extension or cancellation within {config.requester_grace_ms} ms. "
-        f"Response command: {command}"
+        f"Response command: {command} (or pass your control token in place of "
+        "--control-token-file=...)"
     )
     if manager["address"] is not None:
         with suppress(RecruiterError):
@@ -13588,6 +13591,57 @@ def cmd_await_any(
         time.sleep(poll_seconds)
 
 
+def _read_private_control_token_file(value: str) -> str:
+    """Read a requester control token from a private file, never through a symlink.
+
+    The file must be absolute, a regular file owned by this user, with no group or world
+    bits, and hold exactly one 32-hex token.
+    """
+    path = Path(value)
+    if not value or not path.is_absolute():
+        raise RecruiterError(f"--control-token-file must be an absolute path: {value!r}")
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RecruiterError(
+            f"--control-token-file is not a readable non-symlink file: {path}: {error}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RecruiterError(f"--control-token-file must be a regular file: {path}")
+        if metadata.st_uid != os.geteuid():
+            raise RecruiterError(
+                f"--control-token-file must be owned by the current user: {path}"
+            )
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise RecruiterError(
+                f"--control-token-file must not be group/world accessible: {path}"
+            )
+        if metadata.st_size <= 0 or metadata.st_size > 256:
+            raise RecruiterError(f"--control-token-file has an invalid size: {path}")
+        raw = os.read(descriptor, 257)
+    finally:
+        os.close(descriptor)
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise RecruiterError(
+            f"--control-token-file must contain UTF-8 text: {path}"
+        ) from error
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise RecruiterError(
+            f"--control-token-file does not contain a valid control token: {path}"
+        )
+    return token
+
+
 def cmd_respond(
     order_path: str,
     control_token: str,
@@ -16147,7 +16201,16 @@ def main(argv: list[str] | None = None) -> int:
         "respond", help="authorize extension or cancellation as the requester"
     )
     p_respond.add_argument("order", help="path to order.json")
-    p_respond.add_argument("control_token", help="control token returned by request")
+    p_respond.add_argument(
+        "control_token",
+        nargs="?",
+        help="control token returned by request (or use --control-token-file)",
+    )
+    p_respond.add_argument(
+        "--control-token-file",
+        help="absolute path to the private requester control token, in place of the "
+        "positional token",
+    )
     p_respond.add_argument("nonce", help="nonce returned by await/timeout warning")
     p_respond.add_argument("action", choices=lifecycle.REQUESTER_ACTIONS)
     p_respond.add_argument(
@@ -16256,9 +16319,16 @@ def main(argv: list[str] | None = None) -> int:
             extension_ms = args.extension_ms if args.action == "extend" else None
             if args.action == "cancel" and args.extension_ms != 0:
                 raise RecruiterError("cancel requires extension_ms=0")
+            if (args.control_token is None) == (args.control_token_file is None):
+                raise RecruiterError(
+                    "respond needs exactly one of a positional control token or "
+                    "--control-token-file"
+                )
             return cmd_respond(
                 args.order,
-                args.control_token,
+                args.control_token
+                if args.control_token is not None
+                else _read_private_control_token_file(args.control_token_file),
                 args.nonce,
                 args.action,
                 extension_ms,

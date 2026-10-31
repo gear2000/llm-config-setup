@@ -2815,6 +2815,139 @@ def test_timeout_waits_for_authenticated_requester_extension(
     assert ledger.state(key)["state"] == "running"
 
 
+def _awaiting_requester(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, str, Path, str]:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 60_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    lease = ledger.mark_awaiting_requester(
+        key, token, "nonce-1", 1, requester_grace_ms=300_000
+    )
+    assert lease is not None
+    return ledger, key, order_path, cast(str, lease["requester_control_token"])
+
+
+def _token_file(tmp_path: Path, token: str, mode: int = 0o600) -> Path:
+    path = tmp_path / "control-token"
+    path.write_text(token + "\n")
+    path.chmod(mode)
+    return path
+
+
+def test_respond_accepts_a_private_control_token_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    ledger, key, order_path, token = _awaiting_requester(tmp_path, monkeypatch)
+    token_file = _token_file(tmp_path, token)
+    argv = [
+        "respond",
+        str(order_path),
+        f"--control-token-file={token_file}",
+        "nonce-1",
+        "extend",
+        "60000",
+    ]
+    assert recruiter.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["accepted"] is True
+    assert (ledger.request_dir(key) / "responses" / "nonce-1.json").is_file()
+
+
+def test_respond_keeps_the_positional_control_token_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    ledger, key, order_path, token = _awaiting_requester(tmp_path, monkeypatch)
+    argv = ["respond", str(order_path), token, "nonce-1", "cancel", "0"]
+    assert recruiter.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "cancel"
+
+
+@pytest.mark.parametrize("case", ["both", "neither", "group-readable", "symlink"])
+def test_respond_refuses_an_ambiguous_or_unsafe_token_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    ledger, key, order_path, token = _awaiting_requester(tmp_path, monkeypatch)
+    token_file = _token_file(
+        tmp_path, token, mode=0o640 if case == "group-readable" else 0o600
+    )
+    if case == "symlink":
+        link = tmp_path / "token-link"
+        link.symlink_to(token_file)
+        token_file = link
+    middle = {
+        "both": [token, f"--control-token-file={token_file}"],
+        "neither": [],
+        "group-readable": [f"--control-token-file={token_file}"],
+        "symlink": [f"--control-token-file={token_file}"],
+    }[case]
+    argv = ["respond", str(order_path), *middle, "nonce-1", "cancel", "0"]
+    with pytest.raises((RecruiterError, SystemExit)):
+        assert recruiter.main(argv) != 0
+    assert not (ledger.request_dir(key) / "responses" / "nonce-1.json").exists()
+
+
+def test_timeout_warning_never_carries_the_raw_control_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D8b: the timeout message reaches the requester log, the await JSON, and the
+    account-manager pane. It names a token-file placeholder, never the token."""
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    manager = {
+        "address": "manager-name",
+        "config": SimpleNamespace(
+            account_manager=SimpleNamespace(timeout_ms=100), requester_grace_ms=50
+        ),
+        "generation": 1,
+    }
+    prompts: list[str] = []
+    notices: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda address, message, **kwargs: prompts.append(message),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_notify_requester",
+        lambda ledger_arg, key_arg, order_arg, generation, kind, message, detail=None: (
+            notices.append((message, detail or {}))
+        ),
+    )
+    leases: list[dict] = []
+    mark = ledger.mark_awaiting_requester
+
+    def recording_mark(*args: Any, **kwargs: Any) -> dict | None:
+        lease = mark(*args, **kwargs)
+        leases.append(cast(dict, lease))
+        return lease
+
+    monkeypatch.setattr(ledger, "mark_awaiting_requester", recording_mark)
+    recruiter._await_requester_timeout_decision(
+        ledger, key, token, order, manager, "worker-pane", 1, threading.Event()
+    )
+    control = leases[0]["requester_control_token"]
+    message, detail = notices[0]
+    assert isinstance(control, str) and len(control) == 32
+    for text in (message, json.dumps(detail), *prompts):
+        assert control not in text
+    assert "--control-token-file=<control-token-file>" in detail["response_command"]
+    assert detail["response_command"] in message
+    assert prompts and prompts[0] == message
+
+
 def test_lapsed_awaiting_requester_deadline_writes_failed_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

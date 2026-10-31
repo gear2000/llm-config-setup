@@ -2155,3 +2155,19 @@ def test_public_request_rejects_invalid_status_first_before_registration(
         public_api.PublicError, match="management.status_first must be a boolean"
     ):
         public_api.execute(_args(_worker_argv(tmp_path)), tmp_path)
+
+
+def test_public_respond_takes_a_token_or_a_token_file_but_not_both() -> None:
+    base = ["respond", "--request", REQUEST_ID, "--nonce", "n", "--action", "cancel"]
+    tail = ["--extension-ms", "0"]
+    by_file = _args([*base, "--control-token-file", "/private/token", *tail])
+    assert by_file.control_token is None
+    assert by_file.control_token_file == "/private/token"
+    by_token = _args([*base, "--control-token", "a" * 32, *tail])
+    assert by_token.control_token == "a" * 32 and by_token.control_token_file is None
+    for extra in (
+        [],
+        ["--control-token", "a" * 32, "--control-token-file", "/private/token"],
+    ):
+        with pytest.raises(public_api.contract.PublicCommandError):
+            _args([*base, *extra, *tail])
