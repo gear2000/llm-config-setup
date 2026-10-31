@@ -618,13 +618,15 @@ def test_worker_health_fails_fast_when_launch_returns_to_shell(monkeypatch) -> N
         recruiter._wait_for_worker_health("worker-pane", _order(), 100)
 
 
-def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> None:
+def test_start_worker_creates_pane_then_starts_agent(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     calls = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
-        assert kwargs == {"herdr_session": "llm-lab-test"}
+        assert kwargs["herdr_session"] == "llm-lab-test"
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "worker-pane", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
@@ -653,10 +655,78 @@ def test_start_worker_is_one_atomic_herdr_agent_start(monkeypatch, tmp_path) -> 
         "workspace-1",
         "upagent-req-abc-g1",
     )
-    start = calls[2]
-    assert start[:4] == ("agent", "start", "upagent-req-abc-g1", "--cwd")
+    split, start = calls[2:4]
+    assert split[:3] == ("pane", "split", "leader-pane")
+    assert start[:4] == ("agent", "start", "upagent-req-abc-g1", "--kind")
+    assert start[start.index("--pane") + 1] == pane
+    assert "--cwd" not in start and "--split" not in start
     assert "--" in start
-    assert start[-3:] == ("bash", "-lc", "claude --model some-model")
+    assert start[-2:] == ("--model", "some-model")
+
+
+def _split_env(monkeypatch, tmp_path, order: dict) -> dict[str, str]:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane", "workspace_id": "w"}}}
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "get"):
+            return {"result": {"pane": {"tab_id": "tab-1"}}}
+        return {
+            "result": {"agent": {"name": "upagent-req-env-g1", "pane_id": "worker-pane"}}
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    recruiter._start_herdr_agent(
+        "upagent-req-env-g1", order, "claude --model m", herdr_session="s"
+    )
+    split = next(call for call in calls if call[:2] == ("pane", "split"))
+    values = [split[i + 1] for i, item in enumerate(split) if item == "--env"]
+    return dict(value.split("=", 1) for value in values)
+
+
+def test_pane_split_carries_the_hub_canonical_repo_into_the_pane(
+    monkeypatch, tmp_path
+) -> None:
+    """D6: a nested request inside the worker pane must resolve the same checkout the
+    hub resolved through UPAGENT_CANONICAL_REPO; a Herdr pane does not inherit it."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setenv("UPAGENT_CANONICAL_REPO", str(checkout))
+    env = _split_env(monkeypatch, tmp_path, _order(cockpit_pane="leader-pane"))
+    assert env == {"UPAGENT_CANONICAL_REPO": str(checkout.resolve())}
+
+
+def test_pane_split_adds_no_canonical_repo_when_the_hub_had_none(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("UPAGENT_CANONICAL_REPO", raising=False)
+    env = _split_env(
+        monkeypatch, tmp_path, _order(cockpit_pane="leader-pane", env={"A": "1"})
+    )
+    assert env == {"A": "1"}
+
+
+def test_pane_split_order_env_wins_over_the_hub_canonical_repo(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPAGENT_CANONICAL_REPO", str(tmp_path / "hub-checkout"))
+    env = _split_env(
+        monkeypatch,
+        tmp_path,
+        _order(cockpit_pane="leader-pane", env={"UPAGENT_CANONICAL_REPO": "/order/own"}),
+    )
+    assert env == {"UPAGENT_CANONICAL_REPO": "/order/own"}
+
+
+def test_pane_split_refuses_a_relative_canonical_repo(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_CANONICAL_REPO", "relative/checkout")
+    with pytest.raises(RecruiterError, match="absolute checkout root"):
+        _split_env(monkeypatch, tmp_path, _order(cockpit_pane="leader-pane"))
 
 
 def test_start_herdr_agent_honors_downward_role_placement(
@@ -667,7 +737,9 @@ def test_start_herdr_agent_honors_downward_role_placement(
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
-        assert kwargs == {"herdr_session": "llm-lab-test"}
+        assert kwargs["herdr_session"] == "llm-lab-test"
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "manager-pane", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
@@ -693,8 +765,9 @@ def test_start_herdr_agent_honors_downward_role_placement(
     )
 
     start = calls[2]
-    split_index = start.index("--split")
+    split_index = start.index("--direction")
     assert start[split_index + 1] == "down"
+
 
 
 def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
@@ -702,10 +775,13 @@ def test_safe_agent_name_disambiguates_ids_sharing_a_long_prefix() -> None:
     first = recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 1)
     second = recruiter._safe_agent_name("upagent", f"{shared}-try2-second", 1)
     assert first != second
-    assert first.startswith("upagent-") and first.endswith("-g1")
+    assert first.startswith("upagent-") and len(first) <= 32
+    assert first != recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 2)
+    assert first != recruiter._safe_agent_name("upagent-check", f"{shared}-try1-primary", 1)
     # Deterministic for the same id, and shell/Herdr-safe.
     assert first == recruiter._safe_agent_name("upagent", f"{shared}-try1-primary", 1)
     assert all(c.isalnum() or c in "-_" for c in first)
+
 
 
 def test_start_herdr_agent_refuses_duplicate_agent_name(monkeypatch, tmp_path) -> None:
@@ -735,6 +811,8 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
     start_calls: list[tuple[str, ...]] = []
 
     def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "pane-first", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             if state["started"]:
                 return {"result": {"agent": {"name": args[2], "pane_id": "pane-first"}}}
@@ -780,6 +858,7 @@ def test_concurrent_same_name_launches_start_exactly_one_agent(
     assert len(start_calls) == 1
     assert len(errors) == 1
     assert "already exists in Herdr" in str(errors[0])
+
 
 
 def test_start_herdr_agent_rejects_unknown_split_direction() -> None:
@@ -930,6 +1009,8 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(
 
     def fake_json(*args: str, **kwargs: object) -> dict:
         calls.append(args)
+        if args[:2] == ("pane", "split"):
+            return {"id": "cli:pane:split", "result": {"type": "pane_info", "pane": {"pane_id": "worker-pane", "workspace_id": "workspace-1", "terminal_id": "term_test"}}}
         if args[:2] == ("agent", "get"):
             raise RecruiterError("agent_not_found")
         if args == ("pane", "get", "leader-pane"):
@@ -974,6 +1055,7 @@ def test_tab_placement_failure_keeps_the_started_agent_alive(
     assert started == ("worker-pane", "workspace-1", "worker")
     assert closed == []
     assert "tab placement failed" in capsys.readouterr().err
+
 
 
 @pytest.mark.parametrize(
@@ -1286,6 +1368,222 @@ def test_current_herdr_session_refuses_ambiguous_socket_matches(
         recruiter._resolve_current_herdr_session_name()
 
 
+# --- Pane process-tree teardown (D8b: orphaned worker process after cancel) -------
+
+
+def _children_of(pid: int) -> list[int]:
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            text = Path(f"/proc/{entry}/stat").read_text()
+        except OSError:
+            continue
+        fields = text[text.rfind(")") + 2 :].split()
+        if fields[1] == str(pid) and fields[0] != "Z":
+            found.append(int(entry))
+    return found
+
+
+def _wait_for_children(pid: int, count: int) -> list[int]:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        children = _children_of(pid)
+        if len(children) >= count:
+            return children
+        time.sleep(0.02)
+    raise AssertionError(f"process {pid} never started {count} children")
+
+
+def _alive(pid: int) -> bool:
+    return recruiter._process_start_time(pid) is not None
+
+
+def _wait_dead(pid: int, seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.02)
+    return not _alive(pid)
+
+
+def _fake_pane(monkeypatch: pytest.MonkeyPatch, shell: Any) -> list[tuple[str, ...]]:
+    """Herdr stand-in: process-info names `shell`; close hangs it up like a real
+    pane close, so its surviving children re-parent to init."""
+    calls: list[tuple[str, ...]] = []
+    live = {"pane-1"}
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("pane", "process-info"):
+            return {
+                "result": {
+                    "process_info": {
+                        "pane_id": "pane-1",
+                        "shell_pid": shell.pid,
+                        "foreground_processes": [],
+                    }
+                }
+            }
+        if args == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": pane} for pane in live]}}
+        raise AssertionError(args)
+
+    def fake_herdr(*args: str, **kwargs: object) -> None:
+        calls.append(args)
+        assert args == ("pane", "close", "pane-1")
+        live.discard("pane-1")
+        shell.kill()
+        shell.wait()
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    monkeypatch.setattr(recruiter, "_herdr", fake_herdr)
+    return calls
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_close_worker_pane_terminates_the_pane_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot is taken before the close, so a child that the pane close
+    re-parents to init is still found and terminated."""
+    import subprocess
+
+    shell = subprocess.Popen(["sh", "-c", "sleep 300 & sleep 300 & wait"])
+    try:
+        children = _wait_for_children(shell.pid, 2)
+        calls = _fake_pane(monkeypatch, shell)
+        cleanup = recruiter._close_worker_pane("pane-1", herdr_session="s")
+        assert calls[0][:2] == ("pane", "process-info")
+        assert calls.index(("pane", "close", "pane-1")) > 0
+        assert cleanup["verified_absent"] is True
+        tree = cast(dict, cleanup["process_tree"])
+        assert tree["snapshot"] == 3
+        assert sorted(cast(list, tree["terminated"])) == sorted(children)
+        assert all(_wait_dead(pid) for pid in children)
+    finally:
+        for pid in _children_of(shell.pid):
+            os.kill(pid, 9)
+        shell.kill()
+        shell.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_close_worker_pane_spares_an_upagent_runner_and_its_descendants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D6: a nested request's runner (`recruiter.py ... run-job`) started from the
+    worker's tool tree must survive the worker pane teardown, with its children."""
+    import subprocess
+
+    fake_recruiter = tmp_path / "other-checkout" / "recruiter.py"
+    runner_code = (
+        "import subprocess, time; subprocess.Popen(['sleep', '300']); time.sleep(300)"
+    )
+    shell = subprocess.Popen(
+        [
+            "sh",
+            "-c",
+            f'sleep 300 & {sys.executable} -c "{runner_code}" '
+            f"{fake_recruiter} --roster r run-job somekey & wait",
+        ]
+    )
+    runner = grandchild = worker_child = None
+    try:
+        children = _wait_for_children(shell.pid, 2)
+        for pid in children:
+            if "run-job" in recruiter._process_cmdline(pid):
+                runner = pid
+            else:
+                worker_child = pid
+        assert runner is not None and worker_child is not None
+        grandchild = _wait_for_children(runner, 1)[0]
+        _fake_pane(monkeypatch, shell)
+        cleanup = recruiter._close_worker_pane("pane-1", herdr_session="s")
+        tree = cast(dict, cleanup["process_tree"])
+        assert tree["terminated"] == [worker_child]
+        assert _wait_dead(worker_child)
+        assert _alive(runner) and _alive(grandchild)
+    finally:
+        for pid in (runner, grandchild, worker_child):
+            if pid is not None and _alive(pid):
+                os.kill(pid, 9)
+        shell.kill()
+        shell.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc to find children")
+def test_process_snapshot_kills_a_sigterm_ignorer_and_never_signals_a_reused_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(recruiter, "PANE_TREE_TERM_GRACE_SECONDS", 0.2)
+    stubborn = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(300)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    bystander = subprocess.Popen(["sleep", "300"])
+    try:
+        assert stubborn.stdout is not None and stubborn.stdout.readline() == b"ready\n"
+        start = recruiter._process_start_time(stubborn.pid)
+        assert isinstance(start, str)
+        result = recruiter._terminate_process_snapshot(
+            [
+                (stubborn.pid, start),
+                # Same pid number, different birth stamp: a reused pid is never touched.
+                (bystander.pid, "not-its-birth-stamp"),
+            ]
+        )
+        assert result["terminated"] == [stubborn.pid]
+        assert result["killed"] == [stubborn.pid]
+        stubborn.wait(timeout=5)
+        assert bystander.poll() is None
+        # A process that already exited is not an error.
+        gone = recruiter._terminate_process_snapshot([(stubborn.pid, start)])
+        assert gone == {"snapshot": 1, "terminated": [], "killed": []}
+    finally:
+        for process in (stubborn, bystander):
+            process.kill()
+            process.wait()
+
+
+def test_pane_process_snapshot_is_empty_for_an_absent_pane_and_loud_for_a_live_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live: set[str] = set()
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        if args[:2] == ("pane", "process-info"):
+            raise RecruiterError("pane_not_found")
+        if args == ("pane", "list"):
+            return {"result": {"panes": [{"pane_id": pane} for pane in live]}}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    assert recruiter._snapshot_pane_process_tree("pane-1", herdr_session="s") == []
+    live.add("pane-1")
+    with pytest.raises(RecruiterError, match="pane_not_found"):
+        recruiter._snapshot_pane_process_tree("pane-1", herdr_session="s")
+
+
+def test_upagent_runner_is_recognised_from_any_checkout() -> None:
+    assert recruiter._is_upagent_runner(
+        ["/usr/bin/python3", "/elsewhere/upagent/recruiter.py", "--roster", "r", "run-job", "k"]
+    )
+    assert not recruiter._is_upagent_runner(
+        ["/usr/bin/python3", "/elsewhere/recruiter.py", "status"]
+    )
+    assert not recruiter._is_upagent_runner(["run-job", "recruiter.py"])
+
+
 def test_close_worker_pane_requires_recorded_session() -> None:
     with pytest.raises(RecruiterError, match="recorded Herdr session"):
         recruiter._close_worker_pane("pane-1")
@@ -1299,6 +1597,10 @@ def test_close_worker_pane_uses_global_session_option(
     def fake_run(args, **kwargs):
         calls.append(args)
         if args[:4] == ["herdr", "--session", "llm-lab-test", "pane"]:
+            if args[4] == "process-info":
+                return recruiter.subprocess.CompletedProcess(
+                    args, 0, '{"result":{"process_info":{"pane_id":"pane-1"}}}\n', ""
+                )
             if args[4] == "close":
                 return recruiter.subprocess.CompletedProcess(args, 0, "", "")
             if args[4] == "list":
@@ -1312,8 +1614,11 @@ def test_close_worker_pane_uses_global_session_option(
     cleanup = recruiter._close_worker_pane("pane-1", herdr_session="llm-lab-test")
 
     assert cleanup["verified_absent"] is True
-    assert calls[0] == ["herdr", "--session", "llm-lab-test", "pane", "close", "pane-1"]
-    assert calls[1] == ["herdr", "--session", "llm-lab-test", "pane", "list"]
+    assert calls[0] == [
+        "herdr", "--session", "llm-lab-test", "pane", "process-info", "--pane", "pane-1"
+    ]
+    assert calls[1] == ["herdr", "--session", "llm-lab-test", "pane", "close", "pane-1"]
+    assert calls[2] == ["herdr", "--session", "llm-lab-test", "pane", "list"]
 
 
 def test_checker_cleanup_guards_layout_adjustment(tmp_path: Path, monkeypatch) -> None:
@@ -2377,47 +2682,88 @@ def test_run_order_blocks_result_when_startup_assessment_rejects_it(
     assert "startup rejected" in result["reason"]
 
 
-def test_submit_agent_prompt_uses_atomic_run_by_default(monkeypatch) -> None:
+def test_submit_agent_prompt_uses_server_prompt_after_readiness(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
-    monkeypatch.setattr(
-        recruiter,
-        "_herdr_json",
-        lambda *args, **kwargs: {"result": {"agent": {"pane_id": "manager-pane"}}},
-    )
 
-    recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000)
+    def prompt(*args, **kwargs):
+        calls.append(args)
+        return {
+            "result": {"type": "agent_prompted", "agent": {"agent_status": "working"}}
+        }
 
+    monkeypatch.setattr(recruiter, "_herdr_json", prompt)
+    recruiter._submit_agent_prompt("manager-name", "Review evidence.", 5_000, paste_settle_seconds=0.0)
     assert calls == [
-        ("agent", "wait", "manager-name", "--status", "idle", "--timeout", "5000"),
-        ("pane", "run", "manager-pane", "Review evidence."),
+        (
+            "agent",
+            "wait",
+            "manager-name",
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--until",
+            "blocked",
+            "--timeout",
+            "5000",
+        ),
+        (
+            "agent",
+            "prompt",
+            "manager-name",
+            "Review evidence.",
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            "60000",
+        ),
     ]
 
 
-def test_submit_agent_prompt_splits_cursor_paste_and_enter(monkeypatch) -> None:
+def test_submit_agent_prompt_uses_server_cursor_input(monkeypatch) -> None:
     calls = []
-    sleeps = []
     monkeypatch.setattr(recruiter, "_herdr", lambda *args, **kwargs: calls.append(args))
-    monkeypatch.setattr(
-        recruiter,
-        "_herdr_json",
-        lambda *args, **kwargs: {"result": {"agent": {"pane_id": "cursor-pane"}}},
-    )
-    monkeypatch.setattr(recruiter.time, "sleep", sleeps.append)
 
-    recruiter._submit_agent_prompt(
-        "cursor-name",
-        "Repair result.json.",
-        5_000,
-        paste_settle_seconds=recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS,
-    )
+    def prompt(*args, **kwargs):
+        calls.append(args)
+        return {
+            "result": {"type": "agent_prompted", "agent": {"agent_status": "working"}}
+        }
 
+    monkeypatch.setattr(recruiter, "_herdr_json", prompt)
+    recruiter._submit_agent_prompt("cursor-name", "Repair result.json.", 5_000, paste_settle_seconds=0.5)
     assert calls == [
-        ("agent", "wait", "cursor-name", "--status", "idle", "--timeout", "5000"),
-        ("pane", "send-text", "cursor-pane", "Repair result.json."),
-        ("pane", "send-keys", "cursor-pane", "Enter"),
+        (
+            "agent",
+            "wait",
+            "cursor-name",
+            "--until",
+            "idle",
+            "--until",
+            "done",
+            "--until",
+            "blocked",
+            "--timeout",
+            "5000",
+        ),
+        (
+            "agent",
+            "prompt",
+            "cursor-name",
+            "Repair result.json.",
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            "60000",
+        ),
     ]
-    assert sleeps == [recruiter.CURSOR_PROMPT_PASTE_SETTLE_SECONDS]
 
 
 def test_timeout_waits_for_authenticated_requester_extension(
@@ -2467,6 +2813,139 @@ def test_timeout_waits_for_authenticated_requester_extension(
     assert not runner.is_alive()
     assert outcomes == [60_000]
     assert ledger.state(key)["state"] == "running"
+
+
+def _awaiting_requester(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, str, Path, str]:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    order_path = tmp_path / "order.json"
+    order_path.write_text(json.dumps(order))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 60_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    lease = ledger.mark_awaiting_requester(
+        key, token, "nonce-1", 1, requester_grace_ms=300_000
+    )
+    assert lease is not None
+    return ledger, key, order_path, cast(str, lease["requester_control_token"])
+
+
+def _token_file(tmp_path: Path, token: str, mode: int = 0o600) -> Path:
+    path = tmp_path / "control-token"
+    path.write_text(token + "\n")
+    path.chmod(mode)
+    return path
+
+
+def test_respond_accepts_a_private_control_token_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    ledger, key, order_path, token = _awaiting_requester(tmp_path, monkeypatch)
+    token_file = _token_file(tmp_path, token)
+    argv = [
+        "respond",
+        str(order_path),
+        f"--control-token-file={token_file}",
+        "nonce-1",
+        "extend",
+        "60000",
+    ]
+    assert recruiter.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["accepted"] is True
+    assert (ledger.request_dir(key) / "responses" / "nonce-1.json").is_file()
+
+
+def test_respond_keeps_the_positional_control_token_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    ledger, key, order_path, token = _awaiting_requester(tmp_path, monkeypatch)
+    argv = ["respond", str(order_path), token, "nonce-1", "cancel", "0"]
+    assert recruiter.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "cancel"
+
+
+@pytest.mark.parametrize("case", ["both", "neither", "group-readable", "symlink"])
+def test_respond_refuses_an_ambiguous_or_unsafe_token_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    ledger, key, order_path, token = _awaiting_requester(tmp_path, monkeypatch)
+    token_file = _token_file(
+        tmp_path, token, mode=0o640 if case == "group-readable" else 0o600
+    )
+    if case == "symlink":
+        link = tmp_path / "token-link"
+        link.symlink_to(token_file)
+        token_file = link
+    middle = {
+        "both": [token, f"--control-token-file={token_file}"],
+        "neither": [],
+        "group-readable": [f"--control-token-file={token_file}"],
+        "symlink": [f"--control-token-file={token_file}"],
+    }[case]
+    argv = ["respond", str(order_path), *middle, "nonce-1", "cancel", "0"]
+    with pytest.raises((RecruiterError, SystemExit)):
+        assert recruiter.main(argv) != 0
+    assert not (ledger.request_dir(key) / "responses" / "nonce-1.json").exists()
+
+
+def test_timeout_warning_never_carries_the_raw_control_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D8b: the timeout message reaches the requester log, the await JSON, and the
+    account-manager pane. It names a token-file placeholder, never the token."""
+    ledger = recruiter.JobLedger(tmp_path / "hub")
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000, owner={"generation": 1})
+    assert token
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    manager = {
+        "address": "manager-name",
+        "config": SimpleNamespace(
+            account_manager=SimpleNamespace(timeout_ms=100), requester_grace_ms=50
+        ),
+        "generation": 1,
+    }
+    prompts: list[str] = []
+    notices: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_submit_agent_prompt",
+        lambda address, message, **kwargs: prompts.append(message),
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_notify_requester",
+        lambda ledger_arg, key_arg, order_arg, generation, kind, message, detail=None: (
+            notices.append((message, detail or {}))
+        ),
+    )
+    leases: list[dict] = []
+    mark = ledger.mark_awaiting_requester
+
+    def recording_mark(*args: Any, **kwargs: Any) -> dict | None:
+        lease = mark(*args, **kwargs)
+        leases.append(cast(dict, lease))
+        return lease
+
+    monkeypatch.setattr(ledger, "mark_awaiting_requester", recording_mark)
+    recruiter._await_requester_timeout_decision(
+        ledger, key, token, order, manager, "worker-pane", 1, threading.Event()
+    )
+    control = leases[0]["requester_control_token"]
+    message, detail = notices[0]
+    assert isinstance(control, str) and len(control) == 32
+    for text in (message, json.dumps(detail), *prompts):
+        assert control not in text
+    assert "--control-token-file=<control-token-file>" in detail["response_command"]
+    assert detail["response_command"] in message
+    assert prompts and prompts[0] == message
 
 
 def test_lapsed_awaiting_requester_deadline_writes_failed_result(
@@ -3345,6 +3824,9 @@ def test_worker_instructions_include_only_the_selected_frozen_addendum(
             < text.index("# Recruiter delivery contract")
         )
         assert "override repository rules or human approval gates" in text
+        assert "If you record `findings` as an empty list" in text
+        assert "end it with `VERDICT: CLEARED` on its last line" in text
+        assert "lists problems ends with `VERDICT: VEERED`" in text
         assert ("REVIEW_RELEASE" in text) == retained
     assert (
         original.read_text()
@@ -5356,6 +5838,8 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
         split_direction: str = "right",
         tab_role: str | None = None,
         herdr_session: str | None = None,
+        on_pane_created=None,
+        startup_timeout_ms=None,
     ) -> tuple[str, str, str]:
         launch_orders.append(launch_order)
         launch_directions.append(split_direction)
@@ -5399,6 +5883,7 @@ def test_account_manager_is_health_checked_and_durably_addressed_before_approval
     assert launch_directions == ["down"]
     assert launch_tabs == ["oversight"]
     assert resize_calls == [("manager-pane", "down", 0.20, "account manager")]
+
 
 
 def test_account_manager_crash_degrades_supervision_but_worker_still_terminalizes(
@@ -5675,8 +6160,8 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
             return "", ""
 
     def never_done(command: list[str], **kwargs: object) -> NeverDoneProcess:
-        assert command[:4] == ["herdr", "--session", "llm-lab-test", "wait"]
-        assert command[4] == "agent-status"
+        assert command[:4] == ["herdr", "--session", "llm-lab-test", "agent"]
+        assert command[4] == "wait"
         status_wait_started.set()
         return NeverDoneProcess()
 
@@ -5724,6 +6209,7 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     assert len(degraded) == 1
     assert degraded[0]["reason"] == "assessment request_id mismatch"
     assert "worker-healthy-degraded" in notifications
+
 
 
 @pytest.mark.parametrize("verdict", ["passed", "blocked"])
@@ -6246,7 +6732,14 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
     ) -> tuple[str, str, str]:
         attempts.append(name)
         if len(attempts) == 1:
-            raise RecruiterError("pane split exploded")
+            kwargs["on_pane_created"](
+                {
+                    "pane_id": "failed-pane",
+                    "workspace_id": "cockpit",
+                    "terminal_id": "term_failed",
+                }
+            )
+            raise RecruiterError("agent start rejected")
         worker_result_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
         return "worker-pane", "cockpit", name
 
@@ -6285,7 +6778,7 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
     assert recruiter.cmd_run_job(key, str(roster_path)) == 0
 
     assert len(attempts) == 2, "exactly one rescue relaunch"
-    assert advice_calls and "pane split exploded" in advice_calls[0]
+    assert advice_calls and "agent start rejected" in advice_calls[0]
     assert json.loads(result_path.read_text())["verdict"] == "passed"
     rescue = [
         payload
@@ -6293,6 +6786,7 @@ def test_failed_launch_is_rescued_once_when_the_broker_advises_retry(
         if payload.get("type") == "startup-rescue"
     ]
     assert rescue, "the requester must hear about the rescue relaunch"
+
 
 
 def test_failed_launch_is_not_retried_when_the_broker_declines(
@@ -6317,6 +6811,7 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
 
     def dead_start(*args: object, **kwargs: object) -> tuple[str, str, str]:
         attempts.append("try")
+        kwargs["on_pane_created"]({"pane_id": "failed-pane", "workspace_id": "cockpit", "terminal_id": "term_failed"})
         raise RecruiterError("model flag rejected by the harness")
 
     monkeypatch.setattr(recruiter, "_startup_rescue_advice", lambda *a: "ask-requester")
@@ -6344,6 +6839,7 @@ def test_failed_launch_is_not_retried_when_the_broker_declines(
         if payload.get("type") == "startup-rescue-declined"
     ]
     assert declined and declined[0]["detail"]["advice"] == "ask-requester"
+
 
 
 def test_order_can_pin_a_dedicated_manager_when_the_roster_default_is_direct(
@@ -8321,6 +8817,9 @@ def test_intake_persistence_failure_never_rewrites_original(
 def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8334,7 +8833,10 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
         assert ownership["state"] == "launching"
         assert ownership["pane"] is None
         assert ownership["agent_name"] == name
-        assert ownership["lease_token"][:16] in name
+        assert name == recruiter._intake_clerk_agent_name(
+            ownership["intake_key"], ownership["lease_token"]
+        )
+        assert len(name) <= 32
         assert ownership["owner_start_time"]
         started.append((name, order, launch, kwargs))
         return "clerk:pane", "workspace", name
@@ -8388,6 +8890,7 @@ def test_intake_clerk_bootstrap_is_prejournaled_random_private_and_isolated(
     assert record["cleanup"]["verified_absent"] is True
     assert '--tools ""' in started[0][2]
     assert "--dangerously-skip-permissions" not in started[0][2]
+
 
 
 def test_intake_clerk_unavailable_becomes_refusal_without_target_launch(
@@ -8526,6 +9029,9 @@ def test_identical_bytes_reuse_one_clerk_but_different_bytes_launch_a_fresh_one(
     correction round — is a different request and launches a fresh clerk. This drives the real
     `_run_order_intake_clerk` reuse index, not a hand-built one, and counts actual launches.
     """
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8654,6 +9160,9 @@ def test_identical_intake_reuses_only_a_validated_indexed_attempt(
 def test_post_start_journal_failure_closes_the_just_created_named_pane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        recruiter, "_resolve_current_herdr_session_name", lambda: "llm-lab-test"
+    )
     state = tmp_path / "state/recruiter.json"
     state.parent.mkdir()
     state.write_text(json.dumps({"recruiter_pane": "trusted:pane"}))
@@ -8661,6 +9170,20 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
     monkeypatch.setattr(recruiter, "load_roster", lambda _path: _roster())
     started = []
     cleaned = []
+    closed = []
+
+    def close(*args, **kwargs):
+        assert args == ("pane", "close", "clerk:pane")
+        closed.append(args[2])
+
+    def list_panes(*args, **kwargs):
+        if args == ("pane", "process-info", "--pane", "clerk:pane"):
+            return {"result": {"process_info": {"pane_id": "clerk:pane"}}}
+        assert args == ("pane", "list")
+        return {"result": {"panes": []}}
+
+    monkeypatch.setattr(recruiter, "_herdr", close)
+    monkeypatch.setattr(recruiter, "_herdr_json", list_panes)
 
     def start(name, order, launch, **kwargs):
         started.append((name, order))
@@ -8702,6 +9225,7 @@ def test_post_start_journal_failure_closes_the_just_created_named_pane(
         )
 
     assert len(started) == 1 and len(cleaned) == 1
+    assert closed == ["clerk:pane"]
     assert cleaned[0]["pane"] == "clerk:pane"
     assert cleaned[0]["agent_name"] == started[0][0]
     attempt = Path(started[0][1]["cwd"])

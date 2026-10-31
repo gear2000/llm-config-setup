@@ -366,19 +366,24 @@ def test_the_first_action_watcher_relays_the_worker_address(
 
 
 def _claimed_request(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cwd: Path | None = None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cwd: Path | None = None, public_layout: bool = False
 ) -> tuple[Any, dict, str, Any]:
     """One submitted, claimed order with its lease manifest, hub outside the worktree."""
     monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
     ledger = recruiter.JobLedger()
     worktree = cwd or (tmp_path / "wt")
     worktree.mkdir(exist_ok=True)
-    instructions = worktree / "instructions.md"
+    request_dir = tmp_path / "public" / "requests" / "hold-test" if public_layout else worktree
+    request_dir.mkdir(parents=True, exist_ok=True)
+    instructions = request_dir / ("prompt.md" if public_layout else "instructions.md")
+    if public_layout:
+        for name in ("order.json", "request.json"):
+            (request_dir / name).write_text("{}\n")
     instructions.write_text("# Worker\n")
     order = _order(
         cwd=str(worktree),
         instructions_path=str(instructions),
-        result_path=str(worktree / "result.json"),
+        result_path=str(request_dir / "result.json"),
     )
     key, _created = ledger.submit(order)
     token = ledger.claim(
@@ -458,6 +463,67 @@ def test_poll_reports_a_malformed_closeout_once_and_keeps_waiting(
     assert watch.poll() is None
     events = _events(ledger, key)
     assert events.count("sentinel-closeout-invalid") == 1
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_poll_tightens_a_group_readable_closeout_to_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Sentinel writes closeout.json under its own umask; the Recruiter makes it
+    0600 like every other ledger file before it reads the claim."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    _stage_valid_result(manifest, order)
+    watch.closeout_path.write_text(json.dumps(_closeout(order)))
+    watch.closeout_path.chmod(0o664)
+    before = watch.closeout_path.stat()
+    assert watch.poll() == "complete"
+    after = watch.closeout_path.stat()
+    assert _mode(watch.closeout_path) == 0o600
+    # chmod moves ctime only: the stall-hold signature (ino, mtime, size) is unchanged.
+    assert (after.st_ino, after.st_mtime_ns, after.st_size) == (
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+    )
+
+
+def test_poll_tightens_a_malformed_closeout_and_archives_stay_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        recruiter, "_submit_agent_prompt", lambda address, message, **kwargs: None
+    )
+    watch = _watch(ledger, order, key, manifest)
+    watch.closeout_path.write_text("{ not json")
+    watch.closeout_path.chmod(0o664)
+    assert watch.poll() is None
+    assert _mode(watch.closeout_path) == 0o600
+    # A COMPLETE claim over an invalid bundle is archived as rejected: still 0600.
+    watch.closeout_path.unlink()
+    watch.closeout_path.write_text(json.dumps(_closeout(order)))
+    watch.closeout_path.chmod(0o664)
+    assert watch.poll() is None
+    rejected = watch.closeout_path.with_name("closeout.rejected-1.json")
+    assert _mode(rejected) == 0o600
+
+
+def test_poll_never_follows_a_symlinked_closeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps(_closeout(order)))
+    target.chmod(0o644)
+    watch.closeout_path.symlink_to(target)
+    assert watch.poll() is None
+    assert _mode(target) == 0o644
+    assert "sentinel-closeout-invalid" in _events(ledger, key)
 
 
 def test_a_never_started_closeout_raises_the_typed_liftoff_fault(
@@ -714,6 +780,36 @@ def test_a_complete_closeout_over_a_valid_bundle_ends_the_wait(
     _stage_valid_result(manifest, order)
     watch.closeout_path.write_text(json.dumps(_closeout(order)))
     assert watch.poll() == "complete"
+
+
+@pytest.mark.parametrize("tail", ["VERDICT: CLEARED", "VERDICT: VEERED", "No verdict."])
+def test_complete_closeout_checks_empty_findings_against_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tail: str
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    _stage_valid_result(manifest, order)
+    result_path = manifest.artifact("result").staging_path
+    result = json.loads(result_path.read_text())
+    result["findings"] = []
+    result_path.write_text(json.dumps(result))
+    manifest.artifact("compacted").staging_path.write_text(f"# Review\n\n{tail}\n")
+    manifest.artifact("handoff").staging_path.write_text("# CLEARED\n")
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        recruiter, "_submit_agent_prompt",
+        lambda address, message, **kwargs: prompts.append(message),
+    )
+    watch.closeout_path.write_text(json.dumps(_closeout(order)))
+
+    if tail == "VERDICT: CLEARED":
+        assert watch.poll() == "complete"
+        assert not prompts
+        assert "sentinel-complete-rejected" not in _events(ledger, key)
+    else:
+        assert watch.poll() is None
+        assert "verdict/artifact consistency" in prompts[0]
+        assert "sentinel-complete-rejected" in _events(ledger, key)
 
 
 def test_an_invalid_complete_is_rejected_with_one_more_landing_round(
@@ -1681,7 +1777,10 @@ def test_the_persona_pre_check_names_the_exact_missing_paths(
     (other / ".claude/agents" / f"{agent}.md").write_text("persona\n")
     assert recruiter._sentinel_persona_missing(command, str(other)) is None
     # A command with no --agent needs no persona file.
-    assert recruiter._sentinel_persona_missing("claude --model claude-haiku-5-5", str(cwd)) is None
+    assert (
+        recruiter._sentinel_persona_missing("claude --model claude-haiku-5-5", str(cwd))
+        is None
+    )
 
 
 def test_a_failed_sentinel_hire_degrades_supervision_and_notifies_once(
@@ -2190,6 +2289,50 @@ def test_drill_dead_sentinel_falls_to_the_hard_timeout_backstop(
     assert "sentinel-closeout" not in _events(ledger, key)
     assert drill.closed == ["worker-pane", "sentinel-pane"]
     assert receipt["cleanup"]["verified_absent"] is True
+    # The defensive final close finds no live Sentinel; the receipt still reports the
+    # pane that really was hired and closed, never `not-created`.
+    assert receipt["cleanup"]["sentinel"] == {
+        "status": "closed",
+        "worker_pane": "sentinel-pane",
+        "verified_absent": True,
+    }
+
+
+def test_closing_the_sentinel_tightens_a_closeout_the_watch_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """A closeout written after the watch's last read (bypass-at-exit skips the read)
+    still ends up 0600 once its Sentinel pane is closed."""
+    ledger, order, key, roster_path, drill = _drill_job(
+        tmp_path, monkeypatch, timeout_ms=400, grace_ms=50
+    )
+    late = recruiter._sentinel_closeout_path(ledger, key, 1)
+    close = recruiter._close_worker_pane
+
+    def close_after_a_late_write(pane: str, **kwargs: object) -> dict:
+        if pane == "sentinel-pane":
+            late.parent.mkdir(parents=True, exist_ok=True)
+            late.write_text(json.dumps(_closeout(order)))
+            late.chmod(0o664)
+        return close(pane, **kwargs)
+
+    monkeypatch.setattr(recruiter, "_close_worker_pane", close_after_a_late_write)
+    recruiter.cmd_run_job(key, str(roster_path))
+    assert "sentinel-pane" in drill.closed
+    assert _mode(late) == 0o600
+
+
+def test_sentinel_receipt_cleanup_reports_the_real_close_not_the_defensive_one() -> None:
+    closed = {"status": "closed", "worker_pane": "s1", "verified_absent": True}
+    absent = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+    failed = {"status": "cleanup-failed", "worker_pane": "s0", "verified_absent": False}
+    later = {"status": "already-absent", "worker_pane": "s2", "verified_absent": True}
+    pick = recruiter._sentinel_receipt_cleanup
+    assert pick([closed, absent]) is closed
+    assert pick([closed, later, absent]) is later
+    assert pick([failed, closed, absent]) is failed
+    assert pick([absent]) is absent
+    assert pick([])["status"] == "not-created"
 
 
 @pytest.mark.parametrize("verdict", ["passed", "blocked"])
@@ -2212,7 +2355,9 @@ def test_drill_complete_closeout_publishes_worker_bundle_through_validation(
                 raise recruiter.RecruiterError("sentinel close transport failed")
             return close_pane(pane, **kwargs)
 
-        monkeypatch.setattr(recruiter, "_close_worker_pane", close_with_sentinel_failure)
+        monkeypatch.setattr(
+            recruiter, "_close_worker_pane", close_with_sentinel_failure
+        )
 
     outcome: list[int] = []
     runner = threading.Thread(
@@ -2234,7 +2379,9 @@ def test_drill_complete_closeout_publishes_worker_bundle_through_validation(
     }
     staging.write_text(json.dumps(worker_result))
     if verdict == "blocked":
-        staging.with_name("compacted.md").write_text("# Worker context\n\nInput is absent.\n")
+        staging.with_name("compacted.md").write_text(
+            "# Worker context\n\nInput is absent.\n"
+        )
         staging.with_name("handoff.md").write_text("# Handoff\n\nAsk for the input.\n")
     sentinel_question = "Which input should be used?" if verdict == "blocked" else None
     _pre_write_closeout(
@@ -2263,12 +2410,18 @@ def test_drill_complete_closeout_publishes_worker_bundle_through_validation(
     if cleanup_fails:
         assert receipt["state"] == "cleanup-failed"
         assert "sentinel cleanup failed" in published["reason"]
-        archived = list((ledger.request_dir(key) / "artifacts").glob("*/review/overridden/*"))
+        archived = list(
+            (ledger.request_dir(key) / "artifacts").glob("*/review/overridden/*")
+        )
         assert len(archived) == 1
         assert json.loads((archived[0] / "result.json").read_text()) == worker_result
         if verdict == "blocked":
-            assert (archived[0] / "compacted.md").read_text() == "# Worker context\n\nInput is absent.\n"
-            assert (archived[0] / "handoff.md").read_text() == "# Handoff\n\nAsk for the input.\n"
+            assert (
+                archived[0] / "compacted.md"
+            ).read_text() == "# Worker context\n\nInput is absent.\n"
+            assert (
+                archived[0] / "handoff.md"
+            ).read_text() == "# Handoff\n\nAsk for the input.\n"
         assert {
             item["kind"]: item["bytes"]
             for item in published["epilogue"]["staged_artifacts"]
@@ -2288,8 +2441,14 @@ def test_drill_complete_closeout_publishes_worker_bundle_through_validation(
         }
     if verdict == "blocked" and not cleanup_fails:
         publication = order["artifact_publication"]
-        assert Path(publication["compacted_path"]).read_text() == "# Worker context\n\nInput is absent.\n"
-        assert Path(publication["handoff_path"]).read_text() == "# Handoff\n\nAsk for the input.\n"
+        assert (
+            Path(publication["compacted_path"]).read_text()
+            == "# Worker context\n\nInput is absent.\n"
+        )
+        assert (
+            Path(publication["handoff_path"]).read_text()
+            == "# Handoff\n\nAsk for the input.\n"
+        )
 
 
 # --- Stall nudge ladder (hub-owned "continue") ---------------------------------
@@ -3471,3 +3630,338 @@ def test_cancellation_during_last_herdr_query_is_rechecked_before_send(
     watch._attempt_stall_nudge("status evidence", trigger="status")
     assert not prompts
     assert _event(ledger, key, "nudge")["outcome"] == "aborted"
+
+
+@pytest.fixture
+def live_stalled_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request):
+    """Real public layout and process tree, with the nudge cap already spent."""
+    import signal
+    import sys
+
+    wall_time = time.time
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch, public_layout=True)
+    watch, prompts = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    _exhaust_nudges(watch, monkeypatch)
+    monkeypatch.setattr(recruiter.nudge_authority.time, "time", wall_time)
+    mode = getattr(request, "param", "none")
+    child_file = tmp_path / "child.pid"
+    action_ns = time.time_ns() - 2_000_000_000
+    child_code = "while True: pass" if mode in ("cpu", "old-cpu") else "import time; time.sleep(30)"
+    argv = [
+        sys.executable, "-c",
+        "import subprocess,sys; from pathlib import Path; "
+        "p=subprocess.Popen([sys.executable,'-c',sys.argv[2],'codex-code-mode-host']); "
+        "Path(sys.argv[1]).write_text(str(p.pid)); p.wait()",
+        str(child_file), child_code,
+    ] if mode != "none" else ["sleep", "30"]
+    worker = subprocess.Popen(argv, start_new_session=True)
+    try:
+        if mode != "none":
+            deadline = time.monotonic() + 3
+            while not child_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert child_file.exists()
+        if mode != "none":
+            time.sleep(0.1)
+        if mode == "old-cpu":
+            action_ns = time.time_ns()
+        ledger._event(key, recruiter.FIRST_ACTION_EVENT, at_ns=action_ns,
+                      attempt=1, worker_pane="worker-pane")
+        health = {
+            "pane_id": "worker-pane",
+            "process_pid": worker.pid,
+            "process_start_time": recruiter._process_start_time(worker.pid),
+            "attempt": 1,
+            "generation": 1,
+        }
+        assert health["process_start_time"]
+        recruiter.JobLedger._write_json(ledger.request_dir(key) / "worker-health.json", health)
+        # The normal poll samples jobs before any Sentinel closeout exists.
+        assert watch.poll() is None
+        if mode != "none":
+            time.sleep(0.15)
+        watch._next_stall_probe = 0
+        watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+        yield ledger, order, key, manifest, watch, worker, child_file
+    finally:
+        if worker.poll() is None:
+            os.killpg(worker.pid, signal.SIGTERM)
+        worker.wait(timeout=3)
+
+
+def test_stalled_exact_live_worker_with_recent_staging_is_held(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    partial = (
+        manifest.artifact("result").staging_path.parent / "partial" / "progress.txt"
+    )
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_text("Still working.\n")
+    assert watch.poll() is None
+    assert worker.poll() is None and watch.closeout_path.is_file()
+    holds = [e for e in ledger.events(key) if e["event"] == "worker-stall-held"]
+    assert holds[-1]["recent_file"] == str(partial)
+    assert holds[-1]["worker_pid"] == worker.pid
+    assert (
+        len(json.loads(_nudge_state_path(watch).read_text())["continue"]["nudges"]) == 3
+    )
+
+
+@pytest.mark.parametrize("tail", ["VERDICT: VEERED", "No verdict."])
+def test_stalled_hold_does_not_accept_empty_findings_until_report_is_cleared(
+    live_stalled_worker: Any, tail: str
+) -> None:
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    _stage_valid_result(manifest, order)
+    result_path = manifest.artifact("result").staging_path
+    result = json.loads(result_path.read_text())
+    result["findings"] = []
+    result_path.write_text(json.dumps(result))
+    report = manifest.artifact("compacted").staging_path
+    report.write_text(f"# Review\n\n{tail}\n")
+    manifest.artifact("handoff").staging_path.write_text("# CLEARED\n")
+
+    assert watch._terminal_valid() is False
+    assert watch.poll() is None
+    assert watch.closeout_path.is_file() and worker.poll() is None
+    assert "worker-stall-held" in _events(ledger, key)
+    assert recruiter._salvage_staged_result_state(result_path, order, manifest) == "inconsistent"
+
+    report.write_text("# Review\n\nVERDICT: CLEARED\n")
+    watch._next_stall_probe = 0
+    assert watch._terminal_valid() is True
+    assert watch.poll() is None
+    assert not watch.closeout_path.exists()
+    assert "worker-nudge-superseded" in _events(ledger, key)
+    assert "worker-stall-released" in _events(ledger, key)
+    assert recruiter._salvage_staged_result_state(result_path, order, manifest) == "valid"
+    assert json.loads(result_path.read_text())["findings"] == []
+
+
+@pytest.mark.parametrize("live_stalled_worker", ["cpu"], indirect=True)
+def test_stalled_exact_live_worker_with_descendant_is_held(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, child_file = live_stalled_worker
+    assert watch.poll() is None
+    holds = [e for e in ledger.events(key) if e["event"] == "worker-stall-held"]
+    assert holds[-1]["recent_file"] is None
+    assert holds[-1]["descendant_pid"] == int(child_file.read_text())
+
+
+@pytest.mark.parametrize("probe_overruns,already_held", [(False, True), (True, True), (True, False)])
+def test_stalled_hold_does_not_extend_hard_wait_deadline(
+    live_stalled_worker, monkeypatch, probe_overruns, already_held
+):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+    if already_held:
+        assert watch.poll() is None
+    clock = [1000.0]
+    monkeypatch.setattr(recruiter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(recruiter.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    if probe_overruns:
+        watch._next_stall_probe = 0
+        monkeypatch.setattr(watch, "_probe_stall_job", lambda: clock.__setitem__(0, clock[0] + 0.031))
+    with pytest.raises(recruiter.AgentWaitTimeout):
+        recruiter._wait_for_interactive_completion(
+            "worker-pane",
+            "claude",
+            30,
+            threading.Event(),
+            sentinel_watch=watch,
+            herdr_session="default",
+        )
+    if already_held:
+        assert _event(ledger, key, "worker-stall-released")["reason"] == "hard wait deadline reached"
+    else:
+        assert "worker-stall-held" not in _events(ledger, key)
+    assert worker.poll() is None
+
+
+def test_dead_worker_is_not_held_by_recent_staging(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+    worker.terminate()
+    worker.wait(timeout=3)
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert not any(e["event"] == "worker-stall-held" for e in ledger.events(key))
+
+
+def test_stalled_hold_ends_when_files_expire(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+    assert watch.poll() is None
+    os.utime(path, (time.time() - 1000, time.time() - 1000))
+    watch._next_stall_probe = 0
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert worker.poll() is None
+
+
+def test_reused_pid_does_not_hold_stalled_worker(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    health_path = ledger.request_dir(key) / "worker-health.json"
+    health = json.loads(health_path.read_text())
+    health["process_start_time"] = "different-process-birth"
+    health_path.write_text(json.dumps(health))
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert not any(e["event"] == "worker-stall-held" for e in ledger.events(key))
+
+
+def test_fresh_hub_request_files_do_not_hold_live_worker(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    public_dir = manifest.artifact("result").public_path.parent
+    assert public_dir.parent.name == "requests"
+    assert {p.name for p in public_dir.iterdir()} == {"prompt.md", "order.json", "request.json"}
+    assert all(p.stat().st_mtime > time.time() - 900 for p in public_dir.iterdir())
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-stall-held" not in _events(ledger, key)
+    assert worker.poll() is None
+
+
+@pytest.mark.parametrize("live_stalled_worker", ["helper", "old-cpu"], indirect=True)
+def test_resident_or_pre_action_descendant_does_not_hold(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, child_file = live_stalled_worker
+    assert recruiter._process_start_time(int(child_file.read_text())) is not None
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-stall-held" not in _events(ledger, key)
+
+
+def test_blocked_worker_is_not_held_by_recent_staging(live_stalled_worker, monkeypatch):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+
+    def blocked(*args, **kwargs):
+        result = _nudge_herdr(*args, **kwargs)
+        if args[:2] == ("pane", "get"):
+            result["result"]["pane"]["agent_status"] = "blocked"
+        return result
+
+    monkeypatch.setattr(recruiter, "_herdr_json", blocked)
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-stall-held" not in _events(ledger, key)
+
+
+def test_hold_notifies_once_and_probes_on_15_second_cadence(live_stalled_worker, monkeypatch):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+    clock = [time.monotonic()]
+    monkeypatch.setattr(recruiter.time, "monotonic", lambda: clock[0])
+    baseline = len(ledger.events(key))
+    assert watch.poll() is None
+    entered = len(ledger.events(key))
+    probes = []
+    original = watch._probe_stall_job
+    monkeypatch.setattr(watch, "_probe_stall_job", lambda: (probes.append(clock[0]), original()))
+    for _ in range(3):
+        clock[0] += 1
+        assert watch.poll() is None
+    assert len(ledger.events(key)) - entered <= 2
+    assert not probes
+    clock[0] += 12
+    path.write_text("changed partial")
+    assert watch.poll() is None
+    assert len(probes) == 1
+    new = ledger.events(key)[baseline:]
+    assert sum(e["event"] == "sentinel-closeout" for e in new) == 1
+    assert sum(e["event"] == "nudge" and e["outcome"] == "cap-exhausted" for e in new) == 1
+    assert sum(e["event"] == "worker-stall-held" for e in new) == 1
+    notices = [e for e in new if e["event"] == "requester-message" and e["message_type"] == "worker-stall-held"]
+    assert len(notices) == 1
+    assert "recent worker file" in Path(notices[0]["message_path"]).read_text()
+    os.utime(path, (time.time() - 1000, time.time() - 1000))
+    clock[0] += 15
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "no recent worker files" in _event(ledger, key, "worker-stall-released")["reason"]
+
+
+def test_cancellation_releases_hold_before_next_probe(live_stalled_worker):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    path = manifest.artifact("result").staging_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("partial")
+    assert watch.poll() is None
+    state_path = ledger.request_dir(key) / "state/latest.json"
+    state = json.loads(state_path.read_text())
+    state["state"] = "cancelling"
+    state_path.write_text(json.dumps(state))
+    assert watch.poll() is None
+    assert _event(ledger, key, "worker-stall-released")["reason"] == "request state is cancelling"
+
+
+@pytest.mark.parametrize("error", [subprocess.CalledProcessError(1, "ps"), subprocess.TimeoutExpired("ps", 2)])
+def test_failed_process_snapshot_is_no_hold_signal(live_stalled_worker, monkeypatch, error):
+    ledger, order, key, manifest, watch, worker, _ = live_stalled_worker
+    run = subprocess.run
+
+    def fail_ps(argv, **kwargs):
+        if argv[0] == "ps":
+            raise error
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(recruiter.subprocess, "run", fail_ps)
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert "worker-stall-held" not in _events(ledger, key)
+
+
+def test_unconfirmed_nudge_spends_rung_without_claiming_delivery(tmp_path, monkeypatch):
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    submit = recruiter._submit_agent_prompt
+    watch, _ = _nudgeable(ledger, order, key, manifest, monkeypatch)
+    monkeypatch.setattr(recruiter, "_submit_agent_prompt", submit)
+    clock = [1000.0]
+    monkeypatch.setattr(recruiter.time, "time", lambda: clock[0])
+    monkeypatch.setattr(recruiter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(recruiter.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    sent = []
+
+    def herdr(*args, **kwargs):
+        if args[:2] == ("agent", "prompt"):
+            sent.append(args[2:4])
+            if args[2] == "worker-address":
+                raise recruiter.RecruiterError("agent_prompt_stalled: Enter lost")
+            return {"result": {"agent": {"agent_status": "working"}}}
+        if args[:2] == ("agent", "wait"):
+            return {"result": {"agent": {"agent_status": "idle", "completion_seq": 7}}}
+        reply = _nudge_herdr(*args, **kwargs)
+        if args[:2] == ("agent", "get"):
+            reply["result"]["agent"].update(agent_status="idle", completion_seq=7)
+        return reply
+
+    monkeypatch.setattr(recruiter, "_herdr_json", herdr)
+    # Old scrollback and an unsent composer both show the exact one-word payload.
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *a, **kw: "continue")
+    for ordinal in range(1, 4):
+        watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+        assert watch.poll() is None
+        state = json.loads(_nudge_state_path(watch).read_text())["continue"]
+        assert len(state["nudges"]) == ordinal
+        assert all(n["state"] == "delivery-unconfirmed" and not n["delivered"] for n in state["nudges"])
+        assert _event(ledger, key, "nudge")["outcome"] == "delivery-unconfirmed"
+        clock[0] += 1000
+    watch.closeout_path.write_text(json.dumps(_corroborated_stalled(order)))
+    with pytest.raises(recruiter.SentinelStalledError):
+        watch.poll()
+    assert _event(ledger, key, "nudge")["outcome"] == "cap-exhausted"
+    assert [text for target, text in sent if target == "worker-address"] == ["continue"] * 3
+    notices = [text for target, text in sent if target == "sentinel-address"]
+    assert len(notices) == 3 and all("delivery is unconfirmed" in text for text in notices)
+    assert "worker-nudge-delivered" not in _events(ledger, key)

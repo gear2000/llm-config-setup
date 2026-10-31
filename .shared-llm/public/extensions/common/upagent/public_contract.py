@@ -149,7 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
         "respond", help="answer the current fenced timeout decision"
     )
     respond.add_argument("--request", required=True)
-    respond.add_argument("--control-token", required=True)
+    respond_token = respond.add_mutually_exclusive_group(required=True)
+    respond_token.add_argument("--control-token")
+    respond_token.add_argument("--control-token-file")
     respond.add_argument("--nonce", required=True)
     respond.add_argument("--action", required=True, choices=("extend", "cancel"))
     respond.add_argument("--extension-ms", required=True, type=int)

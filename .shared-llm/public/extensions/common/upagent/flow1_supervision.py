@@ -156,19 +156,50 @@ class Panes:
 
     def inspect(self, owner: dict) -> tuple[dict, dict, list]:
         pane = self.rpc("pane", "get", owner["pane_id"])["result"]["pane"]
-        agent = self.rpc("agent", "get", owner["agent_name"])["result"]["agent"]
+        # 0.9.5 cannot name a shell waiting on the controller's FIFO gate. During
+        # that startup transaction, terminal + exact process birth/argv owns cleanup.
+        if owner.get("gate_script"):
+            agent = {}
+        else:
+            try:
+                agent = self.rpc("agent", "get", owner["agent_name"])["result"]["agent"]
+            except self.recruiter.RecruiterError as error:
+                if "agent_not_found" not in str(error):
+                    raise
+                # 0.9.5 clears the name when its occupant exits. Cleanup still needs
+                # the recorded terminal and process identities; absence is not ownership.
+                agent = {}
         processes = self.rpc("pane", "process-info", "--pane", owner["pane_id"])[
             "result"
         ]["process_info"].get("foreground_processes", [])
         return pane, agent, processes
 
-    def capture(self, pane_id: str, name: str) -> dict:
+    def capture(self, pane_id: str, name: str, *, gate_script: Path | None = None) -> dict:
         owner = {
             "pane_id": pane_id,
             "agent_name": name,
             "workspace_id": self.receipt["workspace_id"],
             "herdr_session": self.receipt["herdr_session"],
         }
+        pane = self.rpc("pane", "get", pane_id)["result"]["pane"]
+        if pane.get("terminal_id"):
+            owner["terminal_id"] = pane["terminal_id"]
+        info = self.rpc("pane", "process-info", "--pane", pane_id)["result"][
+            "process_info"
+        ]
+        shell_pid = info.get("shell_pid")
+        shell_birth = process.process_start_time(shell_pid)
+        if shell_birth:
+            owner.update(
+                shell_pid=shell_pid,
+                shell_birth=shell_birth,
+                shell_argv=process.process_cmdline(shell_pid),
+            )
+        if gate_script is not None:
+            terminal_id = pane.get("terminal_id")
+            if not isinstance(terminal_id, str) or not terminal_id:
+                raise SupervisionError("gated shell has no terminal identity")
+            owner.update(gate_script=str(gate_script), terminal_id=terminal_id)
         pane, agent, processes = self.inspect(owner)
         if not self.matches(owner, pane, agent):
             raise SupervisionError("pane/agent launch identity mismatch")
@@ -184,6 +215,17 @@ class Panes:
             ),
             processes[0],
         )
+        if gate_script is not None:
+            foreground = next(
+                (
+                    item
+                    for item in processes
+                    if str(gate_script) in str(item.get("cmdline", ""))
+                ),
+                None,
+            )
+            if foreground is None:
+                raise SupervisionError("gated shell is not running the recorded startup script")
         pid = foreground.get("pid")
         stamp = process.process_start_time(pid)
         argv = process.process_cmdline(pid)
@@ -198,6 +240,19 @@ class Panes:
         Refresh argv only inside that startup transaction, and only for the
         same pane/agent and exact process birth. Finish never uses this rule.
         """
+        if owner.get("gate_script"):
+            pane, agent, processes = self.inspect(owner)
+            stamp = process.process_start_time(owner["pid"])
+            if (
+                not self.matches(owner, pane, agent)
+                or stamp != owner["process_start_time"]
+                or not any(item.get("pid") == owner["pid"] for item in processes)
+            ):
+                raise SupervisionError("startup process ownership changed")
+            argv = process.process_cmdline(owner["pid"])
+            if not argv:
+                raise SupervisionError("startup process has no argv identity")
+            return {**owner, "argv": argv, "argv_marker": argv[0]}
         current = self.capture(owner["pane_id"], owner["agent_name"])
         if (
             current["pid"] != owner["pid"]
@@ -208,6 +263,21 @@ class Panes:
 
     @staticmethod
     def matches(owner: dict, pane: dict, agent: dict) -> bool:
+        if owner.get("gate_script"):
+            return (
+                pane.get("pane_id") == owner.get("pane_id")
+                and pane.get("workspace_id") == owner.get("workspace_id")
+                and pane.get("terminal_id") == owner.get("terminal_id")
+            )
+        if not agent:
+            return (
+                bool(owner.get("terminal_id"))
+                and pane.get("pane_id") == owner.get("pane_id")
+                and pane.get("workspace_id") == owner.get("workspace_id")
+                and pane.get("terminal_id") == owner["terminal_id"]
+                and not pane.get("agent_name")
+                and not pane.get("agent")
+            )
         return (
             pane.get("pane_id") == owner.get("pane_id")
             and pane.get("workspace_id") == owner.get("workspace_id")
@@ -244,7 +314,16 @@ class Panes:
         # An exited process may leave an owned, empty PTY. A replacement process
         # or a reused PID never authorizes closing it.
         if stamp is None:
-            verified = not processes and bool(owner.get("process_start_time"))
+            shell_pid = owner.get("shell_pid")
+            original_shell = (
+                not agent
+                and shell_pid is not None
+                and process.process_start_time(shell_pid) == owner.get("shell_birth")
+                and process.process_cmdline(shell_pid) == owner.get("shell_argv")
+                and bool(processes)
+                and all(p.get("pid") == shell_pid for p in processes)
+            )
+            verified = (not processes or original_shell) and bool(owner.get("process_start_time"))
         else:
             verified = (
                 stamp == owner.get("process_start_time")
@@ -344,7 +423,7 @@ def launch_role(
     command = management.render_role_command(
         role, brief_path, panes.receipt["cwd"], output
     )
-    name = "flow1-" + directory.name + "-" + uuid.uuid4().hex[:16]
+    name = panes.recruiter._safe_agent_name("flow1-" + directory.name, uuid.uuid4().hex, number)
     launch = {
         "state": "launching",
         "agent_name": name,
@@ -358,26 +437,27 @@ def launch_role(
         "command": command,
     }
     write(directory / "launch.json", launch)
-    anchor = panes.rpc("pane", "get", panes.receipt["implementer_pane"])["result"][
-        "pane"
-    ]
-    response = panes.rpc(
-        "agent",
-        "start",
+
+    def record_created(pane: dict) -> None:
+        launch.update(
+            pane_id=pane["pane_id"],
+            terminal_id=pane.get("terminal_id"),
+            state="created",
+        )
+        write(directory / "launch.json", launch)
+
+    pane_id, _, _ = panes.recruiter._start_herdr_agent(
         name,
-        "--cwd",
-        panes.receipt["cwd"],
-        "--tab",
-        anchor["tab_id"],
-        "--split",
-        "down",
-        "--no-focus",
-        "--",
-        "bash",
-        "-lc",
+        {
+            "cwd": panes.receipt["cwd"],
+            "cockpit_pane": panes.receipt["implementer_pane"],
+        },
         command,
+        split_direction="down",
+        herdr_session=panes.receipt["herdr_session"],
+        on_pane_created=record_created,
     )
-    launch["pane_id"] = response["result"]["agent"]["pane_id"]
+    launch["pane_id"] = pane_id
     write(directory / "launch.json", launch)
     owner = panes.capture(launch["pane_id"], name)
     launch.update(ownership=owner, state="started")

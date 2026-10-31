@@ -16,7 +16,7 @@ HERE = Path(__file__).parent.resolve()
 ROOT = HERE.parents[4]
 
 HERDR = r"""
-import fcntl, json, os, signal, subprocess, sys, time
+import fcntl, json, os, shlex, signal, subprocess, sys, time
 from pathlib import Path
 root = Path(os.environ['FLOW1_FAKE'])
 args = sys.argv[1:]
@@ -35,29 +35,43 @@ with (root/'lock').open('a+') as lock:
     elif args[:2] == ['pane','list']:
         response = {'panes': list(state.values())}
     elif args[:2] == ['agent','get']:
-        p = next((p for p in state.values() if p['agent_name'] == args[2]), None)
+        p = next((p for p in state.values() if p.get('agent_name') == args[2] or (p['pane_id'] == args[2] and p.get('agent_name'))), None)
         if p is None:
             print('agent_not_found', file=sys.stderr); sys.exit(1)
-        response = {'agent': {'name': p['agent_name'], 'workspace_id': 'workspace', 'pane_id': p['pane_id']}}
+        response = {'agent': {'name': p['agent_name'], 'workspace_id': 'w1', 'pane_id': p['pane_id']}}
     elif args[:2] == ['pane','process-info']:
         p = state[args[-1]]
         try:
             command = Path('/proc/'+str(p['pid'])+'/cmdline').read_bytes().replace(b'\0', b' ').decode()
         except FileNotFoundError:
             command = ''
-        response = {'process_info': {'foreground_processes': [{'pid': p['pid'], 'name': p['agent'], 'cmdline': command}] if command else []}}
+        if command:
+            state[args[-1]]['agent'] = 'claude' if '/claude ' in command else ('codex' if '/codex ' in command else 'bash')
+        response = {'type': 'pane_process_info', 'process_info': {'foreground_processes': [{'pid': p['pid'], 'name': state[args[-1]]['agent'], 'cmdline': command}] if command else []}}
+    elif args[:2] == ['pane','split']:
+        pane = 'w1:p' + str(time.time_ns())
+        cwd = args[args.index('--cwd') + 1]
+        state[pane] = {'pane_id': pane, 'terminal_id': 'terminal-' + pane,
+                       'agent_name': None, 'workspace_id': 'w1', 'tab_id': 'w1:t1',
+                       'cwd': cwd, 'foreground_cwd': cwd, 'agent': None, 'agent_status': None}
+        response = {'type': 'pane_info', 'pane': state[pane]}
+    elif args[:2] == ['agent','rename']:
+        pane = args[2]
+        state[pane]['agent_name'] = args[3]
+        # The controller's FIFO gate execs Claude in the same process.
+        state[pane]['agent'] = 'claude' if 'implementer' in args[3] else state[pane]['agent']
+        state[pane]['agent_status'] = 'working'
+        response = {'type': 'agent_info', 'agent': {'name': args[3], 'pane_id': pane, 'workspace_id': 'w1'}}
     elif args[:2] == ['agent','start']:
-        name = args[2]
-        cwd = args[args.index('--cwd')+1]
-        command = args[args.index('--')+1:]
+        pane = args[args.index('--pane') + 1]
+        kind = args[args.index('--kind') + 1]
+        command = [kind, *args[args.index('--')+1:]]
         with (root/'children.log').open('a') as log:
-            p = subprocess.Popen(command, cwd=cwd, env=os.environ.copy(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        with (root/'pids').open('a') as log: log.write(str(p.pid)+'\n')
+            child = subprocess.Popen(command, cwd=state[pane]['cwd'], env=os.environ.copy(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        with (root/'pids').open('a') as log: log.write(str(child.pid)+'\n')
         time.sleep(.08)
-        pane = 'pane-'+name
-        agent = 'claude' if name.startswith('plan-implementer') else 'codex'
-        state[pane] = {'pane_id': pane, 'agent_name': name, 'workspace_id': 'workspace', 'tab_id': 'control', 'cwd': cwd, 'foreground_cwd': cwd, 'agent': agent, 'agent_status': 'working', 'pid': p.pid}
-        response = {'agent': {'name': name, 'pane_id': pane, 'workspace_id': 'workspace'}}
+        state[pane].update(agent_name=args[2], agent=kind, agent_status='idle', pid=child.pid)
+        response = {'type': 'agent_started', 'agent': {'name': args[2], 'pane_id': pane, 'workspace_id': 'w1', 'agent_status': 'idle'}}
     elif args[:2] == ['pane','close']:
         p = state.pop(args[2], None)
         if p:
@@ -65,13 +79,24 @@ with (root/'lock').open('a+') as lock:
             except ProcessLookupError: pass
         response = {'closed': True}
     elif args[:2] == ['tab','list']:
-        response = {'tabs': [{'tab_id': 'control', 'label': 'control'}]}
+        response = {'tabs': [{'tab_id': 'w1:t1', 'label': 'control'}]}
     elif args[:2] == ['pane','run']:
+        command = shlex.split(args[3])
+        if command[0] == 'exec': command = command[1:]
+        pane = args[2]
+        with (root/'children.log').open('a') as log:
+            child = subprocess.Popen(command, cwd=state[pane]['cwd'], env=os.environ.copy(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        with (root/'pids').open('a') as log: log.write(str(child.pid)+'\n')
+        state[pane].update(pid=child.pid, agent=Path(command[0]).name, agent_status='working')
+        time.sleep(.08)
+    elif args[:2] == ['agent','prompt']:
         with (root/'prompts').open('a') as stream: stream.write(json.dumps(args)+'\n')
     else:
         raise RuntimeError('unsupported fake Herdr: '+repr(args))
     (root/'panes.json').write_text(json.dumps(state))
-    print(json.dumps({'result': response}))
+    response.setdefault('type', {('pane', 'get'): 'pane_info', ('pane', 'list'): 'pane_list',
+                                  ('agent', 'get'): 'agent_info', ('tab', 'list'): 'tab_list'}.get(tuple(args[:2]), 'ok'))
+    print(json.dumps({'id': 'cli:' + ':'.join(args[:2]), 'result': response}))
 """
 
 MODEL = r"""
@@ -98,11 +123,11 @@ def cli(tmp_path):
     (tmp_path / "panes.json").write_text(
         json.dumps(
             {
-                "hil": {
-                    "pane_id": "hil",
-                    "agent_name": "hil",
-                    "workspace_id": "workspace",
-                    "tab_id": "control",
+                "w1:p1": {
+                    "pane_id": "w1:p1",
+                    "agent_name": "w1:p1",
+                    "workspace_id": "w1",
+                    "tab_id": "w1:t1",
                     "cwd": str(tmp_path),
                 }
             }
@@ -137,7 +162,7 @@ def cli(tmp_path):
         "UPAGENT_HUB_DIR": str(tmp_path / "ledger"),
         "UPAGENT_STATE": str(tmp_path / "service.json"),
         "HERDR_ENV": "1",
-        "HERDR_PANE_ID": "hil",
+        "HERDR_PANE_ID": "w1:p1",
         "HERDR_SESSION": "test-flow1",
         "HERDR_SOCKET_PATH": str(tmp_path / "socket"),
         "FLOW1_FAKE": str(tmp_path),
@@ -233,7 +258,7 @@ def test_real_start_recipe_and_finish(cli, mode):
             == "finished"
         )
     assert all(item["status"] != "cleanup-failed" for item in finish["cleanup"]), finish
-    assert list(json.loads((root / "panes.json").read_text())) == ["hil"]
+    assert list(json.loads((root / "panes.json").read_text())) == ["w1:p1"]
 
 
 def test_real_finish_recipe_displays_cleanup_failure_evidence(cli):
@@ -309,7 +334,7 @@ def test_real_inject_recipe_working_idle_batch_duplicate_and_finish(cli):
     assert {path.name: path.read_bytes() for path in inbox.iterdir()} == before
     prompts = (root / "prompts").read_text().splitlines()
     assert [json.loads(line) for line in prompts] == [
-        ["pane", "run", receipt["implementer_pane"], "read your inbox"]
+        ["agent", "prompt", receipt["implementer_pane"], "read your inbox"]
     ]
     authority = json.loads(next((root / "ledger/nudge").glob("*.json")).read_text())
     assert authority["continue"]["nudges"] == []

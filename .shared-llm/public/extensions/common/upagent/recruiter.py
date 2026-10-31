@@ -52,6 +52,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1827,6 +1828,8 @@ class JobLedger:
         pane: str,
         workspace_id: str | None,
         address: str,
+        *,
+        terminal_id: str | None = None,
     ) -> None:
         """Persist Herdr's exact returned identity before attempting the lease commit."""
 
@@ -1853,6 +1856,7 @@ class JobLedger:
                     "pane": pane,
                     "state": "created",
                     "workspace_id": workspace_id,
+                    **({"terminal_id": terminal_id} if terminal_id else {}),
                 }
             )
             self._write_json(path, journal)
@@ -3943,12 +3947,15 @@ def _safe_agent_name(prefix: str, request_id: str, generation: int) -> str:
     concurrent requests to share one agent name, letting the second launch adopt — and its
     failure reconciliation close — the first request's live worker pane.
     """
-    compact = "".join(
-        character if character.isalnum() or character in "-_" else "-"
-        for character in request_id
-    )
-    digest = hashlib.sha256(request_id.encode()).hexdigest()[:10]
-    return f"{prefix}-{compact[:28]}-{digest}-g{generation}"
+    # 0.9.5 accepts at most 32 ASCII characters, starting with a letter. Hash the
+    # complete identity, including the role and generation, before truncating display text.
+    digest = hashlib.sha256(
+        f"{prefix}\0{request_id}\0{generation}".encode()
+    ).hexdigest()[:16]
+    label = re.sub("[^a-z0-9_-]", "-", prefix.lower())[:15]
+    if not label or not label[0].isalpha():
+        label = "a" + label[:14]
+    return f"{label}-{digest}"
 
 
 @contextmanager
@@ -4135,6 +4142,108 @@ def _place_started_agent_in_role_tab(
         return moved_id
 
 
+AGENT_START_TIMEOUT_MS = 180_000
+HERDR_MAX_START_TIMEOUT_MS = 299_000
+PROMPT_TIMEOUT_FLOOR_MS = 60_000
+PROMPT_RECONCILE_POLL_SECONDS = 0.25
+HERDR_AGENT_KINDS = {
+    "claude": "claude",
+    "pi": "pi",
+    "codex": "codex",
+    "cursor-agent": "cursor",
+}
+
+
+def _agent_start_timeout_ms(configured: int | None) -> int:
+    return min(HERDR_MAX_START_TIMEOUT_MS, max(AGENT_START_TIMEOUT_MS, configured or 0))
+
+
+def _agent_launch_argv(launch: str) -> tuple[list[str], str | None, str | None]:
+    """Split the rendered command without running its task during interactive startup.
+
+    Kit renderers and roster templates put the assignment sentence last. Option values
+    remain on the bare command. Codex exec keeps its positional assignment by design.
+    ClaudeX is a wrapper, so it must still execute that wrapper rather than substitute Claude.
+    """
+    argv = shlex.split(launch)
+    executable = Path(argv[0]).name if argv else ""
+    kind = HERDR_AGENT_KINDS.get(executable)
+    if executable == "claudex":
+        kind = "claude"
+    if not argv:
+        raise RecruiterError("agent launch command is empty")
+    if kind is None:
+        # Shell wrappers own their quoting, redirects, and inline task delivery.
+        return argv, None, None
+    prompt = None
+    if len(argv) > 1 and any(ch.isspace() for ch in argv[-1]):
+        prompt = argv.pop()
+    # Legacy Pi templates contain a quoted $HOME extension path. Public renderers
+    # already supply an absolute path. Never expand variables in the task sentence.
+    argv = [os.path.expandvars(word) for word in argv]
+    if kind == "codex" and prompt is not None:
+        argv.append(prompt)
+        prompt = None
+    return argv, kind, prompt
+
+
+def _wait_for_cursor_session(
+    name: str, pane_id: str, deadline: float, session: str
+) -> None:
+    """0.9.5 detects Cursor before its TUI accepts Enter; wait for the official hook.
+
+    Headless probes reproduced agent_prompt_stalled immediately after agent_started,
+    including with the former half-second paste delay. The installed sessionStart hook
+    registered about one second later; input after that registration worked repeatedly.
+    """
+    while time.monotonic() < deadline:
+        agent = (
+            _herdr_json(
+                "agent",
+                "get",
+                name,
+                herdr_session=session,
+                timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+            )
+            .get("result", {})
+            .get("agent", {})
+        )
+        if agent.get("pane_id") != pane_id or agent.get("name") != name:
+            raise RecruiterError(
+                "Cursor startup identity changed before session registration"
+            )
+        registration = agent.get("agent_session") or {}
+        if registration.get("source") == "herdr:cursor" and registration.get("value"):
+            return
+        time.sleep(0.1)
+    raise RecruiterError(
+        f"Cursor {name!r} did not register its official integration session before the startup deadline"
+    )
+
+
+CANONICAL_REPO_ENV = "UPAGENT_CANONICAL_REPO"
+
+
+def _pane_environment(order: dict) -> dict[str, str]:
+    """The `pane split --env` map for one hub-owned pane.
+
+    A Herdr pane inherits the Herdr server's environment, not the runner's. When this hub
+    resolved its source through `$UPAGENT_CANONICAL_REPO`, a pane's own `just upagent`
+    call (a nested request) must resolve the same checkout, so the value travels into the
+    pane. An explicit order `env` entry for the same key wins.
+    """
+    environment = dict(order.get("env") or {})
+    canonical = command_runtime.getenv(CANONICAL_REPO_ENV)
+    if canonical and CANONICAL_REPO_ENV not in environment:
+        path = Path(canonical).expanduser()
+        if not path.is_absolute():
+            raise RecruiterError(
+                f"{CANONICAL_REPO_ENV} must be an absolute checkout root: {canonical}"
+            )
+        environment[CANONICAL_REPO_ENV] = str(path.resolve())
+    return environment
+
+
 def _start_herdr_agent(
     name: str,
     order: dict,
@@ -4143,18 +4252,39 @@ def _start_herdr_agent(
     split_direction: str = "right",
     tab_role: str | None = None,
     herdr_session: str | None = None,
+    on_pane_created: Callable[[dict], None] | None = None,
+    expected_agent: str | None = None,
+    expected_process: str | None = None,
+    startup_timeout_ms: int | None = None,
 ) -> tuple[str, str | None, str]:
-    """Atomically create a named Herdr pane and start its process.
+    """Create topology, record its identity, then start a bare interactive harness.
 
-    ``herdr agent start`` carries argv through the socket in one request; unlike ``pane run`` it
-    cannot interleave launch keystrokes with another command in a shared shell. Role-specific
-    directions form a balanced grid: workers default right; managers and checkers request down.
+    Herdr 0.9.5 starts agents only in existing panes. The create callback lets the owning
+    launch journal record the terminal before startup or prompt delivery can fail.
     """
     if split_direction not in ("right", "down"):
         raise RecruiterError(
             f"agent split direction must be right or down, got {split_direction!r}"
         )
     session = _recorded_herdr_session(herdr_session, "agent startup")
+    argv, kind, prompt = _agent_launch_argv(launch)
+    shell_wrapper = argv[0] not in HERDR_AGENT_KINDS
+    bare_kind = kind
+    kind = kind or expected_agent or HERDR_AGENT_KINDS.get(order.get("harness", ""))
+    if kind is None:
+        raise RecruiterError("shell launch requires an expected agent kind")
+    start_budget_ms = _agent_start_timeout_ms(startup_timeout_ms)
+    deadline = time.monotonic() + start_budget_ms / 1000
+
+    def remaining_seconds() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RecruiterError(f"agent {name!r} exhausted its startup budget")
+        return remaining
+
+    def remaining_ms() -> int:
+        return max(1, int(remaining_seconds() * 1000))
+
     # The name lock makes the duplicate check and the launch one atomic step: without it two
     # concurrent launches of the same name could both pass the check before either starts.
     with _exclusive_agent_name(name):
@@ -4163,7 +4293,13 @@ def _start_herdr_agent(
         # another live request's pane — which a later failure reconciliation would then close.
         try:
             existing = (
-                _herdr_json("agent", "get", name, herdr_session=session)
+                _herdr_json(
+                    "agent",
+                    "get",
+                    name,
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
                 .get("result", {})
                 .get("agent")
             )
@@ -4178,7 +4314,13 @@ def _start_herdr_agent(
                 "it would adopt another request's pane"
             )
         cockpit = (
-            _herdr_json("pane", "get", order["cockpit_pane"], herdr_session=session)
+            _herdr_json(
+                "pane",
+                "get",
+                order["cockpit_pane"],
+                herdr_session=session,
+                timeout_seconds=remaining_seconds(),
+            )
             .get("result", {})
             .get("pane", {})
         )
@@ -4186,21 +4328,99 @@ def _start_herdr_agent(
         if not isinstance(tab_id, str) or not tab_id:
             raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
         args = [
-            "agent",
-            "start",
-            name,
+            "pane",
+            "split",
+            order["cockpit_pane"],
+            "--direction",
+            split_direction,
             "--cwd",
             order["cwd"],
-            "--tab",
-            tab_id,
-            "--split",
-            split_direction,
             "--no-focus",
         ]
-        for key, value in (order.get("env") or {}).items():
+        for key, value in _pane_environment(order).items():
             args.extend(("--env", f"{key}={value}"))
-        args.extend(("--", "bash", "-lc", launch))
-        response = _herdr_json(*args, herdr_session=session)
+        created = (
+            _herdr_json(
+                *args, herdr_session=session, timeout_seconds=remaining_seconds()
+            )
+            .get("result", {})
+            .get("pane", {})
+        )
+        created_id = created.get("pane_id") if isinstance(created, dict) else None
+        if not isinstance(created_id, str) or not created_id:
+            raise RecruiterError(
+                "herdr pane split returned no pane identity; creation is uncertain"
+            )
+        try:
+            if on_pane_created is not None:
+                on_pane_created(created)
+            if shell_wrapper:
+                # Canonical `agent start --kind` cannot invoke a wrapper or an explicit
+                # executable path. Preserve that command in this newly owned shell.
+                _herdr(
+                    "pane",
+                    "run",
+                    created_id,
+                    launch if bare_kind is None else shlex.join(argv),
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
+                _wait_for_agent_health(
+                    created_id,
+                    expected_agent=expected_agent or kind,
+                    expected_process=expected_process or kind,
+                    expected_cwd=order["cwd"],
+                    timeout_ms=remaining_ms(),
+                    herdr_session=session,
+                )
+                _herdr(
+                    "agent",
+                    "rename",
+                    created_id,
+                    name,
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
+                response = _herdr_json(
+                    "agent",
+                    "get",
+                    name,
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
+            else:
+                start_timeout_ms = remaining_ms()
+                response = _herdr_json(
+                    "agent",
+                    "start",
+                    name,
+                    "--kind",
+                    kind,
+                    "--pane",
+                    created_id,
+                    "--timeout",
+                    str(start_timeout_ms),
+                    "--",
+                    *argv[1:],
+                    timeout_seconds=start_timeout_ms / 1000 + 5,
+                    herdr_session=session,
+                )
+            agent = response.get("result", {}).get("agent", {})
+            if agent.get("pane_id") != created_id or agent.get("name") != name:
+                raise RecruiterError(
+                    "herdr agent start returned a different pane or agent identity"
+                )
+            if kind == "cursor":
+                _wait_for_cursor_session(name, created_id, deadline, session)
+            if prompt is not None:
+                _submit_agent_prompt(
+                    name, prompt, start_budget_ms, herdr_session=session
+                )
+        except (RecruiterError, OSError, RuntimeError):
+            # This caller holds the returned create identity. Recovery after a caller crash
+            # instead verifies the recorded terminal; agent names clear on process exit.
+            _close_worker_pane(created_id, herdr_session=session)
+            raise
     agent = response.get("result", {}).get("agent", {})
     pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
@@ -4309,6 +4529,24 @@ def _reconcile_exact_launch(
             pane = resolved_pane
             agent_verified = True
         if pane is not None:
+            if not agent_verified and isinstance(journal.get("terminal_id"), str):
+                # A 0.9.5 agent name disappears when its occupant exits. The original
+                # terminal may still contain its shell. Close that shell only when its
+                # exact terminal identity matches and no replacement agent occupies it.
+                try:
+                    current = (
+                        _herdr_json("pane", "get", pane, herdr_session=herdr_session)
+                        .get("result", {})
+                        .get("pane", {})
+                    )
+                except RecruiterError as error:
+                    errors.append(str(error))
+                else:
+                    agent_verified = (
+                        current.get("terminal_id") == journal["terminal_id"]
+                        and current.get("workspace_id") == journal.get("workspace_id")
+                        and not current.get("agent")
+                    )
             if not agent_verified:
                 live_panes = _live_pane_ids(herdr_session=herdr_session)
                 if pane not in live_panes:
@@ -4344,7 +4582,12 @@ def _reconcile_exact_launch(
                     errors.append(
                         str(evidence.get("reason", "cleanup was not verified"))
                     )
-        elif allow_not_found_absent and not_found and attempt == attempts:
+        elif (
+            allow_not_found_absent
+            and not_found
+            and attempt == attempts
+            and journal.get("herdr_launch_style") != "split-then-start"
+        ):
             evidence = {
                 "agent_name": agent_name,
                 "launch_id": launch_id,
@@ -4415,6 +4658,7 @@ def _start_fenced_ledger_agent(
     tab_role: str | None = None,
     herdr_session: str,
     metadata: dict[str, object] | None = None,
+    startup_timeout_ms: int | None = None,
 ) -> tuple[str, str | None, str, str]:
     """Journal before create; failed commit returns only truthful cleanup evidence."""
 
@@ -4430,9 +4674,25 @@ def _start_fenced_ledger_agent(
         name,
         herdr_session,
         order["cwd"],
-        metadata=metadata,
+        metadata={**(metadata or {}), "herdr_launch_style": "split-then-start"},
     )
     pane: str | None = None
+    created_recorded = False
+
+    def record_created(created: dict) -> None:
+        nonlocal pane, created_recorded
+        pane = created["pane_id"]
+        ledger.record_launch_created(
+            key,
+            token,
+            launch_id,
+            pane,
+            created.get("workspace_id"),
+            name,
+            terminal_id=created.get("terminal_id"),
+        )
+        created_recorded = True
+
     try:
         pane, workspace_id, address = _start_herdr_agent(
             name,
@@ -4441,8 +4701,13 @@ def _start_fenced_ledger_agent(
             split_direction=split_direction,
             tab_role=tab_role,
             herdr_session=herdr_session,
+            on_pane_created=record_created,
+            startup_timeout_ms=startup_timeout_ms,
         )
-        ledger.record_launch_created(key, token, launch_id, pane, workspace_id, address)
+        if not created_recorded:
+            ledger.record_launch_created(
+                key, token, launch_id, pane, workspace_id, address
+            )
         if ledger.mark_launch_started(
             key, token, launch_id, pane, workspace_id, address
         ):
@@ -4483,7 +4748,7 @@ def _resize_started_pane(
 ) -> None:
     """Shrink a new 50/50 split without making presentation part of worker correctness.
 
-    Agent startup remains one atomic ``herdr agent start`` operation. Resizing happens afterward
+    Agent startup records a split pane before ``herdr agent start``. Resizing happens afterward
     by expanding the adjacent older pane toward the new pane. Herdr versions without layout
     controls produce a visible warning; an optional presentation failure never strands a healthy
     worker or changes lifecycle ownership.
@@ -4655,6 +4920,9 @@ def _wait_for_agent_health(
                         f"agent {pane_id} started in {cwd!r}, expected {expected_cwd!r}"
                     )
                 latest["healthy"] = True
+                latest["process_start_time"] = _process_start_time(
+                    latest["process_pid"]
+                )
                 return latest
         completed_during_startup = False
         if completion_order is not None:
@@ -4736,6 +5004,211 @@ def _live_pane_ids(*, herdr_session: str | None = None) -> set[str]:
     }
 
 
+PANE_TREE_TERM_GRACE_SECONDS = 1.5
+PANE_TREE_KILL_GRACE_SECONDS = 1.0
+
+
+def _is_upagent_runner(argv: list[str]) -> bool:
+    """True for a `recruiter.py ... run-job` process, from any checkout.
+
+    A nested request's runner starts inside the submitting worker's tool tree and then
+    re-parents to init so it survives that tree's kill. Pane teardown must never signal
+    it, or its intermediate fork, or anything it started.
+    """
+    for index, item in enumerate(argv):
+        if Path(item).name == "recruiter.py" and "run-job" in argv[index + 1 :]:
+            return True
+    return False
+
+
+def _process_ancestors(pid: int, parents: dict[int, int]) -> set[int]:
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        pid = parents.get(pid, 0)
+    return seen
+
+
+def _process_parent_table(pane: str) -> dict[int, int]:
+    """Map every live pid to its parent pid.
+
+    Linux reads /proc directly (no subprocess, like process_identity). Other platforms
+    use ps(1). A listing that cannot be read fails loud: a silent empty table would
+    leak the pane's processes.
+    """
+    parents: dict[int, int] = {}
+    if sys.platform == "linux":
+        try:
+            entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
+        except OSError as error:
+            raise RecruiterError(
+                f"could not list /proc to snapshot pane {pane}: {error}"
+            ) from error
+        for entry in entries:
+            try:
+                text = Path(f"/proc/{entry}/stat").read_text()
+            except OSError:
+                continue  # exited during the scan
+            fields = text[text.rfind(")") + 2 :].split()
+            if len(fields) > 1 and fields[1].isdigit():
+                parents[int(entry)] = int(fields[1])
+        return parents
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout
+        for line in listing.splitlines():
+            if line.strip():
+                child, parent = line.split()
+                parents[int(child)] = int(parent)
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise RecruiterError(
+            f"could not list processes to snapshot pane {pane}: {error}"
+        ) from error
+    return parents
+
+
+def _snapshot_pane_process_tree(
+    pane: str, *, herdr_session: str | None
+) -> list[tuple[int, str]]:
+    """Record (pid, birth stamp) for the pane's shell and every descendant.
+
+    UpAgent runner subtrees, this process, and its ancestors are excluded. A pane that is
+    already gone has nothing left to trace; any other probe fault propagates, like a
+    failed close.
+    """
+    try:
+        info = (
+            _herdr_json(
+                "pane", "process-info", "--pane", pane, herdr_session=herdr_session
+            )
+            .get("result", {})
+            .get("process_info", {})
+        )
+    except RecruiterError:
+        if pane in _live_pane_ids(herdr_session=herdr_session):
+            raise
+        return []
+    if not isinstance(info, dict):
+        info = {}
+    roots = {
+        candidate
+        for candidate in (
+            info.get("shell_pid"),
+            *(
+                process.get("pid")
+                for process in info.get("foreground_processes", []) or []
+                if isinstance(process, dict)
+            ),
+        )
+        if isinstance(candidate, int)
+        and not isinstance(candidate, bool)
+        and candidate > 1
+    }
+    if not roots:
+        return []
+    parents = _process_parent_table(pane)
+    children: dict[int, list[int]] = {}
+    for child, parent in parents.items():
+        children.setdefault(parent, []).append(child)
+    protected = _process_ancestors(os.getpid(), parents)
+    snapshot: list[tuple[int, str]] = []
+    pending = sorted(roots)
+    visited: set[int] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in visited or pid <= 1 or pid in protected:
+            continue
+        visited.add(pid)
+        if _is_upagent_runner(_process_cmdline(pid)):
+            continue
+        start = _process_start_time(pid)
+        if start is not None:
+            snapshot.append((pid, start))
+        pending.extend(children.get(pid, []))
+    return snapshot
+
+
+def _signal_process_identity(pid: int, start: str, signal_number: int) -> bool:
+    """Signal pid only while its birth stamp still matches; False when it is gone.
+
+    On Linux a pidfd pins the process between the identity check and the signal, so a
+    reused pid can never be signalled.
+    """
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send = getattr(signal, "pidfd_send_signal", None)
+    try:
+        if pidfd_open is not None and pidfd_send is not None:
+            descriptor = pidfd_open(pid)
+            try:
+                if _process_start_time(pid) != start:
+                    return False
+                pidfd_send(descriptor, signal_number)
+            finally:
+                os.close(descriptor)
+        else:
+            if _process_start_time(pid) != start:
+                return False
+            os.kill(pid, signal_number)
+    except ProcessLookupError:
+        return False
+    except OSError as error:
+        raise RecruiterError(
+            f"cannot signal pane process {pid} with {signal_number}: {error}"
+        ) from error
+    return True
+
+
+def _terminate_process_snapshot(
+    snapshot: list[tuple[int, str]],
+) -> dict[str, object]:
+    """SIGTERM every snapshot process still alive, then SIGKILL the survivors.
+
+    A process that already exited is not an error. One that outlives SIGKILL is.
+    """
+
+    def alive(items: list[tuple[int, str]]) -> list[tuple[int, str]]:
+        return [(pid, start) for pid, start in items if _process_start_time(pid) == start]
+
+    terminated = [
+        (pid, start)
+        for pid, start in snapshot
+        if _signal_process_identity(pid, start, signal.SIGTERM)
+    ]
+    survivors = terminated
+    if terminated:
+        deadline = time.monotonic() + PANE_TREE_TERM_GRACE_SECONDS
+        survivors = alive(terminated)
+        while survivors and time.monotonic() < deadline:
+            time.sleep(0.05)
+            survivors = alive(survivors)
+    killed = [
+        (pid, start)
+        for pid, start in survivors
+        if _signal_process_identity(pid, start, signal.SIGKILL)
+    ]
+    if killed:
+        deadline = time.monotonic() + PANE_TREE_KILL_GRACE_SECONDS
+        remaining = alive(killed)
+        while remaining and time.monotonic() < deadline:
+            time.sleep(0.05)
+            remaining = alive(remaining)
+        if remaining:
+            raise RecruiterError(
+                "pane processes survived SIGKILL: "
+                + ", ".join(str(pid) for pid, _start in remaining)
+            )
+    return {
+        "snapshot": len(snapshot),
+        "terminated": [pid for pid, _start in terminated],
+        "killed": [pid for pid, _start in killed],
+    }
+
+
 def _close_worker_pane(
     worker_pane: str, *, herdr_session: str | None = None
 ) -> dict[str, object]:
@@ -4745,6 +5218,9 @@ def _close_worker_pane(
     absent. Other close/list faults propagate; terminal publication must not hide leaked panes.
     """
     session = _recorded_herdr_session(herdr_session, "pane cleanup")
+    # Snapshot BEFORE the close: afterwards the pane's surviving descendants are
+    # re-parented to init and can no longer be traced back to this pane.
+    process_tree = _snapshot_pane_process_tree(worker_pane, herdr_session=session)
     close_status = "closed"
     try:
         _herdr("pane", "close", worker_pane, herdr_session=session)
@@ -4759,6 +5235,7 @@ def _close_worker_pane(
         "status": close_status,
         "worker_pane": worker_pane,
         "verified_absent": True,
+        "process_tree": _terminate_process_snapshot(process_tree),
     }
 
 
@@ -4916,6 +5393,7 @@ def _worker_pane_confirmed_gone(
     *,
     herdr_session: str | None = None,
     confirmations: int = 1,
+    timeout_seconds: float = 10,
 ) -> bool:
     """True only when herdr POSITIVELY answers that the pane does not exist.
 
@@ -4932,7 +5410,7 @@ def _worker_pane_confirmed_gone(
                 "pane",
                 "get",
                 worker_pane,
-                timeout_seconds=10,
+                timeout_seconds=timeout_seconds,
                 herdr_session=herdr_session,
             )
             return False
@@ -5025,10 +5503,10 @@ def _worker_process_confirmed_gone(
     return True
 
 
-# How often completion waits independently probe the worker pane/process. Herdr 0.7.1's wait
-# subscription goes SILENT when the watched pane vanishes mid-wait (it reports nothing until
-# --timeout), so without this probe a dead worker holds the order for its entire remaining
-# budget — observed as ~2 h of discarded work.
+# Herdr 0.9.5's server-owned wait returns agent_not_running promptly on pane loss
+# (verified in the headless lab). Keep independent probes: interactive completion does
+# not use a turn waiter, and these probes also check the Sentinel and surviving shells.
+# A transport fault is never positive evidence that either process disappeared.
 AGENT_WAIT_PANE_PROBE_SECONDS = 15.0
 
 # How long a staged result.json may sit invalid before the completion monitor wakes the job
@@ -5067,6 +5545,7 @@ def _await_sentinel_closeout_after_worker_gone(
     alone always says why the supervised wait ended.
     """
     grace_deadline = min(deadline, time.monotonic() + SENTINEL_CLOSEOUT_GRACE_SECONDS)
+    sentinel_watch.wait_deadline = deadline
     next_sentinel_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
     while True:
         # Published at entry — the window starts with an awake Sentinel — and
@@ -5088,6 +5567,7 @@ def _await_sentinel_closeout_after_worker_gone(
         if remaining <= 0:
             # Typed lapse: a wake event alone proves only that Python touched a
             # file; this records WHY the supervised wait fell back mechanically.
+            sentinel_watch._release_stall_hold("hard wait deadline reached")
             sentinel_watch.note_window_lapsed("closeout")
             return False
         time.sleep(min(COMPLETION_MONITOR_POLL_SECONDS, remaining))
@@ -5121,6 +5601,8 @@ def _wait_for_interactive_completion(
         )
     deadline = time.monotonic() + timeout_ms / 1000
     next_liveness_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
+    if sentinel_watch is not None:
+        sentinel_watch.wait_deadline = deadline
     while True:
         # Supervision is recomputed every iteration, never snapshotted at wait entry: a
         # Sentinel that dies mid-wait hands the rest of the wait back to the mechanical
@@ -5158,6 +5640,8 @@ def _wait_for_interactive_completion(
             return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if sentinel_watch is not None:
+                sentinel_watch._release_stall_hold("hard wait deadline reached")
             # The timeout decision RE-OBSERVES the finalized event: a validation
             # that landed after this iteration's landing pass but before this line
             # must end the wait on the bundle, never as a timeout over finished
@@ -5255,9 +5739,81 @@ def _wait_for_agent_status(
             f"unsupported worker completion style {completion_style!r}"
         )
 
-    # Exec mode opens one Herdr subscription for the whole worker lifetime. When the durable
-    # file wins, terminate that waiter promptly; do not create a new socket subscription every
-    # second. A positively absent pane falls through to salvage-or-block.
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        remaining_ms = max(1, math.ceil((deadline - time.monotonic()) * 1000))
+        try:
+            return _wait_for_exec_status(
+                worker_pane,
+                remaining_ms,
+                monitor_finalized,
+                expected_process=expected_process,
+                never_started_abort=never_started_abort,
+                sentinel_watch=sentinel_watch,
+                herdr_session=herdr_session,
+            )
+        except HerdrWaitLost:
+            # Live subscriptions have no replay cursor. Re-read authoritative state
+            # before opening another wait, retaining the original request deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if monitor_finalized is not None and monitor_finalized.is_set():
+                    return False
+                raise AgentWaitTimeout(
+                    f"Herdr wait for {worker_pane} exceeded its deadline"
+                )
+            if _worker_pane_confirmed_gone(
+                worker_pane,
+                herdr_session=herdr_session,
+                timeout_seconds=min(2.0, remaining),
+            ):
+                if monitor_finalized is not None and monitor_finalized.is_set():
+                    if sentinel_watch is not None and sentinel_watch.supervising:
+                        sentinel_watch.note_bypassed_at_exit()
+                    return False
+                return not (
+                    sentinel_watch is not None
+                    and sentinel_watch.supervising
+                    and _await_sentinel_closeout_after_worker_gone(
+                        sentinel_watch, deadline, reason="worker-gone"
+                    )
+                )
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                _herdr_json(
+                    "pane",
+                    "get",
+                    worker_pane,
+                    herdr_session=herdr_session,
+                    timeout_seconds=min(2.0, remaining),
+                )
+            if time.monotonic() >= deadline:
+                if monitor_finalized is not None and monitor_finalized.is_set():
+                    return False
+                raise AgentWaitTimeout(
+                    f"Herdr wait for {worker_pane} exceeded its deadline after reconnection"
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+class HerdrWaitLost(RecruiterError):
+    """A lost Herdr observation must be reconciled before waiting again."""
+
+
+def _wait_for_exec_status(
+    worker_pane: str,
+    timeout_ms: int,
+    monitor_finalized: threading.Event | None,
+    *,
+    expected_process: str | None,
+    never_started_abort: threading.Event | None,
+    sentinel_watch: Any | None,
+    herdr_session: str | None,
+) -> bool:
+
+    # One server-owned wait for the worker lifetime. No events.subscribe stream is held
+    # by the hub, so its slow-reader limit does not normally apply. Lost observation is
+    # still reconciled by the caller, never interpreted as completion or replayed input.
 
     def _terminate(process: subprocess.Popen) -> None:
         process.terminate()
@@ -5282,11 +5838,13 @@ def _wait_for_agent_status(
         return monitor_finalized is not None and monitor_finalized.is_set()
 
     deadline = time.monotonic() + timeout_ms / 1000
+    if sentinel_watch is not None:
+        sentinel_watch.wait_deadline = deadline
     args = (
+        "agent",
         "wait",
-        "agent-status",
         worker_pane,
-        "--status",
+        "--until",
         "done",
         "--timeout",
         str(timeout_ms),
@@ -5338,6 +5896,8 @@ def _wait_for_agent_status(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate(process)
+            if sentinel_watch is not None:
+                sentinel_watch._release_stall_hold("hard wait deadline reached")
             # See the interactive wait: the timeout decision re-observes the
             # finalized event so a validation racing the deadline is never lost.
             if _bundle_already_valid():
@@ -5345,7 +5905,7 @@ def _wait_for_agent_status(
                     sentinel_watch.note_window_lapsed("landing")
                 return False
             raise AgentWaitTimeout(
-                f"herdr wait agent-status {worker_pane} timed out after {timeout_ms} ms"
+                f"herdr agent wait {worker_pane} timed out after {timeout_ms} ms"
             )
         if time.monotonic() >= next_pane_probe:
             next_pane_probe = time.monotonic() + AGENT_WAIT_PANE_PROBE_SECONDS
@@ -5410,6 +5970,12 @@ def _wait_for_agent_status(
     # error. Confirm with two positive probes and fall through to the completion reactor.
     if _worker_pane_confirmed_gone(
         worker_pane, herdr_session=herdr_session, confirmations=2
+    ) or (
+        "agent_not_running" in (stderr or stdout)
+        and expected_process is not None
+        and _worker_process_confirmed_gone(
+            worker_pane, expected_process, herdr_session=herdr_session, confirmations=2
+        )
     ):
         if _supervised() and _bundle_already_valid():
             sentinel_watch.note_bypassed_at_exit()
@@ -5420,6 +5986,8 @@ def _wait_for_agent_status(
                 sentinel_watch, deadline, reason="worker-gone"
             )
         )
+    if "events_lost" in (stderr or stdout):
+        raise HerdrWaitLost((stderr or stdout).strip())
     raise RecruiterError(f"{' '.join(argv)} failed: {(stderr or stdout).strip()}")
 
 
@@ -6130,6 +6698,32 @@ def _sentinel_closeout_path(ledger: JobLedger, key: str, attempt: int) -> Path:
     return ledger.request_dir(key) / "sentinel" / f"attempt-{attempt}" / "closeout.json"
 
 
+def _tighten_private_file(path: Path) -> None:
+    """Force one agent-written ledger file to mode 0600 without following a symlink.
+
+    A file that is already gone is not an error. A symlink or a non-regular file raises
+    OSError, so a caller that reads the file treats it like any other unreadable claim.
+    """
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(errno.EINVAL, f"{path} is not a regular file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
 def _sentinel_wake_path(closeout_path: Path) -> Path:
     """The attempt's wake file, beside its closeout. Python is the ONLY writer (staging
     activity, proven worker death); the Sentinel is the only consumer — its pulse wait
@@ -6197,6 +6791,7 @@ def _start_sentinel(
         tab_role="oversight",
         herdr_session=herdr_session,
         metadata={"generation": generation, "worker_pane": worker_pane},
+        startup_timeout_ms=config.startup_timeout_ms,
     )
     try:
         _resize_started_pane(
@@ -6343,6 +6938,82 @@ class _NudgeDeliveryError(RecruiterError):
     """A reserved nudge could not be submitted; its rung remains spent."""
 
 
+class PromptDeliveryUnconfirmed(RecruiterError):
+    """Herdr accepted input but no new agent turn was observed in the prompt budget."""
+
+
+def _live_descendant(
+    pid: int, first_action_ns: int, previous: dict[tuple[int, int], int] | None
+) -> tuple[int | None, dict[tuple[int, int], int] | None]:
+    """Find a post-action job whose subtree used CPU since the previous probe.
+
+    Resident helpers are not jobs. Linux birth ticks fence the first-action stamp,
+    and utime+stime deltas distinguish a running job from a sleeping helper. Other
+    platforms have no CPU signal here; file activity can still earn a hold.
+    """
+    if sys.platform != "linux":
+        return None, None
+    try:
+        snapshot = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,stat="],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # An unavailable snapshot (ps failing, timing out, or missing from the host)
+        # supplies no life signal and no delta baseline. This probe runs on every
+        # supervised poll, so it must never take the wait down with it.
+        return None, None
+    children: dict[int, list[tuple[int, str]]] = {}
+    try:
+        for line in snapshot.stdout.splitlines():
+            child, parent, state = line.split()
+            children.setdefault(int(parent), []).append((int(child), state))
+    except ValueError:
+        # An unparseable snapshot line is treated like an unavailable snapshot.
+        return None, None
+    ticks_per_second = os.sysconf("SC_CLK_TCK")
+    boot_time = time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
+    current: dict[tuple[int, int], int] = {}
+    births: dict[int, int] = {}
+    pending = list(children.get(pid, []))
+    while pending:
+        child, state = pending.pop()
+        pending.extend(children.get(child, []))
+        if state.startswith("Z"):
+            continue
+        try:
+            stat = Path(f"/proc/{child}/stat").read_text()
+            fields = stat[stat.rfind(")") + 2 :].split()
+            if fields[0] == "Z":
+                continue
+            birth = int(fields[19])
+            cpu = int(fields[11]) + int(fields[12])
+        except (OSError, ValueError, IndexError):
+            # A descendant exited during the snapshot, or its stat line could not be
+            # read or parsed; either way it cannot keep a hold.
+            continue
+        births[child] = birth
+        current[child, birth] = cpu
+    if previous is not None:
+        for child, birth in births.items():
+            if (boot_time + birth / ticks_per_second) * 1e9 <= first_action_ns:
+                continue
+            subtree = [child]
+            total = prior = 0
+            while subtree:
+                member = subtree.pop()
+                identity = (member, births.get(member, -1))
+                total += current.get(identity, 0)
+                prior += previous.get(identity, 0)
+                subtree.extend(desc for desc, _state in children.get(member, []))
+            if total > prior:
+                return child, current
+    return None, current
+
+
 class _SentinelWatch:
     """Poll one closeout file from inside the Recruiter's completion wait.
 
@@ -6384,6 +7055,12 @@ class _SentinelWatch:
         self._nudge_target: Any | None = None
         self._nudge_address: str | None = None
         self._authority = nudge_authority.NudgeAuthority(ledger.root)
+        self._stall_hold_evidence: dict[str, object] | None = None
+        self._stall_hold_signature: tuple[int, int, int] | None = None
+        self._next_stall_probe = 0.0
+        self._worker_job_cpu: dict[tuple[int, int], int] | None = None
+        self._active_descendant: int | None = None
+        self.wait_deadline: float | None = None
 
     @property
     def supervising(self) -> bool:
@@ -6784,6 +7461,8 @@ class _SentinelWatch:
                     ),
                     herdr_session=target.herdr_session,
                 )
+            except PromptDeliveryUnconfirmed as error:
+                raise nudge_authority.NudgeDeliveryUnconfirmed(str(error)) from error
             except (RecruiterError, OSError) as error:
                 raise _NudgeDeliveryError(str(error)) from error
 
@@ -6815,14 +7494,15 @@ class _SentinelWatch:
             # A fresh authority probe interrupted the idle streak. The next status
             # observation must earn two confirmations again, including after recovery.
             self._idle_probes = 0
-        self.ledger._event(
-            self.key,
-            "nudge",
-            trigger=trigger,
-            episode=outcome.episode,
-            outcome=outcome.outcome,
-            reason=outcome.reason,
-        )
+        if outcome.outcome != "cap-exhausted" or self._stall_hold_evidence is None:
+            self.ledger._event(
+                self.key,
+                "nudge",
+                trigger=trigger,
+                episode=outcome.episode,
+                outcome=outcome.outcome,
+                reason=outcome.reason,
+            )
         if outcome.outcome == "cap-exhausted":
             episode = json.loads(state_path.read_text())["continue"]
             if episode["episode"] == outcome.episode and not episode["escalated"]:
@@ -6852,6 +7532,7 @@ class _SentinelWatch:
                     archived = self.closeout_path.with_name(
                         f"closeout.stalled-working-{time.time_ns()}.json"
                     )
+                    _tighten_private_file(self.closeout_path)
                     os.replace(self.closeout_path, archived)
                 self._prompt_sentinel_after_nudge("working")
                 return True
@@ -6864,6 +7545,7 @@ class _SentinelWatch:
         ordinal = len(state["nudges"])
         label = {
             "delivered": "nudged",
+            "delivery-unconfirmed": "delivery-unconfirmed",
             "backoff": "held",
             "finished": "superseded",
             "aborted": "aborted",
@@ -6878,9 +7560,11 @@ class _SentinelWatch:
             archived = self.closeout_path.with_name(
                 f"closeout.stalled-{label}{suffix}.json"
             )
+            _tighten_private_file(self.closeout_path)
             os.replace(self.closeout_path, archived)
         event_name = {
             "delivered": "delivered",
+            "delivery-unconfirmed": "delivery-unconfirmed",
             "backoff": "held",
             "finished": "superseded",
             "aborted": "aborted",
@@ -6891,11 +7575,12 @@ class _SentinelWatch:
             episode=outcome.episode,
             archived=str(archived) if archived else None,
         )
-        if outcome.outcome == "delivered" or (
+        if outcome.outcome in ("delivered", "delivery-unconfirmed") or (
             trigger == "sentinel" and outcome.outcome in ("backoff", "aborted")
         ):
             self._prompt_sentinel_after_nudge(
-                {"delivered": "delivered", "backoff": "held", "aborted": "failed"}[
+                {"delivered": "delivered", "delivery-unconfirmed": "delivery-unconfirmed",
+                 "backoff": "held", "aborted": "failed"}[
                     outcome.outcome
                 ]
             )
@@ -6935,6 +7620,8 @@ class _SentinelWatch:
             "working": "the worker is working; no continue was sent",
             "held": "the stall is inside the hub's nudge backoff window",
             "delivered": "the hub sent a 'continue' nudge to the worker",
+            "delivery-unconfirmed": "the hub submitted 'continue', but observed no new "
+            "turn within the prompt budget; delivery is unconfirmed and this rung was spent",
             "failed": "the hub's 'continue' nudge delivery failed and this rung "
             "was spent",
         }[outcome]
@@ -6952,11 +7639,155 @@ class _SentinelWatch:
                 self.key, "sentinel-stall-nudge-resume-unavailable", reason=str(error)
             )
 
-    def poll(self) -> str | None:
-        if not self.closeout_path.is_file():
+    def _stall_worker_health(self) -> dict | None:
+        health_path = self.ledger.request_dir(self.key) / "worker-health.json"
+        try:
+            health = json.loads(health_path.read_text())
+        except FileNotFoundError:
             return None
+        if (
+            health.get("attempt") != self.attempt
+            or health.get("generation") != self.generation
+            or health.get("pane_id") != self.sentinel_state.get("worker_pane")
+            or self.ledger.state(self.key).get("state") in self._NUDGE_REJECTED_STATES
+        ):
+            return None
+        pid, birth = health.get("process_pid"), health.get("process_start_time")
+        if not isinstance(birth, str) or _process_start_time(pid) != birth:
+            return None
+        return health
+
+    def _probe_stall_job(self) -> None:
+        """Sample before a closeout arrives so the first STALLED probe has a delta."""
+        health = self._stall_worker_health()
+        first_action = next(
+            (
+                event for event in self.ledger.events(self.key)
+                if event.get("event") == FIRST_ACTION_EVENT
+                and event.get("attempt") == self.attempt
+                and event.get("worker_pane") == self.sentinel_state.get("worker_pane")
+            ),
+            None,
+        ) if health is not None else None
+        if health is None or first_action is None:
+            self._active_descendant, self._worker_job_cpu = None, None
+            return
+        self._active_descendant, self._worker_job_cpu = _live_descendant(
+            health["process_pid"], first_action["at_ns"], self._worker_job_cpu
+        )
+
+    def _release_stall_hold(self, reason: str) -> None:
+        if self._stall_hold_evidence is not None:
+            self.ledger._event(
+                self.key, "worker-stall-released", reason=reason,
+                attempt=self.attempt, generation=self.generation,
+            )
+            self._stall_hold_evidence = None
+            self._stall_hold_signature = None
+
+    def _hold_stalled_worker(self) -> bool:
+        """Hold only a live, unblocked worker with recent staging or an active job."""
+        if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+            self._release_stall_hold("hard wait deadline reached")
+            return False
+        health = self._stall_worker_health()
+        if health is None:
+            self._release_stall_hold("worker identity is gone or request no longer permits a hold")
+            return False
+        pid, birth = health["process_pid"], health["process_start_time"]
+        try:
+            pane = _herdr_json(
+                "pane", "get", health["pane_id"],
+                herdr_session=self.herdr_session, timeout_seconds=2,
+            ).get("result", {}).get("pane", {})
+        except RecruiterError as error:
+            self._release_stall_hold(f"worker status unavailable: {error}")
+            return False
+        status = pane.get("agent_status")
+        if status not in ("working", "idle", "done"):
+            self._release_stall_hold(f"worker status is {status!r}")
+            return False
+        cutoff = time.time() - 15 * 60
+        # The result bundle lives in lease-private staging with the other artifacts.
+        # Its public parent also holds hub-written prompt/order/request files, so it
+        # must NEVER be used as worker activity evidence.
+        directories = {item.staging_path.parent for item in self.manifest.artifacts}
+        recent_file = None
+        for directory in sorted(directories):
+            for path in directory.rglob("*"):
+                try:
+                    modified = path.stat().st_mtime if path.is_file() else 0
+                except FileNotFoundError:
+                    # A worker can atomically replace or remove a file while we inspect it.
+                    continue
+                if modified >= cutoff:
+                    recent_file = str(path)
+                    break
+            if recent_file is not None:
+                break
+        descendant = self._active_descendant if recent_file is None else None
+        if recent_file is None and descendant is None:
+            self._release_stall_hold("no recent worker files or post-action job CPU progress")
+            return False
+        # A PID reused while reading the files/process snapshot cannot earn a hold.
+        if _process_start_time(pid) != birth:
+            self._release_stall_hold("worker identity changed during probe")
+            return False
+        evidence = {
+            "worker_pid": pid,
+            "worker_start_time": birth,
+            "recent_file": recent_file,
+            "descendant_pid": descendant,
+            "freshness_seconds": 900,
+            "attempt": self.attempt,
+            "generation": self.generation,
+        }
+        if self._stall_hold_evidence is None:
+            self.ledger._event(self.key, "worker-stall-held", **evidence)
+            self._stall_hold_evidence = evidence
+            reason = (
+                f"recent worker file {recent_file}"
+                if recent_file else f"post-action job {descendant} consumed CPU since the last probe"
+            )
+            _notify_requester(
+                self.ledger, self.key, self.order, self.generation,
+                "worker-stall-held", f"The stalled worker is held: {reason}.", evidence,
+            )
+        if self.closeout_path.exists():
+            stat = self.closeout_path.stat()
+            self._stall_hold_signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        return True
+
+    def poll(self) -> str | None:
+        now = time.monotonic()
+        if (self._stall_hold_evidence is not None
+                and self.wait_deadline is not None and now >= self.wait_deadline):
+            self._release_stall_hold("hard wait deadline reached")
+            return None
+        if self._stall_hold_evidence is not None:
+            state = self.ledger.state(self.key).get("state")
+            if state in self._NUDGE_REJECTED_STATES:
+                self._release_stall_hold(f"request state is {state}")
+                return None
+        probe_due = now >= self._next_stall_probe
+        if probe_due:
+            self._next_stall_probe = now + AGENT_WAIT_PANE_PROBE_SECONDS
+            self._probe_stall_job()
+        if not self.closeout_path.is_file():
+            self._release_stall_hold("STALLED closeout removed")
+            return None
+        if self._stall_hold_evidence is not None:
+            stat = self.closeout_path.stat()
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            if signature != self._stall_hold_signature:
+                self._release_stall_hold("Sentinel closeout changed")
+            elif not probe_due:
+                return None
         request_id = lifecycle.request_identity(self.order)
         try:
+            # The Sentinel writes this file itself, under its own umask (0664 on a
+            # typical host). Every ledger file is 0600, so tighten it before reading.
+            _tighten_private_file(self.closeout_path)
             closeout = contracts_sentinel.load_closeout(
                 self.closeout_path, request_id, self.order["order_id"]
             )
@@ -6991,18 +7822,19 @@ class _SentinelWatch:
             scope_roots=scope_roots,
         )
         outcome = closeout["outcome"]
-        self.ledger._event(
-            self.key,
-            SENTINEL_CLOSEOUT_EVENT,
-            outcome=outcome,
-            interpretation=closeout["interpretation"],
-            corroborated_citations=corroborated,
-            uncorroborated_citations=uncorroborated,
-            blocking_question=closeout.get("blocking_question"),
-            exchanges=len(cast(list, closeout["exchanges"])),
-            first_action_recorded=_first_action_event(self.ledger, self.key)
-            is not None,
-        )
+        if self._stall_hold_evidence is None:
+            self.ledger._event(
+                self.key,
+                SENTINEL_CLOSEOUT_EVENT,
+                outcome=outcome,
+                interpretation=closeout["interpretation"],
+                corroborated_citations=corroborated,
+                uncorroborated_citations=uncorroborated,
+                blocking_question=closeout.get("blocking_question"),
+                exchanges=len(cast(list, closeout["exchanges"])),
+                first_action_recorded=_first_action_event(self.ledger, self.key)
+                is not None,
+            )
         reason = _closeout_published_reason(closeout, corroborated, uncorroborated)
         if outcome == "NEVER_STARTED":
             # Routes through the same triage as the mechanical deadline: the typed
@@ -7031,6 +7863,7 @@ class _SentinelWatch:
                 archived = self.closeout_path.with_name(
                     "closeout.stalled-rejected.json"
                 )
+                _tighten_private_file(self.closeout_path)
                 os.replace(self.closeout_path, archived)
                 self.ledger._event(
                     self.key,
@@ -7062,12 +7895,32 @@ class _SentinelWatch:
                             "sentinel-stall-recheck-unavailable",
                             reason=str(prompt_error),
                         )
+                        if self._hold_stalled_worker():
+                            # Keep the claim pending so loss of either life signal is
+                            # re-evaluated on subsequent polls, even if the Sentinel died.
+                            os.replace(archived, self.closeout_path)
+                            stat = self.closeout_path.stat()
+                            self._stall_hold_signature = (
+                                stat.st_ino, stat.st_mtime_ns, stat.st_size
+                            )
+                            return None
+                        if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+                            self._release_stall_hold("hard wait deadline reached")
+                            return None
                         raise SentinelStalledError(
                             f"sentinel closeout STALLED: {reason}",
                             closeout,
                         ) from prompt_error
                 return None
             if self._attempt_stall_nudge(reason):
+                self._release_stall_hold("nudge ladder resumed")
+                return None
+            if self._hold_stalled_worker():
+                return None
+            # A probe can consume the remaining wait budget. Let the caller's hard
+            # deadline path decide completion/timeout instead of publishing STALLED.
+            if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+                self._release_stall_hold("hard wait deadline reached")
                 return None
             raise SentinelStalledError(
                 f"sentinel closeout STALLED: {reason}",
@@ -7099,6 +7952,7 @@ class _SentinelWatch:
                 rejected = self.closeout_path.with_name(
                     f"closeout.rejected-{self._landing_rounds_granted}.json"
                 )
+                _tighten_private_file(self.closeout_path)
                 os.replace(self.closeout_path, rejected)
                 self.ledger._event(
                     self.key,
@@ -7948,6 +8802,49 @@ def _wait_typed_file(path: Path, timeout_ms: int, parser: Callable[[str], Any]) 
 _PROMPT_SUBMISSION_LOCK = threading.Lock()
 
 
+def _reconcile_stalled_prompt(
+    target: str, before: dict, *, timeout_ms: int, herdr_session: str | None
+) -> None:
+    """Confirm only working or a newly completed turn; visible text proves nothing."""
+    budget_seconds = max(PROMPT_TIMEOUT_FLOOR_MS, timeout_ms) / 1000
+    deadline = time.monotonic() + budget_seconds
+    last_evidence = "no new working or completed turn"
+    while time.monotonic() < deadline:
+        try:
+            response = _herdr_json(
+                "agent",
+                "get",
+                target,
+                herdr_session=herdr_session,
+                timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+            )
+        except RecruiterError as error:
+            last_evidence = str(error)
+        else:
+            agent = response.get("result", {}).get("agent", {})
+            if agent.get("agent_status") == "blocked":
+                raise RecruiterError(
+                    f"agent_blocked: {target!r} reached a dialog after prompt delivery"
+                )
+            if agent.get("agent_status") == "working":
+                return
+            completed = agent.get("completion_seq")
+            prior_completed = before.get("completion_seq")
+            if (agent.get("agent_status") == "done"
+                    and "completion_seq" in before
+                    and isinstance(completed, int)
+                    and (prior_completed is None or completed > prior_completed)):
+                return
+            last_evidence = f"agent status {agent.get('agent_status')!r}; no new completed turn"
+        time.sleep(
+            min(PROMPT_RECONCILE_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
+        )
+    raise PromptDeliveryUnconfirmed(
+        f"agent_prompt_stalled: {target!r} delivery unconfirmed after "
+        f"{budget_seconds:g}s: {last_evidence}"
+    )
+
+
 def _submit_agent_prompt(
     target: str,
     message: str,
@@ -7956,37 +8853,56 @@ def _submit_agent_prompt(
     paste_settle_seconds: float = 0.0,
     herdr_session: str | None = None,
 ) -> None:
-    """Submit one prompt only after Herdr proves the dedicated target is idle.
+    """Gate on input readiness, then let Herdr reject a blocked dialog atomically.
 
-    Most agents accept one serialized ``pane run`` action. Cursor's interactive
-    TUI needs text and Enter as separate actions with a short settle between
-    them; without it, the prompt remains visibly drafted but never runs.
+    The 0.9.5 prompt operation owns paste/Enter sequencing, including Cursor. Do not
+    retry an uncertain submission: it may already have delivered the task.
     """
     with _PROMPT_SUBMISSION_LOCK:
-        _herdr(
+        ready = _herdr_json(
             "agent",
             "wait",
             target,
-            "--status",
+            "--until",
             "idle",
+            "--until",
+            "done",
+            "--until",
+            "blocked",
             "--timeout",
             str(idle_timeout_ms),
             herdr_session=herdr_session,
+            timeout_seconds=idle_timeout_ms / 1000,
         )
-        agent = (
-            _herdr_json("agent", "get", target, herdr_session=herdr_session)
-            .get("result", {})
-            .get("agent", {})
-        )
-        pane_id = agent.get("pane_id") if isinstance(agent, dict) else None
-        if not isinstance(pane_id, str) or not pane_id:
-            raise RecruiterError(f"Herdr agent target {target!r} has no current pane")
-        if paste_settle_seconds > 0:
-            _herdr("pane", "send-text", pane_id, message, herdr_session=herdr_session)
-            time.sleep(paste_settle_seconds)
-            _herdr("pane", "send-keys", pane_id, "Enter", herdr_session=herdr_session)
-        else:
-            _herdr("pane", "run", pane_id, message, herdr_session=herdr_session)
+        prompt_budget_ms = max(PROMPT_TIMEOUT_FLOOR_MS, idle_timeout_ms)
+        try:
+            response = _herdr_json(
+                "agent",
+                "prompt",
+                target,
+                message,
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--timeout",
+                str(prompt_budget_ms),
+                herdr_session=herdr_session,
+                timeout_seconds=prompt_budget_ms / 1000,
+            )
+        except RecruiterError as error:
+            if "agent_prompt_stalled" not in str(error):
+                raise
+            _reconcile_stalled_prompt(
+                target, ready.get("result", {}).get("agent", {}),
+                timeout_ms=prompt_budget_ms, herdr_session=herdr_session,
+            )
+            return
+        if response.get("result", {}).get("agent", {}).get("agent_status") == "blocked":
+            raise RecruiterError(
+                f"agent_blocked: {target!r} reached a dialog after prompt delivery"
+            )
 
 
 def _notify_requester(
@@ -8194,6 +9110,7 @@ def _start_account_manager(
                         "offering_id": candidate.offering_id,
                         "provider": candidate.provider,
                     },
+                    startup_timeout_ms=config.startup_timeout_ms,
                 )
             )
             _resize_started_pane(
@@ -8456,6 +9373,7 @@ def _run_one_shot_checker(
                     "offering_id": candidate.offering_id,
                     "provider": candidate.provider,
                 },
+                startup_timeout_ms=config.startup_timeout_ms,
             )
         except (RecruiterError, OSError) as error:
             candidate_error = error
@@ -8577,17 +9495,20 @@ def _await_requester_timeout_decision(
         # Release or feedback delivery won the state race. Permit one bounded finalization
         # grace; a second timeout hard-stops instead of extending forever.
         return ledger.consume_review_transition_grace(key, token)
-    control_token = cast(str, lease["requester_control_token"])
     response_path = ledger.request_dir(key) / "responses" / f"{nonce}.json"
+    # The token never rides in this message: it reaches the requester message log, the
+    # await JSON, and the account-manager pane, and the manager may only recommend. The
+    # requester names its private token file (or passes its token positionally).
     command = (
         f"just upagent-respond {shlex.quote(str(ledger.request_dir(key) / 'request.json'))} "
-        f"{shlex.quote(control_token)} {shlex.quote(nonce)} "
+        f"--control-token-file=<control-token-file> {shlex.quote(nonce)} "
         "<extend|cancel> <extension-ms-or-0>"
     )
     message = (
         f"Worker {worker_pane} reached work cap {timeout_number}. Inspect it if useful, then "
         f"authorize an extension or cancellation within {config.requester_grace_ms} ms. "
-        f"Response command: {command}"
+        f"Response command: {command} (or pass your control token in place of "
+        "--control-token-file=...)"
     )
     if manager["address"] is not None:
         with suppress(RecruiterError):
@@ -8747,6 +9668,7 @@ def _startup_rescue_advice(
             tab_role="oversight",
             herdr_session=herdr_session,
             metadata={"generation": generation},
+            startup_timeout_ms=config.startup_timeout_ms,
         )
         try:
             _wait_for_agent_health(
@@ -9984,6 +10906,44 @@ def _resolve_intake_clerk_identity(ownership: dict) -> dict[str, object]:
         )
     except RecruiterError as error:
         if "agent_not_found" in str(error):
+            recorded_pane = ownership.get("pane")
+            terminal_id = ownership.get("terminal_id")
+            if recorded_pane and terminal_id:
+                try:
+                    current = (
+                        _herdr_json(
+                            "pane", "get", recorded_pane, herdr_session=herdr_session
+                        )
+                        .get("result", {})
+                        .get("pane", {})
+                    )
+                except RecruiterError as lookup_error:
+                    if "pane_not_found" in str(lookup_error):
+                        return {"status": "absent", "agent_name": agent_name}
+                    return {"status": "blocked", "reason": str(lookup_error)}
+                if (
+                    current.get("terminal_id") == terminal_id
+                    and current.get("workspace_id") == ownership.get("workspace_id")
+                    and not current.get("agent")
+                    and not current.get("agent_name")
+                ):
+                    return {
+                        "status": "owned",
+                        "agent_name": agent_name,
+                        "pane": recorded_pane,
+                    }
+                return {
+                    "status": "blocked",
+                    "reason": "intake terminal has a different occupant or identity",
+                }
+            if (
+                ownership.get("herdr_launch_style") == "split-then-start"
+                and not recorded_pane
+            ):
+                return {
+                    "status": "blocked",
+                    "reason": "intake split outcome is uncertain; an absent agent name cannot prove pane absence",
+                }
             return {"status": "absent", "agent_name": agent_name}
         return {"status": "blocked", "reason": f"agent lookup failed: {error}"}
     if not isinstance(agent, dict) or not agent:
@@ -10243,6 +11203,7 @@ def _run_order_intake_clerk(
         "schema_version": 1,
         "intake_key": intake_key,
         "attempt_name": attempt.name,
+        "herdr_launch_style": "split-then-start",
         "lease_token": lease_token,
         "agent_name": agent_name,
         "owner_pid": os.getpid(),
@@ -10254,13 +11215,18 @@ def _run_order_intake_clerk(
         "expires_at": int(time.time())
         + max(
             1,
-            (config.startup_timeout_ms + config.intake_clerk.timeout_ms) // 1000 + 30,
+            (
+                _agent_start_timeout_ms(config.startup_timeout_ms)
+                + config.intake_clerk.timeout_ms
+            )
+            // 1000
+            + 30,
         ),
         "pane": None,
         "state": "launching",
     }
-    # This journal exists before Herdr is asked to create anything. A crash at any later point
-    # can resolve the unguessable agent name even when no pane id was written.
+    # Journal before creating topology. If a split reply is lost, name absence cannot
+    # prove its anonymous shell absent; keep cleanup unresolved until identity is known.
     _secure_write_json(ownership_path, ownership)
 
     clerk_order = {"cockpit_pane": recruiter_pane, "cwd": cwd}
@@ -10274,6 +11240,17 @@ def _run_order_intake_clerk(
     response: object | None = None
     failure: BaseException | None = None
     launch_attempted = False
+
+    def record_created(created: dict) -> None:
+        nonlocal pane
+        pane = created["pane_id"]
+        ownership.update(
+            pane=pane,
+            terminal_id=created.get("terminal_id"),
+            workspace_id=created.get("workspace_id"),
+        )
+        _secure_write_json(ownership_path, ownership)
+
     try:
         launch_attempted = True
         pane, workspace_id, address = _start_herdr_agent(
@@ -10283,6 +11260,10 @@ def _run_order_intake_clerk(
             split_direction="down",
             tab_role="oversight",
             herdr_session=herdr_session,
+            on_pane_created=record_created,
+            expected_agent=config.intake_clerk.expected_agent,
+            expected_process=config.intake_clerk.expected_process,
+            startup_timeout_ms=config.startup_timeout_ms,
         )
         ownership["pane"] = (
             pane  # local cleanup remains possible if journal update fails
@@ -10761,6 +11742,31 @@ def _terminate_owned_runner(pid: object, key: str) -> None:
         time.sleep(0.05)
     if _runner_alive(pid, key):
         os.kill(pid, 9)
+
+
+def _sentinel_receipt_cleanup(
+    cleanups: list[dict[str, object]],
+) -> dict[str, object]:
+    """Pick the one Sentinel cleanup record the receipt reports.
+
+    A failed close always wins, so a leaked pane taints the terminal. Otherwise the
+    last pane that was really created and closed wins: the defensive final close finds
+    no live Sentinel and returns `not-created`, which must not hide the attempt's real,
+    verified close. Only a request that never hired a Sentinel reports `not-created`.
+    """
+    failed = next(
+        (item for item in cleanups if item.get("verified_absent") is not True), None
+    )
+    if failed is not None:
+        return failed
+    created = [item for item in cleanups if item.get("status") != "not-created"]
+    if created:
+        return created[-1]
+    return (
+        cleanups[-1]
+        if cleanups
+        else {"status": "not-created", "worker_pane": None, "verified_absent": True}
+    )
 
 
 def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
@@ -11848,6 +12854,10 @@ def cmd_reconcile(*, force: bool = False, emit: bool = True) -> int:
     return 0
 
 
+RUNNER_REPARENT_ENV = "UPAGENT_RUNNER_REPARENT"
+RUNNER_REPARENT_CLAIM_SECONDS = 30.0
+
+
 def _spawn_job(key: str, roster_path: str) -> subprocess.Popen[bytes] | None:
     """Start one detached supervisor, or attach when the durable lease already has one."""
     ledger = JobLedger()
@@ -11866,6 +12876,7 @@ def _spawn_job(key: str, roster_path: str) -> subprocess.Popen[bytes] | None:
     environment = dict(command_runtime.current_environ())
     environment["UPAGENT_HUB_DIR"] = str(ledger.root.resolve())
     environment["UPAGENT_STATE"] = str(STATE_FILE.resolve())
+    environment[RUNNER_REPARENT_ENV] = "1"
     argv = [
         sys.executable,
         str((HERE / "recruiter.py").resolve()),
@@ -12142,7 +13153,11 @@ def _request_order(order: dict, roster_path: str) -> int:
         process = None
     deadline = (
         time.monotonic()
-        + (config.account_manager.timeout_ms + config.startup_timeout_ms * 2) / 1000
+        + (
+            config.account_manager.timeout_ms
+            + _agent_start_timeout_ms(config.startup_timeout_ms) * 2
+        )
+        / 1000
     )
     while time.monotonic() < deadline:
         state = ledger.state(key)
@@ -12574,6 +13589,57 @@ def cmd_await_any(
                 terminal=False,
             )
         time.sleep(poll_seconds)
+
+
+def _read_private_control_token_file(value: str) -> str:
+    """Read a requester control token from a private file, never through a symlink.
+
+    The file must be absolute, a regular file owned by this user, with no group or world
+    bits, and hold exactly one 32-hex token.
+    """
+    path = Path(value)
+    if not value or not path.is_absolute():
+        raise RecruiterError(f"--control-token-file must be an absolute path: {value!r}")
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RecruiterError(
+            f"--control-token-file is not a readable non-symlink file: {path}: {error}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RecruiterError(f"--control-token-file must be a regular file: {path}")
+        if metadata.st_uid != os.geteuid():
+            raise RecruiterError(
+                f"--control-token-file must be owned by the current user: {path}"
+            )
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise RecruiterError(
+                f"--control-token-file must not be group/world accessible: {path}"
+            )
+        if metadata.st_size <= 0 or metadata.st_size > 256:
+            raise RecruiterError(f"--control-token-file has an invalid size: {path}")
+        raw = os.read(descriptor, 257)
+    finally:
+        os.close(descriptor)
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise RecruiterError(
+            f"--control-token-file must contain UTF-8 text: {path}"
+        ) from error
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise RecruiterError(
+            f"--control-token-file does not contain a valid control token: {path}"
+        )
+    return token
 
 
 def cmd_respond(
@@ -13195,8 +14261,37 @@ def cmd_message_worker(
     return 0
 
 
+def _reparent_runner(key: str) -> None:
+    """Complete the second fork before the caller's shell-tool timeout can kill its tree.
+
+    Popen creates the first child/session. This child forks the actual runner, whose
+    PID and birth stamp go into the lease. The intermediate parent exits after that
+    claim, so init adopts the runner. setsid alone cannot defeat a process-tree kill.
+    """
+    os.environ.pop(RUNNER_REPARENT_ENV, None)
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        return
+    ledger = JobLedger()
+    deadline = time.monotonic() + RUNNER_REPARENT_CLAIM_SECONDS
+    while True:
+        exited, status = os.waitpid(child, os.WNOHANG)
+        if exited:
+            os._exit(os.waitstatus_to_exitcode(status))
+        lease = _active_claim_for(ledger, key)
+        if lease is not None and lease.get("runner_pid") == child:
+            os._exit(0)
+        if time.monotonic() >= deadline:
+            # The live child may still claim; the existing lease reconciler owns it.
+            os._exit(0)
+        time.sleep(0.05)
+
+
 def cmd_run_job(key: str, roster_path: str) -> int:
     """Claim one persisted request, then run its existing exclusive worker lifecycle."""
+    if command_runtime.getenv(RUNNER_REPARENT_ENV) == "1":
+        _reparent_runner(key)
     ledger = JobLedger()
     order = ledger.order(key)
     roster = load_roster(roster_path)
@@ -13219,7 +14314,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
     lease_window_ms = (
         timeout_ms
         + management_config.account_manager.timeout_ms
-        + management_config.startup_timeout_ms * 2
+        + _agent_start_timeout_ms(management_config.startup_timeout_ms) * 2
         + management_config.requester_grace_ms
     )
     token = ledger.claim(key, order["order_id"], lease_window_ms, owner=owner)
@@ -13409,6 +14504,21 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             ledger.mark_launch_closed(
                 key, launch_id, pane, sentinel_cleanup, expected_lease_token=token
             )
+        # A closeout the Sentinel wrote after the watch's last read (the bypass-at-exit
+        # path skips the read entirely) is still at the Sentinel's umask. Nothing can
+        # write the attempt directory once its Sentinel is closed: make every claim 0600.
+        closeout_path = sentinel_state.get("closeout_path")
+        if isinstance(closeout_path, Path):
+            for claim in sorted(closeout_path.parent.glob("closeout*.json")):
+                try:
+                    _tighten_private_file(claim)
+                except OSError as error:
+                    ledger._event(
+                        key,
+                        "sentinel-closeout-mode-unfixed",
+                        path=str(claim),
+                        reason=str(error),
+                    )
         sentinel_state.clear()
         return sentinel_cleanup
 
@@ -13446,6 +14556,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
             tab_role=cast(str | None, kwargs.get("tab_role")),
             herdr_session=herdr_session,
             metadata={"attempt": len(worker_launches) + 1, "generation": generation},
+            startup_timeout_ms=management_config.startup_timeout_ms,
         )
         worker_launches.append((launch_id, pane))
         return pane, workspace_id, address
@@ -13563,6 +14674,11 @@ def cmd_run_job(key: str, roster_path: str) -> int:
 
     def worker_healthy(evidence: dict[str, object]) -> None:
         assert manager is not None
+        evidence = {
+            **evidence,
+            "attempt": attempt_state["number"],
+            "generation": generation,
+        }
         # Health is the startup-marker clock zero: from here the worker has the clamped
         # first-action deadline (_first_action_deadline_ms) to show a first observable
         # action.
@@ -13926,14 +15042,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         # every attempt's cleanup evidence into the receipt. A leaked Sentinel pane taints
         # the terminal exactly like a leaked manager pane.
         sentinel_cleanups.append(close_sentinel())
-        sentinel_cleanup = next(
-            (
-                item
-                for item in sentinel_cleanups
-                if item.get("verified_absent") is not True
-            ),
-            sentinel_cleanups[-1],
-        )
+        sentinel_cleanup = _sentinel_receipt_cleanup(sentinel_cleanups)
         if sentinel_cleanup.get("verified_absent") is not True:
             result = _write_required_blocked_bundle(
                 order,
@@ -15107,7 +16216,16 @@ def main(argv: list[str] | None = None) -> int:
         "respond", help="authorize extension or cancellation as the requester"
     )
     p_respond.add_argument("order", help="path to order.json")
-    p_respond.add_argument("control_token", help="control token returned by request")
+    p_respond.add_argument(
+        "control_token",
+        nargs="?",
+        help="control token returned by request (or use --control-token-file)",
+    )
+    p_respond.add_argument(
+        "--control-token-file",
+        help="absolute path to the private requester control token, in place of the "
+        "positional token",
+    )
     p_respond.add_argument("nonce", help="nonce returned by await/timeout warning")
     p_respond.add_argument("action", choices=lifecycle.REQUESTER_ACTIONS)
     p_respond.add_argument(
@@ -15216,9 +16334,16 @@ def main(argv: list[str] | None = None) -> int:
             extension_ms = args.extension_ms if args.action == "extend" else None
             if args.action == "cancel" and args.extension_ms != 0:
                 raise RecruiterError("cancel requires extension_ms=0")
+            if (args.control_token is None) == (args.control_token_file is None):
+                raise RecruiterError(
+                    "respond needs exactly one of a positional control token or "
+                    "--control-token-file"
+                )
             return cmd_respond(
                 args.order,
-                args.control_token,
+                args.control_token
+                if args.control_token is not None
+                else _read_private_control_token_file(args.control_token_file),
                 args.nonce,
                 args.action,
                 extension_ms,

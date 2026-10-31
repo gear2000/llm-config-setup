@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 # Pin Herdr to the version this kit's UpAgent hub is tested against.
 #
-# UpAgent's recruiter was written against Herdr 0.7.1. A newer Herdr (including
-# whatever https://herdr.dev/install.sh currently ships) breaks the hub: wait
-# subscriptions go silent when a pane vanishes, and later protocol/CLI changes
-# are untested here. Do not run `herdr update`, `brew upgrade herdr`, or the
-# unpinned herdr.dev installer on a machine that runs this kit.
+# UpAgent targets Herdr 0.9.5's existing-pane agent startup and server-owned waits.
+# Install this release explicitly; `herdr update`, package-manager upgrades, and
+# the unpinned herdr.dev installer can change that API.
 #
-# Source of the binary: GitHub release tag v0.7.1, not herdr.dev/latest.json.
+# Source of the binary: GitHub release tag v0.9.5, not herdr.dev/latest.json.
 #
 # Usage:
-#   tools/install-herdr.sh           # install 0.7.1 if missing; no-op if already 0.7.1
+#   tools/install-herdr.sh           # install 0.9.5 if missing; no-op if already 0.9.5
 #   tools/install-herdr.sh --check   # verify the pin, mutate nothing
-#   tools/install-herdr.sh --force   # replace a different installed version with 0.7.1
+#   tools/install-herdr.sh --force   # replace a different installed version with 0.9.5
 #
-# Override the pin only for a deliberate kit-side bump (then re-test UpAgent):
-#   HERDR_PIN=0.7.1 tools/install-herdr.sh
+# Override only for an explicit rollback or tested kit-side bump:
+#   HERDR_PIN=0.7.1 tools/install-herdr.sh --force
 
 set -euo pipefail
 
-PINNED="${HERDR_PIN:-0.7.1}"
+PINNED="${HERDR_PIN:-0.9.5}"
 INSTALL_DIR="${HERDR_INSTALL_DIR:-$HOME/.local/bin}"
 RELEASE_BASE="https://github.com/herdrdev/herdr/releases/download/v${PINNED}"
 
@@ -31,7 +29,7 @@ for arg in "$@"; do
 	--force) FORCE=1 ;;
 	--) ;;
 	-h | --help)
-		sed -n '12,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,2\}//'
+		sed -n '/^# Usage:/,/^# Override/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,2\}//'
 		exit 0
 		;;
 	*)
@@ -55,7 +53,7 @@ fail_wrong_version() {
 	if command -v herdr >/dev/null 2>&1; then
 		echo "       binary: $(command -v herdr)" >&2
 	fi
-	echo "       A newer Herdr breaks the UpAgent hub. Do not run \`herdr update\`." >&2
+	echo "       Other versions are outside this port. Do not run \`herdr update\`." >&2
 	echo "       Install the pin: bash tools/install-herdr.sh --force" >&2
 	echo "       Official unpinned installer (do not use): curl -fsSL https://herdr.dev/install.sh | sh" >&2
 	exit 1
@@ -116,6 +114,30 @@ if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 "$url" -o "${tmp}/
 	echo "       Manual fallback: https://github.com/herdrdev/herdr/releases/tag/v${PINNED}" >&2
 	exit 1
 fi
+curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 \
+	"https://api.github.com/repos/herdrdev/herdr/releases/tags/v${PINNED}" \
+	-o "${tmp}/release.json"
+python3 - "$PINNED" "$asset" "${tmp}/release.json" "${tmp}/herdr" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+version, asset_name, metadata_path, binary_path = sys.argv[1:]
+release = json.loads(Path(metadata_path).read_text())
+asset = next(item for item in release["assets"] if item["name"] == asset_name)
+digest = asset.get("digest")
+if digest is None and version == "0.7.1":
+    print(f"Skipping SHA-256: Herdr {version} publishes no digest for {asset_name}.")
+else:
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise SystemExit(f"ERROR: release has no valid SHA-256 for {asset_name}; refusing install")
+    actual = "sha256:" + hashlib.sha256(Path(binary_path).read_bytes()).hexdigest()
+    if actual != digest:
+        raise SystemExit(f"ERROR: SHA-256 mismatch for {asset_name}: expected {digest}, got {actual}")
+    print(f"Verified {asset_name} {digest}")
+PY
 chmod +x "${tmp}/herdr"
 mv "${tmp}/herdr" "${INSTALL_DIR}/herdr"
 
@@ -139,4 +161,4 @@ if [[ "$got" != "$PINNED" ]]; then
 fi
 
 echo "installed herdr ${PINNED} ($(command -v herdr))"
-echo "do not run: herdr update   (that would leave 0.7.1)"
+echo "do not run: herdr update   (that would leave ${PINNED})"

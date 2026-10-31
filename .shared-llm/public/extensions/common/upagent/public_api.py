@@ -2037,7 +2037,9 @@ def execute(args: Any, cwd: Path) -> int:
         code, output = _capture(
             recruiter.cmd_respond,
             str(registered.order_path),
-            args.control_token,
+            args.control_token
+            if args.control_token is not None
+            else _private_control_token_file(args.control_token_file),
             args.nonce,
             args.action,
             extension,
