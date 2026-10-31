@@ -484,6 +484,11 @@ def _launch(
     tab = _herdr(state, "pane", "get", cockpit)["result"]["pane"].get("tab_id")
     if not tab:
         raise SpecialistError("caller pane has no tab")
+    if state["harness"] in ("claude", "claudex"):
+        # As for hub panes: an untrusted cwd stops the resident at Claude's "do you trust
+        # this folder?" dialog. Done before any journal write, so a failure here (an
+        # unreadable ~/.claude.json) leaves nothing in flight to block the next start.
+        recruiter._ensure_claude_folder_trust(state["cwd"])
     # Journal BEFORE launching. A lost response must block, never cause an orphan duplicate.
     _save(directory, state)
     # Start the bound before IPC: a hung launch must not bypass readiness.

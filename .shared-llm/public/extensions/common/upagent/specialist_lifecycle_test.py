@@ -50,6 +50,8 @@ class FakeRecruiter:
         self.closes = []
         # pane id -> callable run when that pane closes (a real close ends its agent).
         self.close_hooks = {}
+        # Ordered ("trust", cwd) / ("start", name) records of launch-side effects.
+        self.launch_log = []
         self.prompts = []
         self.acknowledge = True
         self.answer = True
@@ -116,6 +118,7 @@ class FakeRecruiter:
     ):
         assert herdr_session == "test-session"
         self.start_calls += 1
+        self.launch_log.append(("start", name))
         args = (name, order["cwd"], launch)
         if self.fail_start:
             mode, self.fail_start = self.fail_start, None
@@ -255,6 +258,12 @@ class FakeRecruiter:
             return {"result": {}}
         raise AssertionError(args)
 
+    def _ensure_claude_folder_trust(self, cwd):
+        if getattr(self, "fail_trust", False):
+            self.fail_trust = False
+            raise BackendError("cannot read ~/.claude.json to pre-trust " + cwd)
+        self.launch_log.append(("trust", cwd))
+
     def _snapshot_pane_process_tree(self, pane, *, herdr_session):
         # No real processes behind fake panes; a test swaps in the real snapshot.
         assert herdr_session == "test-session"
@@ -308,6 +317,40 @@ def test_fixed_two_hour_boundary(runtime, monkeypatch, age, expired):
         module._expired({"launched_at": 10000 - age, "launched_monotonic": 10000 - age})
         is expired
     )
+
+
+@pytest.mark.parametrize(
+    "harness,trusted", [("claude", True), ("claudex", True), ("pi", False)]
+)
+def test_claude_resident_pre_trusts_its_folder_before_agent_start(
+    runtime, harness, trusted
+):
+    """Claude and ClaudeX stop at "do you trust this folder?" in a new folder, so the
+    resident's cwd must be pre-trusted before `agent start`, as hub panes are."""
+    module, backend, _ = runtime
+    backend.entry["offering_snapshot"] = {"harness": harness}
+    backend.EXPECTED_HARNESS_AGENT = {harness: "pi"}
+    backend.EXPECTED_HARNESS_PROCESS = {harness: "pi"}
+    _, state = start(runtime)
+    assert state["state"] == "ready"
+    expected = [("trust", state["cwd"])] if trusted else []
+    assert backend.launch_log == expected + [("start", state["agent_name"])]
+
+
+def test_a_failed_folder_trust_never_wedges_the_resident_launch(runtime):
+    """Pre-trust fails before anything is created, so the next `up` starts cleanly."""
+    module, backend, cwd = runtime
+    backend.entry["offering_snapshot"] = {"harness": "claude"}
+    backend.EXPECTED_HARNESS_AGENT = {"claude": "pi"}
+    backend.EXPECTED_HARNESS_PROCESS = {"claude": "pi"}
+    backend.fail_trust = True
+    with pytest.raises(BackendError, match="pre-trust"):
+        module.main(["up", "advisor"])
+    assert backend.start_calls == 0
+    module.main(["up", "advisor"])
+    state = module._read(module._directory("advisor", cwd) / "state.json")
+    assert state["state"] == "ready"
+    assert backend.start_calls == 1
 
 
 def test_refresh_before_worker_and_disabled_stays_down(runtime):
