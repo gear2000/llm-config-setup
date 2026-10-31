@@ -465,6 +465,67 @@ def test_poll_reports_a_malformed_closeout_once_and_keeps_waiting(
     assert events.count("sentinel-closeout-invalid") == 1
 
 
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_poll_tightens_a_group_readable_closeout_to_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Sentinel writes closeout.json under its own umask; the Recruiter makes it
+    0600 like every other ledger file before it reads the claim."""
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    _stage_valid_result(manifest, order)
+    watch.closeout_path.write_text(json.dumps(_closeout(order)))
+    watch.closeout_path.chmod(0o664)
+    before = watch.closeout_path.stat()
+    assert watch.poll() == "complete"
+    after = watch.closeout_path.stat()
+    assert _mode(watch.closeout_path) == 0o600
+    # chmod moves ctime only: the stall-hold signature (ino, mtime, size) is unchanged.
+    assert (after.st_ino, after.st_mtime_ns, after.st_size) == (
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+    )
+
+
+def test_poll_tightens_a_malformed_closeout_and_archives_stay_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        recruiter, "_submit_agent_prompt", lambda address, message, **kwargs: None
+    )
+    watch = _watch(ledger, order, key, manifest)
+    watch.closeout_path.write_text("{ not json")
+    watch.closeout_path.chmod(0o664)
+    assert watch.poll() is None
+    assert _mode(watch.closeout_path) == 0o600
+    # A COMPLETE claim over an invalid bundle is archived as rejected: still 0600.
+    watch.closeout_path.unlink()
+    watch.closeout_path.write_text(json.dumps(_closeout(order)))
+    watch.closeout_path.chmod(0o664)
+    assert watch.poll() is None
+    rejected = watch.closeout_path.with_name("closeout.rejected-1.json")
+    assert _mode(rejected) == 0o600
+
+
+def test_poll_never_follows_a_symlinked_closeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, order, key, manifest = _claimed_request(tmp_path, monkeypatch)
+    watch = _watch(ledger, order, key, manifest)
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps(_closeout(order)))
+    target.chmod(0o644)
+    watch.closeout_path.symlink_to(target)
+    assert watch.poll() is None
+    assert _mode(target) == 0o644
+    assert "sentinel-closeout-invalid" in _events(ledger, key)
+
+
 def test_a_never_started_closeout_raises_the_typed_liftoff_fault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

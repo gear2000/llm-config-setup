@@ -6465,6 +6465,32 @@ def _sentinel_closeout_path(ledger: JobLedger, key: str, attempt: int) -> Path:
     return ledger.request_dir(key) / "sentinel" / f"attempt-{attempt}" / "closeout.json"
 
 
+def _tighten_private_file(path: Path) -> None:
+    """Force one agent-written ledger file to mode 0600 without following a symlink.
+
+    A file that is already gone is not an error. A symlink or a non-regular file raises
+    OSError, so a caller that reads the file treats it like any other unreadable claim.
+    """
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(errno.EINVAL, f"{path} is not a regular file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
 def _sentinel_wake_path(closeout_path: Path) -> Path:
     """The attempt's wake file, beside its closeout. Python is the ONLY writer (staging
     activity, proven worker death); the Sentinel is the only consumer — its pulse wait
@@ -7273,6 +7299,7 @@ class _SentinelWatch:
                     archived = self.closeout_path.with_name(
                         f"closeout.stalled-working-{time.time_ns()}.json"
                     )
+                    _tighten_private_file(self.closeout_path)
                     os.replace(self.closeout_path, archived)
                 self._prompt_sentinel_after_nudge("working")
                 return True
@@ -7300,6 +7327,7 @@ class _SentinelWatch:
             archived = self.closeout_path.with_name(
                 f"closeout.stalled-{label}{suffix}.json"
             )
+            _tighten_private_file(self.closeout_path)
             os.replace(self.closeout_path, archived)
         event_name = {
             "delivered": "delivered",
@@ -7524,6 +7552,9 @@ class _SentinelWatch:
                 return None
         request_id = lifecycle.request_identity(self.order)
         try:
+            # The Sentinel writes this file itself, under its own umask (0664 on a
+            # typical host). Every ledger file is 0600, so tighten it before reading.
+            _tighten_private_file(self.closeout_path)
             closeout = contracts_sentinel.load_closeout(
                 self.closeout_path, request_id, self.order["order_id"]
             )
@@ -7599,6 +7630,7 @@ class _SentinelWatch:
                 archived = self.closeout_path.with_name(
                     "closeout.stalled-rejected.json"
                 )
+                _tighten_private_file(self.closeout_path)
                 os.replace(self.closeout_path, archived)
                 self.ledger._event(
                     self.key,
@@ -7687,6 +7719,7 @@ class _SentinelWatch:
                 rejected = self.closeout_path.with_name(
                     f"closeout.rejected-{self._landing_rounds_granted}.json"
                 )
+                _tighten_private_file(self.closeout_path)
                 os.replace(self.closeout_path, rejected)
                 self.ledger._event(
                     self.key,
