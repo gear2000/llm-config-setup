@@ -11475,6 +11475,31 @@ def _terminate_owned_runner(pid: object, key: str) -> None:
         os.kill(pid, 9)
 
 
+def _sentinel_receipt_cleanup(
+    cleanups: list[dict[str, object]],
+) -> dict[str, object]:
+    """Pick the one Sentinel cleanup record the receipt reports.
+
+    A failed close always wins, so a leaked pane taints the terminal. Otherwise the
+    last pane that was really created and closed wins: the defensive final close finds
+    no live Sentinel and returns `not-created`, which must not hide the attempt's real,
+    verified close. Only a request that never hired a Sentinel reports `not-created`.
+    """
+    failed = next(
+        (item for item in cleanups if item.get("verified_absent") is not True), None
+    )
+    if failed is not None:
+        return failed
+    created = [item for item in cleanups if item.get("status") != "not-created"]
+    if created:
+        return created[-1]
+    return (
+        cleanups[-1]
+        if cleanups
+        else {"status": "not-created", "worker_pane": None, "verified_absent": True}
+    )
+
+
 def _cleanup_lease_panes(lease: dict) -> dict[str, object]:
     """Close every pane explicitly recorded by one lease generation, and no others."""
     outcomes: dict[str, object] = {}
@@ -14682,14 +14707,7 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         # every attempt's cleanup evidence into the receipt. A leaked Sentinel pane taints
         # the terminal exactly like a leaked manager pane.
         sentinel_cleanups.append(close_sentinel())
-        sentinel_cleanup = next(
-            (
-                item
-                for item in sentinel_cleanups
-                if item.get("verified_absent") is not True
-            ),
-            sentinel_cleanups[-1],
-        )
+        sentinel_cleanup = _sentinel_receipt_cleanup(sentinel_cleanups)
         if sentinel_cleanup.get("verified_absent") is not True:
             result = _write_required_blocked_bundle(
                 order,

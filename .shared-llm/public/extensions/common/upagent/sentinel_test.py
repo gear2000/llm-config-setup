@@ -2228,6 +2228,26 @@ def test_drill_dead_sentinel_falls_to_the_hard_timeout_backstop(
     assert "sentinel-closeout" not in _events(ledger, key)
     assert drill.closed == ["worker-pane", "sentinel-pane"]
     assert receipt["cleanup"]["verified_absent"] is True
+    # The defensive final close finds no live Sentinel; the receipt still reports the
+    # pane that really was hired and closed, never `not-created`.
+    assert receipt["cleanup"]["sentinel"] == {
+        "status": "closed",
+        "worker_pane": "sentinel-pane",
+        "verified_absent": True,
+    }
+
+
+def test_sentinel_receipt_cleanup_reports_the_real_close_not_the_defensive_one() -> None:
+    closed = {"status": "closed", "worker_pane": "s1", "verified_absent": True}
+    absent = {"status": "not-created", "worker_pane": None, "verified_absent": True}
+    failed = {"status": "cleanup-failed", "worker_pane": "s0", "verified_absent": False}
+    later = {"status": "already-absent", "worker_pane": "s2", "verified_absent": True}
+    pick = recruiter._sentinel_receipt_cleanup
+    assert pick([closed, absent]) is closed
+    assert pick([closed, later, absent]) is later
+    assert pick([failed, closed, absent]) is failed
+    assert pick([absent]) is absent
+    assert pick([])["status"] == "not-created"
 
 
 @pytest.mark.parametrize("verdict", ["passed", "blocked"])
