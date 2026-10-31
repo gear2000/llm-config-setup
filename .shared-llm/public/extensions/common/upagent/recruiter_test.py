@@ -664,6 +664,71 @@ def test_start_worker_creates_pane_then_starts_agent(monkeypatch, tmp_path) -> N
     assert start[-2:] == ("--model", "some-model")
 
 
+def _split_env(monkeypatch, tmp_path, order: dict) -> dict[str, str]:
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls = []
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("pane", "split"):
+            return {"result": {"pane": {"pane_id": "worker-pane", "workspace_id": "w"}}}
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("agent_not_found")
+        if args[:2] == ("pane", "get"):
+            return {"result": {"pane": {"tab_id": "tab-1"}}}
+        return {
+            "result": {"agent": {"name": "upagent-req-env-g1", "pane_id": "worker-pane"}}
+        }
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    recruiter._start_herdr_agent(
+        "upagent-req-env-g1", order, "claude --model m", herdr_session="s"
+    )
+    split = next(call for call in calls if call[:2] == ("pane", "split"))
+    values = [split[i + 1] for i, item in enumerate(split) if item == "--env"]
+    return dict(value.split("=", 1) for value in values)
+
+
+def test_pane_split_carries_the_hub_canonical_repo_into_the_pane(
+    monkeypatch, tmp_path
+) -> None:
+    """D6: a nested request inside the worker pane must resolve the same checkout the
+    hub resolved through UPAGENT_CANONICAL_REPO; a Herdr pane does not inherit it."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setenv("UPAGENT_CANONICAL_REPO", str(checkout))
+    env = _split_env(monkeypatch, tmp_path, _order(cockpit_pane="leader-pane"))
+    assert env == {"UPAGENT_CANONICAL_REPO": str(checkout.resolve())}
+
+
+def test_pane_split_adds_no_canonical_repo_when_the_hub_had_none(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("UPAGENT_CANONICAL_REPO", raising=False)
+    env = _split_env(
+        monkeypatch, tmp_path, _order(cockpit_pane="leader-pane", env={"A": "1"})
+    )
+    assert env == {"A": "1"}
+
+
+def test_pane_split_order_env_wins_over_the_hub_canonical_repo(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPAGENT_CANONICAL_REPO", str(tmp_path / "hub-checkout"))
+    env = _split_env(
+        monkeypatch,
+        tmp_path,
+        _order(cockpit_pane="leader-pane", env={"UPAGENT_CANONICAL_REPO": "/order/own"}),
+    )
+    assert env == {"UPAGENT_CANONICAL_REPO": "/order/own"}
+
+
+def test_pane_split_refuses_a_relative_canonical_repo(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPAGENT_CANONICAL_REPO", "relative/checkout")
+    with pytest.raises(RecruiterError, match="absolute checkout root"):
+        _split_env(monkeypatch, tmp_path, _order(cockpit_pane="leader-pane"))
+
+
 def test_start_herdr_agent_honors_downward_role_placement(
     monkeypatch, tmp_path
 ) -> None:

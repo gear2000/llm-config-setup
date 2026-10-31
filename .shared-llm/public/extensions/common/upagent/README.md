@@ -354,8 +354,10 @@ blocks in `just upagent-implementer-await-answer` until that answer file exists
 On `cancelled` / `hard-timeout` without a result file, pass `--force`. Claude Code's
 HIL await uses `timeout_ms=590000` under a 600 s shell-tool cap and re-enters the
 same wait if the tool is killed. Feature-branch checkouts prefix every `just upagent*`
-call with `$UPAGENT_CANONICAL_REPO`; `start.sh` copies that env into the implementer pane. Durable files are
-truth; pane text is display-only.
+call with `$UPAGENT_CANONICAL_REPO`; `start.sh` copies that env into the implementer pane. The hub
+also passes its own `$UPAGENT_CANONICAL_REPO` (when set) into every pane it splits, so a worker's
+nested `just upagent` call resolves the same checkout; an order `env` entry for that key wins.
+Durable files are truth; pane text is display-only.
 
 The plan-implementer hires workers with `just upagent request` (public façade), not
 Recruiter `order.json`.

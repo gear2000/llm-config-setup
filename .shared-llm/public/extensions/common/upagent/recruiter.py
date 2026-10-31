@@ -4220,6 +4220,29 @@ def _wait_for_cursor_session(
     )
 
 
+CANONICAL_REPO_ENV = "UPAGENT_CANONICAL_REPO"
+
+
+def _pane_environment(order: dict) -> dict[str, str]:
+    """The `pane split --env` map for one hub-owned pane.
+
+    A Herdr pane inherits the Herdr server's environment, not the runner's. When this hub
+    resolved its source through `$UPAGENT_CANONICAL_REPO`, a pane's own `just upagent`
+    call (a nested request) must resolve the same checkout, so the value travels into the
+    pane. An explicit order `env` entry for the same key wins.
+    """
+    environment = dict(order.get("env") or {})
+    canonical = command_runtime.getenv(CANONICAL_REPO_ENV)
+    if canonical and CANONICAL_REPO_ENV not in environment:
+        path = Path(canonical).expanduser()
+        if not path.is_absolute():
+            raise RecruiterError(
+                f"{CANONICAL_REPO_ENV} must be an absolute checkout root: {canonical}"
+            )
+        environment[CANONICAL_REPO_ENV] = str(path.resolve())
+    return environment
+
+
 def _start_herdr_agent(
     name: str,
     order: dict,
@@ -4313,7 +4336,7 @@ def _start_herdr_agent(
             order["cwd"],
             "--no-focus",
         ]
-        for key, value in (order.get("env") or {}).items():
+        for key, value in _pane_environment(order).items():
             args.extend(("--env", f"{key}={value}"))
         created = (
             _herdr_json(
