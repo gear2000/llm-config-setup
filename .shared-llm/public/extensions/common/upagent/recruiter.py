@@ -546,7 +546,9 @@ class JobLedger:
     def _write_json(path: Path, value: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        with temporary.open("w", encoding="utf-8") as f:
+        # 0600 whatever the umask: lease files and their index hold control tokens.
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
             json.dump(value, f, indent=2, sort_keys=True)
             f.write("\n")
             f.flush()
@@ -1054,18 +1056,42 @@ class JobLedger:
             if expiry > current_time:
                 continue
             for index_path in expiry_dir.glob("*.json"):
-                lease = self._lease(index_path)
-                suffix = f"-{lease['token']}.json"
-                if not index_path.name.endswith(suffix):
-                    raise RecruiterError(
-                        f"lease index {index_path} does not match its token"
-                    )
-                key = index_path.name.removesuffix(suffix)
-                with self._claim_lock(key):
+                # One machine-wide lock (the key is unused); take it before the read,
+                # since another reaper may prune this entry after the listing.
+                with self._claim_lock(index_path.name):
+                    if not index_path.exists():
+                        continue
+                    lease = self._lease(index_path)
+                    suffix = f"-{lease['token']}.json"
+                    if not index_path.name.endswith(suffix):
+                        raise RecruiterError(
+                            f"lease index {index_path} does not match its token"
+                        )
+                    key = index_path.name.removesuffix(suffix)
                     if self._reclaim_expired_locked(
                         key, current_time, lease["token"], expiry
                     ):
                         reclaimed += 1
+                    # Claim writes its index entry under this same lock, so an entry
+                    # whose claim is gone or now carries another token/expiry is stale.
+                    claim_dir = self.active / "requests" / key
+                    current = (
+                        self._lease(claim_dir / "lease.json")
+                        if claim_dir.is_dir()
+                        else None
+                    )
+                    if current is None or (current["token"], current["expires_at"]) != (
+                        lease["token"],
+                        expiry,
+                    ):
+                        index_path.unlink(missing_ok=True)
+            with self._claim_lock(expiry_dir.name):
+                try:
+                    expiry_dir.rmdir()
+                except OSError as error:
+                    # Not empty yet, or another reaper removed it first.
+                    if error.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT):
+                        raise
         return reclaimed
 
     def active_claims(self) -> list[tuple[str, dict]]:

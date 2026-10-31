@@ -6451,6 +6451,83 @@ def test_expired_lease_is_reclaimed_and_stale_index_cannot_remove_new_lease(
     assert (ledger.active / "requests" / key).is_dir()
 
 
+def test_ledger_json_files_are_private_whatever_the_umask(tmp_path: Path) -> None:
+    """A lease index holds the requester control token; the umask must not widen it."""
+    previous = os.umask(0o002)
+    try:
+        path = tmp_path / "hub" / "active" / "by-expiry" / "1" / "key-token.json"
+        recruiter.JobLedger._write_json(path, {"token": "t"})
+    finally:
+        os.umask(previous)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_reap_removes_expiry_index_entries_of_finished_or_replaced_claims(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "upagent-hub"
+    ledger = recruiter.JobLedger(root)
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    lease = json.loads((root / "active/requests" / key / "lease.json").read_text())
+    expiry_dir = root / "active/by-expiry" / str(lease["expires_at"])
+    index = expiry_dir / f"{key}-{token}.json"
+    assert _finalize(
+        ledger, key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    # An expired lease whose pane is still recorded is not reaped; its entry stays.
+    held = _order(request_id="request-held", order_id="order-held")
+    held_key, _ = ledger.submit(held)
+    held_token = ledger.claim(held_key, held["order_id"], 1_000)
+    assert held_token is not None
+    held_lease = {
+        **ledger._lease(root / "active/requests" / held_key / "lease.json"),
+        "expires_at": lease["expires_at"],
+        "worker_pane": "pane-held",
+    }
+    ledger._write_json(root / "active/requests" / held_key / "lease.json", held_lease)
+    held_index = expiry_dir / f"{held_key}-{held_token}.json"
+    ledger._write_json(held_index, held_lease)
+    assert index.is_file()
+    assert ledger.reap_expired(now=lease["expires_at"]) == 0
+    assert not index.exists()
+    assert held_index.is_file()
+    held_index.unlink()
+    (root / "active/requests" / held_key / "lease.json").unlink()
+    (root / "active/requests" / held_key).rmdir()
+    assert ledger.reap_expired(now=lease["expires_at"]) == 0
+    assert not expiry_dir.exists()
+
+
+def test_reap_skips_an_index_entry_another_reaper_pruned_after_the_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "upagent-hub"
+    ledger = recruiter.JobLedger(root)
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(key, order["order_id"], 1_000)
+    assert token is not None
+    lease = json.loads((root / "active/requests" / key / "lease.json").read_text())
+    assert _finalize(
+        ledger, key, token, order, _result(order["order_id"]), cleanup=_cleanup()
+    )
+    real_glob = Path.glob
+
+    def racing_glob(self: Path, pattern: str, *args: Any, **kwargs: Any) -> Any:
+        found = list(real_glob(self, pattern, *args, **kwargs))
+        if self.parent.name == "by-expiry":
+            for path in found:
+                path.unlink()  # a concurrent reaper pruned it after this listing
+        return iter(found)
+
+    monkeypatch.setattr(Path, "glob", racing_glob)
+    assert ledger.reap_expired(now=lease["expires_at"]) == 0
+    assert not (root / "active/by-expiry" / str(lease["expires_at"])).exists()
+
+
 def test_stage_timeout_defaults_and_explicit_override() -> None:
     assert recruiter._default_timeout_ms("stage-1-implementation") == 10_800_000
     assert recruiter._default_timeout_ms("stage-2-adversarial-audit") == 10_800_000
