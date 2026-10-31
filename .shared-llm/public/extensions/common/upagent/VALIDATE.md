@@ -45,8 +45,9 @@ herdr integration status             # expected: pi, claude, codex, cursor prese
 just herdr-pin --check               # expected: exit 0
 grep -c herdr-status-fix ~/.codex/hooks.json 2>/dev/null || true   # expected: 0 (legacy 0.7.1 hook, see UPINSTALL)
 herdr session list --json | python3 -c 'import json,sys; print([s["name"] for s in json.load(sys.stdin)["sessions"]])'
-just upagent lists --type offerings --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("offerings", d)), "offerings")'
-just upagent status --json | head -c 2000   # expected: runtime bound, no active requests before you begin
+just upagent lists --type offerings --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["offerings"] if isinstance(d, dict) else d), "offerings")'
+just upagent status --json | head -c 2000   # expected: "services_ready": true
+just upagent lists --type workers --status active --json   # expected: [] (no active requests before you begin)
 ```
 
 The required Herdr version is the pin in `tools/install-herdr.sh`.
@@ -128,8 +129,8 @@ step 1 still checks authentication and optional-offering availability on the mac
 | D3 pi interactive | `pi-gpt-6-1-sol` / medium | insulated Pi launch, agent-state extension loaded | verdict passed, 5050, panes gone |
 | D4 cursor | `cursor-composer-2-5` / default | Cursor readiness wait, prompt delivery | verdict passed, 5050, panes gone (if Cursor is not installed or not authenticated, record skipped and continue) |
 | D5 claudex | `claudex-gpt-6-1-sol` / medium | proxy-backed Claude launch | verdict passed, 5050, panes gone (skip with a note if the `claudex` offering set is not selected or the proxy is not running) |
-| D6 nested request | `codex-gpt-6-1-sol` / medium, task below | runner survives the submitting shell tool's tree kill | inner request terminalizes passed after the outer worker finishes; outer verdict passed |
-| D7 pane close | `pi-gpt-6-1-sol` / medium | pane-loss detection and typed blocked closeout | within 30 s of your `herdr pane close`, ledger shows worker-gone; terminal verdict blocked, not a hang; panes gone |
+| D6 nested request | `codex-gpt-6-1-sol` / medium, task below | a worker can place and await its own request; the inner runner runs detached from the worker's shell tool | inner request terminalizes passed (before the outer, since the outer awaits it); outer verdict passed and its result names the inner request |
+| D7 pane close | `pi-gpt-6-1-sol` / medium | pane-loss detection and typed blocked closeout | within 30 s of your `herdr pane close`, ledger shows `sentinel-wake-worker-gone` (or a `worker-nudge-probe` with `pane_state: gone`); terminal verdict blocked, not a hang; panes gone |
 | D8 timeout | `claude-sonnet-5-5` / medium, `--duration-minutes 2`, 300 s task | deadline handling | ledger shows `timeout-warning` while the computation still runs; await returns `awaiting-requester` and the requester message names extend/cancel; after you cancel with `just upagent cancel --request <id> --control-token-file <run-dir>/control-token`, no hub pane and no worker process remain |
 | D9 (optional, 25 min) waiting worker | `claude-sonnet-5-5` / medium, `--duration-minutes 35`, task below | idle-with-background-job worker is nudged and escalated, not killed | ledger shows nudges and `worker-stall-escalation`; no STALLED termination; the worker completes passed |
 
@@ -141,7 +142,7 @@ the worker can use it as the inner prompt.
 
 D7 procedure: hire with the standard task, wait until `just upagent get` shows `running` and the
 worker pane shows `working`, then run `herdr pane close <worker-pane-id>` from the cockpit.
-Time from the close to the first worker-gone ledger event.
+Time from the close to the first of those two worker-gone ledger events.
 
 D8 procedure: standard task with step 1 changed to about 300 seconds (both numbers), and
 `--duration-minutes 2`. The 2-minute clock starts when the worker is healthy, not when the
