@@ -3,4 +3,5 @@ name: prd-to-plan
 description: .shared-llm/public/layers/slash-commands/common/common/prd-to-plan/description.md
 inputs:
 - .shared-llm/public/layers/slash-commands/common/common/prd-to-plan/command.md
+- .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/skills/prd-to-plan/SKILL.md

@@ -6,4 +6,5 @@ frontmatter:
 inputs:
   - .shared-llm/public/layers/slash-commands/common/common/do-plan/command.md
   - .shared-llm/public/layers/slash-commands/common/common/plan-core.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/skills/do-plan/SKILL.md

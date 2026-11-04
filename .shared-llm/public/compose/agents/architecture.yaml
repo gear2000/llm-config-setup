@@ -6,4 +6,6 @@ description: .shared-llm/public/layers/agents/common/architecture.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/architecture.md
   - .shared-llm/public/layers/agents/common/_report-contract.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/agents/architecture.md

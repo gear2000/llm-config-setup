@@ -1,0 +1,7 @@
+type: skill
+name: refactor-safe
+description: .shared-llm/public/layers/slash-commands/common/common/refactor-safe/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/refactor-safe/command.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/skills/refactor-safe/SKILL.md

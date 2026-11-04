@@ -15,7 +15,10 @@ This file covers BOTH. General playwright-cli command reference lives in the `pl
 2. **UI tests ONLY.** You simulate a real user: click buttons, fill forms, navigate pages, read what's on screen. NEVER call API endpoints directly via `page.evaluate(fetch(...))` or any other programmatic API call. That's an integration test — not your job.
 3. **Think like a user.** Before writing any test, ask: "What would a user see? What would they click? What would they expect to happen?" If the spec file doesn't make the user flow clear, STOP and ask the user to clarify.
 4. **If something is broken in the app, STOP.** Report what's broken and let the user decide. Do not create stubs, shims, or missing files to make a test pass.
-5. **Check credentials before reporting them missing.** All secrets live in the project's credential store. Look there first.
+5. **Check credentials before reporting them missing.** All secrets live in the project's credential store. Look there first. Use only authorized disposable test-account credentials; possession of credentials does not authorize a target.
+6. **Require explicit authorization and isolation.** Use a disposable workspace, storage, and accounts on the approved test target. Never exercise production, shared data, or real user accounts. Account setup and cleanup must also use the browser UI, not direct API calls. If safe setup or cleanup is unavailable, stop and report the blocker rather than widening authority.
+7. **PR review mode is read-only.** When asked to review, do not author or edit tests or configs. Use existing tests and browser observations; report defects and gaps instead of applying test fixes.
+8. **No browser means `UNVERIFIED`.** Static code inspection is not a substitute for an observed browser flow; report the missing browser or environment blocker.
 
 ## Execution Loop — MANDATORY (for authored test runs)
 
@@ -44,6 +47,21 @@ This file covers BOTH. General playwright-cli command reference lives in the `pl
 8. Maximum 10 iterations
 ```
 
+## Browser acceptance checks (authored tests and interactive review)
+
+Walk each relevant acceptance flow through the UI, including success, denial, and failure. Also check:
+
+- Empty and invalid inputs, boundary values, and long values.
+- Back navigation, refresh, and double submit: no unintended duplicate effects or lost state beyond the specified behavior.
+- Form values retained after validation failures, with clear errors near the affected fields.
+- Desktop and narrow screens (about 375px): usable layout without clipped controls or unreadable content.
+- Keyboard-only navigation, focus, input labels, image alternatives, readable contrast, and browser console errors.
+- For plain-text fields, enter literal `<b>x</b>` through the UI and verify it is displayed as text, never interpreted as HTML.
+
+Use disposable data for these probes. Capture screenshots of main steps, validation errors, and narrow-screen states. Sanitize screenshots, traces, console output, and other artifacts before sharing: exclude credentials, cookies, tokens, personal data, and unrelated user content. Do not publish unsanitized traces simply because a test failed.
+
+Report each criterion using its existing ID, `PASS` / `FAIL` / `UNVERIFIED`, the tested revision (including relevant uncommitted changes), the browser actions and observed outcome or executed command, and sanitized artifact references. Missing execution is `UNVERIFIED`, not PASS. Keep criterion evidence separate from any overall verdict. Preserve a caller's strict report schema by using existing evidence/details fields; otherwise append a human-readable criterion evidence section.
+
 ## Key Conventions (authored tests)
 
 ### CLI Commands
@@ -70,7 +88,7 @@ This file covers BOTH. General playwright-cli command reference lives in the `pl
 - Prefix test names with IDs: `T1-1:`, `T2-3:`, etc.
 - Arrange: set up auth + navigate
 - Act: interact with the page
-- Assert: check visibility, URLs, API responses
+- Assert: check visible results and URLs; network responses may be observed only as consequences of browser UI actions, never triggered by direct API calls
 - Always screenshot after key actions
 
 ### Debugging failures
@@ -86,4 +104,5 @@ This file covers BOTH. General playwright-cli command reference lives in the `pl
 - NEVER use `waitForTimeout` unless absolutely unavoidable — prefer explicit waits
 - Use `--reporter=list` for CI and troubleshooting (shows each test inline)
 - Use `--reporter=html` for local debugging (rich interactive report)
-- Tests must clean up test users in `afterAll` — never leave orphaned auth users
+- Tests must clean up disposable test users through the browser UI in `afterAll`; interactive sessions must clean up through the UI too. Never delete unrelated users. Report any cleanup failure and remaining disposable resources.
+- Never weaken assertions to obtain green; test-only authority does not permit application fixes.

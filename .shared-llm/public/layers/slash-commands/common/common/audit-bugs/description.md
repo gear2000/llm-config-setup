@@ -1,0 +1,1 @@
+Audit correctness bugs without editing the application or publishing issues. Discover candidates, independently verify them, check root-cause duplicates, and rank evidence-backed findings with explicit limits.

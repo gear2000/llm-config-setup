@@ -5,4 +5,6 @@ color: blue
 description: .shared-llm/public/layers/agents/common/code-review.description.md
 inputs:
   - .shared-llm/public/layers/agents/common/code-review.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/agents/code-review.md

@@ -37,6 +37,13 @@ Create the directory before grilling. Pass the absolute `plan.html` path inside 
 10. After the final adversarial round, regenerate mutable `plan.md` + `plan.html` with the adversarial diff summary, submit it so the final changed pair is frozen as `plan-vN.*`, and ask for final human approval.
 11. Final human approval writes `review/final-approval.json`. The approved `plan.md` remains the mutable-latest pathname that downstream tooling reads; its matching immutable `plan-vN.md` and candidate receipts preserve the approved content and history.
 
+## Acceptance traceability
+
+- Preserve existing requirement, invariant, and acceptance IDs exactly; never renumber or reuse them. Assign `REQ-n`, `INV-n`, or `AC-n` only where the corresponding item lacks an ID, avoiding collisions. Link to the authoritative requirement/design/criterion and its ID instead of copying whole documents into the plan.
+- Map every in-scope criterion to the planned slice and a future verification command or observable scenario with its expected result. Include relevant success, invalid-input, denial, and failure behavior through public entry points; specify browser verification for visible behavior.
+- Accepted requirements, designs, and final plan approval mean **approved intent**, not implemented or verified behavior. Planning documents specify future verification and must never claim runtime `PASS` before execution. For checks not yet run, record `UNVERIFIED` and the planned check, not an invented result or revision.
+- Specify the evidence execution must later supply per criterion: `PASS` / `FAIL` / `UNVERIFIED`, tested revision (including relevant uncommitted changes), executed command or browser observation, actual result, and artifact reference or blocker. Keep criterion outcomes distinct from overall review/approval verdicts. Use the plan's acceptance section and existing receipt fields; do not replace the receipt schema or approval gates.
+
 ## Required receipts
 
 Keep these under the resolved plan directory:

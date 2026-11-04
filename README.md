@@ -338,14 +338,14 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update shared-llm skills, agents, CLAUDE.md/AGENTS.md rules, or layers. Edit source layers/recipes,… |
 
-### Generic agents (36)
+### Generic agents (37)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.
 
 | Name | Description |
 | --- | --- |
 | `adversarial-evaluator` | Mandatory end-of-phase adversarial gate for a completed plan phase. Reviews finished work against… |
-| `architecture` | Use when designing new modules, defining package boundaries, making architectural decisions, or… |
+| `architecture` | Use for read-only PR architecture review, module design, or package scaffolding. Covers boundaries,… |
 | `aws` | AWS infrastructure and operations specialist for architecture, IAM, networking, MSK provisioning,… |
 | `backend` | Use for backend services, APIs, worker handlers, tests, and fail-loud error handling. Kafka client… |
 | `ci-pipeline` | Use when creating or modifying CI pipeline configurations. Writes configs, validates syntax, and… |
@@ -363,6 +363,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `intake-clerk` | Normalizes imperfect broker envelopes without inventing or changing task, addressee, or execution… |
 | `kafka` | Kafka specialist for topics, partitions, producers, consumers, delivery semantics, Connect/Streams,… |
 | `lucidchart` | Lucidchart specialist for MCP-backed diagram creation/inspection, Standard Import fallback, setup… |
+| `model-picker` | Read-only staffing advisor: classifies one piece of work into a kind from the staffing guide and… |
 | `monorepo-pkgs` | Read-only governance auditor for Python monorepo packages: scaffolding, best practices, utility… |
 | `monorepo-python` | Project-specific Python agent for a monorepo. Use when working on Python packages or deployable… |
 | `phase-evaluator` | Optional independent evaluator for one plan phase. Reviews durable stage evidence from a fresh… |
@@ -373,7 +374,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
 | `researcher` | Bounded read-only investigator for one issue. Reads the issue inside the given worktree and writes… |
 | `reviewer` | Independent read-only reviewer for code, infrastructure, plans, and durable execution evidence. |
-| `security` | Use when implementing auth flows, access-control policies, secrets management, or auditing security… |
+| `security` | Use for read-only PR security review, or auth, access-control, and secrets implementation. Review… |
 | `team-pulse` | Mechanical result watcher for a plan run. Polls one durable result path and alerts its assigned… |
 | `terraform` | Terraform infrastructure specialist that writes and validates IaC, produces plans, and gates… |
 | `upagent-account-manager` | Dedicated LLM lifecycle owner for one UpAgent request; validates configuration and explains… |
@@ -381,12 +382,13 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-rescuer` | Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished… |
 | `upagent-sentinel` | Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout;… |
 
-### Slash-command skills (42)
+### Slash-command skills (44)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, `cc/do-convert --herdr`, and Claude-only `/hil` are the primary workflow surface; `/cc-full` and `/do-full` are disabled; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
 | Name | Description |
 | --- | --- |
+| `audit-bugs` | Audit correctness bugs without editing the application or publishing issues. Discover candidates,… |
 | `blast-radius` | Find what a change could break somewhere else before it ships, beyond the diff, and prove the one… |
 | `cc-convert` | Claude Code converter: `/cc-convert --herdr <plan.md>` idempotently decomposes an approved big plan… |
 | `cc-convert-pattern-10` | Separate a plan into work phases and Pattern 10 YAML workflow assignments, grading each phase easy,… |
@@ -415,6 +417,7 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `playwright-cli` | Automates browser interactions for testing, forms, screenshots, and extraction. Static HTML… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
+| `refactor-safe` | Refactor existing code without changing behavior: characterize the unchanged implementation first,… |
 | `security` | Generic security best practices. Use when implementing auth flows, secrets management, IAM… |
 | `tui-control` | Internal TUI plan controller for a checked plan.md and route.yaml under HERDR_ENV=1. Runs phase… |
 | `unslop` | Cut AI tells from any writing and add human voice. Apply to every user-facing document, report,… |
@@ -430,6 +433,12 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `wait-what` | Stop. That last message did not land: re-pitch it in plain speech. |
 | `writing-for-agents` | Writing documents for agents: concise routing pointers, progressive disclosure, completion… |
 <!-- END:inventory -->
+
+## Review procedures
+
+Existing reviewers use criterion-level PASS, FAIL, and UNVERIFIED evidence without replacing their verdict formats. Security and architecture agents have read-only PR review modes. `/refactor-safe` preserves behavior during refactoring; `/audit-bugs` confirms and deduplicates bugs without publishing issues. The writing-for-agents skill includes a controlled evaluation reference.
+
+See [review procedures](docs/REVIEW-PROCEDURES.md) for role selection, safe probe boundaries, verification, and upstream attribution.
 
 ## The compose engine
 

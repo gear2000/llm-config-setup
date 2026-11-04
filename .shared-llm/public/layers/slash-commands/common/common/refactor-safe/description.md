@@ -1,0 +1,1 @@
+Refactor existing code without changing behavior: characterize the unchanged implementation first, make small verified simplifications, and preserve interfaces, data, errors, and user-visible behavior.

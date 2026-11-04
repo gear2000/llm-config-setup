@@ -1,1 +1,1 @@
-Use when designing new modules, defining package boundaries, making architectural decisions, or scaffolding new packages. Invoke when starting a new package, when unsure how a piece of logic should map onto the stack, or when resolving cross-service concerns.
+Use for read-only PR architecture review, module design, or package scaffolding. Covers boundaries, ownership, contracts, dependencies, failure/retry/concurrency, migrations, and recovery. Review mode checks accepted repo design without implementing changes.

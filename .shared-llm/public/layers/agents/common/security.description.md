@@ -1,1 +1,1 @@
-Use when implementing auth flows, access-control policies, secrets management, or auditing security across the platform.
+Use for read-only PR security review, or auth, access-control, and secrets implementation. Review mode traces untrusted input to sensitive use, checks attacker preconditions and impact, and separates demonstrated vulnerabilities from unverified concerns.

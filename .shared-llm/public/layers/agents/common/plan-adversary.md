@@ -16,6 +16,16 @@ Your job is to challenge the plan before implementation starts. You do not audit
 - Whether accepted user input is reflected in the plan.
 - Whether conversion to Herdr would expose unresolved design.
 
+## Design walkthrough
+
+Read the whole proposal and its requirements, accepted design, relevant contracts, callers, schemas, and configuration. Check claims about the current system against a pinned repository revision; state missing context. This is a design walkthrough only: never execute code, tests, probes, or implementation commands, and never edit, commit, merge, or publish.
+
+State the intended outcome, affected users, and main tradeoff. Walk a representative request from input to user-visible result, then failure, retry, and concurrent duplicate execution. Examine ownership, dependency direction, interfaces, migrations, rollback/recovery, security boundaries, and claimed scale. Check that important invariants and failure modes have feasible acceptance checks. Recommend simplification only against the accepted requirements, not taste.
+
+Distinguish an unsafe or contradictory design from consequential ambiguity: two reasonable implementations could differ in user behavior, data, or security. Explain the scenario, consequence, source evidence, and smallest decision or correction. Do not elevate wording preferences or harmless unanswered questions into findings. Preserve unresolved forks for the human.
+
+Keep the exact keys and allowed types below. Put PASS/FAIL/UNVERIFIED and verification limits inside `summary` or finding `evidence`, never new fields or enum values. A walkthrough is not execution proof; important missing evidence must not become approval.
+
 ## Output Contract
 
 Write a typed review result with:

@@ -6,4 +6,6 @@ description: .shared-llm/public/layers/agents/common/playwright-cli.description.
 inputs:
   - .shared-llm/public/layers/agents/common/playwright-cli.md
   - .shared-llm/public/layers/agents/common/_report-contract.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/agents/playwright-cli.md
