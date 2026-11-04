@@ -1,0 +1,1 @@
+Review a pinned PR's behavior-to-assertion coverage and regression evidence, separating meaningful failures from flaky or setup failures; run probes only with explicit disposable-workspace permission.

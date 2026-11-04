@@ -2,6 +2,8 @@
 
 These procedures strengthen the existing agents and skills. They do not add a review orchestrator, change approval ownership, or grant permission to publish, merge, or repair application code during review.
 
+For dedicated PR skills and reviewers, see the [PR-only toolkit](PR-TOOLKIT.md). It adds opt-in preparation, report consolidation, finding rechecks, and focused specialists under a shared input, authority, and report contract. The existing roles below keep their current contracts.
+
 ## Choose the existing role
 
 | Task | Agent or skill | Boundary |

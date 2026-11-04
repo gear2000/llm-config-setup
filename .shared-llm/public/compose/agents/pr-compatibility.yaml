@@ -1,0 +1,11 @@
+type: agent
+name: pr-compatibility
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/agents/common/pr-compatibility.description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/pr-compatibility.md
+  - .shared-llm/public/layers/agents/common/_pr-review-contract.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/agents/pr-compatibility.md

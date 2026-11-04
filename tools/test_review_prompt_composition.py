@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ROOT / ".shared-llm/public"
 EVIDENCE = PUBLIC / "layers/agents/common/_review-evidence.md"
 LICENSE = PUBLIC / "layers/agents/common/_owainlewis-license.md"
+PR_CONTRACT = PUBLIC / "layers/agents/common/_pr-review-contract.md"
+PR_AGENTS = ("pr-security", "pr-tests", "pr-compatibility", "pr-readiness")
+PR_SKILLS = ("pr-prepare", "pr-review", "pr-recheck")
 AGENTS = (
     "architecture",
     "security",
@@ -63,7 +66,7 @@ def compose(recipe: Path, target: Path) -> Path:
     return target / config["output"]
 
 
-@pytest.mark.parametrize("name", AGENTS)
+@pytest.mark.parametrize("name", AGENTS + PR_AGENTS)
 def test_review_agents_include_shared_evidence_and_license(
     name: str, tmp_path: Path
 ) -> None:
@@ -78,7 +81,9 @@ def test_review_agents_include_shared_evidence_and_license(
     assert output.read_bytes() == first
 
 
-@pytest.mark.parametrize("name", SKILLS)
+@pytest.mark.parametrize(
+    "name", SKILLS + tuple(f"common/common/{name}" for name in PR_SKILLS)
+)
 def test_adapted_skills_ship_license_and_compose_idempotently(
     name: str, tmp_path: Path
 ) -> None:
@@ -162,15 +167,121 @@ def test_review_prompts_survive_public_copy_and_destination_compose(
     log = harness.RunLog(verbose=False)
     harness.do_copy(config, log)
     harness.do_compose(config, log)
-    for name in AGENTS:
+    for name in AGENTS + PR_AGENTS:
         text = (destination / f".claude/agents/{name}.md").read_text()
         assert EVIDENCE.read_text().strip() in text
         assert LICENSE.read_text().strip() in text
-    for name in ("refactor-safe", "audit-bugs", "writing-for-agents"):
+        if name in PR_AGENTS:
+            assert PR_CONTRACT.read_text().strip() in text
+    for name in ("refactor-safe", "audit-bugs", "writing-for-agents") + PR_SKILLS:
         text = (destination / f".claude/skills/{name}/SKILL.md").read_text()
         assert LICENSE.read_text().strip() in text
+        if name in PR_SKILLS:
+            assert PR_CONTRACT.read_text().strip() in text
+            assert EVIDENCE.read_text().strip() in text
     reference = destination / ".claude/skills/writing-for-agents/references/evaluation.md"
     assert LICENSE.read_text().strip() in reference.read_text()
+    before = {
+        path.relative_to(destination): path.read_bytes()
+        for path in destination.rglob("*")
+        if path.is_file()
+    }
+    harness.do_copy(config, log)
+    harness.do_compose(config, log)
+    after = {
+        path.relative_to(destination): path.read_bytes()
+        for path in destination.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+@pytest.mark.parametrize("name", PR_AGENTS + PR_SKILLS)
+def test_pr_toolkit_composes_the_same_contract_once(name: str, tmp_path: Path) -> None:
+    if name in PR_AGENTS:
+        recipe = PUBLIC / "compose/agents" / f"{name}.yaml"
+    else:
+        recipe = PUBLIC / "compose/slash-commands/common/common" / f"{name}.yaml"
+    config = yaml.safe_load(recipe.read_text())
+    assert config["inputs"][1:] == [
+        str(path.relative_to(ROOT)) for path in (PR_CONTRACT, EVIDENCE, LICENSE)
+    ]
+    content = compose(recipe, tmp_path).read_text()
+    for source in (PR_CONTRACT, EVIDENCE, LICENSE):
+        assert content.count(source.read_text().strip()) == 1
+    _, frontmatter, _ = content.split("---", 2)
+    metadata = yaml.safe_load(frontmatter)
+    assert metadata["name"] == name
+    assert len(metadata["description"].encode("utf-16-le")) // 2 <= 300
+    assert "## PR input contract" in content
+    assert "## PR authority contract" in content
+    assert "## PR report contract v1" in content
+
+
+def test_pr_contract_preserves_snapshot_and_authority_boundaries() -> None:
+    """Guard prompt wording, not an executable policy or proof of compliance."""
+    content = PR_CONTRACT.read_text()
+    for required in (
+        "They do not review uncommitted changes",
+        "multiple merge bases",
+        "revision-qualified reads",
+        "synthetic merge commit",
+        "read the remote head and base again",
+        "Offline review",
+        "Do not mix reports",
+        "Report-only",
+        "or spawn workers",
+        "only with explicit authorization",
+        "default home databases",
+        "A setup failure does not prove a regression",
+        "An APPROVED review is not permission to merge",
+        "not a replacement for the existing Pi PR reviewer",
+        "APPROVED | APPROVED WITH NITS | CHANGES REQUESTED",
+        "PASS / FAIL / UNVERIFIED",
+        "Retain existing criterion and finding IDs",
+    ):
+        assert required in content
+    for name in AGENTS:
+        recipe = PUBLIC / "compose/agents" / f"{name}.yaml"
+        assert str(PR_CONTRACT.relative_to(ROOT)) not in yaml.safe_load(
+            recipe.read_text()
+        )["inputs"]
+
+
+def test_pr_specialists_keep_distinct_evidence_and_follow_up_rules() -> None:
+    readiness = (PUBLIC / "layers/agents/common/pr-readiness.md").read_text()
+    for text in (
+        "producing app or integration identity",
+        "synthetic merge relationship",
+        "Skipped or absent execution stays UNVERIFIED",
+        "gate-applicability criterion",
+        "refresh remote base and head",
+    ):
+        assert text in readiness
+    tests = (PUBLIC / "layers/agents/common/pr-tests.md").read_text()
+    assert "Do not author new tests or change assertions" in tests
+    assert "same focused regression test" in tests
+    assert "real parser, API, CLI" in tests
+    commands = PUBLIC / "layers/slash-commands/common/common"
+    review = (commands / "pr-review/command.md").read_text()
+    for text in ("SAME-SNAPSHOT", "Preserve unresolved dissent", "selection-only"):
+        assert text in review
+    recheck = (commands / "pr-recheck/command.md").read_text()
+    for text in (
+        "prior head to new head",
+        "full current merge-base-to-head diff",
+        "If base or merge base changed",
+        "FIXED",
+        "OPEN",
+        "UNVERIFIED",
+        "SUPERSEDED",
+        "never recycle or renumber previous IDs",
+    ):
+        assert text in recheck
+    prepare = (commands / "pr-prepare/command.md").read_text()
+    assert "Do not publish the draft" in prepare
+    for name in PR_SKILLS:
+        assert len((commands / name / "command.md").read_text().splitlines()) < 100
 
 
 def test_qa_source_never_reintroduces_application_edit_permission() -> None:

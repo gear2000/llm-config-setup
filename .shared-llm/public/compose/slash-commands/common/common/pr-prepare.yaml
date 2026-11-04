@@ -1,0 +1,9 @@
+type: skill
+name: pr-prepare
+description: .shared-llm/public/layers/slash-commands/common/common/pr-prepare/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/pr-prepare/command.md
+  - .shared-llm/public/layers/agents/common/_pr-review-contract.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/skills/pr-prepare/SKILL.md

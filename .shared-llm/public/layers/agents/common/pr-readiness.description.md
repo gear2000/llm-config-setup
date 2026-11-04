@@ -1,0 +1,1 @@
+Assess current PR readiness read-only against branch policy, trusted exact-snapshot checks, approvals, threads, draft/conflict state, and merge queues; expose missing or stale evidence without merging.

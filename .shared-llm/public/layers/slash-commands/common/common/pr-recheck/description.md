@@ -1,0 +1,1 @@
+Recheck prior PR findings against verified old/new snapshots and the full current diff, preserving IDs and separating fix dispositions from check status without assuming deleted lines prove correction.
