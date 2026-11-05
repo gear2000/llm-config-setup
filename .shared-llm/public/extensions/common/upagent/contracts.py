@@ -141,8 +141,28 @@ def parse_order(text: str) -> dict:
     if not isinstance(order, dict):
         raise ContractError("order.json must be a JSON object")
 
+    # Omission is the documented legacy pane mode, not a headless inference.
+    execution_mode = order.get("execution_mode", "pane")
+    if execution_mode not in ("pane", "headless"):
+        raise ContractError("order.json: execution_mode must be pane or headless")
     for key in ORDER_REQUIRED:
+        if key == "cockpit_pane" and execution_mode == "headless":
+            continue
         _require_str(order, key, "order.json")
+    if execution_mode == "headless":
+        if order.get("harness") != "claude":
+            raise ContractError("headless requires the Claude harness")
+        if "cockpit_pane" in order or "completion_policy" in order:
+            raise ContractError(
+                "headless is one-shot and cannot use cockpit_pane or completion_policy"
+            )
+        if (
+            order.get("management") != {"mode": "direct"}
+            or order.get("sentinel") is not False
+        ):
+            raise ContractError(
+                "headless requires direct Python management and sentinel:false"
+            )
 
     if order["stage_id"] not in RECOGNIZED_STAGE_IDS:
         raise ContractError(

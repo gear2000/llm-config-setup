@@ -19,6 +19,28 @@ with evidence paths, so a broken hub is caught here and not during real work.
 Budget: about 45 minutes without the optional hold drill, about 70 minutes with it.
 Run drills one at a time. Never run two hires at once.
 
+## Headless backend: separate validation
+
+The drills below cover the existing Herdr backend, not live Claude print-mode behavior.
+For Linux-local headless changes, first run the isolated fake-executable regression suite:
+
+```bash
+python3 -m pytest .shared-llm/public/extensions/common/upagent/headless_test.py .shared-llm/public/extensions/common/upagent/headless_fixes_test.py -q
+```
+
+It exercises public intake, typed artifacts, output pressure, deadlines, cancellation,
+descendants, spawn/crash recovery, and identity fencing without provider credentials or Herdr.
+Review regressions also cover modeled supervisor PID reuse/old boot/absence, a real child dying
+before claim, a truncated valid JSON prefix, and unsupported verification before side effects.
+It is not live Claude proof. With explicit human authorization for provider spend, use a scratch
+repository, a separate absolute `UPAGENT_RUNTIME_DIR` (and no conflicting hub/state overrides),
+and explicit `UPAGENT_CANONICAL_REPO` pointing at the source under test. Submit one approved
+Claude `--headless` request with a narrow artifact contract and default permissions. Do not stop
+an active Herdr server to test independence. Verify no Herdr calls/helper hires, inspect the
+actual CLI JSON and typed artifacts, and prove recorded processes/descendants are absent before
+accepting its receipt. Keep credentials and tokens out of the report. Do not claim this live
+check passed merely because fake-process tests did.
+
 ## Hard rules
 
 - Never run `herdr update`, `brew upgrade herdr`, `just herdr-pin --force`, or stop the default

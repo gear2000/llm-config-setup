@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
   just upagent request --type worker --offering pi-gpt-6-1-sol --effort high \\
     --agent backend --prompt-file /abs/brief.md
   just upagent request --file /abs/request.json --cockpit-pane LIVE_PANE --wait --json
+  just upagent request --type worker --headless --offering claude-sonnet-5-5 --effort high \\
+    --agent backend --prompt-file /abs/brief.md --wait --json
   just upagent get --request 01957f4e-7f7f-7f8b-9c42-6e7f52f9321a --json
   just upagent cancel --request ID --control-token-file /private/token
   just upagent cleanup --all-terminal --older-than-seconds 86400
@@ -70,7 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     lists = sub.add_parser("lists", help="list offerings, specialists, or workers")
     lists.add_argument(
-        "--type", required=True, choices=("offerings", "plan-implementers", "specialists", "workers")
+        "--type",
+        required=True,
+        choices=("offerings", "plan-implementers", "specialists", "workers"),
     )
     lists.add_argument(
         "--status", choices=("active", "terminal", "all"), default="active"
@@ -95,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--cwd")
     request.add_argument("--duration-minutes", type=int)
     request.add_argument("--keep-open", action="store_true", default=None)
+    request.add_argument(
+        "--headless",
+        action="store_true",
+        default=None,
+        help="Linux-local Claude print mode; one-shot, Python-only supervision",
+    )
     request.add_argument(
         "--no-sentinel",
         dest="sentinel",
@@ -133,7 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     await_any.add_argument("--json", action="store_true")
 
     verify = sub.add_parser(
-        "verify", help="launch an independent review of a terminal request"
+        "verify",
+        help="launch an independent review of a terminal pane-mode request (not headless)",
     )
     verify.add_argument("--request", required=True)
     verify.add_argument("--offering", required=True)
@@ -232,6 +243,7 @@ def parse_argv(argv: Sequence[str]) -> argparse.Namespace:
             "duration_minutes",
             "keep_open",
             "sentinel",
+            "headless",
         )
         if args.file is not None and any(
             getattr(args, field) is not None for field in defining

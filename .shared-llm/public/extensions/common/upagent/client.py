@@ -127,12 +127,12 @@ def _load(name: str, path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ClientError(f"could not load UpAgent target {path}")
-    module = importlib.util.module_from_spec(spec)
+    module: Any = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
     runtime = sys.modules.get("upagent_command_runtime")
     if runtime is not None and name != "upagent_command_runtime":
-        setattr(module, "print", runtime.command_print)
+        module.print = runtime.command_print
     return module
 
 
@@ -336,8 +336,15 @@ def invoke(target: str, argv: list[str], cwd: Path) -> int:
             # Reconciliation performs process and Herdr work without an outer lock. Its
             # token-fenced JobLedger CAS methods acquire the one coarse lock only while each
             # durable mutation commits.
+            headless_operation = getattr(module, "headless_operation", None)
+            isolated_headless = (
+                target == "public"
+                and headless_operation is not None
+                and headless_operation(argv, cwd)
+            )
             if (
-                _reconciliation_needed(recruiter)
+                not isolated_headless
+                and _reconciliation_needed(recruiter)
                 and not _uses_exact_reconciliation(target, argv)
                 and not (
                     target == "recruiter" and _recruiter_command(argv) == "run-job"

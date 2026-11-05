@@ -2,13 +2,22 @@
 
 Use only the repository's canonical `just upagent` façade. Do not start another service, launch an exploration session, steer a live worker, or route silently by account/quota.
 
-## Mandatory caller-pane anchoring inside Herdr
+First parse explicit leading controls, including `--headless`, before any pane lookup. Set
+`headless=true` only when the user requested it. Headless is Linux-local Claude one-shot work,
+not an automatic fallback when Herdr is unavailable. It cannot use `--keep-open` or cockpit
+anchoring and must not hire a model-picker or any lifecycle helper. It uses normal Claude
+credentials, settings, hooks, skills, and persona discovery with default permission gates;
+it is not a sandbox and does not authorize bypassing a required human approval. The public
+`verify` control is pane-only and must not be used for a headless request; it is rejected before
+any resident or verification worker can start.
+
+## Mandatory caller-pane anchoring for pane-backed work inside Herdr
 
 Before routing or submission, build the invocation-only cockpit arguments exactly once:
 
 ```bash
 cockpit_args=()
-if [[ "${HERDR_ENV:-}" == "1" ]]; then
+if [[ "${headless:-}" != "true" && "${HERDR_ENV:-}" == "1" ]]; then
   [[ -n "${HERDR_PANE_ID:-}" ]] || {
     echo "ERROR: HERDR_ENV=1 but HERDR_PANE_ID is missing; refusing to infer the caller from UI focus." >&2
     exit 1
@@ -35,10 +44,11 @@ This is a hard routing boundary. `HERDR_PANE_ID` is the caller's environment-pro
 UI focus can move, and the UpAgent services pointer can name a different or stale pane. Never use
 `herdr pane current`, focus inspection, or the services pointer to infer the caller. The public API
 repeats the live-pane check before registration. Outside Herdr, leave `cockpit_args` empty so the
-existing service-pane resolution/creation behavior remains unchanged.
+existing service-pane resolution/creation behavior remains unchanged for pane mode. For explicit
+headless work, leave `cockpit_args` empty even inside Herdr; never create or inspect a service pane.
 
-1. Parse optional leading controls from `$ARGUMENTS`: `--duration-minutes N` (integer 1–120; omitted keeps the 60-minute default) and `--keep-open`. Treat the remaining text as the complete bounded task. If no task remains, ask for one before launching. `--keep-open` is for a managed TUI controller or phase leader that will inspect checkpoints and explicitly continue or release the same worker; do not use it for an unattended ad-hoc request.
-2. Honor an explicit user offering and effort. Otherwise consult the `model-picker` specialist through `just upagent-consult` with the task and role, and use the `offering` and `effort` it returns (it reads `staffing-guide.yaml`; do not raise its effort). If it returns `requires_approval: true`, ask the user before launching and offer the cheaper alternative it names. If it returns `fit: split-first`, tell the user the proposed split and ask whether to run the slices instead. If the picker is unreachable, run `just upagent lists --type offerings --json` and take the kind's seat straight from `staffing-guide.yaml`. Verify the id exists and the effort is in its `efforts` list. Do not invent an id or probe provider accounts.
+1. Parse optional leading controls from `$ARGUMENTS`: `--duration-minutes N` (integer 1–120; omitted keeps the 60-minute default), `--headless`, and `--keep-open`. Reject headless plus keep-open, a non-Claude offering, or a non-Linux host before submission. Treat the remaining text as the complete bounded task. If no task remains, ask for one before launching. `--keep-open` is for a managed TUI controller or phase leader that will inspect checkpoints and explicitly continue or release the same worker; do not use it for an unattended ad-hoc request.
+2. For headless, require an explicit approved Claude offering and effort; use `just upagent lists --type offerings --json` to check them. If missing, ask the user rather than hiring a picker. For pane mode, honor an explicit user offering and effort. Otherwise consult the `model-picker` specialist through `just upagent-consult` with the task and role, and use the `offering` and `effort` it returns (it reads `staffing-guide.yaml`; do not raise its effort). If it returns `requires_approval: true`, ask the user before launching and offer the cheaper alternative it names. If it returns `fit: split-first`, tell the user the proposed split and ask whether to run the slices instead. If the picker is unreachable, run `just upagent lists --type offerings --json` and take the kind's seat straight from `staffing-guide.yaml`. Verify the id exists and the effort is in its `efforts` list. Do not invent an id or probe provider accounts.
 3. Select one existing persona appropriate to the task from the repository/home agent definitions. Honor an explicit persona; fail loud if it does not exist. Do not create a persona as part of this command.
 4. Resolve the current repository directory with `pwd -P`. For read-only commands, tests, audits, and investigations, use that absolute path as `--cwd` unless the user supplied another existing absolute repository directory. If the task may edit files, do not hand a worker an unisolated primary checkout by default: require an explicitly approved existing worktree or ask the user whether to create/use one before dispatch.
 5. Generate a canonical UUID with Python. Resolve `${XDG_STATE_HOME:-$HOME/.local/state}` to an absolute path, set `umask 077`, create `<state-root>/upagent/runs/<request-id>` with mode `0700`, and write the full task to `<run-dir>/prompt.md` as UTF-8 with mode `0600`. Author `prompt.md` through the `writing-for-agents` skill. The worker reads it cold. State one narrow goal, what is in scope, what is out of scope, the repository context and recorded decisions that govern the work, and checkable completion conditions. Carry enough context that the worker understands the overall agreed work, not just the isolated task. Tell the worker to return `blocked` with the exact decision needed if the task requires a wider scope or a design change. Keep this caller-owned directory; never put it in the Recruiter ledger.
@@ -50,6 +60,7 @@ existing service-pane resolution/creation behavior remains unchanged.
    extra_args=()
    [[ -n "${duration_minutes:-}" ]] && extra_args+=(--duration-minutes "$duration_minutes")
    [[ -n "${keep_open:-}" ]] && extra_args+=(--keep-open)
+   [[ "${headless:-}" == "true" ]] && extra_args+=(--headless)
    if just upagent request --type worker --request-id "$request_id" \
      --offering "$offering" --effort "$effort" --agent "$persona" \
      --prompt-file "$run_dir/prompt.md" --cwd "$cwd" \
@@ -68,7 +79,7 @@ existing service-pane resolution/creation behavior remains unchanged.
    already-accepted or terminal attachment ignores a new pane and preserves its exact order.
 
 7. Before any await, use a local Python helper to atomically extract `.state.requester_control_token` into `<run-dir>/control-token` with mode `0600`, remove that field from `request.json`, and atomically replace the response with the redacted value. Refuse to print or load the unredacted response into the conversation. If the request terminalized before reaching healthy `running`, the token may be absent; record that fact and do not invent one.
-8. For ordinary one-shot work, block without burning LLM turns with `just upagent await --request "$request_id" --json >"$run_dir/terminal.json"`, preserving its exit code and setting mode `0600` as before.
+8. For ordinary one-shot work, block without burning LLM turns with `just upagent await --request "$request_id" --json >"$run_dir/terminal.json"`, preserving its exit code and setting mode `0600` as before. Headless duration expiry stops work and returns blocked; there is no same-live-worker repair, retained review, or timeout extension in that backend. A failed or missing typed bundle is not permission to hire another worker.
 9. For `--keep-open`, do **not** call terminal `await` yet. Block on `just upagent review-await --request "$request_id" --after "$last_sequence" --json`. Record both `review.latest_sequence` and `review.checkpoint_sha256`, then inspect that exact checkpoint and the actual worktree diff/tests. Then make exactly one requester-owned decision:
    - Continue the same live worker: write concrete feedback to a mode-`0600` file and run `just upagent review-continue --request "$request_id" --checkpoint "$sequence" --checkpoint-sha256 "$checkpoint_sha256" --prompt-file "$feedback" --control-token-file "$run_dir/control-token" --json`; await the next checkpoint.
    - Accept and finalize: run `just upagent review-release --request "$request_id" --checkpoint "$sequence" --checkpoint-sha256 "$checkpoint_sha256" --control-token-file "$run_dir/control-token" --json`, then call ordinary `await` for the terminal receipt.

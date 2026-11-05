@@ -68,6 +68,7 @@ REQUEST_KEYS = {
     "duration_minutes",
     "keep_open",
     "sentinel",
+    "headless",
 }
 REQUEST_ID_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab0-9a-f][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -355,6 +356,7 @@ def _inline_request(args: Any) -> dict[str, object]:
         "duration_minutes",
         "keep_open",
         "sentinel",
+        "headless",
     ):
         item = getattr(args, field)
         if item is not None:
@@ -380,6 +382,7 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
         "duration_minutes",
         "keep_open",
         "sentinel",
+        "headless",
     }
     for key, value in raw.items():
         if key in string_fields and (not isinstance(value, str) or not value):
@@ -399,6 +402,16 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
     sentinel = raw.get("sentinel", True)
     if not isinstance(sentinel, bool):
         raise PublicError("request sentinel must be a boolean when present")
+    headless = raw.get("headless", False)
+    if not isinstance(headless, bool):
+        raise PublicError("request headless must be a boolean when present")
+    if headless:
+        if sys.platform != "linux":
+            raise PublicError("headless execution requires Linux")
+        if keep_open or args.cockpit_pane is not None or raw.get("sentinel") is True:
+            raise PublicError(
+                "headless cannot use keep_open, cockpit-pane, or sentinel:true"
+            )
     request_type = raw.get("type")
     if request_type not in ("worker", "specialist"):
         raise PublicError("request type must be worker or specialist")
@@ -475,6 +488,8 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
                 f"specialist {specialist_name!r} has invalid offering: {error}"
             ) from error
 
+    if headless and snapshot["harness"] != "claude":
+        raise PublicError("headless execution supports only Claude offerings")
     prompt_sha256 = hashlib.sha256(prompt_bytes).hexdigest()
     payload: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
@@ -496,7 +511,11 @@ def validate_request(args: Any, caller_cwd: Path) -> ValidatedRequest:
         payload["managed_requester"] = _managed_retained_requester()
     # Default-on Sentinel supervision: only the explicit opt-out enters the payload, so
     # every pre-existing request hash stays identical.
-    if sentinel is False:
+    if headless:
+        # Omission/false retain historical pane hashes; opt-in mode is immutable identity.
+        payload["headless"] = True
+        payload["sentinel"] = False
+    elif sentinel is False:
         payload["sentinel"] = False
     return ValidatedRequest(
         request_id=request_id,
@@ -608,6 +627,8 @@ class PublicRequestStore:
         and Recruiter-accepted requests are attachments: their accepted pane is immutable, and
         replay must not depend on any service/caller pane still being alive.
         """
+        if request.payload.get("headless") is True:
+            return False, None
         with self.request_lock(request.request_id):
             if not self.path(request.request_id).exists():
                 return True, None
@@ -711,7 +732,9 @@ class PublicRequestStore:
                         f"request_id_conflict: {request.request_id} already names a different canonical payload"
                     )
                 return existing
-            if not isinstance(cockpit_pane, str) or not cockpit_pane:
+            if request.payload.get("headless") is not True and (
+                not isinstance(cockpit_pane, str) or not cockpit_pane
+            ):
                 raise PublicError(
                     f"new request {request.request_id} has no freshly resolved live cockpit pane"
                 )
@@ -740,7 +763,10 @@ class PublicRequestStore:
                     "answer_path": str(final_answer),
                 }
                 instructions = recruiter.build_consult_brief(
-                    consult, location, cast(str, payload["cwd"])
+                    consult,
+                    location,
+                    cast(str, payload["cwd"]),
+                    **({"headless": True} if payload.get("headless") is True else {}),
                 )
                 (temporary / "instructions.md").write_text(instructions)
                 instructions_path = final_instructions
@@ -760,9 +786,15 @@ class PublicRequestStore:
                 "cwd": payload["cwd"],
                 "instructions_path": str(instructions_path),
                 "result_path": str(final_result),
-                "cockpit_pane": cockpit_pane,
+                **(
+                    {"execution_mode": "headless", "management": {"mode": "direct"}}
+                    if payload.get("headless") is True
+                    else {
+                        "cockpit_pane": cockpit_pane,
+                        "management": {"mode": "dedicated"},
+                    }
+                ),
                 "offering_snapshot": payload["offering_snapshot"],
-                "management": {"mode": "dedicated"},
                 **(
                     {"requester": payload["managed_requester"]}
                     if "managed_requester" in payload
@@ -1358,6 +1390,12 @@ def _cleanup_tombstone(
         "request_id": registered.request_id,
         "order_id": order_id,
         "payload_sha256": registered.record["payload_sha256"],
+        **(
+            {"headless": True}
+            if cast(dict[str, object], registered.record["payload"]).get("headless")
+            is True
+            else {}
+        ),
         "offering_snapshot": registered.record.get("offering_snapshot"),
         "terminal_state": evidence["terminal_state"],
         "terminal_verdict": evidence["terminal_verdict"],
@@ -1821,9 +1859,15 @@ def _submit_registered(
             result = registered.record.get("result")
             verdict = result.get("verdict") if isinstance(result, dict) else None
             return (0 if verdict == "passed" else 1), False
-        resident_submission = resident_requests.submit(
-            sys.modules[__name__], residents, registered, cockpit_pane
+        headless = (
+            cast(dict[str, object], registered.record["payload"]).get("headless")
+            is True
         )
+        resident_submission = None
+        if not headless:
+            resident_submission = resident_requests.submit(
+                sys.modules[__name__], residents, registered, cockpit_pane
+            )
         if resident_submission is not None:
             return resident_submission
         order = recruiter.load_order(registered.order_path)
@@ -1843,11 +1887,12 @@ def _submit_registered(
                 )
                 return code, False
             return 0, False
-        if cockpit_pane is None:
-            raise PublicError(
-                f"request {registered.request_id} has no accepted or freshly resolved cockpit pane"
-            )
-        store.rebind_unaccepted_cockpit(registered, cockpit_pane, ledger)
+        if not headless:
+            if cockpit_pane is None:
+                raise PublicError(
+                    f"request {registered.request_id} has no accepted or freshly resolved cockpit pane"
+                )
+            store.rebind_unaccepted_cockpit(registered, cockpit_pane, ledger)
         store.transition_submission(registered, "submitting")
         command = (
             recruiter.cmd_dispatch_strict if wait else recruiter.cmd_request_strict
@@ -1859,6 +1904,53 @@ def _submit_registered(
         )
         store.transition_submission(registered, "submitted")
         return code, True
+
+
+def _registered_headless(registered: RegisteredRequest) -> bool:
+    if registered.pruned:
+        return registered.record.get("headless") is True
+    payload = registered.record.get("payload")
+    return isinstance(payload, dict) and payload.get("headless") is True
+
+
+def _reject_headless_verify(registered: RegisteredRequest) -> None:
+    if _registered_headless(registered):
+        raise PublicError("verify is unsupported for headless requests")
+
+
+def headless_operation(argv: list[str], cwd: Path) -> bool:
+    """Keep headless intake/control independent of unrelated pane-job reconciliation.
+
+    Validate opt-in intake before any opportunistic mutation; ordinary pane operations
+    keep their existing sweep. Await already reconciles only the exact request.
+    """
+    args = contract.parse_argv(argv)
+    if args.command == "request":
+        raw = (
+            _load_json_request(args.file)
+            if args.file is not None
+            else _inline_request(args)
+        )
+        if "headless" in raw:
+            return validate_request(args, cwd).payload.get("headless") is True
+    elif args.command in (
+        "cancel",
+        "cleanup",
+        "verify",
+        "respond",
+        "review-await",
+        "review-continue",
+        "review-release",
+    ):
+        request_id = getattr(args, "request", None)
+        if isinstance(request_id, str):
+            store = PublicRequestStore()
+            if store.path(request_id).is_dir():
+                registered = store.load(request_id)
+                if args.command == "verify":
+                    _reject_headless_verify(registered)
+                return _registered_headless(registered)
+    return False
 
 
 def _request(args: Any, cwd: Path) -> int:
@@ -1877,6 +1969,11 @@ def _request(args: Any, cwd: Path) -> int:
     if resolve_cockpit:
         residents.preflight(validated.payload["cwd"], cockpit_pane)
     registered = store.register(validated, cockpit_pane)
+    if validated.payload.get("headless") is True and not registered.pruned:
+        ledger = recruiter.JobLedger()
+        key = ledger.key_for_order(recruiter.load_order(registered.order_path))
+        if ledger.request_dir(key).is_dir():
+            recruiter._reconcile_exact_request_runner(ledger, key)
     code, submitted_now = _submit_registered(
         store, registered, wait=args.wait, cockpit_pane=cockpit_pane
     )
@@ -2002,6 +2099,7 @@ def execute(args: Any, cwd: Path) -> int:
         return code
     if args.command == "verify":
         registered = store.load(args.request)
+        _reject_headless_verify(registered)
         residents.preflight(cwd)
         if registered.pruned:
             raise PublicError("cannot verify a pruned terminal request")

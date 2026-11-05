@@ -16,6 +16,17 @@ UpAgent worker             owns the requested work and its result
 One-shot check agent       advises on ambiguous evidence only
 ```
 
+## Execution backends
+
+Pane execution remains the default. The request flow below describes that backend.
+An explicit `--headless` request instead runs one local Claude print-mode worker on Linux,
+without Herdr or any lifecycle LLM helper. Python retains the same durable identity, lease,
+control-token, typed artifact, and receipt authority. A gated subprocess and dedicated subreaper
+own execution and descendant cleanup. No retained review, same-live-worker repair, or automatic
+helper/retry path exists in this mode. A guardian crash without cleanup proof stays blocked and
+`cleanup-failed`; it is never treated as successful absence. See
+[local Claude headless](README.md#local-claude-headless) for controls and permission boundaries.
+
 ## Use case: request one worker
 
 ```text

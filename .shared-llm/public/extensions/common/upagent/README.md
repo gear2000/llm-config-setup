@@ -2,10 +2,10 @@
 
 UpAgent coordinates durable LLM worker lifecycles for a phase leader, TUI, or another framework.
 The Python **Recruiter** persists each request, launches and verifies the worker, validates its
-result, closes owned panes, publishes a receipt, and releases the lease. See
+result, cleans owned processes/panes, publishes a receipt, and releases the lease. See
 [FUNDAMENTALS.md](FUNDAMENTALS.md) for the authority model and use-case tree.
 
-The hub targets **Herdr 0.9.5**. Other server versions require a separate compatibility check.
+The default pane backend targets **Herdr 0.9.5**. Opt-in [local Claude headless](#local-claude-headless) needs no Herdr. Other server versions require a separate compatibility check.
 Pin it from the kit checkout with `just herdr-pin` (`tools/install-herdr.sh`). Do not run
 `herdr update` or the unpinned `https://herdr.dev/install.sh` installer. Machine setup:
 [UPINSTALL.md](../../../../../UPINSTALL.md).
@@ -196,11 +196,11 @@ just upagent get --request ID [--json]
 just upagent lists --type offerings|plan-implementers|specialists|workers [--status active|terminal|all] [--json]
 just upagent request --type worker --offering ID --effort LEVEL --agent PERSONA \
   --prompt-file /absolute/brief.md [--cwd /absolute/worktree] \
-  [--duration-minutes 1..120] [--keep-open] [--no-sentinel] [--cockpit-pane LIVE_PANE] \
+  [--duration-minutes 1..120] [--headless] [--keep-open] [--no-sentinel] [--cockpit-pane LIVE_PANE] \
   [--wait] [--json]
 just upagent request --type specialist --specialist NAME \
   --prompt-file /absolute/question.md [--cwd /absolute/worktree] \
-  [--cockpit-pane LIVE_PANE] [--wait] [--json]
+  [--headless] [--cockpit-pane LIVE_PANE] [--wait] [--json]
 just upagent request --file /absolute/request.json [--cockpit-pane LIVE_PANE] [--wait] [--json]
 just upagent await --request ID [--notify-after-ms MS] [--json]
 just upagent await-any --request ID [--request ID ...] [--cursor JSON] [--timeout-ms MS] [--json]
@@ -222,7 +222,7 @@ just upagent reconcile [--json]
 
 Named flags and `--file` enter one closed `schema_version: 1` parser. A file must be one readable
 absolute JSON object and may contain only `schema_version`, `request_id`, `type`, `offering`,
-`effort`, `agent`, `specialist`, `prompt_file`, `cwd`, `duration_minutes`, and `keep_open`.
+`effort`, `agent`, `specialist`, `prompt_file`, `cwd`, `duration_minutes`, `keep_open`, `sentinel`, and `headless`.
 Duration must be an integer from 1 through 120; omission uses the 60-minute public default.
 `keep_open` must be boolean, applies only to workers, and maps to the release-gated retained
 lifecycle. `--file` is mutually exclusive with request-defining flags; `--cockpit-pane`, `--wait`,
@@ -240,7 +240,7 @@ another registered destination.
 `--cockpit-pane` is an invocation-only override for anchoring the order to the caller's own pane.
 It may accompany named flags or `--file`, but it is not a request-defining flag, does not enter the
 closed request object or immutable payload hash, and is not an allowed key inside a request file.
-Before Recruiter acceptance, a supplied value must be a non-empty pane ID that a fresh pane listing
+For pane-mode requests, before Recruiter acceptance a supplied value must be a non-empty pane ID that a fresh pane listing
 proves live in the current Herdr session; omission resolves the current service pane on demand. A
 same-ID/same-payload retry of a refused or interrupted pre-acceptance submission refreshes only this
 routing field and keeps every immutable request field unchanged. Once
@@ -260,6 +260,73 @@ Recruiter's idempotent ledger. Same id plus same hash attaches without another l
 a changed hash returns `request_id_conflict` before request mutation. This remains true after
 history pruning: the compact tombstone retains the immutable payload hash, so an identical retry
 attaches and a changed payload still conflicts without launching.
+
+### Local Claude headless
+
+`request --headless` (JSON: `"headless": true`) opts one worker or Claude-backed specialist into
+**Linux-local, one-shot** execution. It needs Linux `/proc`, child-subreaper support, and kernel
+PID file descriptors (`pidfd_open`, Linux 5.3+). It does not need Herdr, its socket, a pane, a
+services workspace, or `HERDR_ENV`. Existing requests and omitted/false `headless` retain pane
+mode and their old hashes. Opt-in mode enters immutable request identity: changing mode under
+the same request ID conflicts rather than launching again.
+
+```bash
+umask 077
+just upagent request --type worker --headless \
+  --offering claude-sonnet-5-5 --effort high --agent backend \
+  --prompt-file /absolute/brief.md --cwd /absolute/approved-worktree \
+  --duration-minutes 10 --wait --json > /absolute/terminal.json
+```
+
+Non-Linux, non-Claude (including ClaudeX), `--keep-open`, `--cockpit-pane`, and explicit
+`sentinel:true` combinations fail before launch. Python alone supervises the request: no Account
+Manager, Sentinel, Checker, Rescuer, resident specialist routing, or helper fallback is hired.
+Headless intake/cancel do not sweep unrelated pane jobs. `reconcile` remains an explicit
+machine-wide command; `await` and same-ID request attachment recover only that request.
+`verify` is pane-only: headless requests (including pruned history) are refused before unrelated
+reconciliation, resident preflight, or verification-file writes. Existing interactive controllers
+are unchanged; headless does not convert their orchestration.
+
+A separate launcher runs `claude --print --output-format json` with the selected `--agent`, model,
+and effort, supplying the composed assignment through stdin. The executable is resolved once to
+an absolute path; exec failure never falls through to another PATH entry. Claude uses the caller's
+local credentials and normal project/home settings, hooks, skills, and persona discovery. The
+launcher sets `--permission-mode default`, never adds a permission-bypass flag, and removes
+`HERDR_*` from the worker environment. Configure legitimate tool permissions in advance; a needed
+human approval must block rather than be waived. **Headless is not a sandbox.** Review the local
+settings, hooks, tools, and persona before authorizing a task.
+
+The total duration covers launch and execution, including time after apparent final output.
+Timeout stops the process and produces a blocked result; this backend has no timeout extension or
+same-live-worker repair/review loop. For cancellation, omit `--wait`, save the originating response
+privately, extract its control token to a mode-0600 file, then use the existing `cancel` command.
+`running` means the owned exec child was admitted, not that Claude authenticated or finished.
+Very fast requests can return their terminal receipt without exposing an intermediate running state.
+Both wait modes monitor the spawned supervisor until a durable claim or terminal receipt exists,
+with a bounded startup wait. A supervisor that exits before claiming produces a blocked receipt;
+synchronous submission does not abandon that child to an unowned terminal wait.
+
+The Python guardian is a dedicated Linux subreaper. It persists process birth/boot identity before
+releasing each launch gate, drains both output pipes continuously, and keeps at most 16 MiB per
+stream. Excess bytes are drained but discarded; receipt cleanup evidence records byte counts and
+log paths. Any stdout truncation blocks acceptance based on those durable byte counts, even when
+the retained prefix is valid success JSON. Stderr-only truncation does not invalidate an otherwise
+valid result. Captured stdout is Claude's JSON result, not a full tool transcript; the worker's
+`full_log` remains its own transcript/session pointer. The guardian cleans descendants, including
+reparented/daemonized children, and uses PID file descriptors with birth rechecks for signals.
+The supervisor also has a complete PID/birth/boot identity persisted in its lease, runner record,
+receipt, and completion marker. Its cancellation, reconciliation, and terminal absence checks use
+boot-aware PID file descriptors too, never a numeric PID signal. Missing headless identity fields
+fail closed rather than falling back to legacy pane liveness. If the supervisor dies, the guardian
+stops work; a later command reconciles durable evidence.
+A dead guardian alone is **not** proof of descendant absence: uncertainty stays `cleanup-failed`
+with a blocked result and retained lease, rather than authorizing a retry or a clean receipt.
+
+Acceptance requires the actual process exit, non-error Claude JSON without permission denials,
+a valid lease-private typed result (and specialist answer), consistent artifacts, and proven
+cleanup. Exit zero, final-looking prose, and early result files are insufficient. Missing or
+malformed artifacts block without hiring a repair/rescue worker. Summaries keep the existing
+best-effort policy. These checks validate delivery, not the substantive correctness of the work.
 
 ### Retained review loop
 

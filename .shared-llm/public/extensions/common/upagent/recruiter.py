@@ -169,6 +169,14 @@ sys.modules[_completion_spec.name] = completion
 _completion_spec.loader.exec_module(completion)
 CompletionError = completion.CompletionError
 
+_headless_spec = importlib.util.spec_from_file_location(
+    "upagent_headless", HERE / "headless.py"
+)
+if _headless_spec is None or _headless_spec.loader is None:
+    raise RuntimeError("could not load UpAgent headless backend")
+headless = cast(Any, importlib.util.module_from_spec(_headless_spec))
+_headless_spec.loader.exec_module(headless)
+
 _runtime_name = "upagent_command_runtime"
 if _runtime_name in sys.modules:
     command_runtime = sys.modules[_runtime_name]
@@ -1030,8 +1038,8 @@ class JobLedger:
             return False
         if lease["expires_at"] > now:
             return False
-        if lease.get("worker_pane"):
-            # Only the runtime reconciler can reclaim a lease after proving its recorded pane
+        if lease.get("worker_pane") or lease.get("execution_mode") == "headless":
+            # Only the runtime reconciler can reclaim a lease after proving its owned process/pane
             # absent. Blind filesystem reaping would orphan a live worker.
             return False
         shutil.rmtree(claim_dir)
@@ -1106,7 +1114,9 @@ class JobLedger:
                         key, current_time, lease["token"], expiry
                     ):
                         reclaimed += 1
-                    self._prune_index_entry_locked(index_path, key, lease["token"], expiry)
+                    self._prune_index_entry_locked(
+                        index_path, key, lease["token"], expiry
+                    )
             with self._claim_lock(expiry_dir.name):
                 self._remove_empty_expiry_dir(expiry_dir)
         return reclaimed
@@ -1165,6 +1175,7 @@ class JobLedger:
             "runner_pid": pid,
             "runner_session_id": None,
             "runner_start_time": start,
+            **headless.runner_metadata(receipt),
             "schema_version": 1,
         }
 
@@ -1218,6 +1229,8 @@ class JobLedger:
             expiry_epoch = int(time.time() + timeout_ms / 1000) + 60
             requester_control_token = uuid.uuid4().hex
             owner_record = dict(owner or {})
+            if self.order(key).get("execution_mode") == "headless":
+                headless.runner_identity(owner_record)
             owner_record.setdefault("runner_pid", os.getpid())
             owner_record.setdefault(
                 "runner_start_time", _process_start_time(owner_record["runner_pid"])
@@ -1256,6 +1269,7 @@ class JobLedger:
                     "runner_pid": lease.get("runner_pid"),
                     "runner_session_id": lease.get("runner_session_id"),
                     "runner_start_time": lease.get("runner_start_time"),
+                    **headless.runner_metadata(lease),
                     "schema_version": 1,
                 },
             )
@@ -1700,16 +1714,28 @@ class JobLedger:
                 raise RecruiterError(
                     f"runner identity for {key} conflicts with its terminal receipt"
                 )
+            execution_mode = self.order(key).get("execution_mode")
+            if execution_mode == "headless":
+                if headless.runner_identity(runner) != headless.runner_identity(
+                    receipt
+                ):
+                    raise RecruiterError(
+                        f"runner boot identity for {key} conflicts with its receipt"
+                    )
+                if source == "supervisor" and headless.runner_identity(
+                    runner
+                ) != headless.process.identity(os.getpid()):
+                    raise RecruiterError(
+                        f"headless runner completion for {key} does not match this supervisor"
+                    )
             if source == "supervisor" and (
                 pid != os.getpid() or _process_start_time(pid) != start
             ):
                 raise RecruiterError(
                     f"runner completion for {key} does not match this supervisor"
                 )
-            if (
-                require_dead
-                and isinstance(start, str)
-                and _process_start_time(pid) == start
+            if require_dead and _recorded_runner_alive(
+                runner, execution_mode=execution_mode
             ):
                 raise RecruiterError(f"runner for {key} is still alive")
             if runner_missing:
@@ -1722,6 +1748,7 @@ class JobLedger:
                 "request_id": receipt.get("request_id"),
                 "runner_pid": pid,
                 "runner_start_time": start,
+                **headless.runner_metadata(runner),
                 "schema_version": 1,
                 "source": source,
             }
@@ -2450,6 +2477,13 @@ class JobLedger:
             raise RecruiterError(
                 f"request {request_id} has conflicting runner-completed evidence"
             )
+        if order.get("execution_mode") == "headless" and (
+            headless.runner_identity(runner_completed)
+            != headless.runner_identity(receipt)
+        ):
+            raise RecruiterError(
+                f"request {request_id} has conflicting runner boot identity"
+            )
         cleanup = receipt.get("cleanup")
         if not isinstance(cleanup, dict) or cleanup.get("verified_absent") is not True:
             raise RecruiterError(
@@ -2611,6 +2645,8 @@ class JobLedger:
             lease = self._lease(claim_dir / "lease.json")
             if lease["token"] != token:
                 return False
+            if order.get("execution_mode") == "headless":
+                headless.runner_identity(lease)
             # A lease is a fence as well as an ownership token. An expired owner cannot publish
             # a result during the gap before a replacement runner claims this order.
             if not allow_expired and lease["expires_at"] <= int(time.time()):
@@ -2720,6 +2756,7 @@ class JobLedger:
                 "result_path": order["result_path"],
                 "runner_pid": lease.get("runner_pid"),
                 "runner_start_time": lease.get("runner_start_time"),
+                **headless.runner_metadata(lease),
                 "state": terminal_state,
                 "terminal_at_ns": terminal_at_ns,
                 "verdict": parsed["verdict"],
@@ -2793,6 +2830,7 @@ class JobLedger:
                         "request_id": receipt["request_id"],
                         "runner_pid": receipt["runner_pid"],
                         "runner_start_time": receipt["runner_start_time"],
+                        **headless.runner_metadata(receipt),
                         "schema_version": 1,
                         "source": "finalize",
                     },
@@ -4585,7 +4623,9 @@ def _reconcile_exact_launch(
         # A liveness check only: SIGKILL is already pending on each survivor.
         nonlocal survivors
         survivors = [
-            (pid, start) for pid, start in survivors if _process_start_time(pid) == start
+            (pid, start)
+            for pid, start in survivors
+            if _process_start_time(pid) == start
         ]
         if survivors:
             errors.append(str(PaneProcessesSurvived(survivors)))
@@ -5353,7 +5393,9 @@ def _terminate_process_snapshot(
     """
 
     def alive(items: list[tuple[int, str]]) -> list[tuple[int, str]]:
-        return [(pid, start) for pid, start in items if _process_start_time(pid) == start]
+        return [
+            (pid, start) for pid, start in items if _process_start_time(pid) == start
+        ]
 
     terminated = [
         (pid, start)
@@ -5521,10 +5563,16 @@ def _write_worker_instructions(
         + (
             ""
             if retained
-            else "After writing every artifact, remain in your session and go idle. Do NOT "
-            "exit, close your pane, or clean anything up: the Recruiter validates these "
-            "files while you are still reachable, may send you one COMPLETION_REPAIR "
-            "instruction to fix them, and closes the pane itself after validation.\n"
+            else (
+                "After writing the artifacts, return your final answer and exit. This is "
+                "one-shot headless execution: there is no pane, lifecycle helper, or "
+                "same-live-worker repair. Do not bypass permissions or approval gates.\n"
+                if order.get("execution_mode") == "headless"
+                else "After writing every artifact, remain in your session and go idle. Do NOT "
+                "exit, close your pane, or clean anything up: the Recruiter validates these "
+                "files while you are still reachable, may send you one COMPLETION_REPAIR "
+                "instruction to fix them, and closes the pane itself after validation.\n"
+            )
         )
     )
     handoff_section = (
@@ -5962,7 +6010,7 @@ def _wait_for_agent_status(
                 sentinel_watch=sentinel_watch,
                 herdr_session=herdr_session,
             )
-        except HerdrWaitLost:
+        except HerdrWaitLost as error:
             # Live subscriptions have no replay cursor. Re-read authoritative state
             # before opening another wait, retaining the original request deadline.
             remaining = deadline - time.monotonic()
@@ -5971,7 +6019,7 @@ def _wait_for_agent_status(
                     return False
                 raise AgentWaitTimeout(
                     f"Herdr wait for {worker_pane} exceeded its deadline"
-                )
+                ) from error
             if _worker_pane_confirmed_gone(
                 worker_pane,
                 herdr_session=herdr_session,
@@ -6002,7 +6050,7 @@ def _wait_for_agent_status(
                     return False
                 raise AgentWaitTimeout(
                     f"Herdr wait for {worker_pane} exceeded its deadline after reconnection"
-                )
+                ) from error
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
@@ -7789,10 +7837,12 @@ class _SentinelWatch:
             trigger == "sentinel" and outcome.outcome in ("backoff", "aborted")
         ):
             self._prompt_sentinel_after_nudge(
-                {"delivered": "delivered", "delivery-unconfirmed": "delivery-unconfirmed",
-                 "backoff": "held", "aborted": "failed"}[
-                    outcome.outcome
-                ]
+                {
+                    "delivered": "delivered",
+                    "delivery-unconfirmed": "delivery-unconfirmed",
+                    "backoff": "held",
+                    "aborted": "failed",
+                }[outcome.outcome]
             )
         return True
 
@@ -7873,15 +7923,21 @@ class _SentinelWatch:
     def _probe_stall_job(self) -> None:
         """Sample before a closeout arrives so the first STALLED probe has a delta."""
         health = self._stall_worker_health()
-        first_action = next(
-            (
-                event for event in self.ledger.events(self.key)
-                if event.get("event") == FIRST_ACTION_EVENT
-                and event.get("attempt") == self.attempt
-                and event.get("worker_pane") == self.sentinel_state.get("worker_pane")
-            ),
-            None,
-        ) if health is not None else None
+        first_action = (
+            next(
+                (
+                    event
+                    for event in self.ledger.events(self.key)
+                    if event.get("event") == FIRST_ACTION_EVENT
+                    and event.get("attempt") == self.attempt
+                    and event.get("worker_pane")
+                    == self.sentinel_state.get("worker_pane")
+                ),
+                None,
+            )
+            if health is not None
+            else None
+        )
         if health is None or first_action is None:
             self._active_descendant, self._worker_job_cpu = None, None
             return
@@ -7892,8 +7948,11 @@ class _SentinelWatch:
     def _release_stall_hold(self, reason: str) -> None:
         if self._stall_hold_evidence is not None:
             self.ledger._event(
-                self.key, "worker-stall-released", reason=reason,
-                attempt=self.attempt, generation=self.generation,
+                self.key,
+                "worker-stall-released",
+                reason=reason,
+                attempt=self.attempt,
+                generation=self.generation,
             )
             self._stall_hold_evidence = None
             self._stall_hold_signature = None
@@ -7905,14 +7964,23 @@ class _SentinelWatch:
             return False
         health = self._stall_worker_health()
         if health is None:
-            self._release_stall_hold("worker identity is gone or request no longer permits a hold")
+            self._release_stall_hold(
+                "worker identity is gone or request no longer permits a hold"
+            )
             return False
         pid, birth = health["process_pid"], health["process_start_time"]
         try:
-            pane = _herdr_json(
-                "pane", "get", health["pane_id"],
-                herdr_session=self.herdr_session, timeout_seconds=2,
-            ).get("result", {}).get("pane", {})
+            pane = (
+                _herdr_json(
+                    "pane",
+                    "get",
+                    health["pane_id"],
+                    herdr_session=self.herdr_session,
+                    timeout_seconds=2,
+                )
+                .get("result", {})
+                .get("pane", {})
+            )
         except RecruiterError as error:
             self._release_stall_hold(f"worker status unavailable: {error}")
             return False
@@ -7940,7 +8008,9 @@ class _SentinelWatch:
                 break
         descendant = self._active_descendant if recent_file is None else None
         if recent_file is None and descendant is None:
-            self._release_stall_hold("no recent worker files or post-action job CPU progress")
+            self._release_stall_hold(
+                "no recent worker files or post-action job CPU progress"
+            )
             return False
         # A PID reused while reading the files/process snapshot cannot earn a hold.
         if _process_start_time(pid) != birth:
@@ -7960,11 +8030,17 @@ class _SentinelWatch:
             self._stall_hold_evidence = evidence
             reason = (
                 f"recent worker file {recent_file}"
-                if recent_file else f"post-action job {descendant} consumed CPU since the last probe"
+                if recent_file
+                else f"post-action job {descendant} consumed CPU since the last probe"
             )
             _notify_requester(
-                self.ledger, self.key, self.order, self.generation,
-                "worker-stall-held", f"The stalled worker is held: {reason}.", evidence,
+                self.ledger,
+                self.key,
+                self.order,
+                self.generation,
+                "worker-stall-held",
+                f"The stalled worker is held: {reason}.",
+                evidence,
             )
         if self.closeout_path.exists():
             stat = self.closeout_path.stat()
@@ -7973,8 +8049,11 @@ class _SentinelWatch:
 
     def poll(self) -> str | None:
         now = time.monotonic()
-        if (self._stall_hold_evidence is not None
-                and self.wait_deadline is not None and now >= self.wait_deadline):
+        if (
+            self._stall_hold_evidence is not None
+            and self.wait_deadline is not None
+            and now >= self.wait_deadline
+        ):
             self._release_stall_hold("hard wait deadline reached")
             return None
         if self._stall_hold_evidence is not None:
@@ -8117,10 +8196,15 @@ class _SentinelWatch:
                             os.replace(archived, self.closeout_path)
                             stat = self.closeout_path.stat()
                             self._stall_hold_signature = (
-                                stat.st_ino, stat.st_mtime_ns, stat.st_size
+                                stat.st_ino,
+                                stat.st_mtime_ns,
+                                stat.st_size,
                             )
                             return None
-                        if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+                        if (
+                            self.wait_deadline is not None
+                            and time.monotonic() >= self.wait_deadline
+                        ):
                             self._release_stall_hold("hard wait deadline reached")
                             return None
                         raise SentinelStalledError(
@@ -8135,7 +8219,10 @@ class _SentinelWatch:
                 return None
             # A probe can consume the remaining wait budget. Let the caller's hard
             # deadline path decide completion/timeout instead of publishing STALLED.
-            if self.wait_deadline is not None and time.monotonic() >= self.wait_deadline:
+            if (
+                self.wait_deadline is not None
+                and time.monotonic() >= self.wait_deadline
+            ):
                 self._release_stall_hold("hard wait deadline reached")
                 return None
             raise SentinelStalledError(
@@ -9021,12 +9108,16 @@ def _reconcile_stalled_prompt(
                 return
             completed = agent.get("completion_seq")
             prior_completed = before.get("completion_seq")
-            if (agent.get("agent_status") == "done"
-                    and "completion_seq" in before
-                    and isinstance(completed, int)
-                    and (prior_completed is None or completed > prior_completed)):
+            if (
+                agent.get("agent_status") == "done"
+                and "completion_seq" in before
+                and isinstance(completed, int)
+                and (prior_completed is None or completed > prior_completed)
+            ):
                 return
-            last_evidence = f"agent status {agent.get('agent_status')!r}; no new completed turn"
+            last_evidence = (
+                f"agent status {agent.get('agent_status')!r}; no new completed turn"
+            )
         time.sleep(
             min(PROMPT_RECONCILE_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
         )
@@ -9095,8 +9186,10 @@ def _submit_agent_prompt(
             if "agent_prompt_stalled" not in str(error):
                 raise
             _reconcile_stalled_prompt(
-                target, ready.get("result", {}).get("agent", {}),
-                timeout_ms=prompt_budget_ms, herdr_session=herdr_session,
+                target,
+                ready.get("result", {}).get("agent", {}),
+                timeout_ms=prompt_budget_ms,
+                herdr_session=herdr_session,
             )
             return
         if response.get("result", {}).get("agent", {}).get("agent_status") == "blocked":
@@ -11935,7 +12028,9 @@ def _live_recruiter_pane_from_state() -> str | None:
     try:
         state = json.loads(STATE_FILE.read_text())
         session = state.get("herdr_session") if isinstance(state, dict) else None
-        live = _live_pane_ids(herdr_session=session if isinstance(session, str) else None)
+        live = _live_pane_ids(
+            herdr_session=session if isinstance(session, str) else None
+        )
     except (OSError, json.JSONDecodeError, RecruiterError):
         return None
     return pane if pane in live else None
@@ -11946,8 +12041,32 @@ def _process_cmdline(pid: int) -> list[str]:
     return _process_identity.process_cmdline(pid)
 
 
+def _recorded_runner_alive(record: dict, *, execution_mode: object = None) -> bool:
+    if execution_mode == "headless" or record.get("execution_mode") == "headless":
+        return headless.runner_alive(record)
+    start = record.get("runner_start_time")
+    return (
+        isinstance(start, str)
+        and _process_start_time(record.get("runner_pid")) == start
+    )
+
+
 def _runner_alive(pid: object, key: str) -> bool:
     """Prove a PID is this request's detached canonical ``run-job`` process."""
+    lease_path = JobLedger().active / "requests" / key / "lease.json"
+    try:
+        lease = JobLedger._lease(lease_path)
+    except RecruiterError:
+        return False
+    if (
+        lease.get("execution_mode") == "headless"
+        or JobLedger().order(key).get("execution_mode") == "headless"
+    ):
+        if pid != lease.get("runner_pid"):
+            raise RecruiterError(
+                "headless supervisor PID conflicts with its lease identity"
+            )
+        return headless.runner_alive(lease)
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
         return False
     cmdline = _process_cmdline(pid)
@@ -11960,11 +12079,6 @@ def _runner_alive(pid: object, key: str) -> bool:
         return False
     if run_index + 1 >= len(cmdline) or cmdline[run_index + 1] != key:
         return False
-    lease_path = JobLedger().active / "requests" / key / "lease.json"
-    try:
-        lease = JobLedger._lease(lease_path)
-    except RecruiterError:
-        return False
     recorded_start = lease.get("runner_start_time")
     return (
         not isinstance(recorded_start, str)
@@ -11973,7 +12087,18 @@ def _runner_alive(pid: object, key: str) -> bool:
 
 
 def _terminate_owned_runner(pid: object, key: str) -> None:
-    """Terminate only a process whose command line proves exact request ownership."""
+    """Terminate only proven ownership; headless always uses boot-fenced PID descriptors."""
+    lease = _active_claim_for(JobLedger(), key)
+    if lease is not None and (
+        lease.get("execution_mode") == "headless"
+        or JobLedger().order(key).get("execution_mode") == "headless"
+    ):
+        if pid != lease.get("runner_pid"):
+            raise RecruiterError(
+                "headless termination PID conflicts with its lease identity"
+            )
+        headless.stop_runner(lease)
+        return
     if not _runner_alive(pid, key):
         return
     assert isinstance(pid, int)
@@ -12842,6 +12967,10 @@ def _reconcile_claim(
     ledger: JobLedger, key: str, lease: dict, *, force: bool, emit: bool = True
 ) -> bool:
     """Close and terminalize one dead/expired owned job. Never touches an unrecorded pane."""
+    if ledger.order(key).get("execution_mode") == "headless":
+        return headless.reconcile(
+            sys.modules[__name__], ledger, key, lease, force=force
+        )
     expired = lease["expires_at"] <= int(time.time())
     runner_alive = _runner_alive(lease.get("runner_pid"), key)
     if not force and not expired and runner_alive:
@@ -13052,9 +13181,9 @@ def _reconcile_terminal_runners(ledger: JobLedger) -> int:
     """Complete terminal runner evidence only after the recorded process is dead."""
     completed = 0
     for key, runner in ledger.incomplete_terminal_runners():
-        pid = runner.get("runner_pid")
-        start = runner.get("runner_start_time")
-        if isinstance(start, str) and _process_start_time(pid) == start:
+        if _recorded_runner_alive(
+            runner, execution_mode=ledger.order(key).get("execution_mode")
+        ):
             continue
         if ledger.mark_runner_completed(
             key, source="crash-reconciler", require_dead=True
@@ -13270,6 +13399,8 @@ def _order_log_payload(
 
 def _dispatch_order(order: dict, roster_path: str) -> int:
     """Submit one already-valid order and block for its durable terminal receipt."""
+    if order.get("execution_mode") == "headless":
+        return headless.submit(sys.modules[__name__], order, roster_path, wait=True)
     _log_request_event("DISPATCH_START", _order_log_payload(order))
     ledger = JobLedger()
     key, _created = ledger.submit(order)
@@ -13363,6 +13494,8 @@ def cmd_request_strict(order_path: str, roster_path: str) -> int:
 
 def _request_order(order: dict, roster_path: str) -> int:
     """Submit one already-valid order and return after worker health or rejection."""
+    if order.get("execution_mode") == "headless":
+        return headless.submit(sys.modules[__name__], order, roster_path, wait=False)
     _log_request_event("REQUEST_START", _order_log_payload(order))
     roster = load_roster(roster_path)
     config = llm_management.load_management_config(roster)
@@ -13546,9 +13679,9 @@ def _reconcile_exact_request_runner(ledger: JobLedger, key: str) -> bool:
     runner = _terminal_runner_identity(ledger, key)
     if runner is None:
         return False
-    pid = runner.get("runner_pid")
-    start = runner.get("runner_start_time")
-    if isinstance(start, str) and _process_start_time(pid) == start:
+    if _recorded_runner_alive(
+        runner, execution_mode=ledger.order(key).get("execution_mode")
+    ):
         return False
     return ledger.mark_runner_completed(
         key, source="await-reconciler", require_dead=True
@@ -13598,7 +13731,7 @@ def cmd_await(order_path: str, notify_after_ms: int = 600_000) -> int:
             print(f"ORDER_RECEIPT {json.dumps(receipt, sort_keys=True)}", flush=True)
             _maybe_notify_completion(
                 (time.monotonic() - started) * 1000,
-                notify_after_ms,
+                0 if order.get("execution_mode") == "headless" else notify_after_ms,
                 order["order_id"],
                 str(receipt["verdict"]),
             )
@@ -13627,6 +13760,8 @@ def cmd_verify(
     hold, ``failed`` with concrete findings when they do not.
     """
     original = load_order(order_path)
+    if original.get("execution_mode") == "headless":
+        raise RecruiterError("verify is unsupported for headless requests")
     result = load_result(
         original["result_path"], expected_order_id=original["order_id"]
     )
@@ -13851,7 +13986,9 @@ def _read_private_control_token_file(value: str) -> str:
     """
     path = Path(value)
     if not value or not path.is_absolute():
-        raise RecruiterError(f"--control-token-file must be an absolute path: {value!r}")
+        raise RecruiterError(
+            f"--control-token-file must be an absolute path: {value!r}"
+        )
     flags = (
         os.O_RDONLY
         | os.O_NONBLOCK
@@ -14391,9 +14528,18 @@ def cmd_cancel(order_path: str, control_token: str) -> dict[str, object]:
     token = outcome.get("token")
     if not isinstance(lease, dict) or not isinstance(token, str):
         raise RecruiterError("cancellation fence returned invalid ownership")
-    _await_inflight_launches(ledger, key)
-    cleanup = _cancel_owned_request(ledger, key, lease)
-    _terminate_owned_runner(lease.get("runner_pid"), key)
+    if order.get("execution_mode") == "headless":
+        # Stop the launcher BEFORE inspecting its journals: a fenced but still-live
+        # runner could otherwise create a guardian after a false not-created snapshot.
+        if not headless.stop_runner(lease):
+            raise RecruiterError(
+                "headless cancellation cannot yet prove the launcher stopped; retry the same cancellation"
+            )
+        cleanup = headless.cleanup(sys.modules[__name__], ledger, key)
+    else:
+        _await_inflight_launches(ledger, key)
+        cleanup = _cancel_owned_request(ledger, key, lease)
+        _terminate_owned_runner(lease.get("runner_pid"), key)
     manifest = completion.build_manifest(
         order,
         ledger.request_dir(key),
@@ -14546,6 +14692,8 @@ def cmd_run_job(key: str, roster_path: str) -> int:
         _reparent_runner(key)
     ledger = JobLedger()
     order = ledger.order(key)
+    if order.get("execution_mode") == "headless":
+        return headless.run(sys.modules[__name__], key)
     roster = load_roster(roster_path)
     management_config = llm_management.load_management_config(roster)
     timeout_ms = _order_timeout_ms(order)
@@ -15852,7 +16000,9 @@ def _resolve_consult_cwd(entry: dict, consult: dict, consult_id: str) -> str:
     return root
 
 
-def build_consult_brief(consult: dict, location: str, cwd: str) -> str:
+def build_consult_brief(
+    consult: dict, location: str, cwd: str, *, headless: bool = False
+) -> str:
     """The briefing a transient specialist reads: the question, where its own definition and the
     repo live, and the exact answer.json contract it must satisfy (answer + file:line citations).
 
@@ -15870,8 +16020,12 @@ def build_consult_brief(consult: dict, location: str, cwd: str) -> str:
         f'"citations": ["path/to/file:line", ...]. Every claim MUST carry a real file:line '
         f"citation into the repo. Write nothing outside that JSON file.\n"
         "After the cited answer is durable, satisfy the Recruiter delivery contract appended "
-        "to this brief, then remain in your session and go idle — do NOT exit or close your "
-        "pane; the Recruiter validates your files and closes the pane.\n"
+        + (
+            "to this brief, then return your final answer and exit.\n"
+            if headless
+            else "to this brief, then remain in your session and go idle — do NOT exit or close your "
+            "pane; the Recruiter validates your files and closes the pane.\n"
+        )
     )
 
 

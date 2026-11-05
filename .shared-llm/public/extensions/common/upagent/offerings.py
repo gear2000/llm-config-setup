@@ -85,7 +85,12 @@ APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         "cursor",
     ),
     "pi-gpt-6-1-sol": ("pi", "openai-codex/gpt-6.1-sol", EFFORTS_SOL, "openai"),
-    "pi-gpt-5-6-terra": ("pi", "openai-codex/gpt-5.6-terra", EFFORTS_HIGH_PLUS, "openai"),
+    "pi-gpt-5-6-terra": (
+        "pi",
+        "openai-codex/gpt-5.6-terra",
+        EFFORTS_HIGH_PLUS,
+        "openai",
+    ),
     "pi-gpt-5-6-luna": ("pi", "openai-codex/gpt-5.6-luna", EFFORTS_HIGH_PLUS, "openai"),
     "pi-gpt-6-astra": ("pi", "openai-codex/gpt-6-astra", EFFORTS, "openai"),
     "claudex-gpt-6-1-sol": ("claudex", "gpt-6.1-sol", EFFORTS_SOL, "openai"),
@@ -764,6 +769,27 @@ def render_argv(snapshot: object, persona: str, instructions_path: str) -> list[
             cursor_prompt,
         ]
     raise OfferingError(f"offering snapshot has unsupported harness {harness!r}")
+
+
+def render_headless_argv(snapshot: object, persona: str) -> list[str]:
+    """Claude print mode, stdin assignment, default permission gates (no bypass)."""
+    selected = validate_snapshot(snapshot)
+    if selected["harness"] != "claude":
+        raise OfferingError("headless execution supports only Claude")
+    return [
+        "claude",
+        "--print",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "default",
+        "--agent",
+        persona,
+        "--model",
+        str(selected["model"]),
+        "--effort",
+        str(selected["selected_effort"]),
+    ]
 
 
 def preflight_snapshot(snapshot: object) -> dict[str, object]:

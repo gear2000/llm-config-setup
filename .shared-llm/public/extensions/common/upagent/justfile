@@ -1,8 +1,8 @@
-# UpAgent per-command Recruiter module (over Herdr) — imported by the root justfile:
+# UpAgent per-command Recruiter (default Herdr panes; opt-in Linux Claude headless):
 #   import '.shared-llm/public/extensions/common/upagent/justfile'
 #
-# The Recruiter hires one fresh worker per work order and drives the running Herdr over Herdr's
-# own IPC. Each recipe starts a current-source command process; asynchronous requests detach a
+# The Recruiter hires one fresh worker per work order. Pane mode drives Herdr over its own IPC;
+# public request --headless uses a separate local subprocess path. Asynchronous requests detach a
 # durable supervisor. The launch roster lives in upagent.yaml (template: upagent.yaml.example).
 #
 # Paths anchor on `{{justfile_directory()}}` to find the client. It resolves the main checkout
