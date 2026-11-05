@@ -193,6 +193,41 @@ def _cursor_health_herdr(status: str, cwd: Path) -> Callable[..., dict]:
     return herdr_json
 
 
+@pytest.mark.parametrize("public", [False, True])
+def test_fast_adverse_startup_keeps_public_normalization_and_routed_strictness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, public: bool
+) -> None:
+    path = tmp_path / "result.json"
+    order = _order(cwd=str(tmp_path), harness="codex", result_path=str(path))
+    if public:
+        order["public_request"] = {"payload_sha256": "a" * 64}
+        order["stage_id"] = "stage-5-finalization"
+    path.write_text(
+        json.dumps(
+            {
+                "order_id": order["order_id"],
+                "verdict": "failed",
+                "full_log": "session",
+                "report_markdown": "Full adverse report; no worker-chosen revisit.",
+            }
+        )
+    )
+    before = path.read_bytes()
+    monkeypatch.setattr(recruiter, "_herdr_json", lambda *a, **k: {"result": {}})
+    monkeypatch.setattr(recruiter, "_pane_recent_output", lambda *a, **k: "finished")
+    monkeypatch.setattr(recruiter, "STARTUP_FAILURE_SETTLE_SECONDS", 0)
+    if public:
+        health = recruiter._wait_for_worker_health("worker-pane", order, 100)
+        assert health["healthy"] is True
+        assert health["completed_during_startup"] is True
+    else:
+        with pytest.raises(
+            RecruiterError, match="did not start expected codex process"
+        ):
+            recruiter._wait_for_worker_health("worker-pane", order, 100)
+    assert path.read_bytes() == before
+
+
 def test_cursor_reconnect_loop_fails_startup_before_idle_is_marked_healthy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3928,6 +3963,190 @@ def test_typed_worker_instructions_name_every_private_artifact_and_no_public_ans
     assert "compacted.md" in final_contract
     assert "handoff.md" in final_contract
     assert "answer.json" in final_contract
+    assert "Ignore every earlier artifact destination" not in final_contract
+    assert "Do not write any public path" not in final_contract
+    assert (
+        "Caller-authorized task outputs retain their specified destinations"
+        in final_contract
+    )
+    assert (
+        "Task-output paths must not overwrite source or unrelated existing files"
+        in final_contract
+    )
+    assert (
+        "source edits explicitly authorized by an implementation assignment remain allowed"
+        in final_contract
+    )
+    assert "does not grant additional write authority" in final_contract
+    assert "Do not default to the current stage" in final_contract
+    assert "a nonempty `revisit` list" in final_contract
+    assert "An adverse review uses `failed`" in final_contract
+    assert "does not mean the review task was not completed" in final_contract
+
+
+@pytest.mark.parametrize("public", [False, True])
+@pytest.mark.parametrize("retained", [False, True])
+def test_worker_delivery_preserves_revisit_ownership(
+    tmp_path: Path, public: bool, retained: bool
+) -> None:
+    original = tmp_path / "instructions.md"
+    original.write_text("Review only. Write the task report to reports/review.md.\n")
+    order = _order(
+        instructions_path=str(original),
+        stage_id="stage-2-adversarial-audit",
+        artifact_publication={
+            "schema_version": 1,
+            "compacted_path": str(tmp_path / "compacted.md"),
+            "handoff_path": str(tmp_path / "handoff.md"),
+        },
+    )
+    if retained:
+        order["completion_policy"] = "requester_release"
+    if public:
+        order["stage_id"] = "stage-5-finalization"
+        order["public_request"] = {"request_id": "request-1"}
+    before = json.dumps(order, sort_keys=True)
+    manifest = recruiter.completion.build_manifest(
+        order, tmp_path / "hub/request", "token", "request-1"
+    )
+    destination = tmp_path / "worker-instructions.md"
+    recruiter._write_worker_instructions(
+        order, manifest.artifact("result").staging_path, destination, manifest
+    )
+    text = destination.read_text()
+    if public:
+        assert "For this public request, omit `revisit`" in text
+        assert "regardless of stages named in the task" in text
+        assert "Do not default to the current stage" not in text
+    else:
+        assert "assignment or its governing protocol" in text
+        assert "Do not default to the current stage" in text
+        assert "ask the owning controller which stage to revisit" in text
+        assert "does not launch or authorize a retry" in text
+        assert "For this public request" not in text
+    suffix = text.split("# Recruiter delivery contract (final and authoritative)", 1)[1]
+    assert (
+        "Caller-authorized task outputs retain their specified destinations" in suffix
+    )
+    assert "assignment's governing result protocol for other roles" in suffix
+    assert "an advisor ruling uses `passed` with its `decision`" in suffix
+    assert "including `loop` or `stop-ask-human`" in suffix
+    assert ("Only REVIEW_RELEASE authorizes" in text) == retained
+    assert json.dumps(order, sort_keys=True) == before
+    result = recruiter.contracts.parse_result(
+        json.dumps(
+            {
+                "order_id": order["order_id"],
+                "verdict": "failed",
+                "full_log": "test session",
+                "revisit": ["stage-1-implementation"],
+            }
+        ),
+        expected_order_id=order["order_id"],
+    )
+    reports = {"compacted": "A demonstrated defect.\nVERDICT: VEERED"}
+    assert (
+        recruiter.completion.verdict_artifact_consistency_error(result, reports) is None
+    )
+    assert (
+        recruiter.completion.verdict_artifact_consistency_error(
+            {**result, "verdict": "passed"}, reports
+        )
+        is not None
+    )
+    staging = manifest.artifact("result").staging_path
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    for verdict in ("failed", "passed", "blocked"):
+        for supplied in (None, ["stage-1-implementation"]):
+            written = {**result, "verdict": verdict}
+            if supplied is None:
+                del written["revisit"]
+            else:
+                written["revisit"] = supplied
+            staging.write_text(json.dumps(written))
+            loader = recruiter.contracts.result_loader(order)
+            if public:
+                normalized = loader(staging, order["order_id"])
+                expected = [order["stage_id"]] if verdict == "failed" else []
+                assert normalized["revisit"] == expected
+                recruiter.contracts.parse_result(json.dumps(normalized))
+                # Read-only probes return the canonical envelope without mutating staging.
+                assert json.loads(staging.read_text()) == written
+            elif verdict == "failed" and supplied is None:
+                with pytest.raises(ContractError, match="must name at least one stage"):
+                    loader(staging, order["order_id"])
+            else:
+                assert loader(staging, order["order_id"]) == written
+
+
+@pytest.mark.parametrize("review_contract", [False, True])
+def test_public_adverse_bundle_is_valid_before_finalization(
+    tmp_path: Path, review_contract: bool
+) -> None:
+    """Sentinel/nudge probes must accept the same envelope as final publication."""
+    order = _order(
+        stage_id="stage-5-finalization",
+        public_request={"request_id": "request-1"},
+        result_path=str(tmp_path / "public/result.json"),
+        artifact_publication={
+            "schema_version": 1,
+            "compacted_path": str(tmp_path / "public/compacted.md"),
+            "handoff_path": str(tmp_path / "public/handoff.md"),
+        },
+    )
+    manifest = recruiter.completion.build_manifest(
+        order, tmp_path / "hub/request", "token", "request-1"
+    )
+    written = {
+        "order_id": order["order_id"],
+        "verdict": "failed",
+        "full_log": "session",
+    }
+    if review_contract:
+        order["result_contract"] = "review"
+        written["verdict_document"] = (
+            "Demonstrated finding. " * recruiter.contracts.REVIEW_VERDICT_MIN_CHARS
+            + "\nVERDICT: VEERED\n"
+        )
+    for artifact in manifest.artifacts:
+        artifact.staging_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact.staging_path.write_text(
+            json.dumps(written)
+            if artifact.kind == "result"
+            else "A demonstrated defect.\nVERDICT: VEERED\n"
+        )
+    watch = SimpleNamespace(
+        ledger=SimpleNamespace(completed_result=lambda *args: None),
+        key="request-1",
+        order=order,
+        manifest=manifest,
+    )
+    assert recruiter._SentinelWatch._terminal_valid(watch)
+    loader = recruiter.contracts.result_loader(order)
+    parsed = recruiter.completion.validate_bundle(
+        manifest,
+        load_result=loader,
+        load_answer=recruiter.contracts_consult.load_answer,
+    )
+    assert parsed["revisit"] == [order["stage_id"]]
+    assert parsed["revisit_normalized"] is None
+    staged = manifest.artifact("result").staging_path
+    assert json.loads(staged.read_text()) == written
+    recruiter.completion.derive_review_compacted(order, manifest, load_result=loader)
+    if review_contract:
+        assert (
+            manifest.artifact("compacted").staging_path.read_text()
+            == written["verdict_document"]
+        )
+    recruiter.completion.persist_normalized_result(manifest, parsed)
+    recruiter.completion.project_bundle(
+        manifest,
+        load_result=loader,
+        load_answer=recruiter.contracts_consult.load_answer,
+    )
+    published = json.loads(manifest.artifact("result").public_path.read_text())
+    assert published == parsed == json.loads(staged.read_text())
+    assert recruiter.contracts.load_result(manifest.artifact("result").public_path) == parsed
 
 
 def test_run_order_creates_private_result_parent_before_worker_launch(
@@ -6151,8 +6370,9 @@ def test_completion_monitor_returns_runner_promptly_after_promoting_stuck_status
     assert closed_panes == ["worker-pane", "manager-pane"]
 
 
+@pytest.mark.parametrize("fast_public_adverse", [False, True])
 def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_result(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch, capsys, fast_public_adverse: bool
 ) -> None:
     # Sentinel supervision is covered in sentinel_test.py; this test's worker-shaped
     # herdr stubs must see only the launches it fakes.
@@ -6167,6 +6387,9 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
         instructions_path=str(tmp_path / "instructions.md"),
         timeout_ms=1_000,
     )
+    if fast_public_adverse:
+        order["public_request"] = {"payload_sha256": "a" * 64}
+        order["stage_id"] = "stage-5-finalization"
     Path(order["instructions_path"]).write_text("Do the stage.\n")
     roster_path = tmp_path / "upagent.yaml"
     roster_path.write_text(
@@ -6186,6 +6409,9 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     outcomes: list[int] = []
     notifications: list[str] = []
     _patch_approved_manager(monkeypatch)
+    monkeypatch.setattr(
+        recruiter, "_startup_rescue_advice", lambda *a, **k: "ask-requester"
+    )
     monkeypatch.setattr(
         recruiter,
         "_ask_manager_about_startup",
@@ -6210,6 +6436,16 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
         assert "--model gpt-5.6-sol" in launch
         assert "model_reasoning_effort=high" in launch
         staging_paths.append(Path(launch.split("write:", maxsplit=1)[1]))
+        if fast_public_adverse:
+            _write_typed_worker_result(
+                staging_paths[-1],
+                {
+                    "order_id": order["order_id"],
+                    "verdict": "failed",
+                    "full_log": "session",
+                    "report_markdown": "The full adverse report.",
+                },
+            )
         worker_launched.set()
         return "codex-worker-pane", "cockpit", name
 
@@ -6239,9 +6475,19 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
         return NeverDoneProcess()
 
     monkeypatch.setattr(recruiter, "_start_herdr_agent", fake_start)
-    monkeypatch.setattr(
-        recruiter, "_wait_for_worker_health", lambda *args, **kwargs: {"healthy": True}
-    )
+    if fast_public_adverse:
+        # The exec process has already exited; use the real startup-health path.
+        monkeypatch.setattr(recruiter, "_herdr_json", lambda *a, **k: {"result": {}})
+        monkeypatch.setattr(recruiter, "STARTUP_FAILURE_SETTLE_SECONDS", 0)
+        monkeypatch.setattr(
+            recruiter, "_pane_recent_output", lambda *a, **k: "finished"
+        )
+    else:
+        monkeypatch.setattr(
+            recruiter,
+            "_wait_for_worker_health",
+            lambda *args, **kwargs: {"healthy": True},
+        )
     monkeypatch.setattr(recruiter, "_close_worker_pane", fake_close)
     monkeypatch.setattr(recruiter, "_herdr_available", lambda: None)
     monkeypatch.setattr(recruiter.subprocess, "Popen", never_done)
@@ -6255,10 +6501,11 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     )
     runner.start()
     assert worker_launched.wait(timeout=2)
-    assert status_wait_started.wait(timeout=2)
     assert staging_paths[0] != result_path
-    staging_paths[0].parent.mkdir(parents=True, exist_ok=True)
-    _write_typed_worker_result(staging_paths[0], _result(order["order_id"]))
+    if not fast_public_adverse:
+        assert status_wait_started.wait(timeout=2)
+        staging_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        _write_typed_worker_result(staging_paths[0], _result(order["order_id"]))
 
     deadline = time.monotonic() + 2
     while not result_path.is_file() and time.monotonic() < deadline:
@@ -6266,9 +6513,17 @@ def test_codex_worker_survives_missing_startup_assessment_and_promotes_private_r
     runner.join(timeout=1)
 
     assert not runner.is_alive()
-    assert outcomes == [0]
-    assert json.loads(result_path.read_text()) == _result(order["order_id"])
-    assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
+    published = json.loads(result_path.read_text())
+    if fast_public_adverse:
+        # cmd_run_job reports successful delivery; public await reports verdict.
+        assert outcomes == [0]
+        assert published["verdict"] == "failed"
+        assert published["report_markdown"] == "The full adverse report."
+        assert published["revisit"] == [order["stage_id"]]
+    else:
+        assert outcomes == [0]
+        assert published == _result(order["order_id"])
+        assert capsys.readouterr().out.count(f"ORDER {order['order_id']} DONE\n") == 1
     assert closed_panes == ["codex-worker-pane", "manager-pane"]
     events = [
         json.loads(path.read_text())

@@ -8,5 +8,8 @@ inputs:
   - .shared-llm/public/layers/agents/common/_review-evidence.md
   - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
   - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/recheck.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/integration.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/compatibility.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/readiness.md
   - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/skills/pr-recheck/SKILL.md

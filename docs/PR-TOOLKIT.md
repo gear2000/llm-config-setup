@@ -47,7 +47,7 @@ The agent supplies the specialist identity. The skill owns the procedure. Contra
 | `pr-dead-code` | Evidence of unreachable or unused code, including indirect consumers | Reachability |
 | `pr-readiness` | Current hosted checks, approvals, and stale evidence | Readiness |
 | `pr-prepare` | Draft a description from the final committed diff | Description |
-| `pr-recheck` | Revisit findings while retaining IDs | Recheck |
+| `pr-recheck` | Revisit findings while retaining IDs; fresh boundary review within scope and hosted readiness only when requested | Recheck, integration, compatibility, readiness |
 
 Shared contracts are included in every row. Domain checks apply when the diff or affected behavior makes them relevant. Explain exclusions from repository evidence. They do not require every specialist or every possible test for every PR.
 
@@ -68,11 +68,19 @@ These are natural-language skill invocations, not a new CLI parser:
 
 Alternatively, hire the same-named agent with that request. The caller supplies repository context, PR identity or an explicit committed candidate, refs to resolve or immutable commit IDs, scope, accepted requirements, evidence permissions, and report destination. A review request alone does not authorize tests, probes, publication, or remote approval.
 
+When using UpAgent, distinguish the task report from the Recruiter's completion artifacts. The caller's authorized report destination remains valid unless it collides with Recruiter-owned paths. Only the Recruiter publishes its completion artifacts.
+
+An adverse review uses the existing runtime `failed` verdict and VEERED tail even when the review task completed. Other roles retain their governing result protocol, including advisor rulings reported as `passed` plus `decision`.
+
+For public requests, workers omit `revisit`; the shared result loader supplies it from the existing order during fast-completion startup checks, early completion checks, and final validation. Read-only probes do not rewrite the worker's file. The completion reactor and publisher persist the normalized envelope before publication. Routed workers use corrective stages established by their assignment or governing protocol. If no corrective stage can be established, they return blocked and ask the owning controller, rather than defaulting to the current stage. None of this dispatches a retry or grants merge authority. Read the review's own verdict and checks rather than treating a runtime failure as proof that the reviewer could not do the work.
+
 The general reviewer can recommend a targeted follow-up with a concrete question. It does not dispatch it or treat a missing optional specialist as a prerequisite. Supplied reports can inform the general review only when their snapshot and provenance match. One agent's repeated passes are not several independent reviews.
 
 ## Boundaries
 
 All pairs are report-only. No application or repository-test edits, commits, publication, workflow triggers, deployments, remote approvals, or merges. Explicitly authorized probes use disposable targets. Negative controls may copy the same existing tests and necessary harness files into isolated fixed/unfixed revisions, but cannot rewrite assertions or application code to manufacture a result.
+
+Set `GIT_OPTIONAL_LOCKS=0` before any Git inspection. Even `git status` can refresh index metadata without it. This guard prevents optional refreshes, not explicit mutations.
 
 Uncommitted changes belong with `code-review` or `reviewer` and a captured working-tree snapshot. This toolkit must not silently review committed HEAD instead.
 
@@ -93,10 +101,12 @@ The former combined `_pr-review-contract.md` is split into snapshot, authority, 
 
 ## Verification and deployment
 
+`tools/test_pr_git_inspection.py` checks index bytes and metadata around guarded `git status` in a disposable repository, with an unguarded control that proves the refresh occurs. This tests the Git mechanism, not reviewer compliance.
+
 `tools/test_pr_layering.py` checks all eleven pairs, exact agent/skill body parity, shared contract reuse, description limits, and source-edit propagation to every affected pair in isolated copies. `tools/test_review_prompt_composition.py` checks licensing, repeatable composition, and public copy plus destination composition in a temporary home. It also preserves existing Pi verdict and QA edit-boundary checks.
 
 ```sh
-python3 -m pytest tools/test_pr_layering.py tools/test_review_prompt_composition.py tools/test_compose_layers.py tools/test_descriptions.py -q
+python3 -m pytest tools/test_pr_git_inspection.py tools/test_pr_layering.py tools/test_review_prompt_composition.py tools/test_compose_layers.py tools/test_descriptions.py -q
 ```
 
 These checks prove packaging and source relationships, not model compliance or improved review quality. Use the [controlled evaluation procedure](../.shared-llm/public/layers/slash-commands/common/common/writing-for-agents/resources/references/evaluation.md) for behavioral comparisons. Use the kit's normal update process when you choose to deploy; local composition does not install the toolkit globally.

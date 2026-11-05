@@ -554,6 +554,18 @@ Durable files are the source of truth; terminal text is display-only.
   citations. `compacted.md` and `handoff.md` are best-effort summaries with no schema; an absent or
   blank one is skipped at publication rather than failing an otherwise finished job, because a later
   reader can rebuild both from the result.
+- Caller-authorized task reports keep their destinations unless they collide with Recruiter-owned
+  completion paths. The delivery suffix overrides only the latter. It grants no extra write authority.
+  Completed adverse reviews use `failed` with a VEERED report; other roles retain their governing
+  result protocol, including an advisor's `passed` plus `decision` ruling.
+- Public workers omit `revisit`. The order-bound result loader supplies the existing compatibility
+  stage for `failed` and an empty list for other accepted verdicts before every bundle check,
+  including Sentinel and completion-monitor probes. Startup health uses the same loader when a
+  worker finishes before its process can be observed. These reads do not mutate staged files.
+  The completion reactor and lease-fenced publisher persist the normalized envelope through the
+  existing `revisit_normalized` mechanism before projecting it. Routed results still require a
+  protocol-established corrective stage; a missing stage is not permission to default to the review
+  stage. These rules do not change verdict/schema gates or authorize a retry.
 - `just upagent-await <order.json>` waits in Python for a decision point or completion; no LLM
   loops over files. At inactivity checkpoints, a fresh cheap checker interprets one bounded pane
   and process snapshot, reports to the manager/requester, and exits.

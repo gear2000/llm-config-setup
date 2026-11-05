@@ -424,6 +424,7 @@ def test_public_reactor_owns_internal_revisit_instead_of_rejecting_worker_stage_
 ) -> None:
     recruiter = _load("completion_public_recruiter_under_test", "recruiter.py")
     order = _order(tmp_path)
+    order["stage_id"] = "stage-5-finalization"  # Public orders always carry this stage.
     order["public_request"] = {
         "payload_sha256": "a" * 64,
         "prompt_sha256": "b" * 64,

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 # Verdicts a worker may report. `passed` advances; `failed` loops back per `revisit`;
@@ -425,11 +426,14 @@ def parse_result(
     *,
     result_contract: str | None = None,
     allow_synthesized: bool = False,
+    public_stage_id: str | None = None,
 ) -> dict:
     """Validate + return a result dict from raw JSON text. Fail-loud on any problem.
 
     When `expected_order_id` is given, the result's order_id MUST match it — this catches a
     stale result.json left over from a prior try at the same path.
+    `public_stage_id` comes only from a validated public order, never worker result fields.
+    It supplies the runtime-owned envelope without weakening any other validation.
 
     When `result_contract` is "review", the result must also carry `verdict_document` — the
     full review text, ending with its verdict line. Schema-validated fields were never
@@ -458,6 +462,31 @@ def parse_result(
             f"result.json: order_id {result['order_id']!r} does not match the order "
             f"{expected_order_id!r} — stale or mismatched result file"
         )
+
+    # Public requests use a runtime-owned compatibility stage, never worker routing.
+    # Normalize before EVERY validation path, including read-only Sentinel probes.
+    # The publisher persists reader repairs through revisit_normalized as usual.
+    if public_stage_id is not None:
+        if public_stage_id not in RECOGNIZED_STAGE_IDS:
+            raise ContractError(
+                f"public order stage {public_stage_id!r} is not recognized"
+            )
+        if result["verdict"] == "failed":
+            public_revisit = [public_stage_id]
+        elif result["verdict"] in (
+            "passed",
+            "blocked",
+            "salvaged-done",
+            "never-started",
+        ):
+            public_revisit = []
+        else:
+            raise ContractError(
+                f"cannot normalize public verdict {result['verdict']!r}"
+            )
+        if result.get("revisit") != public_revisit:
+            result["revisit_normalized"] = result.get("revisit")
+        result["revisit"] = public_revisit
 
     # `revisit` (optional) must be a list of recognized stage ids. Required to be non-empty
     # when the verdict is `failed` (a failure with nowhere to go back to is a contract bug).
@@ -618,6 +647,7 @@ def load_result(
     *,
     result_contract: str | None = None,
     allow_synthesized: bool = False,
+    public_stage_id: str | None = None,
 ) -> dict:
     """Read + validate a result.json file. Fail-loud if missing or malformed."""
     p = Path(path)
@@ -628,6 +658,7 @@ def load_result(
         expected_order_id,
         result_contract=result_contract,
         allow_synthesized=allow_synthesized,
+        public_stage_id=public_stage_id,
     )
 
 
@@ -649,14 +680,21 @@ def validate_receipt_synthesis(synthesis_path: object, confirmation: object) -> 
         )
 
 
-def result_loader(order: dict, *, allow_synthesized: bool = False):
+def result_loader(
+    order: dict, *, allow_synthesized: bool = False
+) -> Callable[..., dict]:
     """A `load_result` bound to the order's declared result contract.
 
     Every bundle validation site loads results through this, so a review order's
     `verdict_document` requirement travels with the order instead of depending on each
-    call site remembering to ask.
+    call site remembering to ask. Public revisit normalization follows the same path;
+    read-only probes must not reject an envelope that final publication would repair.
     """
     contract = order.get("result_contract")
+    if isinstance(order.get("public_request"), dict):
+        public_stage_id = order["stage_id"]
+    else:
+        public_stage_id = None
 
     def load(path: str | Path, expected_order_id: str | None = None) -> dict:
         return load_result(
@@ -664,6 +702,7 @@ def result_loader(order: dict, *, allow_synthesized: bool = False):
             expected_order_id,
             result_contract=contract,
             allow_synthesized=allow_synthesized,
+            public_stage_id=public_stage_id,
         )
 
     return load

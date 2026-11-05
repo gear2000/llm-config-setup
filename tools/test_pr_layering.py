@@ -42,7 +42,7 @@ DOMAINS = {
     "pr-devops": ("operational-safety", "migration-rollback"),
     "pr-architecture": ("architecture", "integration"),
     "pr-prepare": ("description",),
-    "pr-recheck": ("recheck",),
+    "pr-recheck": ("recheck", "integration", "compatibility", "readiness"),
 }
 
 
@@ -90,7 +90,16 @@ def test_agent_is_thin_wrapper_around_exact_matching_skill(
 
 
 @pytest.mark.parametrize(
-    "contract", ("snapshot", "security", "integration", "migration-rollback")
+    "contract",
+    (
+        "snapshot",
+        "authority",
+        "report",
+        "security",
+        "integration",
+        "migration-rollback",
+        "readiness",
+    ),
 )
 def test_contract_edit_reaches_every_paired_consumer(
     contract: str, tmp_path: Path
@@ -137,6 +146,12 @@ def test_pr_contract_boundaries_and_legacy_isolation() -> None:
         "Offline review",
         "Do not mix reports",
         "Report-only",
+        "GIT_OPTIONAL_LOCKS=0",
+        "before the first Git inspection",
+        "not a sandbox",
+        "Name checks after the behavioral criterion",
+        "Bound impact claims to demonstrated prerequisites",
+        "critical: severe security or data-integrity impact",
         "or spawn workers",
         "only with explicit authorization",
         "default home databases",

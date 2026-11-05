@@ -2619,10 +2619,15 @@ class JobLedger:
             # Revalidate immediately before the durable public write. A terminal ledger state
             # and receipt are never published without the result file that makes them meaningful.
             contracts.validate_receipt_synthesis(synthesis_path, confirmation)
+            if isinstance(order.get("public_request"), dict):
+                public_stage_id = order["stage_id"]
+            else:
+                public_stage_id = None
             parsed = parse_result(
                 json.dumps(result),
                 expected_order_id=order["order_id"],
                 allow_synthesized=allow_synthesized,
+                public_stage_id=public_stage_id,
             )
             if (
                 order.get("completion_policy") == "requester_release"
@@ -2659,7 +2664,9 @@ class JobLedger:
                     ),
                     failure_answer=contracts_consult.failure_answer,
                 )
-            completion.derive_review_compacted(order, manifest, load_result=load_result)
+            completion.derive_review_compacted(
+                order, manifest, load_result=contracts.result_loader(order)
+            )
             completion.persist_normalized_result(manifest, parsed)
             projected = completion.project_bundle(
                 manifest,
@@ -5101,7 +5108,7 @@ def _wait_for_agent_health(
         completed_during_startup = False
         if completion_order is not None:
             try:
-                load_result(
+                contracts.result_loader(completion_order)(
                     completion_order["result_path"],
                     expected_order_id=completion_order["order_id"],
                 )
@@ -5451,6 +5458,22 @@ def _write_worker_instructions(
         if retained
         else ""
     )
+    if isinstance(order.get("public_request"), dict):
+        revisit_contract = (
+            "For this public request, omit `revisit`. The Recruiter owns that envelope "
+            "field and derives it from the existing order, regardless of stages named "
+            "in the task. Do not choose route stages or dispatch a retry.\n"
+        )
+    else:
+        revisit_contract = (
+            "For a `failed` result, supply a nonempty `revisit` list of recognized "
+            "corrective stages established by the assignment or its governing protocol. "
+            "Do not default to the current stage or invent a stage. If an adverse "
+            "result needs a corrective stage that cannot be established, return `blocked` "
+            "with the findings and ask the owning controller which stage to revisit. "
+            "Omit `revisit` for `passed` or `blocked` unless required by the assignment. "
+            "Naming a stage does not launch or authorize a retry.\n"
+        )
     destinations = (
         retained_contract
         + "Terminal delivery paths (write only after REVIEW_RELEASE in retained mode):\n"
@@ -5473,7 +5496,15 @@ def _write_worker_instructions(
             if order.get("result_contract") == "review"
             else ""
         )
-        + "Do not invent workflow stage names; omit `revisit` unless the assignment names one.\n"
+        + revisit_contract
+        + "An adverse review uses `failed` with `VERDICT: VEERED`; this does not mean the "
+        "review task was not completed. Keep the candidate's review verdict and task "
+        "completion explanation separate in the allowed result fields. Follow the "
+        "assignment's governing result protocol for other roles; an advisor ruling "
+        "uses `passed` with its `decision`, including `loop` or `stop-ask-human`. "
+        "A completed ruling is not an inability to decide. Keep existing artifact "
+        "consistency checks in force. Never hide findings to obtain a successful "
+        "runtime verdict.\n"
         + "If you record `findings` as an empty list, compacted.md must state that clean "
         "outcome itself: end it with `VERDICT: CLEARED` on its last line. A report that "
         "lists problems ends with `VERDICT: VEERED` and its findings go in `findings`.\n"
@@ -5485,7 +5516,8 @@ def _write_worker_instructions(
             if artifact_manifest.consult_id is not None
             else ""
         )
-        + "Markdown artifacts must contain non-whitespace text. Do not write any public path.\n"
+        + "Markdown artifacts must contain non-whitespace text. Do not write the "
+        "Recruiter's public completion paths; it alone publishes those artifacts.\n"
         + (
             ""
             if retained
@@ -5539,7 +5571,14 @@ def _write_worker_instructions(
     suffix = (
         "\n\n# Recruiter delivery contract (final and authoritative)\n\n"
         "The Recruiter, not this worker, publishes completion artifacts. "
-        "Ignore every earlier artifact destination in this brief.\n" + destinations
+        "The lease-private paths below replace earlier destinations only for the "
+        "Recruiter's result.json, compacted.md, handoff.md, and answer.json. "
+        "Caller-authorized task outputs retain their specified destinations, except "
+        "where they collide with Recruiter-owned completion paths. This does not grant "
+        "additional write authority. Task-output paths must not overwrite source or "
+        "unrelated existing files; source edits explicitly authorized by an implementation "
+        "assignment remain allowed. A destination conflict is blocked, not permission "
+        "to overwrite.\n" + destinations
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -6216,7 +6255,7 @@ def _write_blocked_result(
     path = Path(result_path or order["result_path"])
     if preserve_valid and path.is_file():
         try:
-            return load_result(path, expected_order_id=order["order_id"])
+            return contracts.result_loader(order)(path, expected_order_id=order["order_id"])
         except ContractError:
             pass
     # Only name a stage in `revisit` when it is recognized (a malformed order may not have one).
@@ -8450,33 +8489,6 @@ def _may_preserve_worker_result(
 # --- commands ----------------------------------------------------------------
 
 
-def _normalize_public_result_revisit(order: dict, manifest: Any) -> None:
-    """Keep route-stage mechanics out of ad-hoc public worker output.
-
-    Public requests are assigned an internal compatibility stage, but their workers do not know
-    the route vocabulary and must not be asked to manufacture it. Python owns this envelope field.
-    """
-    if not isinstance(order.get("public_request"), dict):
-        return
-    path = manifest.artifact("result").staging_path
-    try:
-        value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(value, dict):
-        return
-    verdict = value.get("verdict")
-    if verdict in ("passed", "blocked", "salvaged-done", "never-started"):
-        revisit: list[str] = []
-    elif verdict == "failed":
-        revisit = [order["stage_id"]]
-    else:
-        return
-    if value.get("revisit") == revisit:
-        return
-    JobLedger._write_json(path, {**value, "revisit": revisit})
-
-
 def _wait_for_completion_repair(validate: Callable[[], dict], timeout_ms: int) -> dict:
     """Wait boundedly for an asynchronous same-worker repair to become valid."""
     deadline = time.monotonic() + timeout_ms / 1000
@@ -8518,16 +8530,16 @@ def _complete_typed_bundle(
     salvage: dict | None = None
 
     def validate() -> dict:
-        _normalize_public_result_revisit(order, manifest)
-        completion.derive_review_compacted(order, manifest, load_result=load_result)
-        return cast(
-            dict,
-            completion.validate_bundle(
-                manifest,
-                load_result=contracts.result_loader(order),
-                load_answer=contracts_consult.load_answer,
-            ),
+        completion.derive_review_compacted(
+            order, manifest, load_result=contracts.result_loader(order)
         )
+        parsed = completion.validate_bundle(
+            manifest,
+            load_result=contracts.result_loader(order),
+            load_answer=contracts_consult.load_answer,
+        )
+        completion.persist_normalized_result(manifest, parsed)
+        return cast(dict, parsed)
 
     result: dict | None = None
     try:
@@ -8875,7 +8887,7 @@ def _start_completion_monitor(
                 # poll is a cheap no-op once written — the bundle then validates here
                 # without waiting for the impasse wake.
                 completion.derive_review_compacted(
-                    order, artifact_manifest, load_result=load_result
+                    order, artifact_manifest, load_result=contracts.result_loader(order)
                 )
                 completion.validate_bundle(
                     artifact_manifest,
@@ -9501,7 +9513,7 @@ def _run_one_shot_checker(
         .get("process_info", {})
     )
     try:
-        load_result(worker_result_path, expected_order_id=order["order_id"])
+        contracts.result_loader(order)(worker_result_path, expected_order_id=order["order_id"])
     except ContractError:
         valid_result = False
     else:
@@ -10065,7 +10077,7 @@ def _run_order(
             if order.get("agent") not in WATCHDOG_AGENTS:
                 break
             try:
-                result = load_result(worker_result_path, expected_order_id=order_id)
+                result = contracts.result_loader(order)(worker_result_path, expected_order_id=order_id)
             except ContractError:
                 if agent_finished:
                     break
@@ -10211,8 +10223,8 @@ def _run_order(
     result: dict | None = None
     for return_path in return_paths:
         try:
-            result = load_result(
-                return_path, expected_order_id=order_id, allow_synthesized=True
+            result = contracts.result_loader(order, allow_synthesized=True)(
+                return_path, expected_order_id=order_id
             )
             break
         except ContractError:

@@ -312,6 +312,55 @@ def test_failed_verdict_requires_revisit() -> None:
         contracts.parse_result(json.dumps(bad))
 
 
+@pytest.mark.parametrize("verdict", ["passed", "failed", "blocked"])
+@pytest.mark.parametrize("supplied", [None, [], ["stage-1-implementation"], "invented"])
+def test_public_loader_owns_revisit_without_writing_file(
+    tmp_path: Path, verdict: str, supplied: object
+) -> None:
+    order = {**_valid_order(), "public_request": {}, "stage_id": "stage-5-finalization"}
+    raw = {**_valid_result(), "verdict": verdict}
+    if supplied is not None:
+        raw["revisit"] = supplied
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    parsed = contracts.result_loader(order)(path, order["order_id"])
+    expected = [order["stage_id"]] if verdict == "failed" else []
+    assert parsed["revisit"] == expected
+    if supplied != expected:
+        assert parsed["revisit_normalized"] == supplied
+    assert path.read_bytes() == before
+    assert contracts.parse_result(json.dumps(parsed)) == parsed
+
+
+def test_public_normalization_keeps_identity_schema_and_forgery_guards(
+    tmp_path: Path,
+) -> None:
+    order = {**_valid_order(), "public_request": {}, "stage_id": "stage-5-finalization"}
+    raw = {**_valid_result(), "verdict": "failed"}
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ContractError, match="does not match"):
+        contracts.result_loader(order)(path, "wrong-order")
+    with pytest.raises(ContractError, match="verdict_document"):
+        contracts.result_loader({**order, "result_contract": "review"})(path)
+    for verdict in ("salvaged-done", "never-started", "SUCCESS"):
+        path.write_text(json.dumps({**raw, "verdict": verdict}))
+        with pytest.raises(ContractError, match="verdict"):
+            contracts.result_loader(order)(path)
+    path.write_text("{")
+    with pytest.raises(ContractError, match="not valid JSON"):
+        contracts.result_loader(order)(path)
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ContractError, match="not recognized"):
+        contracts.result_loader({**order, "stage_id": "invented"})(path)
+    path.write_text(
+        json.dumps({**raw, "public_request": {}, "public_stage_id": order["stage_id"]})
+    )
+    with pytest.raises(ContractError, match="must name at least one stage"):
+        contracts.result_loader(_valid_order())(path)
+
+
 def test_failed_verdict_with_revisit_ok() -> None:
     r = _valid_result()
     r["verdict"] = "failed"
