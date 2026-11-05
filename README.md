@@ -338,7 +338,7 @@ Per-repo skills — composed into a destination's `.claude/skills/<name>/SKILL.m
 | `python` | General Python conventions. Use when writing, reviewing, or scaffolding Python code — covers modern… |
 | `update-shared-llm` | Update shared-llm skills, agents, CLAUDE.md/AGENTS.md rules, or layers. Edit source layers/recipes,… |
 
-### Generic agents (41)
+### Generic agents (48)
 
 Brand-free agent personas the global step copies into `~/.claude/agents/` and `~/.pi/agent/agents/`. Adopt them as-is — they contain no project-specific references.
 
@@ -371,10 +371,17 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `plan-watchdog` | Optional plan-phase conformance advisor. Reviews durable evidence for a managed phase and returns… |
 | `planner` | Writes one small tracer-bullet implementation plan for a single issue from its issue and research… |
 | `playwright-cli` | Use for end-to-end browser tests and interactive browser-driving sessions. Static HTML creation… |
-| `pr-compatibility` | Review pinned PR API, schema, config, CLI, event, and persisted-format changes against declared… |
-| `pr-readiness` | Assess current PR readiness read-only against branch policy, trusted exact-snapshot checks,… |
-| `pr-security` | Review a pinned PR for demonstrated security defects across trust boundaries, sensitive sinks,… |
-| `pr-tests` | Review a pinned PR's behavior-to-assertion coverage and regression evidence, separating meaningful… |
+| `pr-architecture` | Review changed ownership, dependency direction, lifecycle, and component contracts against accepted… |
+| `pr-compatibility` | Review changed API, CLI, configuration, event, and persisted contracts against declared support… |
+| `pr-dead-code` | Assess changed code's reachability across callers, exports, reflection, plugins, configuration, and… |
+| `pr-devops` | Review affected build, deploy, infrastructure, permissions, secrets, observability, rollout, and… |
+| `pr-integration` | Trace a pinned PR's real entry points across component handoffs, errors, retries, idempotency, and… |
+| `pr-prepare` | Draft a PR title/body from a pinned committed diff, compare existing claims, and disclose test,… |
+| `pr-readiness` | Assess current hosted PR gates from authoritative policy, trusted check producers, pinned commit… |
+| `pr-recheck` | Recheck prior PR findings against verified old/new snapshots and the full current diff, preserving… |
+| `pr-review` | Review a pinned PR directly for correctness, security, compatibility, integration, tests, and… |
+| `pr-security` | Trace a pinned PR's affected trust boundaries, attacker-controlled inputs, sensitive sinks,… |
+| `pr-tests` | Map a pinned PR's behavior to real entry points and meaningful assertions. Distinguish static… |
 | `qa` | Use to run test suites, validate behavior, perform regression checks, and verify end-to-end flows.… |
 | `researcher` | Bounded read-only investigator for one issue. Reads the issue inside the given worktree and writes… |
 | `reviewer` | Independent read-only reviewer for code, infrastructure, plans, and durable execution evidence. |
@@ -386,7 +393,7 @@ Brand-free agent personas the global step copies into `~/.claude/agents/` and `~
 | `upagent-rescuer` | Short-lived advisory salvage assessor hired only for contradictory evidence about a vanished… |
 | `upagent-sentinel` | Per-request UpAgent supervision pane, duty-bound to exactly one worker from liftoff to closeout;… |
 
-### Slash-command skills (47)
+### Slash-command skills (55)
 
 Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-only. `cc/do-plan`, `cc/do-implement`, `cc/do-convert --herdr`, and Claude-only `/hil` are the primary workflow surface; `/cc-full` and `/do-full` are disabled; old planish/plan-and-grill/meta names are one-release aliases. Other common skills ship to every configured harness. Composed into a destination's `.claude/skills/<name>/SKILL.md`.
 
@@ -419,9 +426,17 @@ Routed slash-command skills — `do-*` symlinks to Pi only, `cc-*` stays Claude-
 | `plain-speech` | How to talk to the user: repo ubiquitous language from CONTEXT.md, Simplified Technical English… |
 | `plan-implementer` | Whole-plan controller for Flow 1. Reads an approved plan.md, hires UpAgent workers for slices, and… |
 | `playwright-cli` | Automates browser interactions for testing, forms, screenshots, and extraction. Static HTML… |
+| `pr-architecture` | Review changed ownership, dependency direction, lifecycle, and component contracts against accepted… |
+| `pr-compatibility` | Review changed API, CLI, configuration, event, and persisted contracts against declared support… |
+| `pr-dead-code` | Assess changed code's reachability across callers, exports, reflection, plugins, configuration, and… |
+| `pr-devops` | Review affected build, deploy, infrastructure, permissions, secrets, observability, rollout, and… |
+| `pr-integration` | Trace a pinned PR's real entry points across component handoffs, errors, retries, idempotency, and… |
 | `pr-prepare` | Draft a PR title/body from a pinned committed diff, compare existing claims, and disclose test,… |
+| `pr-readiness` | Assess current hosted PR gates from authoritative policy, trusted check producers, pinned commit… |
 | `pr-recheck` | Recheck prior PR findings against verified old/new snapshots and the full current diff, preserving… |
-| `pr-review` | Review pinned PR scope and synthesize supplied same-snapshot specialist reports, preserving source… |
+| `pr-review` | Review a pinned PR directly for correctness, security, compatibility, integration, tests, and… |
+| `pr-security` | Trace a pinned PR's affected trust boundaries, attacker-controlled inputs, sensitive sinks,… |
+| `pr-tests` | Map a pinned PR's behavior to real entry points and meaningful assertions. Distinguish static… |
 | `prd-to-plan` | Turn a PRD into a multi-phase implementation plan using tracer-bullet vertical slices, saved under… |
 | `qa` | Interactive QA session where the user reports bugs conversationally. Clarifies, explores for… |
 | `refactor-safe` | Refactor existing code without changing behavior: characterize the unchanged implementation first,… |
@@ -447,7 +462,7 @@ Existing reviewers use criterion-level PASS, FAIL, and UNVERIFIED evidence witho
 
 See [review procedures](docs/REVIEW-PROCEDURES.md) for role selection, safe probe boundaries, verification, and upstream attribution.
 
-The [PR-only toolkit](docs/PR-TOOLKIT.md) adds `/pr-prepare`, `/pr-review`, and `/pr-recheck`, plus focused security, tests, compatibility, and readiness agents. Each includes the same PR input, authority, and report contract. They report findings without publishing, spawning workers, or merging; existing `pr-risk` and Pi review workflows stay unchanged.
+The [PR toolkit](docs/PR-TOOLKIT.md) uses `/pr-review` for ordinary general review. Optional specialists cover security, tests, integration, compatibility, architecture, DevOps, dead code, and readiness. Preparation and recheck support the workflow. Each of the eleven skills has one matching thin agent, with shared procedures and reusable contracts. No automatic specialist dispatch, publication, or merging; existing `pr-risk` and Pi review integrations stay unchanged.
 
 ## The compose engine
 

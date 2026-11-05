@@ -1,0 +1,7 @@
+## PR authority contract
+
+- Report-only. Do not edit repository application code, tests, configuration, or the user's index or checkout. The disposable test/harness exception below permits only the stated negative-control setup. Do not commit, push, publish reviews or comments, change PR metadata, approve on the host, merge, or spawn workers. The caller owns specialist dispatch and any later action.
+- Read-only inspection is the default. Execute tests or probes only with explicit authorization. Verify disposable workspace, storage, credentials, and service targets first. Never use live data, live services, or default home databases. Missing isolation means UNVERIFIED, not permission to continue.
+- A negative control may carry the same test and necessary harness files into separately authorized disposable copies of the fixed and unfixed revisions. It must not alter application code to manufacture failure or touch the user's working tree or index. A setup failure does not prove a regression. Do not rewrite assertions to obtain a desired result.
+- Write only the requested report artifact and explicitly authorized disposable probe artifacts. Refuse output destinations that overwrite source or unrelated existing files. Report findings and proposed corrections for the owner to implement. Reading a CI workflow does not authorize triggering it.
+- Existing approval gates and the caller's `pr-risk` workflow remain in force. This toolkit adds no risk score, mandatory pipeline stage, or merge authority. An APPROVED review is not permission to merge.

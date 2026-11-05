@@ -1,0 +1,1 @@
+Assess current hosted PR gates from authoritative policy, trusted check producers, pinned commit relationships, and current reviews. Keep skipped execution separate from policy exemptions and merge authority.

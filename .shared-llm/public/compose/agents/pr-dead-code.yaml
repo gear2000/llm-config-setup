@@ -1,0 +1,15 @@
+type: agent
+name: pr-dead-code
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/slash-commands/common/common/pr-dead-code/description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/pr-dead-code.md
+  - .shared-llm/public/layers/slash-commands/common/common/pr-dead-code/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/reachability.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/agents/pr-dead-code.md

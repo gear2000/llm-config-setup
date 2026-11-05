@@ -1,0 +1,13 @@
+type: skill
+name: pr-compatibility
+description: .shared-llm/public/layers/slash-commands/common/common/pr-compatibility/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/pr-compatibility/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/compatibility.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/migration-rollback.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/skills/pr-compatibility/SKILL.md

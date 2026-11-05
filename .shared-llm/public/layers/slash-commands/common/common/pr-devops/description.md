@@ -1,0 +1,1 @@
+Review affected build, deploy, infrastructure, permissions, secrets, observability, rollout, and recovery paths read-only. Report operational evidence and gaps without triggering jobs or applying changes.

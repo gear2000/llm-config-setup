@@ -1,1 +1,0 @@
-Review a pinned PR for demonstrated security defects across trust boundaries, sensitive sinks, secrets, logs, and dependencies; report exploit preconditions and evidence gaps without edits or publication.

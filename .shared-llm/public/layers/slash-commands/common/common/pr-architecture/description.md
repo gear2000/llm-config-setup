@@ -1,0 +1,1 @@
+Review changed ownership, dependency direction, lifecycle, and component contracts against accepted architectural constraints. Require concrete consequences, not stylistic preferences or unrelated redesign.

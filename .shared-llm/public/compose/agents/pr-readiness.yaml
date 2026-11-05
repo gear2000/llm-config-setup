@@ -2,10 +2,14 @@ type: agent
 name: pr-readiness
 model: sonnet
 color: blue
-description: .shared-llm/public/layers/agents/common/pr-readiness.description.md
+description: .shared-llm/public/layers/slash-commands/common/common/pr-readiness/description.md
 inputs:
   - .shared-llm/public/layers/agents/common/pr-readiness.md
-  - .shared-llm/public/layers/agents/common/_pr-review-contract.md
+  - .shared-llm/public/layers/slash-commands/common/common/pr-readiness/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
   - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/readiness.md
   - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/agents/pr-readiness.md

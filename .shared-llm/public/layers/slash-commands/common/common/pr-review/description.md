@@ -1,1 +1,1 @@
-Review pinned PR scope and synthesize supplied same-snapshot specialist reports, preserving source IDs, dissent, and gaps without spawning workers, scoring risk, or granting merge authority.
+Review a pinned PR directly for correctness, security, compatibility, integration, tests, and maintainability. Optional same-snapshot reports retain provenance and dissent; no specialists are required or spawned.

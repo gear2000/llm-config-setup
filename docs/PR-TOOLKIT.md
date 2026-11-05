@@ -1,69 +1,104 @@
-# PR-only skills and reviewers
+# Layered PR reviews
 
-Use this toolkit for a pull request or an explicitly requested, committed PR candidate. It adds focused prompts, not a review service, mandatory pipeline, or automatic merge step. Existing general reviewers, the Pi `pr-reviewer`, and your `pr-risk` workflow keep their current contracts.
+Use `pr-review` for ordinary pull-request review. It performs the review itself. It does not require specialist reports or launch a parallel review team. Choose a targeted reviewer only when you want a particular emphasis.
 
-## Choose a task
+Every toolkit skill has exactly one same-named agent. A slash invocation and the matching agent use the same procedure and contracts. Existing `pr-risk`, general-purpose reviewers, and the standalone Pi `pr-reviewer` keep their current integrations.
 
-| Task | Skill or agent | Result |
-| --- | --- | --- |
-| Draft a PR from the final committed diff | `/pr-prepare` | Proposed title and body, with checked claims and explicit gaps |
-| Choose focused reviews or combine supplied reports | `/pr-review` | Recommended reviewers or a same-snapshot combined report |
-| Check whether earlier findings were fixed | `/pr-recheck` | Stable finding IDs with new evidence and dispositions |
-| Inspect security consequences | `pr-security` | Trust-boundary traces, exploit preconditions, and evidence |
-| Inspect regression proof | `pr-tests` | Behavior-to-assertion map and fixed/unfixed comparison when authorized |
-| Inspect compatibility | `pr-compatibility` | Supported old/new combinations, migration, and rollback checks |
-| Inspect current hosted prerequisites | `pr-readiness` | Expected checks and approvals tied to the current PR snapshot |
-
-The skills do not spawn these agents. The caller selects and dispatches specialists through its existing tools. If dispatch is unavailable, `/pr-review` returns the proposed selection and missing reports. It must not pretend that several sections written by one agent are independent reviews.
-
-## Quick start
-
-These are natural-language skill invocations, not commands for a new CLI parser. Replace the example PR number and supply repository context.
+## Agent, skill, contracts
 
 ```text
-/pr-prepare PR #42. Draft only. Verify title/body claims against its pinned diff.
+pr-review agent                       Default general reviewer
+  └── pr-review skill
+      ├── Shared PR contracts
+      └── General and relevant domain contracts
 
-/pr-review PR #42. Recommend focused reviewers. Do not dispatch them.
+Optional targeted pairs
+  ├── pr-security agent      → pr-security skill
+  ├── pr-tests agent         → pr-tests skill
+  ├── pr-integration agent   → pr-integration skill
+  ├── pr-compatibility agent → pr-compatibility skill
+  ├── pr-architecture agent  → pr-architecture skill
+  ├── pr-devops agent        → pr-devops skill
+  ├── pr-dead-code agent     → pr-dead-code skill
+  └── pr-readiness agent     → pr-readiness skill
 
-/pr-review PR #42. Combine the supplied security and test reports.
-Check their repository, base, head, and merge-base identities first.
+Supporting pairs
+  ├── pr-prepare agent       → pr-prepare skill
+  └── pr-recheck agent       → pr-recheck skill
 
-/pr-recheck PR #42 against the supplied prior report.
-Preserve finding IDs and check the new head. Do not implement fixes.
+Each skill
+  ├── Shared snapshot, authority, evidence, and report contracts
+  └── One or more domain contracts
 ```
 
-A specialist handoff needs the repository identity and path, PR identity or explicit prepublication candidate, immutable base/head/merge-base commits, scope and criteria, evidence sources, probe permissions, and report destination. The prompt can resolve refs to commits, but must stop on missing or ambiguous revisions. Tests are not authorized merely because a handoff requests review.
+The agent supplies the specialist identity. The skill owns the procedure. Contracts define the requirements and evidence. Agents do not maintain another review procedure, and one specialist does not load another specialist's skill.
 
-Uncommitted work belongs with `code-review` or `reviewer` using a captured working-tree snapshot. This toolkit must not silently review committed HEAD instead.
+## Choose a review
 
-## Three shared contracts
+| Same-named agent and skill | Emphasis | Domain contracts |
+| --- | --- | --- |
+| `pr-review` | General correctness, tests, security, integration, compatibility, and maintainability; operational concerns where affected | General plus relevant domain contracts below; hosted readiness applies only when explicitly requested, and supporting tasks remain separate |
+| `pr-security` | Reachable security defects and exploit preconditions | Security, boundary tracing |
+| `pr-tests` | Meaningful assertions and regression evidence | Regression, integration |
+| `pr-integration` | Component handoffs, errors, retries, and end-to-end effects | Integration, boundary tracing, compatibility |
+| `pr-compatibility` | Supported consumers, persisted formats, upgrades, and rollback | Compatibility, migration and rollback |
+| `pr-architecture` | Ownership, dependency direction, and system boundaries | Architecture, integration |
+| `pr-devops` | Build/deploy configuration, infrastructure, observability, and recovery | Operational safety, migration and rollback |
+| `pr-dead-code` | Evidence of unreachable or unused code, including indirect consumers | Reachability |
+| `pr-readiness` | Current hosted checks, approvals, and stale evidence | Readiness |
+| `pr-prepare` | Draft a description from the final committed diff | Description |
+| `pr-recheck` | Revisit findings while retaining IDs | Recheck |
 
-The source is [`_pr-review-contract.md`](../.shared-llm/public/layers/agents/common/_pr-review-contract.md). Each of the seven recipes includes it in the generated prompt, followed by the shared evidence rules and MIT notice. There is no source-path dependency at runtime.
+Shared contracts are included in every row. Domain checks apply when the diff or affected behavior makes them relevant. Explain exclusions from repository evidence. They do not require every specialist or every possible test for every PR.
 
-1. **Input contract.** Record repository and PR identity, immutable base/head/merge-base commits, requested scope, and evidence permissions. Read revision-qualified content. Keep remote observations timestamped. Do not combine reports from different snapshots.
-2. **Authority contract.** Review and report only. No repository edits, worker spawning, commits, publication, remote approvals, or merges. Tests and probes require explicit authorization and disposable targets. The narrow negative-control exception permits the same test/harness files in isolated fixed and unfixed copies, not changes to application code.
-3. **Report contract.** The default `PR report v1` has Snapshot, Verdict, Checks, Findings, and Limits sections. Criteria use PASS, FAIL, or UNVERIFIED. Overall verdicts retain APPROVED, APPROVED WITH NITS, and CHANGES REQUESTED. Important missing verification blocks an unqualified approval without becoming a fabricated defect.
+Architecture asks whether ownership and dependency boundaries are sound. Integration follows behavior across those boundaries. Compatibility checks supported consumers and versions. These perspectives may identify the same root cause; deduplicate findings while retaining their source IDs and disagreements.
 
-These are instruction contracts, not executable access controls or a new JSON API. A stricter caller schema retains its existing shape. These prompts do not change the standalone Pi review hub or its verdict parser. Their default report is not a drop-in replacement for a typed worker receipt.
+## Typical use
 
-## Evidence and follow-up
+These are natural-language skill invocations, not a new CLI parser:
 
-A source inspection, an executed test, and a supplied result are different evidence types. Reports state which one supports each criterion. A green subset or an empty findings list cannot establish full coverage.
+```text
+/pr-review PR #42. Review the committed change. Do not dispatch specialists.
+/pr-security PR #42. Focus on authorization and tenant boundaries.
+/pr-integration PR #42. Trace the changed producer-consumer handoff.
+/pr-devops PR #42. Review rollout and recovery. Do not deploy anything.
+/pr-prepare PR #42. Draft only, using the pinned final diff.
+/pr-recheck PR #42 against the supplied prior report. Do not fix code.
+```
 
-Rechecks preserve the original finding IDs. FIXED, OPEN, UNVERIFIED, and SUPERSEDED describe finding disposition, not test status. A removed line is not enough to prove a fix. Changed base commits or unrelated rewritten history can require a fresh review. New defects receive new IDs rather than replacing old findings.
+Alternatively, hire the same-named agent with that request. The caller supplies repository context, PR identity or an explicit committed candidate, refs to resolve or immutable commit IDs, scope, accepted requirements, evidence permissions, and report destination. A review request alone does not authorize tests, probes, publication, or remote approval.
 
-Readiness is separate from code quality. It requires authoritative expected-check policy, trusted check producers, accepted commit relationships, and current hosted review state. Offline or prepublication review leaves current hosted readiness UNVERIFIED. A remote head or base change makes an earlier readiness assessment stale. Even a current APPROVED assessment grants no permission to merge.
+The general reviewer can recommend a targeted follow-up with a concrete question. It does not dispatch it or treat a missing optional specialist as a prerequisite. Supplied reports can inform the general review only when their snapshot and provenance match. One agent's repeated passes are not several independent reviews.
 
-## Packaging and verification
+## Boundaries
 
-Sources live in `.shared-llm/public/layers/agents/common/` and `.shared-llm/public/layers/slash-commands/common/common/`. Recipes live under the matching `compose/agents/` and `compose/slash-commands/common/common/` trees. Use the kit's normal update process when you choose to deploy them; local composition alone does not install them globally.
+All pairs are report-only. No application or repository-test edits, commits, publication, workflow triggers, deployments, remote approvals, or merges. Explicitly authorized probes use disposable targets. Negative controls may copy the same existing tests and necessary harness files into isolated fixed/unfixed revisions, but cannot rewrite assertions or application code to manufacture a result.
 
-The tests in `tools/test_review_prompt_composition.py` compose the real recipes, verify shared-contract and license inclusion, check description limits, and exercise public copy plus destination composition twice in a temporary environment. Existing standalone Pi verdict checks remain in place.
+Uncommitted changes belong with `code-review` or `reviewer` and a captured working-tree snapshot. This toolkit must not silently review committed HEAD instead.
+
+Readiness is separate from code quality. A general code review can pass its scope while current hosted readiness remains UNVERIFIED. Readiness requires authoritative policy, trusted check producers, accepted commit relationships, and fresh hosted state. Skipped execution is not a passed test; a policy exemption must be evidenced separately. No review verdict grants merge permission.
+
+Dead-code findings must account for plugins, reflection, configuration, exports, and external consumers. An empty text search alone is not proof. DevOps expertise does not confer deployment authority. Recheck dispositions FIXED, OPEN, UNVERIFIED, and SUPERSEDED remain separate from criterion status and overall verdict.
+
+## Source ownership and composition
+
+- Skill procedures: `.shared-llm/public/layers/slash-commands/common/common/pr-*/command.md`.
+- Thin agent wrappers: `.shared-llm/public/layers/agents/common/pr-*.md`.
+- Shared and domain contracts: [the PR contract directory](../.shared-llm/public/layers/skills/common/pr-toolkit/contracts/).
+- The existing [evidence layer](../.shared-llm/public/layers/agents/common/_review-evidence.md) and [MIT notice](../.shared-llm/public/layers/agents/common/_owainlewis-license.md) are reused, not copied into new source prose.
+
+The composer accepts flat source lists. Each skill recipe lists its procedure and contracts. Its agent recipe prepends only the wrapper to that exact list and uses the skill's description source. This repeats path lists, not instructions. Tests reject a mismatch. Adding or removing a contract requires updating both recipe lists; changing contract prose requires one edit. No recipe reads a generated `SKILL.md`, and agents need not find an installed skill at runtime because its canonical content is composed into them.
+
+The former combined `_pr-review-contract.md` is split into snapshot, authority, and report sources. Contract text is included once per generated prompt. The Markdown `PR report v1` is an instruction contract, not an executable security boundary or a new JSON API. Stricter caller schemas retain their existing format; the standalone Pi review hub is unchanged.
+
+## Verification and deployment
+
+`tools/test_pr_layering.py` checks all eleven pairs, exact agent/skill body parity, shared contract reuse, description limits, and source-edit propagation to every affected pair in isolated copies. `tools/test_review_prompt_composition.py` checks licensing, repeatable composition, and public copy plus destination composition in a temporary home. It also preserves existing Pi verdict and QA edit-boundary checks.
 
 ```sh
-python3 -m pytest tools/test_review_prompt_composition.py tools/test_compose_layers.py tools/test_descriptions.py -q
+python3 -m pytest tools/test_pr_layering.py tools/test_review_prompt_composition.py tools/test_compose_layers.py tools/test_descriptions.py -q
 ```
 
-These tests catch packaging errors and instruction changes. They do not prove that models follow the prompts or improve review quality. Use the [controlled evaluation procedure](../.shared-llm/public/layers/slash-commands/common/common/writing-for-agents/resources/references/evaluation.md) for behavioral comparisons.
+These checks prove packaging and source relationships, not model compliance or improved review quality. Use the [controlled evaluation procedure](../.shared-llm/public/layers/slash-commands/common/common/writing-for-agents/resources/references/evaluation.md) for behavioral comparisons. Use the kit's normal update process when you choose to deploy; local composition does not install the toolkit globally.
 
-The focused procedures build on the adaptations documented in [Review procedures](REVIEW-PROCEDURES.md). Their composed outputs retain the upstream MIT notice.
+See [Review procedures](REVIEW-PROCEDURES.md) for upstream adaptations. Every composed pair retains the MIT notice.

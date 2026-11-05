@@ -1,0 +1,1 @@
+Assess changed code's reachability across callers, exports, reflection, plugins, configuration, and external consumers. Absent grep references alone prove nothing; report evidence without deleting code.

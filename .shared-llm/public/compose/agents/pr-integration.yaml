@@ -1,0 +1,17 @@
+type: agent
+name: pr-integration
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/slash-commands/common/common/pr-integration/description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/pr-integration.md
+  - .shared-llm/public/layers/slash-commands/common/common/pr-integration/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/integration.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/boundary-tracing.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/compatibility.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/agents/pr-integration.md

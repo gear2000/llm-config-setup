@@ -1,0 +1,12 @@
+type: skill
+name: pr-readiness
+description: .shared-llm/public/layers/slash-commands/common/common/pr-readiness/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/pr-readiness/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/readiness.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/skills/pr-readiness/SKILL.md

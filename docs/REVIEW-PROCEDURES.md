@@ -2,7 +2,7 @@
 
 These procedures strengthen the existing agents and skills. They do not add a review orchestrator, change approval ownership, or grant permission to publish, merge, or repair application code during review.
 
-For dedicated PR skills and reviewers, see the [PR-only toolkit](PR-TOOLKIT.md). It adds opt-in preparation, report consolidation, finding rechecks, and focused specialists under a shared input, authority, and report contract. The existing roles below keep their current contracts.
+For dedicated PR skills and reviewers, see the [layered PR toolkit](PR-TOOLKIT.md). Its default `pr-review` performs a general review itself. Eight targeted reviewers and preparation/recheck are optional. Each skill has one matching thin agent and includes reusable contracts. No automatic dispatch is added. The existing roles below keep their current contracts.
 
 ## Choose the existing role
 

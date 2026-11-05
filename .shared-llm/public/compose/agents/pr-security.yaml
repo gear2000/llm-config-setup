@@ -2,10 +2,15 @@ type: agent
 name: pr-security
 model: sonnet
 color: blue
-description: .shared-llm/public/layers/agents/common/pr-security.description.md
+description: .shared-llm/public/layers/slash-commands/common/common/pr-security/description.md
 inputs:
   - .shared-llm/public/layers/agents/common/pr-security.md
-  - .shared-llm/public/layers/agents/common/_pr-review-contract.md
+  - .shared-llm/public/layers/slash-commands/common/common/pr-security/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
   - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/security.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/boundary-tracing.md
   - .shared-llm/public/layers/agents/common/_owainlewis-license.md
 output: .claude/agents/pr-security.md

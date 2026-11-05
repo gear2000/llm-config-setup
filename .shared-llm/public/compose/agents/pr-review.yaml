@@ -1,0 +1,25 @@
+type: agent
+name: pr-review
+model: sonnet
+color: blue
+description: .shared-llm/public/layers/slash-commands/common/common/pr-review/description.md
+inputs:
+  - .shared-llm/public/layers/agents/common/pr-review.md
+  - .shared-llm/public/layers/slash-commands/common/common/pr-review/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/general.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/boundary-tracing.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/security.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/integration.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/compatibility.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/migration-rollback.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/architecture.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/operational-safety.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/reachability.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/regression.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/readiness.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/agents/pr-review.md

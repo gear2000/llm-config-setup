@@ -1,0 +1,10 @@
+## Hosted-readiness contract
+
+Applies only when current hosted prerequisites are requested. Code review alone does not invoke it. Offline or prepublication candidates leave current hosted readiness UNVERIFIED; individual gates not required by authoritative policy carry an explicit nonapplicability rationale.
+
+- Expected checks and gates come from authoritative repository/target-branch policy, including required contexts, accepted producers, approval eligibility, stale/dismissed-review rules, thread resolution, draft restrictions, conflicts, and merge-queue requirements where applicable. Missing policy is not evidence that no gates exist.
+- Every expected check maps to a trusted workflow/app/integration and identified run/job/check, with observed conclusion and time. A matching display name or unexplained green rollup is insufficient.
+- Results bind to the pinned head or a policy-accepted synthetic merge with evidenced provenance and constituent pinned base/head commits. Earlier heads, different bases, and unverifiable synthetic relationships cannot satisfy the current gate. PR-head, integration, and queue checks are distinct.
+- Missing, pending, skipped, cancelled, failed, successful, and explicitly not-required provider states remain separate from criterion status. Skipped or absent execution stays UNVERIFIED, never a passed test. A documented exemption for this snapshot may separately PASS a gate-applicability criterion, with policy and reason; without that evidence the gap remains.
+- Current eligible approvals/changes requested, threads, draft/conflict state, and queue state have authoritative evidence and snapshot relationships. Comments, prior reports, unknown mergeability, inaccessible threads, or incomplete queue runs cannot substitute for passed gates.
+- A current conclusion requires the shared remote snapshot refresh and timestamped observations; later remote changes invalidate its currency. Assessment grants no authority to approve, resolve threads, mark ready, enqueue/dequeue, or merge.

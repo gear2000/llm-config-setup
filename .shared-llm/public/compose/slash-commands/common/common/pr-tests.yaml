@@ -1,0 +1,13 @@
+type: skill
+name: pr-tests
+description: .shared-llm/public/layers/slash-commands/common/common/pr-tests/description.md
+inputs:
+  - .shared-llm/public/layers/slash-commands/common/common/pr-tests/command.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/snapshot.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/authority.md
+  - .shared-llm/public/layers/agents/common/_review-evidence.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/report.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/regression.md
+  - .shared-llm/public/layers/skills/common/pr-toolkit/contracts/integration.md
+  - .shared-llm/public/layers/agents/common/_owainlewis-license.md
+output: .claude/skills/pr-tests/SKILL.md
