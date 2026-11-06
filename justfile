@@ -105,6 +105,17 @@ herdr-pin *args:
 misc:
     bash tools/install-misc.sh
 
+# Ovis is herdr's browser/phone client. A paired device stays signed in without the token.
+# Ovis keeps its settings where `herdr plugin config-dir devswha.ovis` points; tools/ovis.sh
+# looks that up, so nobody has to remember the path.
+# Print a one-time pairing PIN for a new device (10 min), plus its address and a QR code.
+ovis-pair:
+    @sh tools/ovis.sh pair
+
+# Print the OVIS_TOKEN that Ovis reads.
+ovis-token:
+    @sh tools/ovis.sh token
+
 # ─── Kit self-hosting ─────────────────────────────────
 # The kit tracks its OWN composed slash-command skills under .claude/skills/{cc,do}-*
 # (it self-hosts the workflow suite) and composed generic agents under
