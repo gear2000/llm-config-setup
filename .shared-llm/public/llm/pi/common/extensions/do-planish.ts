@@ -2,7 +2,7 @@
 /**
  * do-planish — visual HTML plan review for Pi, grill-first
  *
- * Planning with do-planish is always a two-beat flow in the browser (port 4390):
+ * Planning with do-planish is always a two-beat flow in the browser (port 4390, or $WORK_LOG_PORT):
  *
  *   1. GRILL   — planish_grill { questions[] }
  *                Pi asks a batch of questions on an annotatable page. The tool
@@ -30,7 +30,8 @@
  * Note: /do-plan is the Pi planning front door; /cc-plan is the Claude Code
  * front door. The old planish and plan-and-grill names are warning aliases.
  *
- * HTTP server: port 4390 (lazy start, shared across a session). The URL host
+ * HTTP server: port 4390, or $WORK_LOG_PORT (one per unix user on a shared machine);
+ * lazy start, shared across a session. The URL host
  * comes from $WORK_LOG_HOST or `work_log.host` in the nearest .shared-llm.yaml
  * (default localhost) — set it to the machine name remote browsers use (e.g. a
  * Tailscale name) and the server binds 0.0.0.0 so those connections work.
@@ -45,7 +46,7 @@ import { spawnSync } from "node:child_process";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const PORT = 4390;
+const DEFAULT_PORT = 4390;
 const CONFIG_NAME = ".shared-llm.yaml";
 const LEGACY_CONFIG_NAME = ".planish.yaml";
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
@@ -58,11 +59,28 @@ let currentHtml = "";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// The page port. Unix users who share one machine each set their own
+// $WORK_LOG_PORT; unset keeps 4390. Read at serve time, never at extension
+// load, so a bad value fails only the serve and cannot stop Pi from starting.
+export function resolvePort(
+	env: Record<string, string | undefined> = process.env,
+): number {
+	const raw = env.WORK_LOG_PORT?.trim();
+	if (!raw) return DEFAULT_PORT;
+	const port = Number(raw);
+	if (!/^\d+$/.test(raw) || port < 1 || port > 65535) {
+		throw new Error(
+			`$WORK_LOG_PORT must be a port number from 1 to 65535, got ${JSON.stringify(raw)}`,
+		);
+	}
+	return port;
+}
+
 // Returns false when the opener is missing or exits non-zero (headless box,
 // no default browser). Callers MUST surface that — the user needs the URL.
 function openBrowser(): boolean {
 	const cmd = process.platform === "darwin" ? "open" : "xdg-open";
-	const r = spawnSync(cmd, [`http://${resolveHost()}:${PORT}/`], {
+	const r = spawnSync(cmd, [`http://${resolveHost()}:${resolvePort()}/`], {
 		detached: true,
 		stdio: "ignore",
 	});
@@ -474,7 +492,7 @@ function ensureServer(): Promise<void> {
 		});
 		// A remote-reachable host is useless if the socket only accepts loopback.
 		const bindAddr = isLocalOnly(resolveHost()) ? "127.0.0.1" : "0.0.0.0";
-		s.listen(PORT, bindAddr, () => {
+		s.listen(resolvePort(), bindAddr, () => {
 			server = s;
 			resolve();
 		});
@@ -487,7 +505,7 @@ async function serve(html: string): Promise<{ url: string; opened: boolean }> {
 	currentHtml = html;
 	await ensureServer();
 	const opened = openBrowser();
-	return { url: `http://${resolveHost()}:${PORT}/`, opened };
+	return { url: `http://${resolveHost()}:${resolvePort()}/`, opened };
 }
 
 function serveNote(r: { url: string; opened: boolean }): string {
