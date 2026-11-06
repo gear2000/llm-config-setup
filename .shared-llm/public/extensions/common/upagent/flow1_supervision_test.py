@@ -744,6 +744,38 @@ def test_start_launches_watch_after_sentinel_and_records_owner(local, monkeypatc
     assert receipt["ownership"]["run-watch"]["pid"] == 999
 
 
+def test_spawn_watch_records_the_launched_argv_while_proc_cmdline_is_still_empty(
+    tmp_path, monkeypatch
+):
+    # Right after Popen returns, /proc/<pid>/cmdline can still read empty while the new
+    # program loads. Recording that empty argv made every later stop_watch refuse to signal
+    # the watcher ("identity mismatch"), so `finish` left it running (flaky flow1_cli test).
+    control = tmp_path / "run" / "control"
+    control.mkdir(parents=True)
+    path = control / "implementer-start.json"
+    f.write(path, {"herdr_session": "test", "workspace_id": "workspace"})
+    launched: dict = {}
+
+    class Child:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    def popen(argv, **kwargs):
+        launched["argv"] = list(argv)
+        f.write(control / "run-watch.json", {"ownership": {"pid": Child.pid}})
+        return Child()
+
+    monkeypatch.setattr(f.subprocess, "Popen", popen)
+    monkeypatch.setattr(f.process, "process_start_time", lambda pid: "birth")
+    monkeypatch.setattr(f.process, "process_cmdline", lambda pid: [])
+    owner = f.bounded(f.spawn_watch)(path, str(tmp_path / "roster.yaml"))
+    assert owner["argv"] == launched["argv"]
+    assert any(Path(word).name == "run_watch.py" for word in owner["argv"])
+    assert f.read(control / "run-watch-launch.json")["ownership"]["argv"] == launched["argv"]
+
+
 def test_await_loop_uses_reconciler_and_returns_cap_event(local, monkeypatch):
     r = reconciler(local, monkeypatch)
     local.panes["implementer"]["agent_status"] = "done"
