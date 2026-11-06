@@ -50,6 +50,7 @@ just reset                       # heavy hammer: delete all kit-owned state, the
 - `just herdr-pin` installs Herdr **0.9.5** from the GitHub release (`tools/install-herdr.sh`). The port targets this exact version; do not run `herdr update` or the unpinned `herdr.dev/install.sh`.
 - `just misc` installs third-party skills this kit does not compose (Lavish, quota-axi, Impeccable, Plannotator). `unslop` is kit-composed by `just update`.
 - `just ovis-pair` prints a one-time pairing PIN for [Ovis](https://github.com/devswha/ovis), herdr's browser/phone client. The PIN lasts 10 minutes and pairs one device, and the command also prints the phone address and a QR code. A paired device stays signed in without the token. `just ovis-token` prints the `OVIS_TOKEN` Ovis reads. Both look up Ovis's settings folder (`herdr plugin config-dir devswha.ovis`) through herdr, so you never need its path.
+- `tools/t3-shared-account.sh` runs one always-on [T3 Code](https://github.com/pingdotgg/t3code) server per person under one shared Unix account: shared agent logins, separate GitHub tokens, worktrees and data folders, and T3 Connect sign-in so users need no SSH. See [`docs/T3-SHARED-ACCOUNT.md`](docs/T3-SHARED-ACCOUNT.md).
 - `just test` runs the composer/flow test suite.
 - `just test` proves the composer and the hub's Python logic offline; it never launches a worker. The live hub is proven by the end-to-end validation brief [`.shared-llm/public/extensions/common/upagent/VALIDATE.md`](.shared-llm/public/extensions/common/upagent/VALIDATE.md): hand the whole file to an agent running inside the Herdr cockpit after installing the kit, after any Herdr version change, and after any change under `extensions/common/upagent/`. Allocate about 45 minutes (70 with the optional hold drill).
 - The Pi launch group — `just hub`, `just builder`, `just pi-status`, `just pi-clean` — and the terraform workflow recipes (`just tf-implement`, `just tf-approve`, `just tf-auto`, `just tf-reviewer-cc` / `-pi`) are covered under "Pi harness runtime config" below.
@@ -190,11 +191,13 @@ tools/
   install-pi-extensions.sh        — `pi install` helper for the pinned third-party extensions
   install-herdr.sh                — pin Herdr 0.9.5 (UpAgent hub; do not `herdr update`)
   install-misc.sh                 — Lavish, quota-axi, Impeccable, Plannotator (not kit-composed)
+  t3-shared-account.sh            — one T3 Code server per person under one Unix account
 justfile                          — init / configure / update, the building blocks, tests, and the Pi launch group
 docs/
   ONBOARDING.md                   — redirect to UPINSTALL.md / SETUP-DESTINATION.md
   HARNESS-ROUTING.md              — skill placement per harness (`do-*`, `cc-*`, common)
   SKILL-CUSTOMIZATIONS.md         — preserve local changes when updating third-party skills
+  T3-SHARED-ACCOUNT.md            — several people on one T3 Code server account
   design/improvements.md          — historical Herdr lifecycle design proposal
 prompts/
   UPDATE_UPAGENT_OFFERINGS.md     — maintainer prompt for adding/changing UpAgent offerings
