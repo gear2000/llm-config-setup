@@ -132,6 +132,7 @@ test:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/disable-amazon-bedrock.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-approve.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/do-planish.test.ts
 
 # Runs planish_resolve.py and both Pi extensions that delegate to it over one corpus.
 test-resolver-parity:
@@ -145,6 +146,10 @@ test-provider-policy:
 
 test-tf-approve:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-approve.test.ts
+
+# do-planish's page port: 4390 by default, $WORK_LOG_PORT per unix user.
+test-do-planish:
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/do-planish.test.ts
 
 test-memsearch:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/memsearch.test.ts

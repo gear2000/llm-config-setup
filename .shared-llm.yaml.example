@@ -73,7 +73,7 @@
 # ──────────────────────────────────────────
 # When you reach this machine by name instead of localhost — Tailscale, LAN,
 # SSH from a laptop — set "work_log.host" to that machine name. Every URL the
-# planning flows hand out (the planish pages on port 4390 AND the static
+# planning flows hand out (the planish pages on port 4390, or $WORK_LOG_PORT, AND the static
 # grill/plan pages) then uses it instead of localhost, and the planish server
 # binds 0.0.0.0 so those remote connections are accepted. Default: localhost.
 # `$WORK_LOG_HOST` overrides it for a single session.
