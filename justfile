@@ -133,6 +133,7 @@ test:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-approve.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/resolver-parity.test.ts
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/do-planish.test.ts
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-implement-fallback.test.ts
 
 # Runs planish_resolve.py and both Pi extensions that delegate to it over one corpus.
 test-resolver-parity:
@@ -150,6 +151,10 @@ test-tf-approve:
 # do-planish's page port: 4390 by default, $WORK_LOG_PORT per unix user.
 test-do-planish:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/do-planish.test.ts
+
+# tf-implement's fallback plan path (used when planish_resolve.py is unreachable).
+test-tf-implement-fallback:
+    node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/tf-implement-fallback.test.ts
 
 test-memsearch:
     node --experimental-strip-types .shared-llm/public/llm/pi/common/extensions/memsearch.test.ts

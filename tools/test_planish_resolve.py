@@ -7,7 +7,10 @@ import importlib.util
 import ipaddress
 import json
 import multiprocessing
+import os
+import pwd
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -16,6 +19,7 @@ import urllib.request
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -27,6 +31,8 @@ SPEC = importlib.util.spec_from_file_location("planish_resolve_tested", SCRIPT)
 assert SPEC and SPEC.loader
 resolver = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(resolver)
+
+_USER = pwd.getpwuid(os.geteuid()).pw_name
 
 ENV_VARS = ("WORK_LOG_DIR", "PLANISH_DIR", "WORK_LOG_HOST", "PLANISH_HOST")
 
@@ -296,7 +302,7 @@ def test_work_log_without_dir_takes_the_default(tmp_path: Path) -> None:
     """host-only config is legitimate — the dir falls back to the default."""
     _write(tmp_path / ".shared-llm.yaml", "work_log:\n  host: example-host\n")
     result = resolver.resolve(tmp_path, "Topic")
-    default_root = str(Path("/var/tmp/work-log").resolve())
+    default_root = str(Path(f"/var/tmp/{_USER}/work-log").resolve())
     assert str(result).startswith(default_root + "/")
 
 
@@ -334,9 +340,50 @@ def test_default_is_outside_repo(tmp_path: Path) -> None:
     result = resolver.resolve(tmp_path, "Topic")
     # /var/tmp may itself be a symlink, so compare against the resolved root
     # rather than the literal string.
-    default_root = str(Path("/var/tmp/work-log").resolve())
+    default_root = str(Path(f"/var/tmp/{_USER}/work-log").resolve())
     assert str(result).startswith(default_root + "/")
     assert result.name == "topic"
+
+
+# ─── one plan folder per unix user ───────────────────────────────────────────
+# Several unix users can share one machine. A fixed /var/tmp/work-log belonged to
+# whoever created it first, so everyone else's plans failed. The default is now
+# /var/tmp/<user>/work-log/{date}/{slug}, and `{user}` works in any template.
+
+
+def test_user_token_expands_to_the_current_user(tmp_path: Path) -> None:
+    result = resolver.resolve(tmp_path, "Topic", "plans/{user}/{slug}")
+    assert result == tmp_path / "plans" / _USER / "topic"
+
+
+def test_user_folder_is_created_private(tmp_path: Path) -> None:
+    resolver.resolve(tmp_path, "Topic", str(tmp_path / "{user}/work-log/{slug}"))
+    assert stat.S_IMODE((tmp_path / _USER).lstat().st_mode) == 0o700
+
+
+def test_user_folder_that_is_a_symlink_is_refused(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / _USER).symlink_to(elsewhere)
+    with pytest.raises(ValueError, match="real directory"):
+        resolver.resolve(tmp_path, "Topic", str(tmp_path / "{user}/work-log/{slug}"))
+    assert not any(elsewhere.iterdir())
+
+
+def test_user_folder_owned_by_someone_else_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another account created /var/tmp/joe before joe ever planned anything.
+    other_uid = os.geteuid() + 4242
+    (tmp_path / "joe").mkdir()
+    monkeypatch.setattr(resolver.os, "geteuid", lambda: other_uid)
+    monkeypatch.setattr(
+        resolver.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_name="joe") if uid == other_uid else None,
+    )
+    with pytest.raises(ValueError, match="not owned by"):
+        resolver.resolve(tmp_path, "Topic", str(tmp_path / "{user}/work-log/{slug}"))
 
 
 def test_empty_topic_fails_loud(tmp_path: Path) -> None:

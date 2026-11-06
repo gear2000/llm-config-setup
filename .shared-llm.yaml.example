@@ -44,6 +44,7 @@
 #   {date}  →  YYYY-MM-DD  (today)
 #   {slug}  →  your planning topic, lowercased and hyphenated
 #   {type}  →  "plan"
+#   {user}  →  your unix user name; its folder must be yours (0700 when created)
 #   {n}     →  next version integer, auto-incremented by scanning siblings
 #
 # A relative "work_log.dir" path resolves from the directory holding THIS file.
@@ -59,7 +60,8 @@
 # One file at your repo root therefore covers everything inside it.
 #
 # With nothing configured anywhere, plans land in
-# /var/tmp/work-log/{date}/{slug}. Fine for throwaway use, inconvenient when
+# /var/tmp/{user}/work-log/{date}/{slug}, one private folder per unix user.
+# Fine for throwaway use, inconvenient when
 # you want plans versioned next to your work.
 #
 # A configured "work_log.dir" must be a non-empty string — a malformed value
@@ -82,7 +84,7 @@
 #     host: your-machine-name
 #
 # "host" works on its own too — a `work_log:` block with only "host" keeps the
-# default /var/tmp/work-log/{date}/{slug} directory.
+# default /var/tmp/{user}/work-log/{date}/{slug} directory.
 #
 #
 # REVIEW URL (optional "url_base" + "serve_root")

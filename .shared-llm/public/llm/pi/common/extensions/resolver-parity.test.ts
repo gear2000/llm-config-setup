@@ -169,7 +169,15 @@ const CASES: Case[] = [
 		name: "roster without work_log takes the default",
 		config: "destinations:\n  - dir: /elsewhere\n    harnesses: cc\n",
 		outcome: "resolve",
-		dirPrefix: `${fs.realpathSync("/var/tmp")}/work-log/`,
+		// One plan folder per unix user, so several accounts can share a machine.
+		dirPrefix: `${fs.realpathSync("/var/tmp")}/${os.userInfo().username}/work-log/`,
+		host: null,
+	},
+	{
+		name: "{user} in a configured dir names the current unix user",
+		config: "work_log:\n  dir: plans/{user}/{slug}\n",
+		outcome: "resolve",
+		dir: `plans/${os.userInfo().username}/${SLUG}`,
 		host: null,
 	},
 ];

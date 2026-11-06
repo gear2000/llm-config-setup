@@ -44,7 +44,8 @@ const REQUEST_FIFO = path.join(PI_DIR, "tf-review-request.fifo");
 const RESPONSE_FIFO = path.join(PI_DIR, "tf-review-response.fifo");
 const CONFIG_NAME = ".shared-llm.yaml";
 const LEGACY_CONFIG_NAME = ".planish.yaml";
-const DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}";
+// One plan folder per unix user, so several accounts can share one machine.
+const DEFAULT_TEMPLATE = "/var/tmp/{user}/work-log/{date}/{slug}";
 const CLAIM_ATTEMPTS = 64;
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const RESOLVER_REL = "public/llm/common/common/planish_resolve.py";
@@ -124,8 +125,8 @@ type ReviewResponse = ReviewApproved | ReviewIssues;
 // kit prerequisite — `just init` checks for it.
 //
 // Precedence (--dir, $WORK_LOG_DIR, $PLANISH_DIR, work_log.dir, legacy
-// .planish.yaml, then /var/tmp/work-log/{date}/{slug}), the {date}/{slug}/
-// {type}/{n} tokens, the atomic {n} claim, and the fail-loud rules for a
+// .planish.yaml, then /var/tmp/{user}/work-log/{date}/{slug}), the {date}/{slug}/
+// {type}/{user}/{n} tokens, the atomic {n} claim, and the fail-loud rules for a
 // malformed config ALL live in that script. It creates and claims the directory
 // it returns, so nothing here claims it a second time.
 //
@@ -318,16 +319,62 @@ function tildeHome(): string {
   );
 }
 
+// The current unix user's name, for {user} and the per-user default. Mirrors the
+// canonical script's passwd lookup by effective uid.
+function currentUser(): string {
+  try {
+    return os.userInfo().username;
+  } catch {
+    throw new Error(
+      `cannot name the current unix user for {user}; set $WORK_LOG_DIR ` +
+        `(or --dir) to a path without it`,
+    );
+  }
+}
+
+// /var/tmp/<user> is a predictable name in a folder every account can write to,
+// so another account could create it first. Mirrors planish_resolve.py: create it
+// 0700, or accept it only when it is this user's real directory, never a symlink.
+function ensurePrivateUserDir(dir: string): void {
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  try {
+    fs.mkdirSync(dir, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const info = fs.lstatSync(dir);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`${dir} must be a real directory, not a symlink or file`);
+  }
+  const uid = process.geteuid?.();
+  if (uid !== undefined && info.uid !== uid) {
+    throw new Error(
+      `${dir} is not owned by this user (uid ${uid}); remove it or ask its owner to`,
+    );
+  }
+}
+
 // Used only when the canonical script is unreachable AND no config file decides
 // the directory. Nothing here reads YAML, so nothing here can drift from PyYAML.
-function fallbackPlanPath(cwd: string, topic: string, dirFlag?: string): string {
-  const expanded = expandUser(
-    (explicitTemplate(dirFlag) ?? DEFAULT_TEMPLATE)
-      .replace(/\{date\}/g, todayYmd())
-      .replace(/\{slug\}/g, slugifyTopic(topic))
-      .replace(/\{type\}/g, "plan"),
-  );
-  return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+export function fallbackPlanPath(cwd: string, topic: string, dirFlag?: string): string {
+  const template = explicitTemplate(dirFlag) ?? DEFAULT_TEMPLATE;
+  const user = template.includes("{user}") ? currentUser() : "";
+  const anchored = (text: string): string => {
+    const expanded = expandUser(
+      text
+        .replace(/\{date\}/g, todayYmd())
+        .replace(/\{slug\}/g, slugifyTopic(topic))
+        .replace(/\{type\}/g, "plan")
+        .replace(/\{user\}/g, user),
+    );
+    return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+  };
+  if (user) {
+    // Guard the folder that ends at the first {user} segment, as the script does.
+    const end = template.indexOf("/", template.indexOf("{user}"));
+    ensurePrivateUserDir(anchored(end < 0 ? template : template.slice(0, end)));
+  }
+  return anchored(template);
 }
 
 export function resolvePlanDir(cwd: string, topic: string, dirFlag?: string): string {
