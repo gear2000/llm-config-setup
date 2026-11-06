@@ -26,7 +26,11 @@ LAYOUT_COMMAND_TIMEOUT_SECONDS = 2.0
 LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 TAB_ROLES = frozenset(("workers", "oversight", "services", "control"))
 # Transitional test seam only; this transport never reads Recruiter state or a job ledger.
-STATE_FILE = Path(os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json"))
+# Its folder holds the TUI layout locks, so the fallback stays in the caller's home (one per
+# unix account). Keep it identical to upagent/recruiter.py.
+STATE_FILE = Path(
+    os.environ.get("UPAGENT_STATE", "~/.local/state/herdr/upagent/recruiter.json")
+).expanduser()
 
 
 class HerdrTransportError(RuntimeError):

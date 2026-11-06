@@ -60,6 +60,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4417,11 +4418,35 @@ def do_global_flow(
 # --- update (copy -> compose -> link, with a full run log) -----------------
 
 
-def _log_path() -> Path:
+def _private_user_dir(path: Path) -> Path:
+    """Create or reuse `path` as a directory that only the current user can enter.
+
+    The name is predictable and /tmp is shared, so another account could create it first.
+    Refuse a symlink or a folder someone else owns instead of writing logs through it.
+    """
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SystemExit(f"error: {path} must be a real directory, not a symlink or file")
+    if info.st_uid != os.geteuid():
+        raise SystemExit(
+            f"error: {path} is not owned by this user (uid {os.geteuid()}); "
+            "remove it or ask its owner to"
+        )
+    path.chmod(0o700)
+    return path
+
+
+def _log_path(tmp_root: Path = Path("/tmp")) -> Path:
+    """One run log per `just update`, in a private folder per unix user."""
     from datetime import datetime
 
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    return Path("/tmp/.shared-llm/log") / f"{stamp}.log"
+    user_dir = _private_user_dir(tmp_root / f".shared-llm-{os.geteuid()}")
+    return user_dir / "log" / f"{stamp}.log"
 
 
 def cmd_copy(args: argparse.Namespace) -> None:
