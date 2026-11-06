@@ -38,7 +38,7 @@ configure *args:
 # `⏭ ignoring <path> (ignore: true)`). One-off filters: `--ignore PATH` (repeatable)
 # and `--only PATH` (repeatable); PATH is the configured path, its expanded form,
 # or the basename. `just update -v` prints per-file detail (always written to the
-# log under /tmp/.shared-llm/log/).
+# log under /tmp/.shared-llm-<uid>/log/, one private folder per unix user).
 update *args:
     ${PYTHON_BIN:-python3} tools/harness.py update {{args}}
 

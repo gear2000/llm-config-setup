@@ -51,7 +51,7 @@ just update                                 # copy → compose → link (+ globa
 ```
 
 `just update` is the one command you re-run whenever layers change. Add `-v` for
-per-file detail; a full log is always written under `/tmp/.shared-llm/log/`.
+per-file detail; a full log is always written under `/tmp/.shared-llm-<uid>/log/` (one private folder per unix user).
 
 ## Verify placement
 

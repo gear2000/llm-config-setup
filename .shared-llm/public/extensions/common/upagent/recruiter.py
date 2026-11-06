@@ -253,8 +253,10 @@ CONSULT_TIMEOUT_MS = 600_000
 # sits inside a phase tree would otherwise emit a spurious `phase-receipt-degraded` per question.
 CONSULT_PHASE_ID = "consult"
 # Where `up` records the resolved workspace + Recruiter pane so `status`/callers can find it.
+# client.py binds the per-repo path; this fallback stays in the caller's home so two unix
+# accounts on one machine never share it. Keep it identical to herdr/herdr_transport.py.
 STATE_FILE = Path(
-    os.environ.get("UPAGENT_STATE", "/tmp/.upagent/recruiter.json")
+    os.environ.get("UPAGENT_STATE", "~/.local/state/herdr/upagent/recruiter.json")
 ).expanduser()
 PHASE_START_RECEIPT_ENV = "UPAGENT_PHASE_START_RECEIPT"
 PHASE_START_READY_STATES = ("watchdog-ready", "ready", "ready-degraded")
