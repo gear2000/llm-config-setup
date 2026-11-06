@@ -10,7 +10,9 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import pwd
 import re
+import stat
 import sys
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -19,7 +21,8 @@ import yaml
 
 CONFIG_NAME = ".shared-llm.yaml"
 LEGACY_CONFIG_NAME = ".planish.yaml"
-DEFAULT_TEMPLATE = "/var/tmp/work-log/{date}/{slug}"
+# One plan folder per unix user, so several accounts can share one machine.
+DEFAULT_TEMPLATE = "/var/tmp/{user}/work-log/{date}/{slug}"
 _CLAIM_ATTEMPTS = 64
 # The only schemes a review URL can be handed to a human in. `file:` needs no
 # base, and anything else either does not fetch or is not a location at all.
@@ -239,20 +242,67 @@ def _template(cwd: Path, explicit_dir: str | None) -> tuple[str, Path]:
     return DEFAULT_TEMPLATE, cwd
 
 
+def _user() -> str:
+    """The current unix user's name, for `{user}` and the per-user default."""
+    uid = os.geteuid()
+    try:
+        entry = pwd.getpwuid(uid)
+    except KeyError:
+        entry = None
+    if entry is None:
+        raise ValueError(
+            f"cannot name the current unix user (uid {uid}) for {{user}}; set "
+            "work_log.dir or $WORK_LOG_DIR to a path without it"
+        )
+    return entry.pw_name
+
+
+def _private_user_dir(path: Path) -> None:
+    """Create `path` as 0700, or accept it only when it is this user's real directory.
+
+    `/var/tmp/<user>` is a predictable name in a folder every account can write to,
+    so another account could create it first. Refuse a symlink or someone else's
+    folder instead of following it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{path} must be a real directory, not a symlink or file")
+    if info.st_uid != os.geteuid():
+        raise ValueError(
+            f"{path} is not owned by this user (uid {os.geteuid()}); "
+            "remove it or ask its owner to"
+        )
+
+
 def resolve(cwd: Path, topic: str, explicit_dir: str | None = None) -> Path:
     if not topic.strip():
         raise ValueError("topic must be non-empty")
     template, base = _template(cwd, explicit_dir)
+    user = _user() if "{user}" in template else ""
 
-    expanded = (
-        template.replace("{date}", date.today().isoformat())
-        .replace("{slug}", _slug(topic))
-        .replace("{type}", "plan")
-    )
-    candidate = Path(expanded).expanduser()
-    if not candidate.is_absolute():
-        candidate = base / candidate
-    return _claim(candidate.resolve())
+    def expand(text: str) -> str:
+        return (
+            text.replace("{date}", date.today().isoformat())
+            .replace("{slug}", _slug(topic))
+            .replace("{type}", "plan")
+            .replace("{user}", user)
+        )
+
+    def anchored(text: str) -> Path:
+        path = Path(expand(text)).expanduser()
+        return path if path.is_absolute() else base / path
+
+    if user:
+        # Guard the folder that ends at the first `{user}` segment before
+        # anything resolves symlinks, so a planted link is refused, not followed.
+        end = template.find("/", template.find("{user}"))
+        _private_user_dir(anchored(template if end < 0 else template[:end]))
+    return _claim(anchored(template).resolve())
 
 
 def resolve_host(cwd: Path) -> str | None:

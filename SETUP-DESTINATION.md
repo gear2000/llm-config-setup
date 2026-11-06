@@ -296,7 +296,7 @@ Use the **accepted file map** from the workflow, not a hardcoded `src/packages` 
 
 ### I — Pi planning output directory (optional)
 
-The Planish runtime provides the browser-backed grill/review tools used by `/do-plan` (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). Without configuration it defaults to `/var/tmp/work-log/{date}/{slug}`, which is fine for throwaway use but inconvenient when you want plans versioned next to your work. Use `/do-plan` in Pi or `/cc-plan` in Claude Code for workflow-suite planning; `/do-planish` and `/cc-planish` are one-release warning aliases.
+The Planish runtime provides the browser-backed grill/review tools used by `/do-plan` (annotation-only pages: sticky notes → Copy Feedback → paste the block back into the TUI). Without configuration it defaults to `/var/tmp/{user}/work-log/{date}/{slug}` (one private folder per unix user), which is fine for throwaway use but inconvenient when you want plans versioned next to your work. Use `/do-plan` in Pi or `/cc-plan` in Claude Code for workflow-suite planning; `/do-planish` and `/cc-planish` are one-release warning aliases.
 
 Put a `.shared-llm.yaml` with a `work_log:` block at your repo root (or any ancestor directory) to control where plans land and which hostname URLs use — start from the tracked `.shared-llm.yaml.example`:
 
@@ -308,7 +308,7 @@ work_log:
   host: your-machine-name   # optional — default localhost
 ```
 
-**Two fields.** `work_log.dir` — where plans land; the path resolves relative to the directory that holds `.shared-llm.yaml`. `work_log.host` — optional; the machine name your browser uses to reach this box (e.g. a Tailscale name) when you work remotely. Every URL the planning flows hand out uses it instead of `localhost`, and the planish server (port 4390, or `$WORK_LOG_PORT` when several unix users share the machine) binds `0.0.0.0` so those remote connections are accepted. `$WORK_LOG_HOST` overrides it for a single session, and `host` works standalone (with `dir` falling back to `/var/tmp/work-log/{date}/{slug}`).
+**Two fields.** `work_log.dir` — where plans land; the path resolves relative to the directory that holds `.shared-llm.yaml`. `work_log.host` — optional; the machine name your browser uses to reach this box (e.g. a Tailscale name) when you work remotely. Every URL the planning flows hand out uses it instead of `localhost`, and the planish server (port 4390, or `$WORK_LOG_PORT` when several unix users share the machine) binds `0.0.0.0` so those remote connections are accepted. `$WORK_LOG_HOST` overrides it for a single session, and `host` works standalone (with `dir` falling back to `/var/tmp/{user}/work-log/{date}/{slug}`).
 
 **Which file wins.** Resolution walks upward from the current directory and takes the nearest `.shared-llm.yaml` that *contains* a `work_log:` mapping; a file without that key is skipped and the walk continues, so the machine-level destination roster at `~/.shared-llm.yaml` never shadows a repo's config. One file at your repo root covers everything inside it. A `work_log.dir` that is present but not a non-empty string fails loudly rather than falling back.
 
@@ -319,6 +319,7 @@ work_log:
 | `{date}` | Today's date — `YYYY-MM-DD` |
 | `{slug}` | Your topic, lowercased and hyphenated |
 | `{type}` | `plan` |
+| `{user}` | Your unix user name. The folder it names is created `0700`; one that is a symlink or owned by someone else is refused |
 | `{n}` | Next version integer — auto-incremented by scanning siblings |
 
 **Example outputs** for `dir: ops/mkdocs/docs/work-log/{date}/{slug}/plan` and topic `"redesign auth flow"`:

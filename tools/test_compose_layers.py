@@ -481,7 +481,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
         ".shared-llm.yaml",
         "work_log.dir",
         "WORK_LOG_DIR",
-        "/var/tmp/work-log/{date}/{slug}",
+        "/var/tmp/{user}/work-log/{date}/{slug}",
         # the legacy names stay wired as deprecated fallbacks
         ".planish.yaml",
         "PLANISH_DIR",
@@ -525,7 +525,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
     assert "resolver-parity.test.ts" in recipe, "`just test` must run the parity corpus"
 
     example = (REPO_ROOT / ".shared-llm.yaml.example").read_text()
-    for token in ("work_log:", "dir:", "host:", "/var/tmp/work-log/{date}/{slug}"):
+    for token in ("work_log:", "dir:", "host:", "/var/tmp/{user}/work-log/{date}/{slug}"):
         assert token in example, f".shared-llm.yaml.example must document {token!r}"
     assert not (REPO_ROOT / ".planish.yaml.example").exists(), (
         "the legacy .planish.yaml.example is retired — .shared-llm.yaml.example replaces it"
@@ -549,7 +549,7 @@ def test_plan_versioning_downloadable_and_host() -> None:
         # the legacy names stay documented as deprecated fallbacks
         "$PLANISH_DIR",
         ".planish.yaml",
-        "/var/tmp/work-log/{date}/{slug}",
+        "/var/tmp/{user}/work-log/{date}/{slug}",
         "`host:`",
         "downloadable",
     ):
