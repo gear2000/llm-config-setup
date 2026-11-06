@@ -592,15 +592,16 @@ def sentinel_start(
 
 def spawn_watch(path: Path, roster_path: str) -> dict:
     log = path.parent / "run-watch.log"
+    argv = [
+        sys.executable,
+        str(Path(__file__).with_name("run_watch.py")),
+        str(path.parent.parent),
+        "--roster",
+        roster_path,
+    ]
     with log.open("a") as stream:
         child = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).with_name("run_watch.py")),
-                str(path.parent.parent),
-                "--roster",
-                roster_path,
-            ],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=stream,
             stderr=stream,
@@ -610,7 +611,10 @@ def spawn_watch(path: Path, roster_path: str) -> dict:
         "pid": child.pid,
         "process_start_time": process.process_start_time(child.pid),
         "argv_marker": "run_watch.py",
-        "argv": process.process_cmdline(child.pid),
+        # Record the argv this call launched. Reading /proc/<pid>/cmdline right after Popen
+        # can return [] while the new program is still loading, and stop_watch then refuses
+        # to signal the watcher. stop_watch still compares this to the live cmdline.
+        "argv": argv,
         "herdr_session": read(path)["herdr_session"],
         "workspace_id": read(path)["workspace_id"],
         "pane_id": None,
