@@ -2692,6 +2692,31 @@ def test_reconcile_keeps_a_live_worker_whose_lease_was_extended(
     assert ledger.state(key)["state"] == "running"
 
 
+def test_reconcile_keeps_a_worker_awaiting_its_second_extension(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The requester's own second `respond --action extend` reconciles first. At that moment
+    the request awaits the second decision and the first extension still holds the lease."""
+    ledger, key, launch_id, old_expiry, new_expiry = _extended_worker_launch(
+        tmp_path, monkeypatch
+    )
+    lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    assert ledger.mark_awaiting_requester(
+        key, lease["token"], "nonce-2", 2, requester_grace_ms=300_000
+    )
+    closed = _record_pane_closes(monkeypatch)
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda pid, candidate_key: True)
+    monkeypatch.setattr(recruiter.time, "time", lambda: float(new_expiry - 60))
+    assert old_expiry < new_expiry - 60
+
+    recruiter.cmd_reconcile(force=False, emit=False)
+
+    assert closed == []
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] != "closed"
+    assert ledger.state(key)["state"] == "awaiting-requester"
+
+
 def test_reconcile_still_closes_a_worker_past_its_extended_lease(
     tmp_path: Path, monkeypatch
 ) -> None:
