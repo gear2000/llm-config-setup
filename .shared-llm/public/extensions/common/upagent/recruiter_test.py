@@ -2608,6 +2608,109 @@ def test_requester_decision_is_fenced_to_current_lease_and_extends_it(
     assert ledger.state(key)["state"] == "running"
 
 
+def _extended_worker_launch(tmp_path: Path, monkeypatch) -> tuple[Any, str, str, int, int]:
+    """A live worker launched before its lease was extended: the journal keeps the old expiry."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    monkeypatch.setattr(recruiter, "STATE_FILE", tmp_path / "state/recruiter.json")
+    ledger = recruiter.JobLedger()
+    order = _order(result_path=str(tmp_path / "result.json"))
+    key, _ = ledger.submit(order)
+    token = ledger.claim(
+        key, order["order_id"], 1_000, owner={"generation": 1, "runner_pid": 999}
+    )
+    assert token
+    launch_id = ledger.begin_launch(
+        key, token, "worker", "upagent-worker-x", "test-session", str(tmp_path)
+    )
+    ledger.record_launch_created(
+        key, token, launch_id, "w1:p1", "w1", "test-session:w1:p1"
+    )
+    active_lease = ledger._lease(ledger.active / "requests" / key / "lease.json")
+    ledger._snapshot(key, "running", **active_lease)
+    assert ledger.mark_awaiting_requester(
+        key, token, "nonce-1", 1, requester_grace_ms=300_000
+    )
+    decision = recruiter.lifecycle.parse_requester_decision(
+        json.dumps(
+            {
+                "request_id": recruiter.lifecycle.request_identity(order),
+                "generation": 1,
+                "action": "extend",
+                "extension_ms": 3_600_000,
+                "message": "Continue.",
+            }
+        ),
+        recruiter.lifecycle.request_identity(order),
+        1,
+    )
+    ledger.record_requester_decision(key, token, "nonce-1", decision)
+    new_expiry = ledger.extend_lease(key, token, 3_600_000)
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    old_expiry = journal["expires_at"]
+    assert old_expiry < new_expiry
+    return ledger, key, launch_id, old_expiry, new_expiry
+
+
+def _record_pane_closes(monkeypatch) -> list[str]:
+    closed: list[str] = []
+    monkeypatch.setattr(
+        recruiter,
+        "_herdr_json",
+        lambda *args, **kwargs: {
+            "result": {"agent": {"name": "upagent-worker-x", "pane_id": "w1:p1"}}
+        },
+    )
+    monkeypatch.setattr(
+        recruiter,
+        "_close_worker_pane",
+        lambda pane, **kwargs: (
+            closed.append(pane)
+            or {"status": "closed", "worker_pane": pane, "verified_absent": True}
+        ),
+    )
+    return closed
+
+
+def test_reconcile_keeps_a_live_worker_whose_lease_was_extended(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Any client command runs this reconcile. Between the original claim expiry and the
+    extended lease expiry, a live runner's worker is still owned and must stay open."""
+    ledger, key, launch_id, old_expiry, new_expiry = _extended_worker_launch(
+        tmp_path, monkeypatch
+    )
+    closed = _record_pane_closes(monkeypatch)
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda pid, candidate_key: True)
+    between = (old_expiry + new_expiry) // 2
+    monkeypatch.setattr(recruiter.time, "time", lambda: float(between))
+
+    recruiter.cmd_reconcile(force=False, emit=False)
+
+    assert closed == []
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] != "closed"
+    assert ledger.state(key)["state"] == "running"
+
+
+def test_reconcile_still_closes_a_worker_past_its_extended_lease(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Control: the extended lease delays reconciliation; it never disables it."""
+    ledger, key, launch_id, _old_expiry, new_expiry = _extended_worker_launch(
+        tmp_path, monkeypatch
+    )
+    closed = _record_pane_closes(monkeypatch)
+    monkeypatch.setattr(recruiter, "_runner_alive", lambda pid, candidate_key: True)
+    monkeypatch.setattr(recruiter.time, "time", lambda: float(new_expiry + 1))
+    monkeypatch.setattr(recruiter, "_terminate_owned_runner", lambda pid, key: None)
+
+    recruiter.cmd_reconcile(force=False, emit=False)
+
+    assert "w1:p1" in closed
+    journal = json.loads(ledger.launch_journal_path(key, launch_id).read_text())
+    assert journal["state"] == "closed"
+
+
 def test_retained_order_default_timeout_is_30_minutes_not_stage_default() -> None:
     ordinary = _order(stage_id="stage-1-implementation")
     retained = _order(
