@@ -89,6 +89,28 @@ echo '{"x":1}' >"$SETTINGS"
 seed_worktree_default >/dev/null
 t "existing settings.json left alone" '[[ $(cat "$SETTINGS") == "{\"x\":1}" ]]'
 
+# --- T3 Connect: fall back to http2 when the network blocks QUIC
+mkdir -p "$(dirname "$RELAY_LOG")"
+# shellcheck disable=SC2317  # fakes called by ensure_connect
+sleep() { :; }
+REACH=0
+# shellcheck disable=SC2317
+connect_reachable() { [[ $REACH == 1 ]] || grep -q '^TUNNEL_TRANSPORT_PROTOCOL=http2' "$SERVICE_ENV"; }
+# shellcheck disable=SC2317  # called by ensure_connect
+t3() { echo "t3 $*" >>"$HOME/t3-calls"; }
+: >"$RELAY_LOG"
+sed -i '/^TUNNEL_TRANSPORT_PROTOCOL=/d' "$SERVICE_ENV"
+t "unreachable, no QUIC errors: no switch" '! ensure_connect && ! grep -q TUNNEL_TRANSPORT_PROTOCOL "$SERVICE_ENV"'
+echo '{"output":"ERR failed to dial to edge with quic: timeout"}' >"$RELAY_LOG"
+t "QUIC blocked: switches to http2 and connects" 'ensure_connect && grep -qx TUNNEL_TRANSPORT_PROTOCOL=http2 "$SERVICE_ENV" && grep -q "t3 service restart" "$HOME/t3-calls"'
+t "T3 port line kept by the switch" 'grep -q "^T3CODE_PORT=" "$SERVICE_ENV"'
+sed -i 's/^TUNNEL_TRANSPORT_PROTOCOL=http2/TUNNEL_TRANSPORT_PROTOCOL=quic/' "$SERVICE_ENV"
+: >"$HOME/t3-calls"
+t "user-chosen transport is never overridden" '! ensure_connect && grep -qx TUNNEL_TRANSPORT_PROTOCOL=quic "$SERVICE_ENV" && [[ ! -s "$HOME/t3-calls" ]]'
+REACH=1
+t "reachable: nothing to do" 'ensure_connect'
+unset -f sleep connect_reachable t3
+
 # --- arguments
 t "unknown argument refused"     '! ( main --bogus ) 2>/dev/null'
 t "--port without a value refused" '! ( main --port ) 2>/dev/null'
