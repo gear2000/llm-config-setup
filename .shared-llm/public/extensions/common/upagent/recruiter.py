@@ -13081,10 +13081,14 @@ def _reconcile_launch_journals(
             continue
         if journal.get("state") == "closed":
             continue
+        lease = active_claims.get(key)
         expires_at = journal.get("expires_at")
+        # The journal copies the lease expiry at launch time. An extension or a cancellation
+        # later moves the lease expiry only, so the active lease is the current deadline.
+        if lease is not None and isinstance(expires_at, int):
+            expires_at = max(expires_at, lease["expires_at"])
         expired = isinstance(expires_at, int) and expires_at <= int(time.time())
         if not force and not expired and _same_owner_process(journal):
-            lease = active_claims.get(key)
             if lease is not None and _runner_alive(lease.get("runner_pid"), key):
                 continue
         launch_id = journal.get("launch_id")
