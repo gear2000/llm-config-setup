@@ -175,7 +175,8 @@ start_service() {
     Use the same T3 login in the phone app afterwards.
 
 EOF
-    t3 up --connect
+    # `t3 up` exits non-zero when the new tunnel is not up yet; verify waits for it instead.
+    t3 up --connect || warn "t3 up reported a problem; checking T3 Connect below (a new tunnel can take a minute)"
   else
     t3 service install
   fi
@@ -204,6 +205,25 @@ server_ready()  {
   [[ "$code" != 000 && "$code" != 503 ]]
 }
 
+RELAY_LOG="$T3_HOME/userdata/logs/relay-client.ndjson"
+connect_on()        { t3 status 2>/dev/null | grep -qE 'T3 Connect[[:space:]]+on'; }
+connect_reachable() { timeout 30 t3 connect status 2>&1 | grep -q 'can reach this machine'; }
+# cloudflared tries QUIC (UDP 7844) first; networks that drop that UDP leave it retrying forever.
+quic_blocked()      { tail -n 50 "$RELAY_LOG" 2>/dev/null | grep -q 'dial to edge with quic'; }
+wait_reachable()    { local i; for ((i = 0; i < $1; i += 5)); do connect_reachable && return 0; sleep 5; done; return 1; }
+
+# Wait for T3 Connect; on a network that blocks QUIC, switch cloudflared to TCP (http2) once.
+ensure_connect() {
+  wait_reachable 90 && return 0
+  if quic_blocked && ! grep -q '^TUNNEL_TRANSPORT_PROTOCOL=' "$SERVICE_ENV" 2>/dev/null; then
+    warn "this network blocks the tunnel's UDP (QUIC); switching it to TCP (http2) and restarting"
+    set_service_env TUNNEL_TRANSPORT_PROTOCOL http2 || true
+    t3 service restart >/dev/null
+    wait_reachable 120 && return 0
+  fi
+  return 1
+}
+
 verify() {
   say "6. Verify"
   session_env
@@ -222,6 +242,13 @@ verify() {
         "runtime file is stale or not from $UNIT" server_pid_ok
   if command -v curl >/dev/null; then
     check "web app answers on http://127.0.0.1:$port/" "web app not ready on port $port (status $(http_code "$port"))" server_ready "$port"
+  fi
+
+  if connect_on; then
+    check "T3 Connect: other devices can reach this server" \
+          "T3 Connect is on but not reachable. Run: t3 connect status" ensure_connect
+  else
+    ok "T3 Connect is off (turn it on: t3 up --connect)"
   fi
 
   printf '\n    -- t3 status\n'

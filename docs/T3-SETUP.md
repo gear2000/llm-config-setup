@@ -67,6 +67,7 @@ Re-running it is safe.
   3. Check that the code matches, and approve. The script continues on its own.
 
   An agent hands you the link and code and waits.
+- **Tunnel.** The tunnel can take a minute to come up after approval, and the checks wait for it. On networks that block its UDP traffic (QUIC), the script switches it to TCP (`TUNNEL_TRANSPORT_PROTOCOL=http2` in `~/.t3/service.env`) and restarts the service.
 - Set up the service now and connect later: `--no-connect`, then `t3 up --connect` when ready.
 
 Check: the script ends with `All checks passed.` Re-check any time with `bash ~/llm-config-setup/tools/t3-setup.sh verify`. `t3 status` shows `T3 Connect` as on.
