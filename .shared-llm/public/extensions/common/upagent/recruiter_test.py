@@ -5947,16 +5947,16 @@ def test_public_account_manager_candidates_filter_same_provider_and_preserve_ord
     )
 
     assert [candidate.offering_id for candidate in anthropic] == [
-        "cursor-composer-2-5",
         "pi-gpt-5-6-luna",
+        "cursor-composer-2-5",
     ]
     assert [candidate.offering_id for candidate in cursor] == [
         "pi-gpt-5-6-luna",
         "claude-sonnet-5-5",
     ]
     assert [candidate.offering_id for candidate in openai] == [
-        "cursor-composer-2-5",
         "claude-sonnet-5-5",
+        "cursor-composer-2-5",
     ]
 
 

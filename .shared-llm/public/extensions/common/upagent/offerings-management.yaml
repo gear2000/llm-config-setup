@@ -9,14 +9,17 @@ management:
   startup_timeout_ms: 45000
   inactivity_check_ms: 900000
   requester_grace_ms: 300000
+  # Cursor ignores a prompt in a pane of 6 rows or fewer, and the oversight tab shrinks
+  # below that under load. A hired manager or Sentinel has no fallback for later prompts,
+  # so Cursor is only the last resort in both seats.
   account_manager:
     candidates:
-      - offering: cursor-composer-2-5
-        effort: default
       - offering: pi-gpt-5-6-luna
         effort: high
       - offering: claude-sonnet-5-5
         effort: medium
+      - offering: cursor-composer-2-5
+        effort: default
     agent: upagent-account-manager
     timeout_ms: 120000
   checker:
@@ -29,12 +32,12 @@ management:
     timeout_ms: 120000
   sentinel:
     candidates:
-      - offering: cursor-composer-2-5
-        effort: default
       - offering: pi-gpt-5-6-luna
         effort: max
       - offering: claude-sonnet-5-5
         effort: medium
+      - offering: cursor-composer-2-5
+        effort: default
     agent: upagent-sentinel
     timeout_ms: 120000
 
