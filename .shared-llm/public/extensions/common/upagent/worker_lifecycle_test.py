@@ -130,6 +130,14 @@ class Herdr095:
             self.panes["w1:p2"] = pane
             self.sequence.append("pane-created")
             return self.reply("pane_info", pane=pane.copy())
+        if head == ("workspace", "list"):
+            return self.reply("workspace_list", workspaces=[])
+        if head == ("workspace", "create"):
+            # Oversight helpers get a whole tab of their own; model it like a split pane.
+            pane = self.pane("w1:p2")
+            self.panes["w1:p2"] = pane
+            self.sequence.append("pane-created")
+            return self.reply("workspace_created", root_pane=pane.copy())
         if head == ("pane", "get"):
             if args[2] not in self.panes:
                 raise r.RecruiterError("pane_not_found")

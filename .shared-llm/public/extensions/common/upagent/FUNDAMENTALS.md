@@ -145,8 +145,12 @@ A managed requester may opt one worker into `completion_policy: requester_releas
 11. A Dedicated Account Manager defaults to the requester's cockpit workspace, beside its worker.
     Shared-services placement is explicit rather than an invisible default.
 12. Cockpit placement is role-separated without weakening startup atomicity. The `control` tab
-    holds the TUI and current phase leader, `workers` holds active stage workers, and `oversight`
-    holds opt-in Account Managers and one-shot checkers. Role tabs are created lazily by
+    holds the TUI and current phase leader, and `workers` holds active stage workers. Every
+    helper (Account Manager, Sentinel, checker, rescuer, intake clerk, watchdog) gets a whole tab
+    of its own in a separate `upagent-oversight` workspace, never a split of the cockpit, so it
+    keeps full rows and columns (Cursor ignores prompts in a pane of 6 rows or 36 columns or
+    fewer). Herdr removes that workspace when its last helper closes; the next helper creates it
+    again, without taking focus. Role tabs are created lazily by
     moving the first live agent pane itself, so there are no placeholder shells. A cross-process
     workspace lock prevents concurrent hires from creating duplicate role tabs. Placement
     completes before the pane address is published. Within a role tab, workers split right and
@@ -364,7 +368,9 @@ The cockpit tabs appear as their roles become active:
 plan workspace
 ├─ control     TUI + current phase leader
 ├─ workers     active stage UpAgent workers
-└─ oversight   opt-in Account Managers + one-shot checkers
+
+upagent-oversight workspace (separate; one tab per helper)
+└─ <helper>    Account Manager, Sentinel, checker, rescuer, intake clerk
 ```
 
 There is no standing watchdog at either level. The TUI's blocking `upagent-phase-await` and the

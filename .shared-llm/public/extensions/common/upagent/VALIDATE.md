@@ -121,6 +121,11 @@ request` returning to `just upagent await` returning, the terminal verdict, whet
 skips the closeout when a valid bundle landed at worker exit), and whether every pane the
 hub created is gone afterwards.
 
+Also check helper placement once, during the first drill: every manager, Sentinel, and checker
+pane sits in its own tab of the `upagent-oversight` workspace (`herdr pane list` shows its
+`workspace_id`; `herdr workspace list` maps it to that label), no helper pane appears in your
+cockpit workspace, and the focused workspace and tab do not change when a helper starts.
+
 For every drill, before awaiting, confirm the brief landed:
 - `<run-dir>/prompt.md` exists, mode 0600, and contains the task text.
 - `<run-dir>/request.json` is redacted (no `requester_control_token` key) and

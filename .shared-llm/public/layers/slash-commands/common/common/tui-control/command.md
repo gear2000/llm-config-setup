@@ -42,12 +42,11 @@ ws: upagent                    ← everything, as tabs (single-workspace default
     └── phase-leader           current phase owner
   tab: workers                 ← active work
     └── stage UpAgent workers
-  tab: oversight               ← inspect when needed
-    ├── account managers
-    └── one-shot checkers
+ws: upagent-oversight          ← helpers, inspect when needed
+  └── one tab per helper: account managers, Sentinels, one-shot checkers
 
 --separate-workspaces          ← legacy layout: same tabs, two workspaces
-ws: <slug>                     ← one run cockpit (control/workers/oversight tabs)
+ws: <slug>                     ← one run cockpit (control/workers tabs)
 ws: shared-services            ← recruiter, peripheral
 ```
 
@@ -61,8 +60,9 @@ per-run isolation. The mode is chosen once at `just upagent-up` and inherited by
 4. Multiple Remote Control TUI sessions can drive the same run; this is a warning-only last-writer check, not a lock. Before each route edit, read the run-tree `route.yaml` marker `# last-edited-by: <session-id> @ <iso-ts>`; before writing, warn if it changed since that session last read it. Update that marker on every edit. Never put this marker in the origin route.
 5. Do not start an ad-hoc LLM result poller, and never create a standing watchdog agent. Observability is layered deterministically: the blocking awaits (`upagent-phase-await` here, `upagent-await`/`upagent-await-any` in the leader) reconcile durable state against live Herdr state every sweep and return `leader-missing`/`leader-stalled`/`inactivity-checkpoint` events; the Recruiter launches fresh **one-shot** LLM checkers only at configured inactivity/anomaly checkpoints; urgent unacknowledged events escalate to the human via `herdr notification`. Phase startup is one Python transaction invoked through `just upagent-phase-start`; do not reproduce its pane operations manually. A leader startup failure is terminal and must be reported.
 6. Keep cockpit geometry deterministic and role-based. The launcher names the TUI tab `control`;
-   phase leaders stay there. The Recruiter moves active stage workers to `workers` and Account
-   Managers (opt-in) and one-shot checkers to `oversight` before publishing their addresses.
+   phase leaders stay there. The Recruiter moves active stage workers to `workers`. Every helper
+   (Account Manager, Sentinel, one-shot checker) starts in a whole tab of its own in the separate
+   `upagent-oversight` workspace, never a split of the cockpit.
    Role tabs are created lazily from the first live pane, not with empty placeholder shells.
    Workers split right; support roles split down. Resizing is bounded and presentation-only:
    report a warning and leave the agent in its source tab if Herdr cannot move or resize it, but

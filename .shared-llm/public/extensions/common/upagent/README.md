@@ -175,7 +175,8 @@ cleanup record carries `process_tree: {snapshot, terminated, killed}`.
 Herdr session (default: single workspace)
 └── ws: upagent                services AND runs share one workspace as role tabs
     ├── tab: services          └── upagent (optional deterministic status surface)
-    └── tabs: control / workers / oversight   per-run panes
+    └── tabs: control / workers               per-run panes
+└── ws: upagent-oversight      one whole tab per helper (manager, Sentinel, checker, ...)
 
 Herdr session (with `up --separate-workspaces`)
 ├── ws: <slug>                 TUI + leader + workers (+ opt-in managers / one-shot checkers)
@@ -902,7 +903,8 @@ selects approved harness/model identities and effort allowlists, plus the candid
 `offerings.py` validates every reference and renders the exact child argv. Public Account Manager candidates are `pi-gpt-5-6-luna`/high, then `claude-sonnet-5-5`/medium,
 then `cursor-composer-2-5`/default. Checker candidates remain Sonnet/medium then Luna/high. Sentinel
 candidates are Luna/max, Sonnet/medium, then Composer/default. Cursor is last in both seats because
-it ignores a prompt in a pane of 6 rows or fewer, and the oversight tab shrinks below that under load. The Recruiter filters the worker's
+it ignores a prompt in a pane of 6 rows or fewer. Helpers now get a whole tab each in the
+`upagent-oversight` workspace, so this order is a second safeguard. The Recruiter filters the worker's
 provider and falls back on startup
 failure. A legacy `upagent.yaml` remains only for explicitly route-driven controller compatibility,
 where existing phase routes still provide raw harness/model profiles and may configure singular

@@ -1190,6 +1190,137 @@ def test_resize_started_pane_warns_without_failing_lifecycle(
     )
 
 
+def _oversight_herdr(
+    monkeypatch, tmp_path, *, workspaces: list[dict], tab_create_error: str | None = None
+) -> tuple[list[tuple[str, ...]], list[str]]:
+    """Fake Herdr shaped like the real 0.9.5 JSON for workspace/tab create and agent start."""
+    monkeypatch.setenv("UPAGENT_HUB_DIR", str(tmp_path / "hub"))
+    calls: list[tuple[str, ...]] = []
+    order_of_events: list[str] = []
+
+    def root_pane(pane_id: str, workspace_id: str, tab_id: str) -> dict:
+        return {
+            "agent_status": "unknown",
+            "cwd": "/tmp/wt",
+            "focused": False,
+            "pane_id": pane_id,
+            "tab_id": tab_id,
+            "terminal_id": f"term_{pane_id}",
+            "workspace_id": workspace_id,
+        }
+
+    def fake_json(*args: str, **kwargs: object) -> dict:
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise RecruiterError("herdr agent get failed: agent_not_found")
+        if args[:2] == ("workspace", "list"):
+            return {"result": {"type": "workspace_list", "workspaces": workspaces}}
+        if args[:2] == ("tab", "create"):
+            order_of_events.append("create")
+            if tab_create_error is not None:
+                raise RecruiterError(f"herdr tab create failed: {tab_create_error}")
+            workspace_id = args[args.index("--workspace") + 1]
+            return {
+                "result": {
+                    "root_pane": root_pane("ov:p2", workspace_id, "ov:t2"),
+                    "tab": {"tab_id": "ov:t2"},
+                    "type": "tab_created",
+                }
+            }
+        if args[:2] == ("workspace", "create"):
+            order_of_events.append("create")
+            return {"result": {"root_pane": root_pane("new:p1", "new", "new:t1")}}
+        if args[:2] == ("agent", "start"):
+            pane = args[args.index("--pane") + 1]
+            return {"result": {"agent": {"name": args[2], "pane_id": pane, "workspace_id": pane.split(":")[0]}}}
+        raise AssertionError(f"unexpected herdr call: {args}")
+
+    monkeypatch.setattr(recruiter, "_herdr_json", fake_json)
+    return calls, order_of_events
+
+
+def _start_oversight(order_of_events: list[str], created: list[dict]) -> tuple:
+    return recruiter._start_herdr_agent(
+        "upagent-sentinel-x",
+        _order(cockpit_pane="worker-pane", cwd="/tmp/wt"),
+        "claude --model m",
+        split_direction="down",
+        tab_role="oversight",
+        herdr_session="s",
+        on_split_attempt=lambda: order_of_events.append("attempt"),
+        on_pane_created=created.append,
+    )
+
+
+def test_oversight_helper_starts_in_its_own_tab_in_the_oversight_workspace(
+    monkeypatch, tmp_path
+) -> None:
+    """Helpers never split the requester's cockpit or a worker pane: each one gets a whole
+    tab (full rows and columns) in one shared `upagent-oversight` workspace."""
+    calls, events = _oversight_herdr(
+        monkeypatch,
+        tmp_path,
+        workspaces=[
+            {"label": "palm-dripper", "workspace_id": "w2V"},
+            {"label": "upagent", "workspace_id": "w2W"},
+            {"label": "upagent-oversight", "workspace_id": "ov"},
+            {"label": "upagent-oversight", "workspace_id": "ov-duplicate"},
+        ],
+    )
+    created: list[dict] = []
+
+    started = _start_oversight(events, created)
+
+    assert started == ("ov:p2", "ov", "upagent-sentinel-x")
+    assert not any(call[:2] in (("pane", "split"), ("pane", "move"), ("pane", "get")) for call in calls)
+    tab = next(call for call in calls if call[:2] == ("tab", "create"))
+    assert tab[tab.index("--workspace") + 1] == "ov"
+    assert tab[tab.index("--cwd") + 1] == "/tmp/wt"
+    assert tab[tab.index("--label") + 1] == "upagent-sentinel-x"
+    assert "--focus" not in tab
+    assert events == ["attempt", "create"]
+    assert created[0]["terminal_id"] == "term_ov:p2"
+    start = next(call for call in calls if call[:2] == ("agent", "start"))
+    assert start[start.index("--pane") + 1] == "ov:p2"
+
+
+def test_oversight_workspace_is_created_without_focus_when_absent(
+    monkeypatch, tmp_path
+) -> None:
+    calls, events = _oversight_herdr(
+        monkeypatch, tmp_path, workspaces=[{"label": "upagent", "workspace_id": "w2W"}]
+    )
+
+    started = _start_oversight(events, [])
+
+    assert started[0] == "new:p1"
+    create = next(call for call in calls if call[:2] == ("workspace", "create"))
+    assert create[create.index("--label") + 1] == "upagent-oversight"
+    assert "--no-focus" in create
+    assert create[create.index("--cwd") + 1] == "/tmp/wt"
+    assert not any(call[:2] == ("tab", "create") for call in calls)
+
+
+def test_oversight_workspace_that_vanished_is_recreated(monkeypatch, tmp_path) -> None:
+    """Herdr removes a workspace when its last pane closes, so a listed workspace can be
+    gone by the time the tab is created."""
+    calls, events = _oversight_herdr(
+        monkeypatch,
+        tmp_path,
+        workspaces=[{"label": "upagent-oversight", "workspace_id": "ov"}],
+        tab_create_error='{"error":{"code":"workspace_not_found","message":"workspace ov not found"}}',
+    )
+
+    started = _start_oversight(events, [])
+
+    assert started[0] == "new:p1"
+    assert [call[:2] for call in calls if call[0] in ("tab", "workspace")] == [
+        ("workspace", "list"),
+        ("tab", "create"),
+        ("workspace", "create"),
+    ]
+
+
 def test_resize_started_pane_is_a_quiet_noop_for_first_pane_in_role_tab(
     monkeypatch, capsys
 ) -> None:
