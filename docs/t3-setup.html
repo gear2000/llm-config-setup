@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T3 Code setup</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f7f7f5; --fg: #1d1f23; --muted: #5d6470; --card: #ffffff; --line: #dcdfe4;
+    --code-bg: #f0f1f3; --who: #8a5a00; --cmd: #1f5fbf; --ok: #1d7a46; --human: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --fg: #e6e6e6; --muted: #9aa1ad; --card: #1b1e24; --line: #2c3039;
+      --code-bg: #1e2128; --who: #ffd166; --cmd: #8ab4f8; --ok: #7fd1a8; --human: #ff8a80;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a; --fg: #e6e6e6; --muted: #9aa1ad; --card: #1b1e24; --line: #2c3039;
+    --code-bg: #1e2128; --who: #ffd166; --cmd: #8ab4f8; --ok: #7fd1a8; --human: #ff8a80;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--fg); }
+  body {
+    margin: 0 auto; max-width: 860px; padding: 1.5rem 16px 4rem;
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow-wrap: anywhere;
+  }
+  h1 { font-size: 1.7rem; line-height: 1.25; margin: .2rem 0 .6rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 .5rem; }
+  p, li { max-width: 68ch; }
+  .meta { color: var(--muted); font-size: .85rem; margin: 0; }
+  a { color: var(--cmd); }
+  code { background: var(--code-bg); padding: .05em .3em; border-radius: .25em; font-size: .92em; }
+  pre {
+    margin: 0; padding: .9rem 1rem; overflow-x: auto; white-space: pre;
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: .5rem;
+    font: .82rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: .6rem; padding: 1rem 1.1rem; margin: 1rem 0; }
+  .card > :first-child { margin-top: 0; }
+  .card > :last-child { margin-bottom: 0; }
+  .prompt { border: 1px solid var(--line); padding: .5rem .8rem; margin: .6rem 0; background: var(--code-bg); border-radius: .4rem; font-style: italic; }
+  .who { color: var(--who); font-weight: 600; }
+  .cmd { color: var(--cmd); }
+  .ok { color: var(--ok); }
+  .human { color: var(--human); font-weight: 600; }
+  .legend { color: var(--muted); font-size: .9rem; }
+  ul { padding-left: 1.2rem; }
+  @media (max-width: 480px) { pre { font-size: .7rem; padding: .7rem .75rem; } }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="meta">llm-config-setup · T3 Code</p>
+  <h1>Your own T3 Code server, used from your phone</h1>
+  <p>Each person gets their own always-on T3 Code server under their own login on the server. They sign in to the T3 Code phone app and control their coding agents from anywhere.</p>
+</header>
+
+<div class="card">
+  <h2>Let an agent do it</h2>
+  <p>Give your agent (Claude Code, Codex, …) this request. It follows <a href="T3-SETUP.md">docs/T3-SETUP.md</a> and stops when it needs you.</p>
+  <div class="prompt">Read docs/T3-SETUP.md in the llm-config-setup repository and set up my T3 Code server. Stop and tell me whenever I need to log in or approve something.</div>
+  <p class="legend">Repository: <a href="https://github.com/gear2000/llm-config-setup">github.com/gear2000/llm-config-setup</a> · guide: <a href="https://github.com/gear2000/llm-config-setup/blob/main/docs/T3-SETUP.md">docs/T3-SETUP.md</a></p>
+</div>
+
+<h2>The whole flow</h2>
+<p class="legend"><span class="who">WHO</span> runs each step · <span class="cmd">command</span> · <span class="human">🧑 only you can do this</span> · <span class="ok">✓ check</span></p>
+
+<pre>T3 Code on your own login
+│
+├── 1. <span class="who">ADMIN</span> on the server (sudo), once per person
+│   ├── <span class="cmd">sudo useradd -m -s /bin/bash alice</span>
+│   └── <span class="cmd">sudo loginctl enable-linger alice</span>
+│       <span class="ok">✓ Linger=yes: the server starts at boot</span>
+│
+├── 2. <span class="who">YOU</span> on the server, logged in as alice
+│   ├── <span class="cmd">git clone https://github.com/gear2000/llm-config-setup.git</span>
+│   ├── <span class="human">🧑</span> <span class="cmd">claude auth login</span>    (or <span class="cmd">codex login</span>)
+│   │      <span class="ok">✓ your own agent subscription</span>
+│   └── <span class="cmd">bash llm-config-setup/tools/t3-setup.sh</span>
+│       ├── installs T3, picks a port, starts the service
+│       ├── <span class="human">🧑</span> prints a link + code → open it → sign in or
+│       │      create your T3 login → approve
+│       └── <span class="ok">✓ All checks passed.</span>
+│
+├── 3. <span class="who">YOU</span>, optional: <span class="cmd">gh auth login</span>   (GitHub for pull requests)
+│
+└── 4. <span class="human">🧑</span> <span class="who">YOUR PHONE</span>
+    ├── install "T3 Code" (App Store or Google Play)
+    ├── sign in with the same T3 login
+    └── pick your server → start a thread
+        <span class="ok">✓ the agent answers</span></pre>
+
+<h2>Several people on one server</h2>
+<ul>
+  <li>Each person repeats steps 1 to 4 with their own login and their own T3 login.</li>
+  <li>Give each person their own port and keep a list: <code>t3-setup.sh --port 3774</code>.</li>
+  <li>Threads, settings, tokens and agent logins stay in each person's own home folder. Other people cannot read them (home folders are mode 750 by default on Ubuntu).</li>
+</ul>
+
+<h2>Day to day</h2>
+<ul>
+  <li>Check everything: <code>bash llm-config-setup/tools/t3-setup.sh verify</code></li>
+  <li>Update T3: <code>t3 update</code></li>
+  <li>Turn T3 Connect on again: <code>t3 up --connect</code></li>
+  <li>Remove the service (keeps your threads): <code>t3 service uninstall</code></li>
+</ul>
+
+</body>
+</html>
