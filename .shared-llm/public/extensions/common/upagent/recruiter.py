@@ -205,6 +205,9 @@ _identity_spec.loader.exec_module(_process_identity)
 # `up --separate-workspaces` restores the dedicated `shared-services` workspace. Bring-up
 # migrates the two retired presentation labels in place; they are never used for new state.
 UNIFIED_WORKSPACE_LABEL = "upagent"
+# Every helper (manager, Sentinel, checker, rescuer, intake clerk, watchdog) gets its own
+# tab in this workspace, apart from the requester's cockpit.
+OVERSIGHT_WORKSPACE_LABEL = "upagent-oversight"
 LEGACY_UNIFIED_WORKSPACE_LABEL = "herdr"
 SHARED_SERVICES_WORKSPACE = "shared-services"
 UPAGENT_PANE_LABEL = "upagent"
@@ -4388,6 +4391,93 @@ def _pane_environment(order: dict) -> dict[str, str]:
     return environment
 
 
+def _pane_environment_args(order: dict) -> list[str]:
+    args: list[str] = []
+    for key, value in _pane_environment(order).items():
+        args.extend(("--env", f"{key}={value}"))
+    return args
+
+
+def _create_oversight_pane(
+    name: str,
+    order: dict,
+    *,
+    herdr_session: str,
+    remaining_seconds: Callable[[], float],
+    on_split_attempt: Callable[[], None] | None,
+) -> dict:
+    """Give one helper (manager, Sentinel, checker, ...) a whole tab of its own.
+
+    Helpers live in one shared workspace, apart from the requester's cockpit. A whole tab
+    keeps every helper at full rows and columns: Cursor ignores prompts in a pane of 6 rows
+    or 36 columns or fewer, and stacked splits shrink below that under load. Neither create
+    call takes focus. Herdr removes a workspace when its last pane closes, so a listed
+    workspace may be gone by the time the tab is created; then it is created again. Two hubs
+    on one Herdr session can each create the workspace; the first listed one is used.
+    """
+    common = ["--cwd", order["cwd"], *_pane_environment_args(order)]
+    with _exclusive_workspace_layout(OVERSIGHT_WORKSPACE_LABEL):
+        workspaces = (
+            _herdr_json(
+                "workspace",
+                "list",
+                herdr_session=herdr_session,
+                timeout_seconds=remaining_seconds(),
+            )
+            .get("result", {})
+            .get("workspaces", [])
+        )
+        match = next(
+            (
+                workspace.get("workspace_id")
+                for workspace in workspaces
+                if isinstance(workspace, dict)
+                and workspace.get("label") == OVERSIGHT_WORKSPACE_LABEL
+                and isinstance(workspace.get("workspace_id"), str)
+            ),
+            None,
+        )
+        if on_split_attempt is not None:
+            on_split_attempt()
+        if match is not None:
+            try:
+                created = (
+                    _herdr_json(
+                        "tab",
+                        "create",
+                        "--workspace",
+                        match,
+                        "--label",
+                        name,
+                        *common,
+                        herdr_session=herdr_session,
+                        timeout_seconds=remaining_seconds(),
+                    )
+                    .get("result", {})
+                    .get("root_pane", {})
+                )
+            except RecruiterError as error:
+                if "workspace_not_found" not in str(error):
+                    raise
+            else:
+                return created if isinstance(created, dict) else {}
+        created = (
+            _herdr_json(
+                "workspace",
+                "create",
+                "--label",
+                OVERSIGHT_WORKSPACE_LABEL,
+                "--no-focus",
+                *common,
+                herdr_session=herdr_session,
+                timeout_seconds=remaining_seconds(),
+            )
+            .get("result", {})
+            .get("root_pane", {})
+        )
+        return created if isinstance(created, dict) else {}
+
+
 def _start_herdr_agent(
     name: str,
     order: dict,
@@ -4458,41 +4548,52 @@ def _start_herdr_agent(
                 f"(pane {existing.get('pane_id')}); refusing to launch a duplicate — "
                 "it would adopt another request's pane"
             )
-        cockpit = (
-            _herdr_json(
-                "pane",
-                "get",
-                order["cockpit_pane"],
+        oversight = tab_role == "oversight"
+        if oversight:
+            created = _create_oversight_pane(
+                name,
+                order,
                 herdr_session=session,
-                timeout_seconds=remaining_seconds(),
+                remaining_seconds=remaining_seconds,
+                on_split_attempt=on_split_attempt,
             )
-            .get("result", {})
-            .get("pane", {})
-        )
-        tab_id = cockpit.get("tab_id") if isinstance(cockpit, dict) else None
-        if not isinstance(tab_id, str) or not tab_id:
-            raise RecruiterError(f"cockpit pane {order['cockpit_pane']} has no tab_id")
-        args = [
-            "pane",
-            "split",
-            order["cockpit_pane"],
-            "--direction",
-            split_direction,
-            "--cwd",
-            order["cwd"],
-            "--no-focus",
-        ]
-        for key, value in _pane_environment(order).items():
-            args.extend(("--env", f"{key}={value}"))
-        if on_split_attempt is not None:
-            on_split_attempt()
-        created = (
-            _herdr_json(
-                *args, herdr_session=session, timeout_seconds=remaining_seconds()
+        else:
+            cockpit = (
+                _herdr_json(
+                    "pane",
+                    "get",
+                    order["cockpit_pane"],
+                    herdr_session=session,
+                    timeout_seconds=remaining_seconds(),
+                )
+                .get("result", {})
+                .get("pane", {})
             )
-            .get("result", {})
-            .get("pane", {})
-        )
+            tab_id = cockpit.get("tab_id") if isinstance(cockpit, dict) else None
+            if not isinstance(tab_id, str) or not tab_id:
+                raise RecruiterError(
+                    f"cockpit pane {order['cockpit_pane']} has no tab_id"
+                )
+            args = [
+                "pane",
+                "split",
+                order["cockpit_pane"],
+                "--direction",
+                split_direction,
+                "--cwd",
+                order["cwd"],
+                "--no-focus",
+                *_pane_environment_args(order),
+            ]
+            if on_split_attempt is not None:
+                on_split_attempt()
+            created = (
+                _herdr_json(
+                    *args, herdr_session=session, timeout_seconds=remaining_seconds()
+                )
+                .get("result", {})
+                .get("pane", {})
+            )
         created_id = created.get("pane_id") if isinstance(created, dict) else None
         if not isinstance(created_id, str) or not created_id:
             raise RecruiterError(
@@ -4578,7 +4679,7 @@ def _start_herdr_agent(
     address = agent.get("name") if isinstance(agent, dict) else None
     if not isinstance(address, str) or not address:
         address = name
-    if tab_role is not None:
+    if tab_role is not None and tab_role != "oversight":
         if workspace_id is None:
             _layout_warning(
                 tab_role,
