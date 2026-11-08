@@ -1278,6 +1278,7 @@ def test_oversight_helper_starts_in_its_own_tab_in_the_oversight_workspace(
     assert tab[tab.index("--cwd") + 1] == "/tmp/wt"
     assert tab[tab.index("--label") + 1] == "upagent-sentinel-x"
     assert "--focus" not in tab
+    assert f"{recruiter.OVERSIGHT_PANE_ENV}=1" in tab
     assert events == ["attempt", "create"]
     assert created[0]["terminal_id"] == "term_ov:p2"
     start = next(call for call in calls if call[:2] == ("agent", "start"))
@@ -1297,6 +1298,7 @@ def test_oversight_workspace_is_created_without_focus_when_absent(
     create = next(call for call in calls if call[:2] == ("workspace", "create"))
     assert create[create.index("--label") + 1] == "upagent-oversight"
     assert "--no-focus" in create
+    assert f"{recruiter.OVERSIGHT_PANE_ENV}=1" in create
     assert create[create.index("--cwd") + 1] == "/tmp/wt"
     assert not any(call[:2] == ("tab", "create") for call in calls)
 
@@ -1319,6 +1321,38 @@ def test_oversight_workspace_that_vanished_is_recreated(monkeypatch, tmp_path) -
         ("tab", "create"),
         ("workspace", "create"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("cmd_cancel", ("/no/order.json", "token")),
+        ("cmd_respond", ("/no/order.json", "token", "nonce", "cancel", None, "m")),
+        ("cmd_review_continue", ("/no/order.json", "token", 1, "sha", "/no/feedback")),
+        ("cmd_review_release", ("/no/order.json", "token", 1, "sha")),
+    ],
+)
+def test_lifecycle_control_commands_refuse_to_run_from_a_helper_pane(
+    monkeypatch, command: str, args: tuple
+) -> None:
+    """Helpers advise; only the requester controls a request. A Cursor account manager once
+    read a checker's 'cancel it' advice as an order, found the requester's control-token
+    file, and cancelled a live worker. Prose did not stop it, so the commands refuse."""
+    monkeypatch.setenv(recruiter.OVERSIGHT_PANE_ENV, "1")
+
+    with pytest.raises(RecruiterError, match="helper pane"):
+        getattr(recruiter, command)(*args)
+
+
+def test_checker_note_to_the_manager_is_advisory_and_forbids_lifecycle_action() -> None:
+    note = recruiter._manager_check_note(
+        1, "w2V:p2WD", "suspected-stall", "cancel it rather than waiting"
+    )
+
+    assert note.startswith("FYI, advisory only:")
+    assert "cancel it rather than waiting" in note
+    assert "Do not cancel, extend, respond, or message the worker" in note
+    assert "the requester decides" in note
 
 
 def test_resize_started_pane_is_a_quiet_noop_for_first_pane_in_role_tab(
