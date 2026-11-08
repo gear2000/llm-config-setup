@@ -47,8 +47,8 @@ PYTHON RECRUITER
 ├─ assigns a globally unique request identity and generation
 ├─ persists ownership, deadlines, and an event ledger atomically
 └─ filters the public Account Manager candidates by worker provider, then attempts
-   code-rendered `pi-gpt-5-6-luna`/high, then `claude-sonnet-5-5`/medium, then
-   `cursor-composer-2-5`/default;
+   code-rendered `cursor-composer-2-5`/default, then `pi-gpt-5-6-luna`/high, then
+   `claude-sonnet-5-5`/medium;
    each startup failure is recorded before fallback, and exhaustion records degraded
    supervision without stopping the worker lifecycle
    │

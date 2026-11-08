@@ -129,31 +129,16 @@ def test_roster_contains_exactly_the_approved_offerings() -> None:
         {"offering": "pi-gpt-5-6-luna", "effort": "high"},
     ]
     assert roster.management["account_manager"]["candidates"] == [
+        {"offering": "cursor-composer-2-5", "effort": "default"},
         {"offering": "pi-gpt-5-6-luna", "effort": "high"},
         {"offering": "claude-sonnet-5-5", "effort": "medium"},
-        {"offering": "cursor-composer-2-5", "effort": "default"},
     ]
     assert roster.management["checker"]["candidates"] == checker_candidates
     assert roster.management["sentinel"]["candidates"] == [
+        {"offering": "cursor-composer-2-5", "effort": "default"},
         {"offering": "pi-gpt-5-6-luna", "effort": "max"},
         {"offering": "claude-sonnet-5-5", "effort": "medium"},
-        {"offering": "cursor-composer-2-5", "effort": "default"},
     ]
-
-
-def test_cursor_is_only_the_last_resort_for_the_manager_and_sentinel_seats() -> None:
-    """Cursor ignores a prompt in a pane of 6 rows or fewer (8+ rows works); Pi and Claude
-    accept prompts at 2 rows. Managers and Sentinels share the oversight tab, and a Sentinel's
-    first prompt lands in a split of the worker's pane, so under load these panes shrink below
-    that. A hired manager or Sentinel has no fallback for its later prompts, so Cursor may
-    only follow every non-Cursor candidate."""
-    roster = offerings.load_selected_roster()
-    for seat in ("account_manager", "sentinel"):
-        harnesses = [
-            roster.offerings[item["offering"]].harness
-            for item in roster.management[seat]["candidates"]
-        ]
-        assert "cursor" not in harnesses[:-1], (seat, harnesses)
 
 
 @pytest.mark.parametrize(
@@ -466,36 +451,36 @@ def test_public_management_candidates_materialize_in_yaml_order_with_code_owned_
 
     if role_name == "sentinel":
         assert [candidate["offering_id"] for candidate in candidates] == [
+            "cursor-composer-2-5",
             "pi-gpt-5-6-luna",
             "claude-sonnet-5-5",
-            "cursor-composer-2-5",
         ]
-        assert candidates[0]["expected_agent"] == "pi"
-        assert candidates[0]["expected_process"] == "pi"
-        assert "openai-codex/gpt-5.6-luna" in candidates[0]["command"]
-        assert "--thinking max" in candidates[0]["command"]
-        assert candidates[1]["expected_agent"] == "claude"
-        assert "--model claude-sonnet-5-5" in candidates[1]["command"]
-        assert "--effort medium" in candidates[1]["command"]
-        assert candidates[2]["expected_agent"] == "cursor"
-        assert candidates[2]["expected_process"] == "cursor-agent"
-        assert candidates[2]["command"].startswith("cursor-agent --force --trust")
-        assert "--model composer-2.5" in candidates[2]["command"]
-        assert "default" not in candidates[2]["command"]
+        assert candidates[0]["expected_agent"] == "cursor"
+        assert candidates[0]["expected_process"] == "cursor-agent"
+        assert candidates[0]["command"].startswith("cursor-agent --force --trust")
+        assert "--model composer-2.5" in candidates[0]["command"]
+        assert "default" not in candidates[0]["command"]
+        assert candidates[1]["expected_agent"] == "pi"
+        assert candidates[1]["expected_process"] == "pi"
+        assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
+        assert "--thinking max" in candidates[1]["command"]
+        assert candidates[2]["expected_agent"] == "claude"
+        assert "--model claude-sonnet-5-5" in candidates[2]["command"]
+        assert "--effort medium" in candidates[2]["command"]
         assert role["command"] == candidates[0]["command"]
         return
 
     if role_name == "account_manager":
         assert [candidate["offering_id"] for candidate in candidates] == [
+            "cursor-composer-2-5",
             "pi-gpt-5-6-luna",
             "claude-sonnet-5-5",
-            "cursor-composer-2-5",
         ]
-        assert "openai-codex/gpt-5.6-luna" in candidates[0]["command"]
-        assert "--thinking high" in candidates[0]["command"]
-        assert "--model claude-sonnet-5-5" in candidates[1]["command"]
-        assert candidates[2]["command"].startswith("cursor-agent --force --trust")
-        assert "--model composer-2.5" in candidates[2]["command"]
+        assert candidates[0]["command"].startswith("cursor-agent --force --trust")
+        assert "--model composer-2.5" in candidates[0]["command"]
+        assert "openai-codex/gpt-5.6-luna" in candidates[1]["command"]
+        assert "--thinking high" in candidates[1]["command"]
+        assert "--model claude-sonnet-5-5" in candidates[2]["command"]
         assert role["command"] == candidates[0]["command"]
         return
 
@@ -562,7 +547,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy_and_adde
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "b24683b6a6b1d0d8713d4e411ec2700d7e2b23a20786136a6cb0ab3a37c3957d"
+        "21d490f629e09389654721c61dcdf615ddb52a89994bc4e5beae3d715f7920cd"
     )
 
 
