@@ -787,8 +787,8 @@ Durable files are the source of truth; terminal text is display-only.
   including retries. Public worker offerings pin code-owned provider metadata in
   their immutable snapshots; legacy orders fall back to known harness/model identity
   only when no snapshot provider exists. For the public roster, the Recruiter filters the
-  YAML-ordered Sentinel candidates (`pi-gpt-5-6-luna`/max, then `claude-sonnet-5-5`/medium,
-  then `cursor-composer-2-5`/default as the last resort)
+  YAML-ordered Sentinel candidates (`cursor-composer-2-5`/default, then `pi-gpt-5-6-luna`/max,
+  then `claude-sonnet-5-5`/medium)
   by provider and tries every eligible startup in order. Each failure is
   recorded; only exhaustion degrades to mechanical supervision through the existing
   `sentinel-degraded` path with a typed `reason_type`. An explicit legacy
@@ -900,11 +900,11 @@ the kit root [SETUP-SPECIALISTS.md](../../../../../SETUP-SPECIALISTS.md). After 
 
 Public workers and management candidates never read a YAML launch command. `offerings.yaml`
 selects approved harness/model identities and effort allowlists, plus the candidate order;
-`offerings.py` validates every reference and renders the exact child argv. Public Account Manager candidates are `pi-gpt-5-6-luna`/high, then `claude-sonnet-5-5`/medium,
-then `cursor-composer-2-5`/default. Checker candidates remain Sonnet/medium then Luna/high. Sentinel
-candidates are Luna/max, Sonnet/medium, then Composer/default. Cursor is last in both seats because
-it ignores a prompt in a pane of 6 rows or fewer. Helpers now get a whole tab each in the
-`upagent-oversight` workspace, so this order is a second safeguard. The Recruiter filters the worker's
+`offerings.py` validates every reference and renders the exact child argv. Public Account Manager candidates are `cursor-composer-2-5`/default, then `pi-gpt-5-6-luna`/high,
+then `claude-sonnet-5-5`/medium. Checker candidates remain Sonnet/medium then Luna/high. Sentinel
+candidates are Composer/default, Luna/max, then Sonnet/medium. Cursor ignores a prompt in a pane of
+6 rows or 36 columns or fewer; it is safe first because every helper gets a whole tab of its own in
+the `upagent-oversight` workspace. The Recruiter filters the worker's
 provider and falls back on startup
 failure. A legacy `upagent.yaml` remains only for explicitly route-driven controller compatibility,
 where existing phase routes still provide raw harness/model profiles and may configure singular
