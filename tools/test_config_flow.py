@@ -805,6 +805,32 @@ def test_update_materializes_home_roster_for_upagent_only_config(
     assert roster.selected_sets == ("standard", "claudex")
 
 
+def test_update_rebuilds_the_kit_checkout_roster(tmp_path: Path) -> None:
+    # A hub started from the kit checkout reads the checkout's own gitignored
+    # offerings.yaml first. `just update` must rebuild it, or a roster edit
+    # leaves the hub refusing every hire with "unknown ids".
+    m = _load()
+    home = tmp_path / "home"
+    _patch_home(m, home)
+    kit_roster = tmp_path / "kit/offerings.yaml"
+    kit_roster.parent.mkdir(parents=True)
+    kit_roster.write_text("stale: roster\n")
+    m.kit_checkout_roster = lambda: kit_roster
+    m.save_config(
+        {
+            "source": str(m.DEFAULT_SOURCE),
+            "global": [],
+            "destinations": [],
+            "upagent": {"offering_sets": ["standard", "claudex"]},
+        }
+    )
+
+    m.cmd_update(argparse.Namespace(verbose=False))
+
+    roster = m._upagent_offerings_module().load_roster(kit_roster)
+    assert roster.selected_sets == ("standard", "claudex")
+
+
 # --- global home-skill routing ---------------------------------------------
 
 
