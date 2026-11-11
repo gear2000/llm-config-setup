@@ -1371,6 +1371,17 @@ def _write_if_changed(path: Path, content: str) -> bool:
     return True
 
 
+def kit_checkout_roster() -> Path:
+    """The kit checkout's own gitignored roster; a hub run from the kit reads it first.
+
+    SHARED_LLM_KIT_ROSTER redirects it so tests never rewrite the live checkout copy.
+    """
+    override = os.environ.get("SHARED_LLM_KIT_ROSTER")
+    if override:
+        return Path(override)
+    return ENGINE_ROOT / ".shared-llm" / PUBLIC_DIR / UPAGENT_ROSTER_REL
+
+
 def materialize_offering_roster(selected_sets: tuple[str, ...], target: Path) -> bool:
     # Home rosters live in the managed generated tree. Apply the same symlink
     # and ownership guard as every other generated artifact before writing.
@@ -4243,6 +4254,11 @@ def do_home_runtime(
         log.always(
             f"  home UpAgent offerings: skipped unsafe generated path {home_roster}"
         )
+    kit_changed = materialize_offering_roster(selected_sets, kit_checkout_roster())
+    log.always(
+        f"  kit UpAgent offerings: {', '.join(selected_sets)} "
+        f"({'updated' if kit_changed else 'unchanged'})"
+    )
     wanted = [h for h in cfg.get("global", []) if h in VALID_HARNESSES]
     # cursor shares codex's home surface (~/.agents/skills) — collapse it so the
     # same dir is never reconciled twice under two tokens.
