@@ -9,7 +9,7 @@ stages:
     effort: high
 
   - role: reviewer                          # opposite model family, adversarial
-    offering: claude-fable-5-1
+    offering: claude-fable-5-2
     effort: low
     adversarial: true
 

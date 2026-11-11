@@ -45,7 +45,7 @@ kinds:
     matches: "cross-module change, unclear design, long-horizon reasoning, tricky debugging"
     offering: pi-gpt-6-astra
     effort: medium
-    alternate: {offering: claude-fable-5-1, effort: medium}
+    alternate: {offering: claude-fable-5-2, effort: medium}
   review:
     matches: "independent read-only review of a candidate; never the coder's own model"
     offering: pi-gpt-6-1-sol
@@ -53,7 +53,7 @@ kinds:
     alternate: {offering: claude-opus-5-5, effort: high}
   adversarial:
     matches: "adversarial evaluation, finalize audit, hunting for what the coder missed"
-    offering: claude-fable-5-1
+    offering: claude-fable-5-2
     effort: high
     alternate: {offering: pi-gpt-6-astra, effort: xhigh}
 
@@ -65,8 +65,8 @@ requires_approval:
   - {offering: codex-gpt-6-astra, effort: high}
   - {offering: codex-gpt-6-astra, effort: xhigh}
   - {offering: codex-gpt-6-astra, effort: max}
-  - {offering: claude-fable-5-1, effort: xhigh}
-  - {offering: claude-fable-5-1, effort: max}
+  - {offering: claude-fable-5-2, effort: xhigh}
+  - {offering: claude-fable-5-2, effort: max}
 
 # Never a default. Only on an explicit human request.
 demoted:
@@ -80,7 +80,7 @@ unavailable_until: {}
 # Which seats the reserved frontier models are for. Outside these kinds the picker names a
 # cheaper seat and says why.
 reserved:
-  claude-fable-5-1: [hard-implementation, adversarial]
+  claude-fable-5-2: [hard-implementation, adversarial]
   pi-gpt-6-astra: [hard-implementation, adversarial]
   codex-gpt-6-astra: [hard-implementation, adversarial]
 

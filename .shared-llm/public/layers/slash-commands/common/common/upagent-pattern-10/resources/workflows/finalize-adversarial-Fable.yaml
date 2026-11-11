@@ -3,7 +3,7 @@ kind: finalize
 
 stages:
   - role: reviewer
-    offering: claude-fable-5-1
+    offering: claude-fable-5-2
     effort: low
     adversarial: true
     scope: "the combined candidate: all phases plus checks"

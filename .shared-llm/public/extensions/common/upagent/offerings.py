@@ -67,7 +67,7 @@ def _load_yaml(text: str) -> object:
 
 
 APPROVED: dict[str, tuple[str, str, tuple[str, ...], str]] = {
-    "claude-fable-5-1": ("claude", "claude-fable-5-1", EFFORTS, "anthropic"),
+    "claude-fable-5-2": ("claude", "claude-fable-5-2", EFFORTS, "anthropic"),
     "claude-sonnet-5-5": ("claude", "claude-sonnet-5-5", EFFORTS, "anthropic"),
     "claude-sonnet-4-6": ("claude", "claude-sonnet-4-6", EFFORTS, "anthropic"),
     "claude-opus-5-5": ("claude", "claude-opus-5-5", EFFORTS_OPUS, "anthropic"),
