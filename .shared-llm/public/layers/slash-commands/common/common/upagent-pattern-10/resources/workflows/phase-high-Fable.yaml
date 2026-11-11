@@ -5,7 +5,7 @@ retries: 5            # repair loops after the initial attempt, then stop and as
 
 stages:
   - role: coder
-    offering: claude-fable-5-1
+    offering: claude-fable-5-2
     effort: low
 
   - role: reviewer                          # fresh Pi worker, never the coder
@@ -19,7 +19,7 @@ stages:
 pass: every reviewer, checks and auditor stage passes on the same candidate
 controller_requirements: controller-requirements.md
 notes: |
-  Fable 5.1 low codes in Claude Code; Sol high reviews in Pi. No Fable-on-Fable review, no phase audit.
+  Fable 5.2 low codes in Claude Code; Sol high reviews in Pi. No Fable-on-Fable review, no phase audit.
 
   Findings from any reviewer, checks or auditor go back to the same coder; the coder model never
   changes on retry. After the last loop, stop and ask the human through the root HIL; never add a

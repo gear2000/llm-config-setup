@@ -335,9 +335,9 @@ def test_roster_rejects_even_one_extra_offering(tmp_path: Path) -> None:
 def test_roster_rejects_duplicate_offering_ids(tmp_path: Path) -> None:
     rendered = offerings.render_roster(["standard"])
     duplicate = (
-        "  claude-fable-5-1:\n"
+        "  claude-fable-5-2:\n"
         "    harness: claude\n"
-        "    model: claude-fable-5-1\n"
+        "    model: claude-fable-5-2\n"
         "    efforts: [low, medium, high, xhigh, max]\n"
     )
     path = tmp_path / "offerings.yaml"
@@ -360,7 +360,7 @@ def test_public_offering_yaml_cannot_inject_a_launch_command(tmp_path: Path) -> 
 def test_every_approved_offering_pins_code_owned_provider_metadata() -> None:
     roster = offerings.load_selected_roster()
     expected = {
-        "claude-fable-5-1": "anthropic",
+        "claude-fable-5-2": "anthropic",
         "claude-sonnet-5-5": "anthropic",
         "claude-sonnet-4-6": "anthropic",
         "claude-opus-5-5": "anthropic",
@@ -547,7 +547,7 @@ def test_standard_render_preserves_the_roster_except_supervision_policy_and_adde
     )
     rendered = rendered.split("\n# Standalone Flow 1 sweeps;")[0]
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
-        "21d490f629e09389654721c61dcdf615ddb52a89994bc4e5beae3d715f7920cd"
+        "9ec8a4d160f03983e687765927f3dc02cf1ed9058e1aa305f7100b0667586b72"
     )
 
 
@@ -571,7 +571,7 @@ def test_offering_set_selection_rejects_unknown_duplicates_and_partial_union(
         offerings.render_roster(["claudex"])
 
     raw = offerings.yaml.safe_load(offerings.render_roster(["standard"]))
-    raw["offerings"].pop("claude-fable-5-1")
+    raw["offerings"].pop("claude-fable-5-2")
     path = tmp_path / "partial.yaml"
     path.write_text(offerings.yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(offerings.OfferingError, match="only part of approved set"):
